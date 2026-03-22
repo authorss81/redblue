@@ -1,0 +1,30 @@
+[package]
+name = "redblue"
+version = "0.1.0"
+edition = "2021"
+authors = ["Redblue Contributors"]
+description = "A programming language as readable as plain English"
+license = "MIT"
+repository = "https://github.com/redblue-lang/redblue"
+keywords = ["programming-language", "compiler"]
+categories = ["compiler", "development-tools"]
+
+[[bin]]
+name = "rb"
+path = "src/main.rs"
+
+[lib]
+name = "redblue"
+path = "src/lib.rs"
+
+[dependencies]
+regex = "1.10"
+chrono = "0.4"
+reqwest = { version = "0.11", features = ["blocking"] }
+
+[dev-dependencies]
+regex = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true

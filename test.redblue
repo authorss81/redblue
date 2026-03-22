@@ -1,0 +1,45 @@
+// This is a Redblue source file
+
+// Hello World
+say "Hello, World!"
+
+// Variables
+set name to "World"
+set greeting to "Hello, {name}!"
+say greeting
+
+// Numbers and math
+set x to 10
+set y to 20
+set sum to x + y
+say "10 + 20 = {sum}"
+
+// Boolean
+set is_active to yes
+if is_active
+    say "System is active"
+end
+
+// Lists
+set numbers to [1, 2, 3, 4, 5]
+say numbers
+
+// For loop
+for each n from 1 to 3
+    say n
+end
+
+// Repeat loop
+repeat 2 times
+    say "Hello!"
+end
+
+// If statement
+set score to 85
+if score is greater than 90
+    say "A grade"
+else if score is greater than 80
+    say "B grade"
+else
+    say "C grade"
+end
