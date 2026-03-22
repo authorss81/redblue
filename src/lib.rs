@@ -4,7 +4,9 @@ mod analyzer;
 mod vm;
 mod value;
 mod error;
-mod stdlib;
+pub mod stdlib;
+pub mod repl;
+pub mod testing;
 
 use std::fs;
 use std::process;
@@ -33,13 +35,27 @@ pub fn run_source(source: &str) -> Result<(), Error> {
 }
 
 pub fn run_repl() {
-    println!("Welcome to Redblue v0.1.0 - Interactive REPL");
-    println!("Type 'help' for commands, 'quit' to exit\n");
+    let mut repl = repl::Repl::new();
+    repl.run();
+}
+
+pub fn run_test(path: Option<&str>) -> Result<(), Error> {
+    let harness = testing::TestHarness::new();
     
-    loop {
-        print!(">>> ");
-        process::exit(0);
+    match path {
+        Some(p) => harness.run_file(p)?,
+        None => {
+            let results = testing::run_all_tests()?;
+            println!("Tests run: {}", results.total);
+            println!("Passed: {}", results.passed);
+            println!("Failed: {}", results.failed);
+            if results.failed > 0 {
+                process::exit(1);
+            }
+        }
     }
+    
+    Ok(())
 }
 
 pub fn run_cli() {
@@ -48,36 +64,71 @@ pub fn run_cli() {
     match args.len() {
         1 => run_repl(),
         2 => {
-            let file = &args[1];
-            if file == "help" || file == "--help" || file == "-h" {
-                print_help();
-            } else if file == "version" || file == "--version" || file == "-v" {
-                print_version();
-            } else {
-                match run_file(file) {
-                    Ok(_) => {},
-                    Err(e) => {
+            let cmd = &args[1];
+            match cmd.as_str() {
+                "help" | "--help" | "-h" => print_help(),
+                "version" | "--version" | "-v" => print_version(),
+                "test" => {
+                    if let Err(e) = run_test(None) {
                         eprintln!("Error: {}", e);
                         process::exit(1);
+                    }
+                },
+                _ => {
+                    if cmd.ends_with(".rb") || cmd.ends_with(".redblue") {
+                        if let Err(e) = run_file(cmd) {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }
+                    } else {
+                        if let Err(e) = run_file(cmd) {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }
                     }
                 }
             }
         },
-        _ => {
-            print_help();
-            process::exit(1);
-        }
+        3 => {
+            let cmd = &args[1];
+            let path = &args[2];
+            match cmd.as_str() {
+                "test" => {
+                    if let Err(e) = run_test(Some(path)) {
+                        eprintln!("Error: {}", e);
+                        process::exit(1);
+                    }
+                },
+                "run" => {
+                    if let Err(e) = run_file(path) {
+                        eprintln!("Error: {}", e);
+                        process::exit(1);
+                    }
+                },
+                _ => {
+                    print_help();
+                    process::exit(1);
+                }
+            }
+        },
+        _ => print_help(),
     }
 }
 
 fn print_help() {
-    println!("Redblue - A programming language as readable as plain English");
+    println!("Redblue v0.1.0 - A programming language as readable as plain English");
     println!();
     println!("Usage:");
     println!("  rb              Start interactive REPL");
-    println!("  rb <file>       Run a Redblue file");
-    println!("  rb help         Show this help");
-    println!("  rb version      Show version");
+    println!("  rb <file>      Run a Redblue file");
+    println!("  rb run <file>  Run a Redblue file");
+    println!("  rb test        Run all tests");
+    println!("  rb test <file> Run specific test file");
+    println!("  rb help        Show this help");
+    println!("  rb version     Show version");
+    println!();
+    println!("Example:");
+    println!("  rb examples/hello.rb");
 }
 
 fn print_version() {

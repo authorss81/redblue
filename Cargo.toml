@@ -18,8 +18,11 @@ name = "redblue"
 path = "src/lib.rs"
 
 [dependencies]
+regex = "1.10"
+chrono = "0.4"
 
 [dev-dependencies]
+regex = "1.10"
 
 [profile.release]
 opt-level = 3
