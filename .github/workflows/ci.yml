@@ -1,1 +1,0 @@
-name: CI\n\non: [push, pull_request]\n\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions-rust-lang/setup-rust-toolchain@v1\n      - run: cargo build\n      - run: cargo test\n      - run: cargo clippy -- -D warnings
