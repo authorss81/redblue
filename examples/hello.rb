@@ -6,8 +6,8 @@ set greeting to "Hello, World!"
 say greeting
 
 // With function
-to say hello(name)
+to greet(name)
     say "Hello, {name}!"
 end
 
-say hello("World")
+greet("World")

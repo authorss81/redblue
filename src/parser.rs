@@ -1101,8 +1101,17 @@ impl Parser {
                     Expr::Variable(name) => {
                         expr = Expr::Call { name, args };
                     }
+                    Expr::Property { object, property } => {
+                        let module_name = match *object {
+                            Expr::Variable(name) => format!("{}_{}", name, property),
+                            _ => return Err(Error::Parser("Expected module name".to_string())),
+                        };
+                        expr = Expr::Call {
+                            name: module_name,
+                            args,
+                        };
+                    }
                     _ => {
-                        // Method call on expression
                         return Err(Error::Parser("Expected function name".to_string()));
                     }
                 }

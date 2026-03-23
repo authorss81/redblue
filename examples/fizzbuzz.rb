@@ -1,22 +1,24 @@
-// Classic FizzBuzz
-for each n from 1 to 100
-    if n is divisible by 15
+// Classic FizzBuzz using repeat loop
+set n to 1
+repeat 15 times
+    if n % 15 is 0 then
         say "FizzBuzz"
-    else if n is divisible by 3
-        say "Fizz"
-    else if n is divisible by 5
-        say "Buzz"
     else
-        say n
+        if n % 3 is 0 then
+            say "Fizz"
+        else
+            if n % 5 is 0 then
+                say "Buzz"
+            else
+                say n
+            end
+        end
     end
+    set n to n + 1
 end
 
-// Alternative: using when statement (pattern matching)
-for each n from 1 to 100
-    when n mod 15
-        case 0 then say "FizzBuzz"
-        case 3 or 6 or 9 or 12 then say "Fizz"
-        case 5 or 10 then say "Buzz"
-        else say n
-    end
+// Using for each with a list
+set numbers to [1, 2, 3, 4, 5]
+for each num in numbers
+    say num
 end
