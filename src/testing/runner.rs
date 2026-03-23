@@ -1,7 +1,6 @@
-use crate::testing::{TestResults, TestError};
+use crate::testing::{TestError, TestResults};
 use crate::value::Value;
-use std::collections::HashMap;
-use std::time::{Instant, Duration};
+use std::time::Instant;
 
 pub struct TestRunner {
     results: TestResults,
@@ -19,18 +18,18 @@ impl TestRunner {
             start_time: Instant::now(),
         }
     }
-    
-    pub fn run_test<F>(&mut self, name: &str, test_fn: F) 
+
+    pub fn run_test<F>(&mut self, name: &str, test_fn: F)
     where
         F: FnOnce() -> Result<(), TestAssertionError>,
     {
         self.current_test = Some(name.to_string());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test_fn));
-        
+
         match result {
             Ok(Ok(())) => {
                 self.results.add_pass();
-            },
+            }
             Ok(Err(e)) => {
                 self.results.add_fail(TestError {
                     test_name: name.to_string(),
@@ -40,7 +39,7 @@ impl TestRunner {
                     expected: e.expected,
                     actual: e.actual,
                 });
-            },
+            }
             Err(_) => {
                 self.results.add_fail(TestError {
                     test_name: name.to_string(),
@@ -52,36 +51,38 @@ impl TestRunner {
                 });
             }
         }
-        
+
         self.current_test = None;
     }
-    
+
     pub fn run_benchmark<F>(&mut self, name: &str, iterations: usize, mut fn_: F)
     where
         F: FnMut(),
     {
         let start = Instant::now();
-        
+
         for _ in 0..iterations {
             fn_();
         }
-        
+
         let elapsed = start.elapsed();
         let avg_ns = elapsed.as_nanos() / iterations as u128;
-        
-        println!("Benchmark: {} - {} ns/iter ({} iterations)", 
-                 name, avg_ns, iterations);
+
+        println!(
+            "Benchmark: {} - {} ns/iter ({} iterations)",
+            name, avg_ns, iterations
+        );
     }
-    
+
     pub fn skip(&mut self, name: &str, reason: &str) {
         println!("SKIP: {} - {}", name, reason);
         self.results.add_skip();
     }
-    
+
     pub fn set_file(&mut self, file: &str) {
         self.current_file = file.to_string();
     }
-    
+
     pub fn results(&self) -> TestResults {
         let mut results = self.results.clone();
         results.duration_ms = self.start_time.elapsed().as_millis();
@@ -110,7 +111,7 @@ impl TestAssertionError {
             actual: None,
         }
     }
-    
+
     pub fn expected<T: std::fmt::Display>(expected: T) -> Self {
         Self {
             message: format!("Expected {}", expected),
@@ -118,12 +119,7 @@ impl TestAssertionError {
             actual: None,
         }
     }
-    
-    pub fn actual<T: std::fmt::Display(&mut Self, actual: T) -> &mut Self {
-        self.actual = Some(actual.to_string());
-        self
-    }
-    
+
     pub fn but_was<T: std::fmt::Display>(actual: T) -> Self {
         Self {
             message: format!("Expected but was: {}", actual),
@@ -149,7 +145,10 @@ pub fn assert_false(value: bool) -> Result<(), TestAssertionError> {
     }
 }
 
-pub fn assert_eq<T: PartialEq + std::fmt::Display>(expected: T, actual: T) -> Result<(), TestAssertionError> {
+pub fn assert_eq<T: PartialEq + std::fmt::Display + std::fmt::Debug>(
+    expected: T,
+    actual: T,
+) -> Result<(), TestAssertionError> {
     if expected == actual {
         Ok(())
     } else {
@@ -161,7 +160,10 @@ pub fn assert_eq<T: PartialEq + std::fmt::Display>(expected: T, actual: T) -> Re
     }
 }
 
-pub fn assert_ne<T: PartialEq + std::fmt::Display>(not_expected: T, actual: T) -> Result<(), TestAssertionError> {
+pub fn assert_ne<T: PartialEq + std::fmt::Display + std::fmt::Debug>(
+    not_expected: T,
+    actual: T,
+) -> Result<(), TestAssertionError> {
     if not_expected != actual {
         Ok(())
     } else {
@@ -173,7 +175,7 @@ pub fn assert_ne<T: PartialEq + std::fmt::Display>(not_expected: T, actual: T) -
     }
 }
 
-pub fn assert_none<T>(value: &Option<T>) -> Result<(), TestAssertionError> {
+pub fn assert_none<T: std::fmt::Debug>(value: &Option<T>) -> Result<(), TestAssertionError> {
     match value {
         None => Ok(()),
         Some(v) => Err(TestAssertionError {
@@ -196,7 +198,7 @@ where
     F: FnOnce(),
 {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    
+
     match result {
         Err(_) => Ok(()),
         Ok(_) => Err(TestAssertionError::new("Expected panic but none occurred")),
@@ -208,7 +210,7 @@ where
     F: FnOnce(),
 {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    
+
     match result {
         Ok(_) => Ok(()),
         Err(e) => Err(TestAssertionError {
@@ -219,7 +221,11 @@ where
     }
 }
 
-pub fn assert_approx_eq(expected: f64, actual: f64, epsilon: f64) -> Result<(), TestAssertionError> {
+pub fn assert_approx_eq(
+    expected: f64,
+    actual: f64,
+    epsilon: f64,
+) -> Result<(), TestAssertionError> {
     if (expected - actual).abs() < epsilon {
         Ok(())
     } else {
@@ -245,7 +251,7 @@ pub fn assert_contains(haystack: &str, needle: &str) -> Result<(), TestAssertion
 
 pub fn assert_matches_regex(pattern: &str, text: &str) -> Result<(), TestAssertionError> {
     use regex::Regex;
-    
+
     match Regex::new(pattern) {
         Ok(re) => {
             if re.is_match(text) {
@@ -257,14 +263,14 @@ pub fn assert_matches_regex(pattern: &str, text: &str) -> Result<(), TestAsserti
                     actual: Some(text.to_string()),
                 })
             }
-        },
+        }
         Err(e) => Err(TestAssertionError::new(format!("Invalid regex: {}", e))),
     }
 }
 
 pub fn assert_len<T: IntoIterator>(iter: T, expected_len: usize) -> Result<(), TestAssertionError> {
     let len = iter.into_iter().count();
-    
+
     if len == expected_len {
         Ok(())
     } else {
@@ -277,11 +283,31 @@ pub fn assert_len<T: IntoIterator>(iter: T, expected_len: usize) -> Result<(), T
 }
 
 pub fn assert_type<T: 'static>(value: &Value) -> Result<(), TestAssertionError> {
-    if value.is::<T>() {
+    use std::any::TypeId;
+
+    let value_type = match value {
+        Value::Nothing => TypeId::of::<()>(),
+        Value::Number(_) => TypeId::of::<f64>(),
+        Value::Text(_) => TypeId::of::<String>(),
+        Value::YesNo(_) => TypeId::of::<bool>(),
+        Value::List(_) => TypeId::of::<Vec<Value>>(),
+        Value::Record(_) => TypeId::of::<std::collections::HashMap<String, Value>>(),
+        Value::Object(_, _) => TypeId::of::<Value>(),
+        Value::Function(_, _) => TypeId::of::<Value>(),
+        Value::Builtin(_) => TypeId::of::<Value>(),
+    };
+
+    let expected_type = TypeId::of::<T>();
+
+    if value_type == expected_type {
         Ok(())
     } else {
         Err(TestAssertionError {
-            message: format!("Expected type {} but got {:?}", std::any::type_name::<T>(), value),
+            message: format!(
+                "Expected type {} but got {:?}",
+                std::any::type_name::<T>(),
+                value
+            ),
             expected: Some(std::any::type_name::<T>().to_string()),
             actual: Some(format!("{:?}", value)),
         })

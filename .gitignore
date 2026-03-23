@@ -1,0 +1,31 @@
+# Build outputs
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Agent/copilot files (local only, do not commit)
+AGENTS.md
+.skill/
+.cursor/
+.cursorrules
+.github/copilot-instructions.md
+
+# Secrets
+.env
+*.pem
+*.key
+credentials.json
+secrets.txt
+
+# Test outputs
+*.tmp
+*.log

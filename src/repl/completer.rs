@@ -116,32 +116,32 @@ impl ReplCompleter {
             ],
         }
     }
-    
+
     pub fn complete(&self, word: &str) -> Vec<String> {
         let mut matches = Vec::new();
         let word_lower = word.to_lowercase();
-        
+
         for keyword in &self.keywords {
             if keyword.to_lowercase().starts_with(&word_lower) {
                 matches.push(keyword.clone());
             }
         }
-        
+
         for builtin in &self.builtins {
             if builtin.to_lowercase().starts_with(&word_lower) {
                 matches.push(builtin.clone());
             }
         }
-        
+
         for command in &self.commands {
             if command.to_lowercase().starts_with(&word_lower) {
                 matches.push(command.clone());
             }
         }
-        
+
         matches.sort();
         matches.dedup();
-        
+
         matches
     }
 }

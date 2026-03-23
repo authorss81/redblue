@@ -1,4 +1,3 @@
-use crate::testing::{TestResults, TestError};
 use crate::value::Value;
 
 pub trait Assertion<T> {
@@ -52,7 +51,7 @@ impl<T: std::fmt::Debug + PartialEq + Clone> AssertThat<T> {
             })
         }
     }
-    
+
     pub fn is_not_equal_to(&self, not_expected: T) -> Result<(), TestAssertionError> {
         if self.actual != not_expected {
             Ok(())
@@ -64,10 +63,12 @@ impl<T: std::fmt::Debug + PartialEq + Clone> AssertThat<T> {
             })
         }
     }
-    
+
     pub fn is_same_as(&self, expected: &T) -> Result<(), TestAssertionError>
-    where T: PartialEq {
-        if std::ptr::eq(self.actual, expected) {
+    where
+        T: PartialEq,
+    {
+        if self.actual == *expected {
             Ok(())
         } else {
             Err(TestAssertionError {
@@ -77,33 +78,30 @@ impl<T: std::fmt::Debug + PartialEq + Clone> AssertThat<T> {
             })
         }
     }
-    
-    pub fn is_none(&self) -> Result<(), TestAssertionError>
-    where T: std::fmt::Debug {
-        match &self.actual {
-            None => Ok(()),
-            Some(v) => Err(TestAssertionError {
-                message: format!("Expected None but got Some({:?})", v),
-                expected: Some("None".to_string()),
-                actual: Some(format!("Some({:?})", v)),
-            }),
-        }
+
+    pub fn is_none(&self) -> Result<(), TestAssertionError> {
+        Err(TestAssertionError {
+            message: "is_none not supported for this type".to_string(),
+            expected: None,
+            actual: None,
+        })
     }
-    
+
     pub fn is_some(&self) -> Result<(), TestAssertionError>
-    where T: std::fmt::Debug {
-        match &self.actual {
-            Some(_) => Ok(()),
-            None => Err(TestAssertionError {
-                message: "Expected Some but got None".to_string(),
-                expected: Some("Some".to_string()),
-                actual: Some("None".to_string()),
-            }),
-        }
+    where
+        T: std::fmt::Debug,
+    {
+        Err(TestAssertionError {
+            message: "is_some not supported for this type".to_string(),
+            expected: None,
+            actual: None,
+        })
     }
-    
+
     pub fn contains(&self, item: &T) -> Result<(), TestAssertionError>
-    where T: PartialEq + std::fmt::Debug {
+    where
+        T: PartialEq + std::fmt::Debug,
+    {
         if self.actual == *item {
             Err(TestAssertionError {
                 message: format!("{:?} should contain {:?}", self.actual, item),
@@ -195,7 +193,7 @@ pub fn assert_list_length(list: &Value, expected: usize) -> Result<(), TestAsser
                     actual: Some(items.len().to_string()),
                 })
             }
-        },
+        }
         _ => Err(TestAssertionError {
             message: format!("Expected list but got {:?}", list),
             expected: Some("list".to_string()),
@@ -248,7 +246,7 @@ where
     F: FnMut(),
 {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut f));
-    
+
     match result {
         Err(_) => Ok(()),
         Ok(_) => Err(TestAssertionError {

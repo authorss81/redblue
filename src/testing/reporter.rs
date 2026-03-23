@@ -1,8 +1,4 @@
-pub mod assertions;
-
-pub use assertions::*;
-
-use crate::testing::{TestResults, TestError};
+use crate::testing::TestResults;
 
 pub trait Reporter {
     fn report(&self, results: &TestResults);
@@ -11,7 +7,7 @@ pub trait Reporter {
 pub struct PrettyReporter {
     show_passed: bool,
     show_failed: bool,
-    show_skipped: bool,
+    _show_skipped: bool,
     color: bool,
 }
 
@@ -20,26 +16,26 @@ impl PrettyReporter {
         Self {
             show_passed: false,
             show_failed: true,
-            show_skipped: true,
+            _show_skipped: true,
             color: true,
         }
     }
-    
+
     pub fn show_passed(mut self, show: bool) -> Self {
         self.show_passed = show;
         self
     }
-    
+
     pub fn show_failed(mut self, show: bool) -> Self {
         self.show_failed = show;
         self
     }
-    
+
     pub fn color(mut self, color: bool) -> Self {
         self.color = color;
         self
     }
-    
+
     fn colorize(&self, text: &str, color: &str) -> String {
         if self.color {
             match color {
@@ -65,7 +61,7 @@ impl Default for PrettyReporter {
 impl Reporter for PrettyReporter {
     fn report(&self, results: &TestResults) {
         println!();
-        
+
         let summary = format!(
             "Test Results: {} total, {} passed, {} failed, {} skipped ({:.1}% success)",
             results.total,
@@ -74,7 +70,7 @@ impl Reporter for PrettyReporter {
             results.skipped,
             results.success_rate()
         );
-        
+
         if results.failed > 0 {
             println!("{}", self.colorize(&summary, "red"));
         } else if results.passed > 0 {
@@ -82,19 +78,22 @@ impl Reporter for PrettyReporter {
         } else {
             println!("{}", summary);
         }
-        
+
         println!("Duration: {}ms", results.duration_ms);
-        
+
         if !results.errors.is_empty() {
             println!();
             println!("{}", self.colorize("Failures:", "bold"));
             println!("{}", "=".repeat(60));
-            
+
             for (i, error) in results.errors.iter().enumerate() {
                 println!();
-                println!("{}: {}", self.colorize(&format!("{}. {}", i + 1, error.test_name), "red"), 
-                         self.colorize("FAILED", "red"));
-                
+                println!(
+                    "{}: {}",
+                    self.colorize(&format!("{}. {}", i + 1, error.test_name), "red"),
+                    self.colorize("FAILED", "red")
+                );
+
                 if !error.file.is_empty() {
                     if let Some(line) = error.line {
                         println!("  Location: {}:{}", error.file, line);
@@ -102,21 +101,21 @@ impl Reporter for PrettyReporter {
                         println!("  Location: {}", error.file);
                     }
                 }
-                
+
                 println!("  Error: {}", error.message);
-                
+
                 if let Some(expected) = &error.expected {
                     println!("  Expected: {}", expected);
                 }
-                
+
                 if let Some(actual) = &error.actual {
                     println!("  Actual: {}", actual);
                 }
             }
         }
-        
+
         println!();
-        
+
         if results.failed > 0 {
             std::process::exit(1);
         }
@@ -146,7 +145,7 @@ impl Reporter for JsonReporter {
         println!("  \"skipped\": {},", results.skipped);
         println!("  \"success_rate\": {:.2},", results.success_rate());
         println!("  \"duration_ms\": {},", results.duration_ms);
-        
+
         if !results.errors.is_empty() {
             println!("  \"errors\": [");
             for (i, error) in results.errors.iter().enumerate() {
@@ -156,20 +155,30 @@ impl Reporter for JsonReporter {
                 if let Some(line) = error.line {
                     println!("      \"line\": {},", line);
                 }
-                println!("      \"message\": \"{}\",", error.message.replace('"', "\\\""));
+                println!(
+                    "      \"message\": \"{}\",",
+                    error.message.replace('"', "\\\"")
+                );
                 if let Some(expected) = &error.expected {
                     println!("      \"expected\": \"{}\",", expected.replace('"', "\\\""));
                 }
                 if let Some(actual) = &error.actual {
                     println!("      \"actual\": \"{}\"", actual.replace('"', "\\\""));
                 }
-                println!("    }}{}", if i < results.errors.len() - 1 { "," } else { "" });
+                println!(
+                    "    }}{}",
+                    if i < results.errors.len() - 1 {
+                        ","
+                    } else {
+                        ""
+                    }
+                );
             }
             println!("  ],");
         } else {
             println!("  \"errors\": [],");
         }
-        
+
         println!("  \"timestamp\": \"{}\"", chrono::Utc::now().to_rfc3339());
         println!("}}");
     }
@@ -193,13 +202,13 @@ impl Reporter for TapReporter {
     fn report(&self, results: &TestResults) {
         println!("TAP version 13");
         println!("1..{}", results.total);
-        
+
         let mut count = 0;
         for _ in 0..results.passed {
             count += 1;
             println!("ok {} - passed", count);
         }
-        
+
         for error in &results.errors {
             count += 1;
             println!("not ok {} - {}", count, error.test_name);
@@ -213,7 +222,7 @@ impl Reporter for TapReporter {
             }
             println!("  ---");
         }
-        
+
         for _ in 0..results.skipped {
             count += 1;
             println!("ok {} - # SKIP", count);

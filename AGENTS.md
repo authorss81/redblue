@@ -1,54 +1,49 @@
 # AGENTS.md - Redblue Programming Language
 
-This file contains instructions for agentic coding agents working on the Redblue project.
+Instructions for agentic coding agents working on the Redblue project.
 
 ## Project Overview
 
-**Redblue** is a programming language designed to be as readable as plain English while maintaining the power of world-class languages.
+**Redblue** is a programming language designed to be as readable as plain English.
 
 - **Language Syntax**: Plain English, e.g., `if count is greater than 10 then say "Hello"`
 - **File Extension**: `.rb`
 - **Implementation**: Rust
-- **Status**: Phase 3-5 (Compiler core done, expanding stdlib)
-
----
+- **Binary**: `rb` (run with `cargo run --bin rb`)
 
 ## Build Commands
 
 ```bash
-# Build the project
-cd redblue
-cargo build
+# Build and run tests
+cargo build && cargo test
 
 # Run in release mode
 cargo build --release
 
+# Run the CLI (binary named 'rb')
+cargo run --bin rb -- [args]
+
+# Run a Redblue file
+cargo run --bin rb -- run hello.rb
+
 # Run tests
 cargo test
 
-# Run specific test
+# Run specific test by name
 cargo test test_name
 
-# Run with example
-cargo run --example hello
+# Run with output
+cargo test -- --nocapture
 
-# Run the REPL
-cargo run
+# Run doc tests
+cargo test --doc
 
-# Run a Redblue file
-cargo run -- test.rb
+# Format and lint
+cargo fmt && cargo clippy
 
-# Format code
-cargo fmt
-
-# Lint code
-cargo clippy
-
-# Full check (all of the above)
+# Full check
 cargo check --all-targets
 ```
-
----
 
 ## Code Style Guidelines
 
@@ -63,7 +58,7 @@ cargo check --all-targets
    - Constants: `SCREAMING_SNAKE_CASE` (e.g., `MAX_BUFFER_SIZE`)
    - Modules: `snake_case` (e.g., `lexer.rs`, `parser.rs`)
 
-4. **Imports**: Group by std, external, local
+4. **Imports**: Group by std, external, local (blank line between):
    ```rust
    use std::collections::HashMap;
    
@@ -74,244 +69,138 @@ cargo check --all-targets
 5. **Error Handling**:
    - Use `Result<T, Error>` for fallible operations
    - Propagate errors with `?` operator
-   - Use descriptive error messages
    - Never silently ignore errors with `_`
 
-6. **Documentation**:
-   - Document public functions with `///`
-   - Keep docs concise but complete
-   - Include examples for complex functions
-
-### Redblue Language Code
-
-1. **Variables**: Use descriptive names
-   ```redblue
-   // Good
-   set user_name to "Alice"
-   
-   // Bad
-   set x to "Alice"
-   ```
-
-2. **Functions**: Verb phrases that describe action
-   ```redblue
-   to calculate_total(items)
-   to fetch_user_data(url)
-   ```
-
-3. **Control Flow**: Readable conditionals
-   ```redblue
-   // Good
-   if user age is greater than 18
-   
-   // Acceptable
-   if age > 18
-   ```
-
-4. **Comments**: Explain why, not what
-   ```redblue
-   // Using binary search for O(log n) performance
-   ```
-
----
+6. **Documentation**: Document public functions with `///`
 
 ## Architecture
 
 ### Compiler Pipeline
-
 ```
-Source Code (.rb)
-    │
-    ▼
-┌─────────┐
-│  Lexer  │  Tokenizes source into tokens
-└────┬────┘
-     │
-     ▼
-┌─────────┐
-│ Parser  │  Builds AST from tokens
-└────┬────┘
-     │
-     ▼
-┌──────────┐
-│ Analyzer │  Semantic analysis, scope checking
-└────┬─────┘
-     │
-     ▼
-┌─────┴────┐
-│    VM    │  Executes AST
-└──────────┘
+Source (.rb) → Lexer → Parser → Analyzer → VM → Output
 ```
 
 ### Source Structure
 
 ```
-redblue/
-├── src/
-│   ├── lib.rs              # Main library entry
-│   ├── main.rs              # CLI entry point
-│   ├── error.rs             # Error types
-│   ├── value.rs             # Runtime values
-│   ├── lexer.rs             # Tokenizer
-│   ├── parser.rs            # AST builder
-│   ├── analyzer.rs          # Semantic analysis
-│   ├── vm.rs                # Virtual machine
-│   ├── repl/                # REPL implementation
-│   │   ├── mod.rs
-│   │   ├── commands.rs
-│   │   ├── completer.rs
-│   │   └── history.rs
-│   └── stdlib/              # Standard library
-│       ├── mod.rs
-│       ├── text.rs          # String operations
-│       ├── math.rs          # Math functions
-│       ├── files.rs         # File I/O
-│       ├── network.rs       # HTTP/networking
-│       ├── formats.rs        # JSON/CSV parsing
-│       ├── list.rs          # List operations
-│       └── console.rs       # I/O utilities
-├── tests/                   # Integration tests
-├── examples/                # Example .rb files
-├── tooling/                  # IDE/REPL tooling
-│   ├── repl/
-│   └── vscode/
-├── docs/
-│   └── GRAMMAR.md          # Language grammar
-├── SPEC.md                 # Language specification
-├── PHILOSOPHY.md           # Design principles
-└── ROADMAP.md              # Project roadmap
+src/
+├── lib.rs           # Main library entry
+├── main.rs          # CLI entry point
+├── error.rs         # Error types (Lexer, Parser, Analyzer, Runtime, Io)
+├── value.rs         # Runtime values (Value enum)
+├── lexer.rs         # Tokenizer (TokenKind enum)
+├── parser.rs        # AST builder
+├── analyzer.rs      # Semantic analysis
+├── vm.rs            # Virtual machine
+├── stdlib.rs        # Standard library (builtins function)
+├── formatter.rs     # Code formatter
+├── linter.rs        # Code linter
+├── repl/            # REPL implementation
+└── testing/         # Test harness (harness, runner, assertions, reporter)
 ```
-
----
-
-## Key Decisions
-
-### Type System
-
-- **Dynamic typing** with optional type annotations
-- **Value types**: `number`, `text`, `yes/no` (boolean), `nothing`
-- **Complex types**: `list`, `record`, `object`
-- Use `Value` enum for runtime values
-
-### Error Handling
-
-- Use `Result<T, Error>` for fallible operations
-- Error enum variants: `Lexer`, `Parser`, `Analyzer`, `Runtime`, `Io`
-- Human-friendly error messages with context
-
-### Standard Library Organization
-
-Each module is in `src/stdlib/<name>.rs`:
-
-```rust
-// Module function signature
-pub fn call(function: &str, args: Vec<Value>) -> Result<Value> {
-    match function {
-        "function_name" => function_impl(args),
-        _ => Err(Error::Runtime(format!("Unknown function '{}'", function))),
-    }
-}
-```
-
----
 
 ## Adding New Features
 
-### Adding a New Keyword
-
+### New Keyword
 1. Add to `lexer.rs` → `TokenKind` enum
-2. Add to `keyword()` method in `Lexer`
-3. Handle in `parser.rs` → `parse_statement()` or `parse_expression()`
-4. Add tests in `tests/`
+2. Handle in `parser.rs` → `parse_statement()` or `parse_expression()`
+3. Add tests
 
-### Adding a Standard Library Function
+### Standard Library Function
+1. Add to `src/stdlib.rs` → `builtins()` function
+2. Implement in `vm.rs` → `call_builtin()`
+3. Add tests
 
-1. Create or edit module in `src/stdlib/`
-2. Add `pub fn call()` function
-3. Export in `src/stdlib/mod.rs`
-4. Update `Vm::call()` in `vm.rs`
-5. Add examples in `examples/`
-
-### Adding a New Statement Type
-
+### New Statement Type
 1. Add variant to `parser.rs` → `Statement` enum
-2. Implement `parse_*()` method in `Parser`
+2. Implement `parse_*()` method
 3. Handle in `vm.rs` → `execute_statement()`
-4. Add tests
-
----
 
 ## Testing
 
+Custom test harness in `src/testing/`. Test files: `.rs` (ending in `_test.rs`) or `.rb`.
+
+### Built-in Test Syntax
+```redblue
+test "my test"
+    set result to 2 + 3
+    expect result to be 5
+end
+```
+
+### Formatter (rbfmt)
 ```bash
-# Run all tests
-cargo test
-
-# Run with output
-cargo test -- --nocapture
-
-# Run doc tests
-cargo test --doc
-
-# Run specific test
-cargo test test_name
-
-# Run integration tests
-cargo test --test '*'
-
-# Run with coverage
-cargo install cargo-llvm-cov
-cargo llvm-cov
+rb format <file>           # Format a file
+rb format --check <file>   # Check if file needs formatting
 ```
 
----
-
-## Git Workflow
-
-1. Create feature branch: `git checkout -b feature/my-feature`
-2. Make changes, commit with conventional commits
-3. Push: `git push origin feature/my-feature`
-4. Create PR on GitHub
-
-### Commit Message Format
-
-```
-<type>(<scope>): <description>
-
-[optional body]
-
-[optional footer]
+### Linter (rblint)
+```bash
+rb lint <file>            # Lint a file
 ```
 
-Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`
+Detects: unused variables, style issues
 
-Examples:
+### Standard Library (Implemented)
+
+#### Files Module
+```redblue
+files.read("path")     // Read entire file as text
+files.write("path", "content")  // Write content to file
+files.append("path", "content") // Append to file
+files.exists("path")    // Check if file exists
+files.lines("path")    // Read file as list of lines
+files.delete("path")   // Delete a file
+files.copy("from", "to")   // Copy file
+files.rename("from", "to") // Rename/move file
 ```
-feat(parser): add pattern matching support
-fix(lexer): handle unicode identifiers correctly
-docs(readme): update installation instructions
-test(vm): add tests for async execution
+
+#### Time Module
+```redblue
+time.now()             // Get current time as record
+time.sleep(seconds)    // Sleep for given seconds
+time.format(timestamp, "format")  // Format Unix timestamp
+time.unix("YYYY-MM-DD HH:MM:SS")  // Parse date string to Unix timestamp
 ```
 
----
+#### Formats Module (JSON/CSV)
+```redblue
+json.parse("{\"key\": \"value\"}")  // Parse JSON string to record
+json.stringify(value)               // Convert value to JSON string
+csv.parse("a,b,c\n1,2,3")          // Parse CSV to list of lists
+```
 
-## Performance Considerations
+#### Network Module
+```redblue
+network.get("url")     // HTTP GET request
+network.post("url", "body")  // HTTP POST request
+```
 
-- Lexer/Parser: O(n) where n = source length
-- VM: Stack-based, no JIT yet
-- Memory: Reference counting GC (planned improvements)
+#### Module System
+```redblue
+import MathUtils                    // Import module
+import files, network as net         // Multiple imports with alias
 
----
+MathUtils.circle_area(5)             // Use module functions
+net.get("https://api.example.com")   // Using alias
+```
 
-## Known Limitations
+#### Math Functions
+```redblue
+PI, E                    // Constants
+abs(x), floor(x), ceil(x)
+round(x), sqrt(x), pow(x, y)
+sin(x), cos(x), tan(x)
+log(x), exp(x)
+```
 
-- No async/await yet (planned for Phase 5+)
-- No generics yet (planned)
-- No module system yet (planned)
-- Limited standard library (expanding)
-- No bytecode compilation (interpreter only)
-
----
+#### Text Functions
+```redblue
+uppercase("text"), lowercase("text"), trim("text")
+split("text", by), join(list, by)
+contains("text", sub), starts_with("text", prefix)
+replace("text", from, to)
+```
 
 ## Resources
 
@@ -319,7 +208,3 @@ test(vm): add tests for async execution
 - [Grammar](docs/GRAMMAR.md)
 - [Philosophy](PHILOSOPHY.md)
 - [Roadmap](ROADMAP.md)
-
----
-
-*Last updated: March 2026*

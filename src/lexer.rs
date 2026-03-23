@@ -7,13 +7,14 @@ pub enum TokenKind {
     Text(String),
     YesNo(bool),
     Nothing,
-    
+
     // Identifiers
     Identifier(String),
-    
+
     // Keywords
     Set,
     To,
+    By,
     Is,
     Are,
     If,
@@ -47,6 +48,8 @@ pub enum TokenKind {
     Module,
     Import,
     Export,
+    Test,
+    Expect,
     Object,
     Has,
     Can,
@@ -58,7 +61,7 @@ pub enum TokenKind {
     Wait,
     Parallel,
     Done,
-    
+
     // Operators
     Plus,
     Minus,
@@ -71,7 +74,7 @@ pub enum TokenKind {
     LessEqual,
     Greater,
     GreaterEqual,
-    
+
     // Delimiters
     LeftParen,
     RightParen,
@@ -82,7 +85,7 @@ pub enum TokenKind {
     Comma,
     Dot,
     Colon,
-    
+
     // Special
     Newline,
     Eof,
@@ -117,15 +120,15 @@ impl Lexer {
             column: 1,
         }
     }
-    
+
     fn current(&self) -> Option<char> {
         self.source.get(self.pos).copied()
     }
-    
+
     fn peek(&self) -> Option<char> {
         self.source.get(self.pos + 1).copied()
     }
-    
+
     fn advance(&mut self) -> Option<char> {
         let c = self.source.get(self.pos).copied();
         self.pos += 1;
@@ -137,7 +140,7 @@ impl Lexer {
         }
         c
     }
-    
+
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.current() {
             if c.is_whitespace() && c != '\n' {
@@ -147,7 +150,7 @@ impl Lexer {
             }
         }
     }
-    
+
     fn skip_comment(&mut self) {
         while let Some(c) = self.current() {
             if c == '\n' {
@@ -156,12 +159,11 @@ impl Lexer {
             self.advance();
         }
     }
-    
+
     fn read_number(&mut self) -> f64 {
         let mut num_str = String::new();
         while let Some(c) = self.current() {
-            if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' 
-               || c == '+' || c == '-' {
+            if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
                 num_str.push(c);
                 self.advance();
             } else {
@@ -170,7 +172,7 @@ impl Lexer {
         }
         num_str.parse().unwrap_or(0.0)
     }
-    
+
     fn read_text(&mut self) -> String {
         self.advance(); // consume opening quote
         let mut text = String::new();
@@ -197,7 +199,7 @@ impl Lexer {
         }
         text
     }
-    
+
     fn read_identifier(&mut self) -> String {
         let mut ident = String::new();
         while let Some(c) = self.current() {
@@ -210,7 +212,7 @@ impl Lexer {
         }
         ident
     }
-    
+
     fn keyword(&self, ident: &str) -> TokenKind {
         match ident {
             "set" => TokenKind::Set,
@@ -234,10 +236,10 @@ impl Lexer {
             "break" => TokenKind::Break,
             "skip" => TokenKind::Skip,
             "return" => TokenKind::Return,
-            "give" => TokenKind::GiveBack, // give back
-            "back" => TokenKind::GiveBack, // give back
+            "give" => TokenKind::GiveBack,   // give back
+            "back" => TokenKind::GiveBack,   // give back
             "might" => TokenKind::MightFail, // might fail
-            "fail" => TokenKind::MightFail, // might fail
+            "fail" => TokenKind::MightFail,  // might fail
             "say" => TokenKind::Say,
             "print" => TokenKind::Print,
             "ask" => TokenKind::Ask,
@@ -253,6 +255,8 @@ impl Lexer {
             "module" => TokenKind::Module,
             "import" => TokenKind::Import,
             "export" => TokenKind::Export,
+            "test" => TokenKind::Test,
+            "expect" => TokenKind::Expect,
             "object" => TokenKind::Object,
             "has" => TokenKind::Has,
             "can" => TokenKind::Can,
@@ -267,49 +271,51 @@ impl Lexer {
             _ => TokenKind::Identifier(ident.to_string()),
         }
     }
-    
+
     pub fn tokenize(source: &str) -> Result<Vec<Token>> {
         let mut lexer = Lexer::new(source);
         let mut tokens = Vec::new();
-        
+
         loop {
             lexer.skip_whitespace();
-            
+
             let line = lexer.line;
             let column = lexer.column;
-            
+
             let Some(c) = lexer.current() else {
                 tokens.push(Token::new(TokenKind::Eof, line, column));
                 break;
             };
-            
+
             // Handle newline
             if c == '\n' {
                 lexer.advance();
                 tokens.push(Token::new(TokenKind::Newline, line, column));
                 continue;
             }
-            
+
             // Skip comments
             if c == '/' && lexer.peek() == Some('/') {
                 lexer.skip_comment();
                 continue;
             }
-            
+
             // Numbers
-            if c.is_ascii_digit() || (c == '.' && lexer.peek().map(|p| p.is_ascii_digit()).unwrap_or(false)) {
+            if c.is_ascii_digit()
+                || (c == '.' && lexer.peek().map(|p| p.is_ascii_digit()).unwrap_or(false))
+            {
                 let num = lexer.read_number();
                 tokens.push(Token::new(TokenKind::Number(num), line, column));
                 continue;
             }
-            
+
             // Strings
             if c == '"' {
                 let text = lexer.read_text();
                 tokens.push(Token::new(TokenKind::Text(text), line, column));
                 continue;
             }
-            
+
             // Identifiers and keywords
             if c.is_alphabetic() || c == '_' {
                 let ident = lexer.read_identifier();
@@ -317,23 +323,65 @@ impl Lexer {
                 tokens.push(Token::new(kind, line, column));
                 continue;
             }
-            
+
             // Operators
             let kind = match c {
-                '+' => { lexer.advance(); TokenKind::Plus },
-                '-' => { lexer.advance(); TokenKind::Minus },
-                '*' => { lexer.advance(); TokenKind::Star },
-                '/' => { lexer.advance(); TokenKind::Slash },
-                '%' => { lexer.advance(); TokenKind::Mod },
-                '(' => { lexer.advance(); TokenKind::LeftParen },
-                ')' => { lexer.advance(); TokenKind::RightParen },
-                '[' => { lexer.advance(); TokenKind::LeftBracket },
-                ']' => { lexer.advance(); TokenKind::RightBracket },
-                '{' => { lexer.advance(); TokenKind::LeftBrace },
-                '}' => { lexer.advance(); TokenKind::RightBrace },
-                ',' => { lexer.advance(); TokenKind::Comma },
-                '.' => { lexer.advance(); TokenKind::Dot },
-                ':' => { lexer.advance(); TokenKind::Colon },
+                '+' => {
+                    lexer.advance();
+                    TokenKind::Plus
+                }
+                '-' => {
+                    lexer.advance();
+                    TokenKind::Minus
+                }
+                '*' => {
+                    lexer.advance();
+                    TokenKind::Star
+                }
+                '/' => {
+                    lexer.advance();
+                    TokenKind::Slash
+                }
+                '%' => {
+                    lexer.advance();
+                    TokenKind::Mod
+                }
+                '(' => {
+                    lexer.advance();
+                    TokenKind::LeftParen
+                }
+                ')' => {
+                    lexer.advance();
+                    TokenKind::RightParen
+                }
+                '[' => {
+                    lexer.advance();
+                    TokenKind::LeftBracket
+                }
+                ']' => {
+                    lexer.advance();
+                    TokenKind::RightBracket
+                }
+                '{' => {
+                    lexer.advance();
+                    TokenKind::LeftBrace
+                }
+                '}' => {
+                    lexer.advance();
+                    TokenKind::RightBrace
+                }
+                ',' => {
+                    lexer.advance();
+                    TokenKind::Comma
+                }
+                '.' => {
+                    lexer.advance();
+                    TokenKind::Dot
+                }
+                ':' => {
+                    lexer.advance();
+                    TokenKind::Colon
+                }
                 _ => {
                     return Err(Error::Lexer(format!(
                         "Unexpected character '{}' at line {}, column {}",
@@ -341,10 +389,10 @@ impl Lexer {
                     )));
                 }
             };
-            
+
             tokens.push(Token::new(kind, line, column));
         }
-        
+
         Ok(tokens)
     }
 }
@@ -352,20 +400,20 @@ impl Lexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_hello_world() {
         let tokens = Lexer::tokenize(r#"say "Hello, World!""#).unwrap();
-        assert_eq!(tokens.len(), 4); // say, Text, Newline, Eof
+        assert_eq!(tokens.len(), 3); // say, Text, Eof
         assert_eq!(tokens[1].kind, TokenKind::Text("Hello, World!".to_string()));
     }
-    
+
     #[test]
     fn test_numbers() {
         let tokens = Lexer::tokenize("set x to 42").unwrap();
         assert_eq!(tokens[3].kind, TokenKind::Number(42.0));
     }
-    
+
     #[test]
     fn test_keywords() {
         let tokens = Lexer::tokenize("if yes then end").unwrap();
