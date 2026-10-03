@@ -1,5 +1,5 @@
 use crate::lexer::Lexer;
-use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
+use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 
 pub struct Formatter {
     indent: usize,
@@ -33,8 +33,8 @@ impl Formatter {
         }
     }
 
-    fn format_statement(&mut self, stmt: &Statement) {
-        match stmt {
+    fn format_statement(&mut self, stmt: &Stmt) {
+        match &stmt.statement {
             Statement::Say(expr) => {
                 self.write("say ");
                 self.format_expression(expr);

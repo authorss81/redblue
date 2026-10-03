@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Span};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -101,6 +101,11 @@ pub struct Token {
 impl Token {
     pub fn new(kind: TokenKind, line: usize, column: usize) -> Self {
         Self { kind, line, column }
+    }
+
+    /// The source position this token was lexed from.
+    pub fn span(&self) -> Span {
+        Span::new(self.line, self.column)
     }
 }
 
@@ -383,10 +388,10 @@ impl Lexer {
                     TokenKind::Colon
                 }
                 _ => {
-                    return Err(Error::Lexer(format!(
-                        "Unexpected character '{}' at line {}, column {}",
-                        c, line, column
-                    )));
+                    return Err(Error::Lexer(
+                        format!("Unexpected character '{}'", c),
+                        Span::new(line, column),
+                    ));
                 }
             };
 

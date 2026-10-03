@@ -1,7 +1,7 @@
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser as redblue_parser;
-use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
+use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::stdlib;
 use crate::value::Value;
 use std::collections::HashMap;
@@ -14,6 +14,7 @@ pub struct Vm {
     output: Vec<String>,
     _modules: HashMap<String, Program>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
+    current_span: Span,
 }
 
 impl Vm {
@@ -26,6 +27,7 @@ impl Vm {
             output: Vec::new(),
             _modules: HashMap::new(),
             expectation_failure: None,
+            current_span: Span::unknown(),
         }
     }
 
@@ -46,7 +48,7 @@ impl Vm {
         let ast = redblue_parser::Parser::new(tokens).parse()?;
 
         for stmt in &ast.statements {
-            match stmt {
+            match &stmt.statement {
                 Statement::Set { name, value } => {
                     let val = self.evaluate(value)?;
                     self.globals.insert(name.clone(), val);
@@ -115,7 +117,20 @@ impl Vm {
         }
     }
 
-    fn execute_statement(&mut self, stmt: &Statement) -> Result<Value> {
+    fn execute_statement(&mut self, stmt: &Stmt) -> Result<Value> {
+        let previous_span = std::mem::replace(&mut self.current_span, stmt.span);
+        let result = self.execute_statement_body(&stmt.statement);
+        self.current_span = previous_span;
+        result
+    }
+
+    /// The source position of the statement being executed. Every runtime
+    /// failure is reported against it.
+    fn span(&self) -> Span {
+        self.current_span
+    }
+
+    fn execute_statement_body(&mut self, stmt: &Statement) -> Result<Value> {
         match stmt {
             Statement::Say(expr) => {
                 let value = self.evaluate(expr)?;
@@ -323,10 +338,10 @@ impl Vm {
                     }
 
                     if !loaded {
-                        return Err(Error::Runtime(format!(
-                            "Cannot find module '{}'",
-                            item.name
-                        )));
+                        return Err(Error::Runtime(
+                            format!("Cannot find module '{}'", item.name),
+                            self.span(),
+                        ));
                     }
 
                     let target_name = item.alias.as_ref().unwrap_or(&item.name);
@@ -345,7 +360,7 @@ impl Vm {
         }
     }
 
-    fn execute_statements(&mut self, statements: &[Statement]) -> Result<Value> {
+    fn execute_statements(&mut self, statements: &[Stmt]) -> Result<Value> {
         let mut result = Value::Nothing;
         for stmt in statements {
             result = self.execute_statement(stmt)?;
@@ -361,7 +376,7 @@ impl Vm {
             Expr::Nothing => Ok(Value::Nothing),
             Expr::Variable(name) => self
                 .get_var(name)
-                .ok_or_else(|| Error::Runtime(format!("Unknown variable '{}'", name))),
+                .ok_or_else(|| Error::Runtime(format!("Unknown variable '{}'", name), self.span())),
             Expr::Binary { op, left, right } => {
                 let l = self.evaluate(left)?;
                 let r = self.evaluate(right)?;
@@ -379,6 +394,7 @@ impl Vm {
                 } else {
                     Err(Error::Runtime(
                         "Cannot access property on non-object".to_string(),
+                        self.span(),
                     ))
                 }
             }
@@ -394,10 +410,16 @@ impl Vm {
                         };
                         Ok(items.get(i as usize).cloned().unwrap_or(Value::Nothing))
                     } else {
-                        Err(Error::Runtime("Index must be a number".to_string()))
+                        Err(Error::Runtime(
+                            "Index must be a number".to_string(),
+                            self.span(),
+                        ))
                     }
                 } else {
-                    Err(Error::Runtime("Cannot index non-list".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot index non-list".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             Expr::InterpolatedText(parts) => {
@@ -425,7 +447,7 @@ impl Vm {
                     Ok(()) => Ok(Value::Nothing),
                     Err(failure) => {
                         self.expectation_failure = Some(failure.clone());
-                        Err(Error::Runtime(failure.to_string()))
+                        Err(Error::Runtime(failure.to_string(), self.span()))
                     }
                 }
             }
@@ -437,38 +459,53 @@ impl Vm {
             BinaryOp::Add => match (left, right) {
                 (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
                 (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{}{}", a, b))),
-                _ => Err(Error::Runtime("Cannot add non-numbers".to_string())),
+                _ => Err(Error::Runtime(
+                    "Cannot add non-numbers".to_string(),
+                    self.span(),
+                )),
             },
             BinaryOp::Sub => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     Ok(Value::Number(a - b))
                 } else {
-                    Err(Error::Runtime("Cannot subtract non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot subtract non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::Mul => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     Ok(Value::Number(a * b))
                 } else {
-                    Err(Error::Runtime("Cannot multiply non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot multiply non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::Div => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     if b == 0.0 {
-                        Err(Error::Runtime("Division by zero".to_string()))
+                        Err(Error::Runtime("Division by zero".to_string(), self.span()))
                     } else {
                         Ok(Value::Number(a / b))
                     }
                 } else {
-                    Err(Error::Runtime("Cannot divide non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot divide non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::Mod => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     Ok(Value::Number(a % b))
                 } else {
-                    Err(Error::Runtime("Cannot modulo non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot modulo non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::Equal => Ok(Value::YesNo(left == right)),
@@ -477,28 +514,40 @@ impl Vm {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     Ok(Value::YesNo(a < b))
                 } else {
-                    Err(Error::Runtime("Cannot compare non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot compare non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::LessEqual => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     Ok(Value::YesNo(a <= b))
                 } else {
-                    Err(Error::Runtime("Cannot compare non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot compare non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::Greater => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     Ok(Value::YesNo(a > b))
                 } else {
-                    Err(Error::Runtime("Cannot compare non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot compare non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::GreaterEqual => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
                     Ok(Value::YesNo(a >= b))
                 } else {
-                    Err(Error::Runtime("Cannot compare non-numbers".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot compare non-numbers".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             BinaryOp::And => Ok(Value::YesNo(left.is_truthy() && right.is_truthy())),
@@ -509,6 +558,7 @@ impl Vm {
                 } else {
                     Err(Error::Runtime(
                         "Right side of 'in' must be a list".to_string(),
+                        self.span(),
                     ))
                 }
             }
@@ -521,7 +571,10 @@ impl Vm {
                 if let Value::Number(n) = value {
                     Ok(Value::Number(-n))
                 } else {
-                    Err(Error::Runtime("Cannot negate non-number".to_string()))
+                    Err(Error::Runtime(
+                        "Cannot negate non-number".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             UnaryOp::Not => Ok(Value::YesNo(!value.is_truthy())),
@@ -539,7 +592,10 @@ impl Vm {
                     println!("{}", arg);
                     Ok(Value::Nothing)
                 } else {
-                    Err(Error::Runtime("say requires an argument".to_string()))
+                    Err(Error::Runtime(
+                        "say requires an argument".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             "length" | "len" => {
@@ -548,7 +604,10 @@ impl Vm {
                 } else if let Some(Value::Text(s)) = args.first().cloned() {
                     Ok(Value::Number(s.len() as f64))
                 } else {
-                    Err(Error::Runtime("length requires a list or text".to_string()))
+                    Err(Error::Runtime(
+                        "length requires a list or text".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             "input" | "ask" => {
@@ -558,7 +617,7 @@ impl Vm {
                 }
                 std::io::stdin()
                     .read_line(&mut input)
-                    .map_err(|e| Error::Runtime(e.to_string()))?;
+                    .map_err(|e| Error::Runtime(e.to_string(), self.span()))?;
                 input.pop(); // Remove newline
                 Ok(Value::Text(input))
             }
@@ -574,6 +633,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.read requires a text path".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -587,6 +647,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.write requires two text arguments".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -600,6 +661,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.append requires two text arguments".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -617,6 +679,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.exists requires a text path".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -628,6 +691,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.lines requires a text path".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -645,6 +709,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.delete requires a text path".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -658,6 +723,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.copy requires two text arguments".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -671,6 +737,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "files.rename requires two text arguments".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -685,7 +752,7 @@ impl Vm {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map_err(|e| Error::Runtime(e.to_string()))?;
+                    .map_err(|e| Error::Runtime(e.to_string(), self.span()))?;
                 let secs = now.as_secs();
                 let nanos = now.subsec_nanos();
                 let record = std::collections::HashMap::from([
@@ -697,7 +764,12 @@ impl Vm {
             "time_sleep" => {
                 let seconds = match args.first() {
                     Some(Value::Number(n)) => *n,
-                    _ => return Err(Error::Runtime("time.sleep requires a number".to_string())),
+                    _ => {
+                        return Err(Error::Runtime(
+                            "time.sleep requires a number".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
                 std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
                 Ok(Value::Nothing)
@@ -710,6 +782,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "time.format requires a number and optional text".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -718,17 +791,25 @@ impl Vm {
                     datetime.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
                     0,
                 )
-                .ok_or_else(|| Error::Runtime("Invalid timestamp".to_string()))?;
+                .ok_or_else(|| Error::Runtime("Invalid timestamp".to_string(), self.span()))?;
                 Ok(Value::Text(tm.format(&format).to_string()))
             }
             "time_unix" => {
                 let text = match args.first() {
                     Some(Value::Text(s)) => s,
-                    _ => return Err(Error::Runtime("time.unix requires a text".to_string())),
+                    _ => {
+                        return Err(Error::Runtime(
+                            "time.unix requires a text".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
                 let parsed = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
                     .map_err(|_| {
-                        Error::Runtime("Invalid date format, use YYYY-MM-DD HH:MM:SS".to_string())
+                        Error::Runtime(
+                            "Invalid date format, use YYYY-MM-DD HH:MM:SS".to_string(),
+                            self.span(),
+                        )
                     })?;
                 Ok(Value::Number(parsed.and_utc().timestamp() as f64))
             }
@@ -736,9 +817,15 @@ impl Vm {
             "json_parse" => {
                 let text = match args.first() {
                     Some(Value::Text(s)) => s,
-                    _ => return Err(Error::Runtime("json.parse requires text".to_string())),
+                    _ => {
+                        return Err(Error::Runtime(
+                            "json.parse requires text".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
-                parse_json(text).map_err(|e| Error::Runtime(e.to_string()))
+                parse_json(text, self.span())
+                    .map_err(|e| Error::Runtime(e.to_string(), self.span()))
             }
             "json_stringify" => {
                 let value = match args.first() {
@@ -746,6 +833,7 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "json.stringify requires a value".to_string(),
+                            self.span(),
                         ))
                     }
                 };
@@ -754,7 +842,12 @@ impl Vm {
             "csv_parse" => {
                 let text = match args.first() {
                     Some(Value::Text(s)) => s,
-                    _ => return Err(Error::Runtime("csv.parse requires text".to_string())),
+                    _ => {
+                        return Err(Error::Runtime(
+                            "csv.parse requires text".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
                 let lines: Vec<Value> = text
                     .lines()
@@ -772,16 +865,20 @@ impl Vm {
             "network_get" => {
                 let url = match args.first() {
                     Some(Value::Text(u)) => u,
-                    _ => return Err(Error::Runtime("network.get requires a URL".to_string())),
+                    _ => {
+                        return Err(Error::Runtime(
+                            "network.get requires a URL".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
                 let client = reqwest::blocking::Client::new();
-                let response = client
-                    .get(url)
-                    .send()
-                    .map_err(|e| Error::Runtime(format!("HTTP request failed: {}", e)))?;
-                let body = response
-                    .text()
-                    .map_err(|e| Error::Runtime(format!("Failed to read response: {}", e)))?;
+                let response = client.get(url).send().map_err(|e| {
+                    Error::Runtime(format!("HTTP request failed: {}", e), self.span())
+                })?;
+                let body = response.text().map_err(|e| {
+                    Error::Runtime(format!("Failed to read response: {}", e), self.span())
+                })?;
                 Ok(Value::Text(body))
             }
             "network_post" => {
@@ -790,31 +887,38 @@ impl Vm {
                     _ => {
                         return Err(Error::Runtime(
                             "network.post requires URL and data".to_string(),
+                            self.span(),
                         ))
                     }
                 };
                 let client = reqwest::blocking::Client::new();
-                let response = client
-                    .post(url)
-                    .body(data.clone())
-                    .send()
-                    .map_err(|e| Error::Runtime(format!("HTTP request failed: {}", e)))?;
-                let body = response
-                    .text()
-                    .map_err(|e| Error::Runtime(format!("Failed to read response: {}", e)))?;
+                let response = client.post(url).body(data.clone()).send().map_err(|e| {
+                    Error::Runtime(format!("HTTP request failed: {}", e), self.span())
+                })?;
+                let body = response.text().map_err(|e| {
+                    Error::Runtime(format!("Failed to read response: {}", e), self.span())
+                })?;
                 Ok(Value::Text(body))
             }
             // Testing module
             "expect" | "assert" => {
                 let (actual, expected) = match (args.first(), args.get(1)) {
                     (Some(a), Some(e)) => (a.clone(), e.clone()),
-                    _ => return Err(Error::Runtime("expect requires two arguments".to_string())),
+                    _ => {
+                        return Err(Error::Runtime(
+                            "expect requires two arguments".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
                 if actual != expected {
-                    return Err(Error::Runtime(format!(
-                        "Assertion failed: expected {:?} but got {:?}",
-                        expected, actual
-                    )));
+                    return Err(Error::Runtime(
+                        format!(
+                            "Assertion failed: expected {:?} but got {:?}",
+                            expected, actual
+                        ),
+                        self.span(),
+                    ));
                 }
                 Ok(Value::Nothing)
             }
@@ -857,7 +961,10 @@ impl Vm {
                     let idx = (now.as_nanos() as usize) % items.len();
                     Ok(items[idx].clone())
                 } else {
-                    Err(Error::Runtime("random_choice requires a list".to_string()))
+                    Err(Error::Runtime(
+                        "random_choice requires a list".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             "random_shuffle" => {
@@ -872,7 +979,10 @@ impl Vm {
                     }
                     Ok(Value::List(items))
                 } else {
-                    Err(Error::Runtime("random_shuffle requires a list".to_string()))
+                    Err(Error::Runtime(
+                        "random_shuffle requires a list".to_string(),
+                        self.span(),
+                    ))
                 }
             }
             // Type conversion
@@ -896,7 +1006,10 @@ impl Vm {
                 if let Some(Value::Function(_, _)) = self.get_var(name) {
                     Ok(Value::Nothing)
                 } else {
-                    Err(Error::Runtime(format!("Unknown function '{}'", name)))
+                    Err(Error::Runtime(
+                        format!("Unknown function '{}'", name),
+                        self.span(),
+                    ))
                 }
             }
         }
@@ -909,14 +1022,14 @@ impl Default for Vm {
     }
 }
 
-fn parse_json(json: &str) -> Result<Value> {
+fn parse_json(json: &str, span: Span) -> Result<Value> {
     let json = json.trim();
     if json.starts_with('{') {
-        parse_json_object(json)
+        parse_json_object(json, span)
     } else if json.starts_with('[') {
-        parse_json_array(json)
+        parse_json_array(json, span)
     } else if json.starts_with('"') {
-        Ok(Value::Text(parse_json_string(json)?))
+        Ok(Value::Text(parse_json_string(json, span)?))
     } else if json == "null" {
         Ok(Value::Nothing)
     } else if json == "true" {
@@ -926,15 +1039,15 @@ fn parse_json(json: &str) -> Result<Value> {
     } else {
         match json.parse::<f64>() {
             Ok(n) => Ok(Value::Number(n)),
-            Err(_) => Err(Error::Runtime(format!("Invalid JSON: {}", json))),
+            Err(_) => Err(Error::Runtime(format!("Invalid JSON: {}", json), span)),
         }
     }
 }
 
-fn parse_json_object(json: &str) -> Result<Value> {
+fn parse_json_object(json: &str, span: Span) -> Result<Value> {
     let json = json.trim();
     if !json.starts_with('{') || !json.ends_with('}') {
-        return Err(Error::Runtime("Invalid JSON object".to_string()));
+        return Err(Error::Runtime("Invalid JSON object".to_string(), span));
     }
     let mut map = std::collections::HashMap::new();
     let content = &json[1..json.len() - 1];
@@ -946,17 +1059,17 @@ fn parse_json_object(json: &str) -> Result<Value> {
         if parts.len() != 2 {
             continue;
         }
-        let key = parse_json_string(parts[0].trim())?;
-        let value = parse_json(parts[1].trim())?;
+        let key = parse_json_string(parts[0].trim(), span)?;
+        let value = parse_json(parts[1].trim(), span)?;
         map.insert(key, value);
     }
     Ok(Value::Record(map))
 }
 
-fn parse_json_array(json: &str) -> Result<Value> {
+fn parse_json_array(json: &str, span: Span) -> Result<Value> {
     let json = json.trim();
     if !json.starts_with('[') || !json.ends_with(']') {
-        return Err(Error::Runtime("Invalid JSON array".to_string()));
+        return Err(Error::Runtime("Invalid JSON array".to_string(), span));
     }
     let content = &json[1..json.len() - 1];
     if content.trim().is_empty() {
@@ -964,15 +1077,15 @@ fn parse_json_array(json: &str) -> Result<Value> {
     }
     let mut items = Vec::new();
     for item in split_json_elements(content) {
-        items.push(parse_json(item)?);
+        items.push(parse_json(item, span)?);
     }
     Ok(Value::List(items))
 }
 
-fn parse_json_string(json: &str) -> Result<String> {
+fn parse_json_string(json: &str, span: Span) -> Result<String> {
     let json = json.trim();
     if !json.starts_with('"') || !json.ends_with('"') {
-        return Err(Error::Runtime("Invalid JSON string".to_string()));
+        return Err(Error::Runtime("Invalid JSON string".to_string(), span));
     }
     let mut result = String::new();
     let chars: Vec<char> = json[1..json.len() - 1].chars().collect();

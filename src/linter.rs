@@ -1,5 +1,5 @@
 use crate::lexer::Lexer;
-use crate::parser::{Expr, Program, Statement};
+use crate::parser::{Expr, Program, Statement, Stmt};
 use std::collections::HashSet;
 
 pub struct Linter {
@@ -52,8 +52,8 @@ impl Linter {
         }
     }
 
-    fn analyze_statement(&mut self, stmt: &Statement) {
-        match stmt {
+    fn analyze_statement(&mut self, stmt: &Stmt) {
+        match &stmt.statement {
             Statement::Set { name, value } => {
                 self.defined_vars.insert(name.clone());
                 self.analyze_expr(value);
