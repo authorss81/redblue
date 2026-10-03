@@ -1,5 +1,14 @@
-use std::collections::HashMap;
 use std::fmt;
+
+use indexmap::IndexMap;
+
+/// Field storage for records and objects.
+///
+/// `IndexMap` is used rather than `HashMap` so that field order is the order
+/// the fields were inserted in. A `HashMap` iterates in an arbitrary, per-map
+/// random order, which made `say` and `json.stringify` emit the same record
+/// differently on every run.
+pub type Fields = IndexMap<String, Value>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -8,8 +17,8 @@ pub enum Value {
     Text(String),
     YesNo(bool),
     List(Vec<Value>),
-    Record(HashMap<String, Value>),
-    Object(String, HashMap<String, Value>),
+    Record(Fields),
+    Object(String, Fields),
     Function(String, Vec<String>),
     Builtin(String),
 }
