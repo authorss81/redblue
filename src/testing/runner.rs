@@ -291,7 +291,7 @@ pub fn assert_type<T: 'static>(value: &Value) -> Result<(), TestAssertionError> 
         Value::Text(_) => TypeId::of::<String>(),
         Value::YesNo(_) => TypeId::of::<bool>(),
         Value::List(_) => TypeId::of::<Vec<Value>>(),
-        Value::Record(_) => TypeId::of::<std::collections::HashMap<String, Value>>(),
+        Value::Record(_) => TypeId::of::<crate::value::Fields>(),
         Value::Object(_, _) => TypeId::of::<Value>(),
         Value::Function(_, _) => TypeId::of::<Value>(),
         Value::Builtin(_) => TypeId::of::<Value>(),
