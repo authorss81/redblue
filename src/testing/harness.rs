@@ -2,7 +2,7 @@ use crate::analyzer;
 use crate::error::{Error, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
-use crate::testing::{TestError, TestResults};
+use crate::testing::{TestError, TestFailure, TestResults};
 use crate::vm::Vm;
 use std::collections::HashMap;
 
@@ -82,7 +82,18 @@ impl TestHarness {
                 self.results.add_pass();
                 print!(".");
             }
-            Err(e) => {
+            Err(TestFailure::Assertion(failure)) => {
+                self.results.add_fail(TestError {
+                    test_name: test_name.to_string(),
+                    file: "inline".to_string(),
+                    line: Some(*i),
+                    message: failure.message.clone(),
+                    expected: failure.expected.clone(),
+                    actual: failure.actual.clone(),
+                });
+                print!("F");
+            }
+            Err(TestFailure::Error(e)) => {
                 self.results.add_fail(TestError {
                     test_name: test_name.to_string(),
                     file: "inline".to_string(),
@@ -133,16 +144,27 @@ impl TestHarness {
         Ok(())
     }
 
-    fn execute_test_code(&self, code: &str) -> Result<()> {
-        let tokens = Lexer::tokenize(code)?;
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse()?;
-        analyzer::analyze(&program)?;
+    fn execute_test_code(&self, code: &str) -> std::result::Result<(), TestFailure> {
+        let program = Lexer::tokenize(code)
+            .and_then(|tokens| Parser::new(tokens).parse())
+            .and_then(|program| {
+                analyzer::analyze(&program)?;
+                Ok(program)
+            })
+            .map_err(TestFailure::Error)?;
 
         let mut vm = Vm::new();
-        vm.run(&program)?;
+        let run = vm.run(&program);
 
-        Ok(())
+        if run.is_err() {
+            // A failed `expect` carries more than the rendered message; keep the
+            // expected and actual values so the reporter can name both.
+            if let Some(failure) = vm.take_expectation_failure() {
+                return Err(TestFailure::Assertion(failure));
+            }
+        }
+
+        run.map(|_| ()).map_err(TestFailure::Error)
     }
 
     pub fn add_error(&mut self, error: String) {

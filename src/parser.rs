@@ -319,6 +319,7 @@ impl Parser {
             TokenKind::Object => self.parse_object()?,
             TokenKind::Try => self.parse_try()?,
             TokenKind::Test => self.parse_test()?,
+            TokenKind::Expect => self.parse_expect()?,
             TokenKind::Import => {
                 self.advance();
                 let mut items = Vec::new();
@@ -804,6 +805,32 @@ impl Parser {
         self.expect(&TokenKind::End)?;
 
         Ok(Some(Statement::Test { name, body }))
+    }
+
+    /// expect <actual> to be <expected>
+    /// expect <actual> to <expected>
+    fn parse_expect(&mut self) -> Result<Option<Statement>> {
+        self.advance(); // consume 'expect'
+
+        let actual = self.parse_expression()?;
+        self.expect(&TokenKind::To)?;
+
+        if let Some(Token {
+            kind: TokenKind::Identifier(word),
+            ..
+        }) = self.current()
+        {
+            if word == "be" {
+                self.advance();
+            }
+        }
+
+        let expected = self.parse_expression()?;
+
+        Ok(Some(Statement::Expr(Expr::Expect {
+            actual: Box::new(actual),
+            expected: Box::new(expected),
+        })))
     }
 
     fn is_expression_start(&self) -> bool {

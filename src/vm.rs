@@ -13,6 +13,7 @@ pub struct Vm {
     functions: HashMap<String, Vec<String>>,
     output: Vec<String>,
     _modules: HashMap<String, Program>,
+    expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
 }
 
 impl Vm {
@@ -24,7 +25,17 @@ impl Vm {
             functions: HashMap::new(),
             output: Vec::new(),
             _modules: HashMap::new(),
+            expectation_failure: None,
         }
+    }
+
+    /// Takes the structured failure from the most recent failed `expect`, so a
+    /// caller such as the test harness can report expected and actual values
+    /// instead of only a rendered message.
+    pub fn take_expectation_failure(
+        &mut self,
+    ) -> Option<crate::testing::assertions::TestAssertionError> {
+        self.expectation_failure.take()
     }
 
     fn load_module(&mut self, path: &str) -> Result<()> {
@@ -410,13 +421,13 @@ impl Vm {
             Expr::Expect { actual, expected } => {
                 let a = self.evaluate(actual)?;
                 let e = self.evaluate(expected)?;
-                if a != e {
-                    return Err(Error::Runtime(format!(
-                        "Expectation failed: expected {:?} but got {:?}",
-                        e, a
-                    )));
+                match crate::testing::assertions::assert_values_equal(&e, &a) {
+                    Ok(()) => Ok(Value::Nothing),
+                    Err(failure) => {
+                        self.expectation_failure = Some(failure.clone());
+                        Err(Error::Runtime(failure.to_string()))
+                    }
                 }
-                Ok(Value::Nothing)
             }
         }
     }

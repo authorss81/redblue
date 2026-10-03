@@ -10,6 +10,24 @@ pub use runner::TestRunner;
 
 use crate::error::Result;
 
+/// Why a single test body did not pass. An `Assertion` failure is a Redblue
+/// `expect` that did not hold; an `Error` is a lexer/parser/analyzer/runtime
+/// fault, which is a different kind of test failure.
+#[derive(Debug)]
+pub enum TestFailure {
+    Assertion(TestAssertionError),
+    Error(crate::error::Error),
+}
+
+impl std::fmt::Display for TestFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TestFailure::Assertion(failure) => write!(f, "{}", failure.message),
+            TestFailure::Error(e) => write!(f, "{}", e),
+        }
+    }
+}
+
 pub fn run_test_file(path: &str) -> Result<TestResults> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| crate::error::Error::Io(format!("Failed to read test file: {}", e)))?;

@@ -15,6 +15,7 @@ use std::fs;
 use std::process;
 
 use crate::lexer::Lexer;
+use testing::reporter::Reporter;
 
 pub use error::Error;
 pub use value::Value;
@@ -46,7 +47,12 @@ pub fn run_test(path: Option<&str>) -> Result<(), Error> {
     let mut harness = testing::TestHarness::new();
 
     match path {
-        Some(p) => harness.run_file(p)?,
+        Some(p) => {
+            harness.run_file(p)?;
+            // Report the failures and exit non-zero. Without this a failing
+            // `expect` printed only a dot/F and still exited 0.
+            testing::PrettyReporter::new().report(&harness.results());
+        }
         None => {
             let results = testing::run_all_tests()?;
             println!("Tests run: {}", results.total);

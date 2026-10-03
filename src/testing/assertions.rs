@@ -6,6 +6,7 @@ pub trait Assertion<T> {
 
 pub struct Expected<T>(pub T);
 
+#[derive(Clone)]
 pub struct TestAssertionError {
     pub message: String,
     pub expected: Option<String>,
