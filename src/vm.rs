@@ -3,7 +3,7 @@ use crate::lexer::Lexer;
 use crate::parser as redblue_parser;
 use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
 use crate::stdlib;
-use crate::value::{Fields, Value};
+use crate::value::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -273,7 +273,7 @@ impl Vm {
                 body: _,
             } => {
                 // Object implementation
-                let record = Value::Record(Fields::new());
+                let record = Value::Record(HashMap::new());
                 self.set_var(name, record);
                 Ok(Value::Nothing)
             }
@@ -412,7 +412,7 @@ impl Vm {
                 Ok(Value::List(values?))
             }
             Expr::Record(fields) => {
-                let mut record = Fields::new();
+                let mut record = HashMap::new();
                 for (key, value) in fields {
                     record.insert(key.clone(), self.evaluate(value)?);
                 }
@@ -688,7 +688,7 @@ impl Vm {
                     .map_err(|e| Error::Runtime(e.to_string()))?;
                 let secs = now.as_secs();
                 let nanos = now.subsec_nanos();
-                let record = crate::value::Fields::from([
+                let record = std::collections::HashMap::from([
                     ("seconds".to_string(), Value::Number(secs as f64)),
                     ("nanoseconds".to_string(), Value::Number(nanos as f64)),
                 ]);
@@ -936,7 +936,7 @@ fn parse_json_object(json: &str) -> Result<Value> {
     if !json.starts_with('{') || !json.ends_with('}') {
         return Err(Error::Runtime("Invalid JSON object".to_string()));
     }
-    let mut map = crate::value::Fields::new();
+    let mut map = std::collections::HashMap::new();
     let content = &json[1..json.len() - 1];
     if content.trim().is_empty() {
         return Ok(Value::Record(map));

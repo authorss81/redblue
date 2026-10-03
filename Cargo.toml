@@ -21,7 +21,6 @@ path = "src/lib.rs"
 regex = "1.10"
 chrono = "0.4"
 reqwest = { version = "0.11", features = ["blocking"] }
-indexmap = "2"
 
 [dev-dependencies]
 regex = "1.10"
