@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, Span};
 use crate::lexer::{Token, TokenKind};
 
 #[derive(Debug, Clone)]
@@ -110,15 +110,15 @@ pub enum Statement {
     // if condition then ... end
     If {
         condition: Expr,
-        then_branch: Vec<Statement>,
-        else_branch: Vec<Statement>,
+        then_branch: Vec<Stmt>,
+        else_branch: Vec<Stmt>,
     },
 
     // for each x in list ... end
     ForEach {
         variable: String,
         iterable: Expr,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 
     // for each i from 1 to 10 ... end
@@ -127,19 +127,19 @@ pub enum Statement {
         start: Expr,
         end: Expr,
         step: Option<Expr>,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 
     // repeat 10 times ... end
     Repeat {
         count: Expr,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 
     // while condition ... end
     While {
         condition: Expr,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 
     // break
@@ -158,29 +158,29 @@ pub enum Statement {
     Function {
         name: String,
         params: Vec<String>,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 
     // to can method(args) ... end
     Method {
         name: String,
         params: Vec<String>,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 
     // object Name ... end
     Object {
         name: String,
         extends: Option<String>,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 
     // try ... catch ... end
     Try {
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
         catch_var: Option<String>,
-        catch_body: Vec<Statement>,
-        finally_body: Vec<Statement>,
+        catch_body: Vec<Stmt>,
+        finally_body: Vec<Stmt>,
     },
 
     // import module
@@ -189,7 +189,7 @@ pub enum Statement {
     // test "name" ... end
     Test {
         name: String,
-        body: Vec<Statement>,
+        body: Vec<Stmt>,
     },
 }
 
@@ -199,9 +199,16 @@ pub struct ImportItem {
     pub alias: Option<String>,
 }
 
+/// A statement together with the source position it was parsed from.
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    pub span: Span,
+    pub statement: Statement,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub statements: Vec<Statement>,
+    pub statements: Vec<Stmt>,
 }
 
 pub struct Parser {
@@ -218,6 +225,16 @@ impl Parser {
         self.tokens.get(self.pos)
     }
 
+    /// The position of the token about to be read. Falls back to the last
+    /// token when the input has run out, and to [`Span::unknown`] only when
+    /// there is no token at all (an empty file).
+    fn span(&self) -> Span {
+        match self.current().or_else(|| self.tokens.last()) {
+            Some(token) => token.span(),
+            None => Span::unknown(),
+        }
+    }
+
     fn advance(&mut self) -> Option<Token> {
         if self.pos < self.tokens.len() {
             self.pos += 1;
@@ -230,13 +247,13 @@ impl Parser {
     fn expect(&mut self, kind: &TokenKind) -> Result<Token> {
         let token = self
             .advance()
-            .ok_or_else(|| Error::Parser("Unexpected end of input".to_string()))?;
+            .ok_or_else(|| Error::Parser("Unexpected end of input".to_string(), self.span()))?;
 
         if &token.kind != kind {
-            return Err(Error::Parser(format!(
-                "Expected {:?} but got {:?}",
-                kind, token.kind
-            )));
+            return Err(Error::Parser(
+                format!("Expected {:?} but got {:?}", kind, token.kind),
+                token.span(),
+            ));
         }
 
         Ok(token)
@@ -267,13 +284,14 @@ impl Parser {
         Ok(Program { statements })
     }
 
-    fn parse_statement(&mut self) -> Result<Option<Statement>> {
+    fn parse_statement(&mut self) -> Result<Option<Stmt>> {
+        let span = self.span();
         let token = match self.current() {
             Some(t) => t.clone(),
             None => return Ok(None),
         };
 
-        let stmt = match &token.kind {
+        let stmt: Option<Statement> = match &token.kind {
             TokenKind::Say => {
                 self.advance();
                 let expr = self.parse_expression()?;
@@ -347,7 +365,10 @@ impl Parser {
                                 self.advance();
                                 Some(a)
                             } else {
-                                return Err(Error::Parser("Expected alias after 'to'".to_string()));
+                                return Err(Error::Parser(
+                                    "Expected alias after 'to'".to_string(),
+                                    self.span(),
+                                ));
                             }
                         } else {
                             None
@@ -355,7 +376,10 @@ impl Parser {
 
                         items.push(ImportItem { name, alias });
                     } else {
-                        return Err(Error::Parser("Expected module name".to_string()));
+                        return Err(Error::Parser(
+                            "Expected module name".to_string(),
+                            self.span(),
+                        ));
                     }
 
                     if let Some(Token {
@@ -380,7 +404,7 @@ impl Parser {
             }
         };
 
-        Ok(stmt)
+        Ok(stmt.map(|statement| Stmt { span, statement }))
     }
 
     fn parse_set(&mut self) -> Result<Option<Statement>> {
@@ -395,7 +419,12 @@ impl Parser {
                 self.advance();
                 n
             }
-            _ => return Err(Error::Parser("Expected variable name".to_string())),
+            _ => {
+                return Err(Error::Parser(
+                    "Expected variable name".to_string(),
+                    self.span(),
+                ))
+            }
         };
 
         // Check for property access: set x.y to value
@@ -414,7 +443,12 @@ impl Parser {
                     self.advance();
                     p
                 }
-                _ => return Err(Error::Parser("Expected property name".to_string())),
+                _ => {
+                    return Err(Error::Parser(
+                        "Expected property name".to_string(),
+                        self.span(),
+                    ))
+                }
             };
 
             self.expect(&TokenKind::To)?;
@@ -500,7 +534,12 @@ impl Parser {
                         self.advance();
                         n
                     }
-                    _ => return Err(Error::Parser("Expected variable name".to_string())),
+                    _ => {
+                        return Err(Error::Parser(
+                            "Expected variable name".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
 
                 self.expect(&TokenKind::In)?;
@@ -525,7 +564,10 @@ impl Parser {
                     body,
                 }))
             }
-            _ => Err(Error::Parser("Expected 'each' after 'for'".to_string())),
+            _ => Err(Error::Parser(
+                "Expected 'each' after 'for'".to_string(),
+                self.span(),
+            )),
         }
     }
 
@@ -582,7 +624,12 @@ impl Parser {
                 self.advance();
                 n
             }
-            _ => return Err(Error::Parser("Expected function name".to_string())),
+            _ => {
+                return Err(Error::Parser(
+                    "Expected function name".to_string(),
+                    self.span(),
+                ))
+            }
         };
 
         // Parse parameters
@@ -645,7 +692,12 @@ impl Parser {
                 self.advance();
                 n
             }
-            _ => return Err(Error::Parser("Expected object name".to_string())),
+            _ => {
+                return Err(Error::Parser(
+                    "Expected object name".to_string(),
+                    self.span(),
+                ))
+            }
         };
 
         let extends = if let Some(Token {
@@ -663,7 +715,12 @@ impl Parser {
                     self.advance();
                     Some(n)
                 }
-                _ => return Err(Error::Parser("Expected parent object name".to_string())),
+                _ => {
+                    return Err(Error::Parser(
+                        "Expected parent object name".to_string(),
+                        self.span(),
+                    ))
+                }
             }
         } else {
             None
@@ -787,7 +844,7 @@ impl Parser {
                 self.advance();
                 name
             }
-            _ => return Err(Error::Parser("Expected test name".to_string())),
+            _ => return Err(Error::Parser("Expected test name".to_string(), self.span())),
         };
 
         self.skip_newlines();
@@ -1094,7 +1151,12 @@ impl Parser {
                         self.advance();
                         n
                     }
-                    _ => return Err(Error::Parser("Expected property name".to_string())),
+                    _ => {
+                        return Err(Error::Parser(
+                            "Expected property name".to_string(),
+                            self.span(),
+                        ))
+                    }
                 };
                 expr = Expr::Property {
                     object: Box::new(expr),
@@ -1131,7 +1193,12 @@ impl Parser {
                     Expr::Property { object, property } => {
                         let module_name = match *object {
                             Expr::Variable(name) => format!("{}_{}", name, property),
-                            _ => return Err(Error::Parser("Expected module name".to_string())),
+                            _ => {
+                                return Err(Error::Parser(
+                                    "Expected module name".to_string(),
+                                    self.span(),
+                                ))
+                            }
                         };
                         expr = Expr::Call {
                             name: module_name,
@@ -1139,7 +1206,10 @@ impl Parser {
                         };
                     }
                     _ => {
-                        return Err(Error::Parser("Expected function name".to_string()));
+                        return Err(Error::Parser(
+                            "Expected function name".to_string(),
+                            self.span(),
+                        ));
                     }
                 }
             } else if let Some(Token {
@@ -1165,7 +1235,7 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr> {
         let token = self
             .current()
-            .ok_or_else(|| Error::Parser("Unexpected end of input".to_string()))?
+            .ok_or_else(|| Error::Parser("Unexpected end of input".to_string(), self.span()))?
             .clone();
 
         match &token.kind {
@@ -1232,7 +1302,12 @@ impl Parser {
                             self.advance();
                             n
                         }
-                        _ => return Err(Error::Parser("Expected field name".to_string())),
+                        _ => {
+                            return Err(Error::Parser(
+                                "Expected field name".to_string(),
+                                self.span(),
+                            ))
+                        }
                     };
 
                     self.expect(&TokenKind::Colon)?;
@@ -1251,7 +1326,10 @@ impl Parser {
                 self.expect(&TokenKind::RightBrace)?;
                 Ok(Expr::Record(fields))
             }
-            _ => Err(Error::Parser(format!("Unexpected token {:?}", token.kind))),
+            _ => Err(Error::Parser(
+                format!("Unexpected token {:?}", token.kind),
+                token.span(),
+            )),
         }
     }
 }

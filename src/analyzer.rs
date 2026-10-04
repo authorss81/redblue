@@ -1,10 +1,10 @@
-use crate::error::{Error, Result};
-use crate::parser::{BinaryOp, Expr, Program, Statement};
+use crate::error::{Error, Result, Span};
+use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt};
 
 pub struct Analyzer {
     scopes: Vec<std::collections::HashSet<String>>,
     functions: std::collections::HashMap<String, Vec<String>>,
-    errors: Vec<String>,
+    errors: Vec<(String, Span)>,
 }
 
 impl Analyzer {
@@ -24,7 +24,13 @@ impl Analyzer {
         if self.errors.is_empty() {
             Ok(())
         } else {
-            Err(Error::Analyzer(self.errors.join("\n")))
+            let messages: Vec<String> = self.errors.iter().map(|(msg, _)| msg.clone()).collect();
+            let span = self
+                .errors
+                .first()
+                .map(|(_, span)| *span)
+                .unwrap_or_else(Span::unknown);
+            Err(Error::Analyzer(messages.join("\n"), span))
         }
     }
 
@@ -46,17 +52,18 @@ impl Analyzer {
         self.scopes.iter().any(|scope| scope.contains(name))
     }
 
-    fn add_error(&mut self, msg: &str) {
-        self.errors.push(msg.to_string());
+    fn add_error(&mut self, msg: &str, span: Span) {
+        self.errors.push((msg.to_string(), span));
     }
 
-    fn analyze_statement(&mut self, stmt: &Statement) {
-        match stmt {
+    fn analyze_statement(&mut self, stmt: &Stmt) {
+        let span = stmt.span;
+        match &stmt.statement {
             Statement::Say(expr) | Statement::Print(expr) => {
-                self.analyze_expr(expr);
+                self.analyze_expr(expr, &span);
             }
             Statement::Set { name, value } => {
-                self.analyze_expr(value);
+                self.analyze_expr(value, &span);
                 self.declare(name);
             }
             Statement::SetProperty {
@@ -64,7 +71,7 @@ impl Analyzer {
                 property: _,
                 value,
             } => {
-                self.analyze_expr(value);
+                self.analyze_expr(value, &span);
                 // Property access is valid if object exists
             }
             Statement::If {
@@ -72,7 +79,7 @@ impl Analyzer {
                 then_branch,
                 else_branch,
             } => {
-                self.analyze_expr(condition);
+                self.analyze_expr(condition, &span);
                 self.push_scope();
                 for stmt in then_branch {
                     self.analyze_statement(stmt);
@@ -89,7 +96,7 @@ impl Analyzer {
                 iterable,
                 body,
             } => {
-                self.analyze_expr(iterable);
+                self.analyze_expr(iterable, &span);
                 self.push_scope();
                 self.declare(variable);
                 for stmt in body {
@@ -104,10 +111,10 @@ impl Analyzer {
                 step,
                 body,
             } => {
-                self.analyze_expr(start);
-                self.analyze_expr(end);
+                self.analyze_expr(start, &span);
+                self.analyze_expr(end, &span);
                 if let Some(s) = step {
-                    self.analyze_expr(s);
+                    self.analyze_expr(s, &span);
                 }
                 self.push_scope();
                 self.declare(variable);
@@ -117,7 +124,7 @@ impl Analyzer {
                 self.pop_scope();
             }
             Statement::Repeat { count, body } => {
-                self.analyze_expr(count);
+                self.analyze_expr(count, &span);
                 self.push_scope();
                 for stmt in body {
                     self.analyze_statement(stmt);
@@ -125,7 +132,7 @@ impl Analyzer {
                 self.pop_scope();
             }
             Statement::While { condition, body } => {
-                self.analyze_expr(condition);
+                self.analyze_expr(condition, &span);
                 self.push_scope();
                 for stmt in body {
                     self.analyze_statement(stmt);
@@ -135,7 +142,7 @@ impl Analyzer {
             Statement::Break | Statement::Skip => {}
             Statement::Return(expr) | Statement::GiveBack(expr) => {
                 if let Some(e) = expr {
-                    self.analyze_expr(e);
+                    self.analyze_expr(e, &span);
                 }
             }
             Statement::Function { name, params, body } => {
@@ -173,7 +180,7 @@ impl Analyzer {
                 self.declare(name);
                 if let Some(parent) = extends {
                     if !self.lookup(parent) {
-                        self.add_error(&format!("Unknown parent object '{}'", parent));
+                        self.add_error(&format!("Unknown parent object '{}'", parent), span);
                     }
                 }
                 self.push_scope();
@@ -206,7 +213,7 @@ impl Analyzer {
             }
             Statement::Import(_) => {}
             Statement::Expr(expr) => {
-                self.analyze_expr(expr);
+                self.analyze_expr(expr, &span);
             }
             Statement::Test { body, .. } => {
                 for stmt in body {
@@ -216,25 +223,25 @@ impl Analyzer {
         }
     }
 
-    fn analyze_expr(&mut self, expr: &Expr) {
+    fn analyze_expr(&mut self, expr: &Expr, span: &Span) {
         match expr {
             Expr::Number(_) | Expr::Text(_) | Expr::YesNo(_) | Expr::Nothing => {}
             Expr::Variable(name) => {
                 if !self.lookup(name) {
-                    self.add_error(&format!("Unknown variable '{}'", name));
+                    self.add_error(&format!("Unknown variable '{}'", name), *span);
                 }
             }
             Expr::Binary { op, left, right } => {
                 self.check_binary_op(op, left, right);
-                self.analyze_expr(left);
-                self.analyze_expr(right);
+                self.analyze_expr(left, span);
+                self.analyze_expr(right, span);
             }
             Expr::Unary { op: _, expr } => {
-                self.analyze_expr(expr);
+                self.analyze_expr(expr, span);
             }
             Expr::Call { name: _, args } => {
                 for arg in args {
-                    self.analyze_expr(arg);
+                    self.analyze_expr(arg, span);
                 }
                 // Function existence is checked at runtime for builtins
             }
@@ -242,25 +249,25 @@ impl Analyzer {
                 object,
                 property: _,
             } => {
-                self.analyze_expr(object);
+                self.analyze_expr(object, span);
             }
             Expr::Index { object, index } => {
-                self.analyze_expr(object);
-                self.analyze_expr(index);
+                self.analyze_expr(object, span);
+                self.analyze_expr(index, span);
             }
             Expr::InterpolatedText(parts) => {
                 for part in parts {
-                    self.analyze_expr(part);
+                    self.analyze_expr(part, span);
                 }
             }
             Expr::List(items) => {
                 for item in items {
-                    self.analyze_expr(item);
+                    self.analyze_expr(item, span);
                 }
             }
             Expr::Record(fields) => {
                 for (_, value) in fields {
-                    self.analyze_expr(value);
+                    self.analyze_expr(value, span);
                 }
             }
             Expr::Expect { .. } => {}

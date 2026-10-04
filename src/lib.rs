@@ -17,7 +17,7 @@ use std::process;
 use crate::lexer::Lexer;
 use testing::reporter::Reporter;
 
-pub use error::Error;
+pub use error::{Error, Span};
 pub use value::Value;
 pub use vm::Vm;
 
@@ -25,6 +25,22 @@ pub fn run_file(path: &str) -> Result<(), Error> {
     let source = fs::read_to_string(path).map_err(|e| Error::Io(e.to_string()))?;
 
     run_source(&source)
+}
+
+/// Runs `path` and, when it fails, renders the source line and caret for the
+/// failure next to the message.
+fn run_file_with_diagnostic(path: &str) -> std::result::Result<(), String> {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(e) => return Err(Error::Io(e.to_string()).to_string()),
+    };
+
+    run_source(&source).map_err(|e| e.render(&source, Some(path)))
+}
+
+fn report(rendered: &str) -> ! {
+    eprintln!("Error: {}", rendered);
+    process::exit(1);
 }
 
 pub fn run_source(source: &str) -> Result<(), Error> {
@@ -84,9 +100,8 @@ pub fn run_cli() {
                     }
                 }
                 _ => {
-                    if let Err(e) = run_file(cmd) {
-                        eprintln!("Error: {}", e);
-                        process::exit(1);
+                    if let Err(rendered) = run_file_with_diagnostic(cmd) {
+                        report(&rendered);
                     }
                 }
             }
@@ -102,9 +117,8 @@ pub fn run_cli() {
                     }
                 }
                 "run" => {
-                    if let Err(e) = run_file(path) {
-                        eprintln!("Error: {}", e);
-                        process::exit(1);
+                    if let Err(rendered) = run_file_with_diagnostic(path) {
+                        report(&rendered);
                     }
                 }
                 "format" => match fs::read_to_string(path) {
