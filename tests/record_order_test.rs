@@ -5,7 +5,18 @@
 //! that insertion order, otherwise the same program prints different output on
 //! every run.
 
+use std::path::PathBuf;
+use std::process::Command;
+
 use redblue::Error;
+
+/// A scratch directory inside `target/`, so the cross-process test never writes
+/// outside the project checkout.
+fn scratch_dir() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/record-order");
+    std::fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+    dir
+}
 
 /// Runs `source` through lexer → parser → VM and returns the value of its last
 /// statement.
@@ -109,6 +120,57 @@ fn edge_twenty_key_record_is_identical_across_fifty_runs() {
         first,
         expected_twenty(),
         "the shared output must be ordered"
+    );
+}
+
+/// The original defect was per-*process*: `HashMap` seeds its hasher per map, so
+/// the same program printed a different order in each new process. An in-process
+/// loop cannot prove that, so this test spawns the real `rb` 50 times and
+/// compares full stdout byte for byte.
+#[test]
+fn edge_twenty_key_record_is_identical_across_fifty_processes() {
+    let program = format!(
+        "set r to {}\nsay r\nsay json.stringify(r)",
+        twenty_key_record()
+    );
+    let script = scratch_dir().join(format!("order-{}.rb", std::process::id()));
+    std::fs::write(&script, program).expect("scratch program should be writable");
+
+    let expected = format!("{}\n{}\n", expected_twenty(), expected_twenty_json());
+    let binary = env!("CARGO_BIN_EXE_rb");
+
+    let mut seen: Option<String> = None;
+    for run in 1..=50 {
+        let output = Command::new(binary)
+            .arg("run")
+            .arg(&script)
+            .output()
+            .unwrap_or_else(|e| panic!("rb should be runnable on attempt {}: {}", run, e));
+
+        assert!(
+            output.status.success(),
+            "process {} exited with {:?}",
+            run,
+            output.status
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
+        match &seen {
+            None => seen = Some(stdout),
+            Some(first) => assert_eq!(
+                &stdout, first,
+                "process {} of 50 printed a different field order than process 1",
+                run
+            ),
+        }
+    }
+
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(
+        seen.expect("50 runs happened").trim_end(),
+        expected.trim_end(),
+        "all 50 processes agreed, but on the wrong order"
     );
 }
 
@@ -375,7 +437,7 @@ fn test_property_access_on_a_list_is_a_runtime_error() {
     let err = eval_err("set r to [1, 2, 3]\nr.alpha");
 
     assert!(
-        matches!(&err, Error::Runtime(m) if m.contains("Cannot access property")),
+        matches!(&err, Error::Runtime(m, _) if m.contains("Cannot access property")),
         "expected a Runtime error about property access, got {:?}",
         err
     );
@@ -386,7 +448,7 @@ fn test_malformed_json_object_is_an_error_not_a_reordered_record() {
     let err = eval_err("json.parse(\"{\\\"a\\\": 1\")");
 
     assert!(
-        matches!(&err, Error::Runtime(_)),
+        matches!(&err, Error::Runtime(_, _)),
         "an unterminated JSON object must be a Runtime error, got {:?}",
         err
     );
@@ -398,10 +460,27 @@ fn test_record_literal_missing_colon_is_a_parse_error() {
     let err = redblue::parser::parse(tokens).expect_err("`{a 1}` must not parse");
 
     assert!(
-        matches!(&err, Error::Parser(_)),
+        matches!(&err, Error::Parser(_, _)),
         "a record field without a colon must be a Parser error, got {:?}",
         err
     );
+}
+
+/// Records are keyed, not indexed, so every index — first, last and far
+/// out of range — must be a clean runtime error. An ordering bug must never turn
+/// into a silent positional read.
+#[test]
+fn test_record_is_not_indexable_at_any_position() {
+    for index in ["0", "1", "2", "19", "-1", "999"] {
+        let err = eval_err(&format!("set r to {{a: 1, b: 2}}\nr[{}]", index));
+
+        assert!(
+            matches!(&err, Error::Runtime(m, _) if m.contains("Cannot index non-list")),
+            "indexing a record at `{}` must be a Runtime error, got {:?}",
+            index,
+            err
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
