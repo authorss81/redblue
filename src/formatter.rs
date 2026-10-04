@@ -109,11 +109,40 @@ fn collect_comments(source: &str) -> Vec<Comment> {
     comments
 }
 
+/// The source lines of every keyword that closes or reopens a block — `else`,
+/// `catch`, `finally`, `end` — in ascending order.
+///
+/// A comment is attached to the innermost block that contains it, and the tree
+/// alone cannot say where a block stops: only the closing keyword's line does.
+/// With these lines, a block's tail is every comment after its last statement
+/// and before its own closing keyword, which is exactly the set of comments the
+/// source wrote inside that block and had nothing further to attach to.
+fn closing_lines(tokens: &[crate::lexer::Token]) -> Vec<usize> {
+    let mut lines: Vec<usize> = tokens
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.kind,
+                crate::lexer::TokenKind::Else
+                    | crate::lexer::TokenKind::Catch
+                    | crate::lexer::TokenKind::Finally
+                    | crate::lexer::TokenKind::End
+            )
+        })
+        .map(|t| t.line)
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
 pub struct Formatter {
     indent: usize,
     output: String,
     comments: Vec<Comment>,
     next_comment: usize,
+    closing_lines: Vec<usize>,
+    last_line: usize,
 }
 
 impl Formatter {
@@ -123,6 +152,8 @@ impl Formatter {
             output: String::new(),
             comments: Vec::new(),
             next_comment: 0,
+            closing_lines: Vec::new(),
+            last_line: 0,
         }
     }
 
@@ -131,6 +162,11 @@ impl Formatter {
     pub fn format(&mut self, source: &str) -> Result<String, String> {
         let tokens = Lexer::tokenize(source).map_err(|e| format!("Lexer error: {}", e))?;
 
+        // Read before the parser takes the tokens: the line of the `else`,
+        // `catch`, `finally` or `end` that closes a block is what tells the
+        // formatter where that block stops, and nothing else in the tree says.
+        self.closing_lines = closing_lines(&tokens);
+
         let mut parser = crate::parser::Parser::new(tokens);
         let program = parser.parse().map_err(|e| format!("Parser error: {}", e))?;
 
@@ -138,6 +174,7 @@ impl Formatter {
         self.output = String::new();
         self.comments = collect_comments(source);
         self.next_comment = 0;
+        self.last_line = 0;
 
         self.format_program(&program);
 
@@ -180,6 +217,7 @@ impl Formatter {
             };
 
             self.emit_comments(stmt.span.line);
+            self.last_line = self.last_line.max(stmt.span.line);
 
             if bare && next_give_back {
                 self.write_indent();
@@ -188,6 +226,7 @@ impl Formatter {
                     self.write(" ");
                     self.format_expression(expr);
                 }
+                self.write_trailing_comment(stmt.span.line);
                 self.newline();
                 i += 2;
                 continue;
@@ -203,6 +242,7 @@ impl Formatter {
                 }
                 _ => self.format_statement(stmt),
             }
+            self.write_trailing_comment(stmt.span.line);
             self.newline();
             i += 1;
         }
@@ -375,6 +415,7 @@ impl Formatter {
                 if let Some(var) = catch_var {
                     self.write_keyword_line("catch ");
                     self.write(var);
+                    self.write_trailing_comment(self.last_line);
                     self.newline();
                     self.format_block(catch_body);
                 }
@@ -412,11 +453,45 @@ impl Formatter {
         }
     }
 
-    /// Writes a block's statements, each on its own line, indented one level.
+    /// Writes a block's statements, each on its own line, indented one level,
+    /// then the comments the block ends with.
+    ///
+    /// A comment written after the block's last statement has no statement to
+    /// attach to, so without this it would be flushed once the whole enclosing
+    /// statement was done — outside the block, at the outer indentation, and in
+    /// an `if`/`else` inside the *other* branch, where it would read as a note
+    /// on that branch's first statement. The closing keyword's line is the bound
+    /// that keeps those comments where the author put them.
     fn format_block(&mut self, body: &[Stmt]) {
         self.indent();
         self.format_statements(body);
+        self.emit_block_tail();
         self.dedent();
+    }
+
+    /// Writes the comments between the block just formatted and the keyword that
+    /// closes it, and records that keyword's line so a comment written on the
+    /// keyword's own line is still recognised as trailing it.
+    fn emit_block_tail(&mut self) {
+        let Some(bound) = self.closing_line_after(self.last_line) else {
+            return;
+        };
+        while let Some(comment) = self.comments.get(self.next_comment) {
+            if comment.line <= self.last_line || comment.line >= bound {
+                break;
+            }
+            let text = comment.text.clone();
+            self.write_indent();
+            self.write(&text);
+            self.newline();
+            self.next_comment += 1;
+        }
+        self.last_line = bound;
+    }
+
+    /// The line of the next keyword that closes or reopens a block after `line`.
+    fn closing_line_after(&self, line: usize) -> Option<usize> {
+        self.closing_lines.iter().copied().find(|&l| l > line)
     }
 
     fn write_signature(&mut self, keyword: &str, name: &str, params: &[String]) {
@@ -651,13 +726,35 @@ impl Formatter {
         self.indent = self.indent.saturating_sub(4);
     }
 
+    /// Writes the next comment, if it was written on `line` itself, at the end of
+    /// the text already on the line. A comment that shared a line with a
+    /// statement keeps that position rather than being pushed onto a line of
+    /// its own, which is also what stops it from drifting out of its block.
+    fn write_trailing_comment(&mut self, line: usize) {
+        let Some(comment) = self.comments.get(self.next_comment) else {
+            return;
+        };
+        if comment.line != line {
+            return;
+        }
+        let text = comment.text.clone();
+        self.write(" ");
+        self.write(&text);
+        self.next_comment += 1;
+    }
+
     /// Writes a word that opens or closes a block at the start of its own
     /// line: `else`, `catch`, `finally` and the `end` that closes a block all
     /// sit at the indentation of the statement they belong to, which is one
     /// level out from the block itself.
+    ///
+    /// `self.last_line` is the line of the keyword being written —
+    /// [`Formatter::emit_block_tail`] recorded it — so a comment that trailed
+    /// the keyword in the source is still recognised here.
     fn write_keyword_line(&mut self, word: &str) {
         self.write_indent();
         self.write(word);
+        self.write_trailing_comment(self.last_line);
     }
 
     fn write_indent(&mut self) {
