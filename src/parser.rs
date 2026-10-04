@@ -211,14 +211,46 @@ pub struct Program {
     pub statements: Vec<Stmt>,
 }
 
+/// The deepest an expression may nest before the parser gives up with a
+/// spanned [`Error::Parser`].
+///
+/// Every nested bracket, prefix operator, call argument and left-associative
+/// binary chain makes the expression tree one level deeper. Parsing recurses
+/// per level and dropping the finished tree recurses per level, so an
+/// unbounded depth turns a long line of source into "has overflowed its stack"
+/// and a core dump instead of a diagnostic.
+///
+/// The value is deliberately small. libstd gives a spawned thread a 2 MiB
+/// stack, and a debug build spends roughly 16 KiB of stack per level of nested
+/// brackets (eleven frames of `parse_primary` .. `parse_postfix`). Measured on
+/// this repository, 123 levels is where a 2 MiB test thread dies; 64 leaves
+/// nearly a 2x margin while staying far above anything hand-written.
+pub const MAX_NESTING_DEPTH: usize = 64;
+
+/// The deepest `if` / `for` / `to` / `object` / `try` / `test` blocks may nest
+/// before the parser gives up with a spanned [`Error::Parser`].
+///
+/// A block body is parsed by a recursive call back into `parse_statement`, so
+/// each nested block is a level of parser recursion, and the analyzer and VM
+/// then walk the same tree. The same 64-level budget as
+/// [`MAX_NESTING_DEPTH`] is used, because the same 2 MiB stack has to hold it.
+pub const MAX_BLOCK_DEPTH: usize = 64;
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
+    block_depth: usize,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+            block_depth: 0,
+        }
     }
 
     fn current(&self) -> Option<&Token> {
@@ -259,6 +291,59 @@ impl Parser {
         Ok(token)
     }
 
+    /// Accounts for one more level of expression nesting.
+    ///
+    /// Returns a spanned [`Error::Parser`] once the nesting passes
+    /// [`MAX_NESTING_DEPTH`], so a pathological source line is a diagnostic
+    /// instead of a stack overflow.
+    fn enter_nesting(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(Error::Parser(
+                format!("Expression nests more than {MAX_NESTING_DEPTH} levels deep"),
+                self.span(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Releases `count` nesting levels claimed by [`Parser::enter_nesting`].
+    fn leave_nesting(&mut self, count: usize) {
+        self.depth = self.depth.saturating_sub(count);
+    }
+
+    /// Whether the upcoming statement opens a `... end` block, and so parses its
+    /// body by calling back into [`Parser::parse_statement`].
+    fn opens_block(&self) -> bool {
+        matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::If)
+                | Some(TokenKind::For)
+                | Some(TokenKind::Repeat)
+                | Some(TokenKind::While)
+                | Some(TokenKind::To)
+                | Some(TokenKind::Object)
+                | Some(TokenKind::Try)
+                | Some(TokenKind::Test)
+        )
+    }
+
+    /// Accounts for one more level of block nesting.
+    fn enter_block(&mut self) -> Result<()> {
+        self.block_depth += 1;
+        if self.block_depth > MAX_BLOCK_DEPTH {
+            return Err(Error::Parser(
+                format!("Blocks nest more than {MAX_BLOCK_DEPTH} levels deep"),
+                self.span(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn leave_block(&mut self) {
+        self.block_depth = self.block_depth.saturating_sub(1);
+    }
+
     fn skip_newlines(&mut self) {
         while let Some(Token {
             kind: TokenKind::Newline,
@@ -274,7 +359,13 @@ impl Parser {
 
         self.skip_newlines();
 
-        while self.current().map(|t| &t.kind) != Some(&TokenKind::Eof) {
+        // `None` is checked as well as `Eof`: a token stream handed straight
+        // to `Parser::new` need not end in `Eof`, and without this the loop
+        // would spin forever once `current()` runs off the end.
+        while let Some(token) = self.current() {
+            if token.kind == TokenKind::Eof {
+                break;
+            }
             if let Some(stmt) = self.parse_statement()? {
                 statements.push(stmt);
             }
@@ -285,6 +376,24 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Option<Stmt>> {
+        let opened_block = self.opens_block();
+        if opened_block {
+            self.enter_block()?;
+        }
+
+        let result = self.parse_statement_inner();
+
+        // Expression nesting is counted per statement, so one long expression
+        // cannot spend the budget of the next one.
+        self.depth = 0;
+        if opened_block {
+            self.leave_block();
+        }
+
+        result
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Option<Stmt>> {
         let span = self.span();
         let token = match self.current() {
             Some(t) => t.clone(),
@@ -912,6 +1021,7 @@ impl Parser {
 
     fn parse_or(&mut self) -> Result<Expr> {
         let mut left = self.parse_and()?;
+        let mut chained = 0usize;
 
         while let Some(Token {
             kind: TokenKind::Or,
@@ -920,6 +1030,8 @@ impl Parser {
         {
             self.advance();
             let right = self.parse_and()?;
+            chained += 1;
+            self.enter_nesting()?;
             left = Expr::Binary {
                 op: BinaryOp::Or,
                 left: Box::new(left),
@@ -927,11 +1039,14 @@ impl Parser {
             };
         }
 
+        self.leave_nesting(chained);
+
         Ok(left)
     }
 
     fn parse_and(&mut self) -> Result<Expr> {
         let mut left = self.parse_comparison()?;
+        let mut chained = 0usize;
 
         while let Some(Token {
             kind: TokenKind::And,
@@ -940,6 +1055,8 @@ impl Parser {
         {
             self.advance();
             let right = self.parse_comparison()?;
+            chained += 1;
+            self.enter_nesting()?;
             left = Expr::Binary {
                 op: BinaryOp::And,
                 left: Box::new(left),
@@ -947,11 +1064,14 @@ impl Parser {
             };
         }
 
+        self.leave_nesting(chained);
+
         Ok(left)
     }
 
     fn parse_comparison(&mut self) -> Result<Expr> {
         let mut left = self.parse_addition()?;
+        let mut chained = 0usize;
 
         loop {
             let op = match self.current() {
@@ -1043,6 +1163,8 @@ impl Parser {
             };
 
             let right = self.parse_addition()?;
+            chained += 1;
+            self.enter_nesting()?;
             left = Expr::Binary {
                 op,
                 left: Box::new(left),
@@ -1050,11 +1172,14 @@ impl Parser {
             };
         }
 
+        self.leave_nesting(chained);
+
         Ok(left)
     }
 
     fn parse_addition(&mut self) -> Result<Expr> {
         let mut left = self.parse_multiplication()?;
+        let mut chained = 0usize;
 
         while let Some(token) = self.current() {
             let op = match &token.kind {
@@ -1066,6 +1191,8 @@ impl Parser {
             if let Some(op) = op {
                 self.advance();
                 let right = self.parse_multiplication()?;
+                chained += 1;
+                self.enter_nesting()?;
                 left = Expr::Binary {
                     op,
                     left: Box::new(left),
@@ -1076,11 +1203,14 @@ impl Parser {
             }
         }
 
+        self.leave_nesting(chained);
+
         Ok(left)
     }
 
     fn parse_multiplication(&mut self) -> Result<Expr> {
         let mut left = self.parse_unary()?;
+        let mut chained = 0usize;
 
         while let Some(token) = self.current() {
             let op = match &token.kind {
@@ -1093,6 +1223,8 @@ impl Parser {
             if let Some(op) = op {
                 self.advance();
                 let right = self.parse_unary()?;
+                chained += 1;
+                self.enter_nesting()?;
                 left = Expr::Binary {
                     op,
                     left: Box::new(left),
@@ -1103,6 +1235,8 @@ impl Parser {
             }
         }
 
+        self.leave_nesting(chained);
+
         Ok(left)
     }
 
@@ -1111,7 +1245,9 @@ impl Parser {
             match &token.kind {
                 TokenKind::Not => {
                     self.advance();
+                    self.enter_nesting()?;
                     let expr = self.parse_unary()?;
+                    self.leave_nesting(1);
                     return Ok(Expr::Unary {
                         op: UnaryOp::Not,
                         expr: Box::new(expr),
@@ -1119,7 +1255,9 @@ impl Parser {
                 }
                 TokenKind::Minus => {
                     self.advance();
+                    self.enter_nesting()?;
                     let expr = self.parse_unary()?;
+                    self.leave_nesting(1);
                     return Ok(Expr::Unary {
                         op: UnaryOp::Neg,
                         expr: Box::new(expr),
@@ -1170,6 +1308,7 @@ impl Parser {
                 self.advance();
                 let mut args = Vec::new();
 
+                self.enter_nesting()?;
                 while self.current().map(|t| &t.kind) != Some(&TokenKind::RightParen)
                     && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
                 {
@@ -1183,6 +1322,7 @@ impl Parser {
                         self.advance();
                     }
                 }
+                self.leave_nesting(1);
 
                 self.expect(&TokenKind::RightParen)?;
 
@@ -1218,7 +1358,9 @@ impl Parser {
             }) = self.current()
             {
                 self.advance();
+                self.enter_nesting()?;
                 let index = self.parse_expression()?;
+                self.leave_nesting(1);
                 self.expect(&TokenKind::RightBracket)?;
                 expr = Expr::Index {
                     object: Box::new(expr),
@@ -1261,7 +1403,9 @@ impl Parser {
             }
             TokenKind::LeftParen => {
                 self.advance();
+                self.enter_nesting()?;
                 let expr = self.parse_expression()?;
+                self.leave_nesting(1);
                 self.expect(&TokenKind::RightParen)?;
                 Ok(expr)
             }
@@ -1269,6 +1413,7 @@ impl Parser {
                 self.advance();
                 let mut items = Vec::new();
 
+                self.enter_nesting()?;
                 while self.current().map(|t| &t.kind) != Some(&TokenKind::RightBracket)
                     && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
                 {
@@ -1283,6 +1428,7 @@ impl Parser {
                     }
                 }
 
+                self.leave_nesting(1);
                 self.expect(&TokenKind::RightBracket)?;
                 Ok(Expr::List(items))
             }
@@ -1290,6 +1436,7 @@ impl Parser {
                 self.advance();
                 let mut fields = Vec::new();
 
+                self.enter_nesting()?;
                 while self.current().map(|t| &t.kind) != Some(&TokenKind::RightBrace)
                     && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
                 {
@@ -1323,6 +1470,7 @@ impl Parser {
                     }
                 }
 
+                self.leave_nesting(1);
                 self.expect(&TokenKind::RightBrace)?;
                 Ok(Expr::Record(fields))
             }
