@@ -414,6 +414,161 @@ check(1)
     }
 }
 
+// A comment with no statement after it inside its block used to be flushed at
+// the *outer* indentation, once the whole enclosing statement had been
+// formatted. Its text survived, so the `contains` assertions above could not
+// see the damage — but it stopped being part of the block it was written in,
+// and in an `if`/`else` it moved into the other branch and came to read as a
+// note on the branch's first statement. These pin *where* a comment lands.
+
+#[test]
+fn edge_a_comment_at_the_end_of_a_block_stays_in_that_block() {
+    let source = "\
+if 1 is 1 then
+    say 1
+    // the last line of the block
+end
+say 2
+";
+
+    let formatted = assert_idempotent(source, "comment at the end of a block");
+
+    assert_eq!(
+        formatted, source,
+        "a comment written last in a block must not be moved out of it"
+    );
+}
+
+#[test]
+fn edge_a_comment_before_else_stays_in_the_then_branch() {
+    let source = "\
+if 1 is 1 then
+    say 1
+    // notes the then branch
+else
+    say 2
+end
+say 3
+";
+
+    let formatted = assert_idempotent(source, "comment before else");
+
+    assert_eq!(
+        formatted, source,
+        "a comment must not migrate from the `then` branch into the `else` one"
+    );
+}
+
+#[test]
+fn edge_a_comment_at_the_end_of_a_nested_block_stays_at_its_own_depth() {
+    let source = "\
+to f(n)
+    if n is 1 then
+        say n
+        // belongs inside the inner if
+    end
+    say 2
+end
+say f(1)
+";
+
+    let formatted = assert_idempotent(source, "comment at the end of a nested block");
+
+    assert_eq!(
+        formatted, source,
+        "a comment must stay in the innermost block that contains it"
+    );
+}
+
+#[test]
+fn edge_a_comment_in_a_try_catch_finally_stays_with_its_branch() {
+    let source = "\
+try
+    say 1
+    // notes the try body
+catch err
+    say err
+    // notes the catch body
+finally
+    say 3
+end
+say 4
+";
+
+    let formatted = assert_idempotent(source, "comment in try/catch/finally");
+
+    assert_eq!(
+        formatted, source,
+        "each branch's trailing comment must stay inside that branch"
+    );
+}
+
+#[test]
+fn edge_a_block_whose_only_tail_is_a_comment_keeps_it_inside() {
+    // Nothing but the comment follows the last statement, so there is no later
+    // statement in the block for the comment to attach to.
+    let source = "\
+if 1 is 1 then
+    say 1
+    // the block ends with a comment
+end
+say 2
+";
+
+    let formatted = assert_idempotent(source, "comment-only block tail");
+
+    assert_eq!(
+        formatted, source,
+        "a comment may be the last line of a block without escaping it"
+    );
+}
+
+#[test]
+fn edge_a_comment_trailing_a_statement_stays_in_that_statement_block() {
+    let source = "\
+to f(n)
+    say n // trailing note
+end
+say f(1)
+";
+
+    let formatted = assert_idempotent(source, "comment trailing a statement");
+
+    assert_eq!(
+        formatted, source,
+        "a comment written after a statement belongs to that statement's block"
+    );
+    assert!(
+        same_program(&parse(source), &parse(&formatted)),
+        "moving the note onto its own line must not change what runs:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn edge_a_block_comment_is_still_a_parser_error_when_the_block_is_unclosed() {
+    // Attaching comments to blocks must not paper over a block that never ends.
+    let source = "if 1 is 1 then\n    say 1\n    // the block is never closed\n";
+
+    let run = run_rb("format", source);
+
+    assert_ne!(
+        run.code, 0,
+        "an unclosed block must be rejected:\n{}",
+        run.stdout
+    );
+    assert!(
+        run.stderr.contains("Parser error"),
+        "an unclosed block must be reported as a parser error:\n{}",
+        run.stderr
+    );
+    assert!(
+        !run.stdout.contains("the block is never closed"),
+        "a rejected file must not be rewritten as if it had been understood:\n{}",
+        run.stdout
+    );
+}
+
 #[test]
 fn edge_slashes_inside_a_text_literal_are_not_comments() {
     // A `//` inside a literal is text: dropping the rest of the line would
