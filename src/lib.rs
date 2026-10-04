@@ -170,7 +170,7 @@ pub fn run_cli() {
                 match fs::read_to_string(path) {
                     Ok(source) => match formatter::format(&source) {
                         Ok(formatted) => {
-                            if source.trim() != formatted.trim() {
+                            if formatter::needs_reformat(&source, &formatted) {
                                 println!("File would be reformatted");
                                 process::exit(1);
                             }
