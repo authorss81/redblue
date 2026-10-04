@@ -293,7 +293,7 @@ pub fn assert_type<T: 'static>(value: &Value) -> Result<(), TestAssertionError> 
         Value::List(_) => TypeId::of::<Vec<Value>>(),
         Value::Record(_) => TypeId::of::<crate::value::Fields>(),
         Value::Object(_, _) => TypeId::of::<Value>(),
-        Value::Function(_, _) => TypeId::of::<Value>(),
+        Value::Function(_) => TypeId::of::<Value>(),
         Value::Builtin(_) => TypeId::of::<Value>(),
     };
 

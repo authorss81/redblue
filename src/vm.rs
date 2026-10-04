@@ -3,9 +3,10 @@ use crate::lexer::Lexer;
 use crate::parser as redblue_parser;
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::stdlib;
-use crate::value::{finite_number, Fields, Value};
+use crate::value::{finite_number, Captured, CapturedScope, Fields, FunctionValue, Value};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 /// The default number of user function calls that may be active at once.
 /// Exceeding it is a `RuntimeError`, not a Rust stack overflow.
@@ -80,8 +81,10 @@ pub fn run_isolated(program: &Program) -> (Vm, Result<Value>) {
 
 pub struct Vm {
     globals: HashMap<String, Value>,
-    locals: Vec<HashMap<String, Value>>,
-    functions: HashMap<String, Vec<Stmt>>,
+    /// The live local scopes, outermost first. A call's parameters are the
+    /// innermost scope, and a function value that closed over scopes pushes
+    /// them above its caller's frames — see [`Vm::call_user_function`].
+    locals: Vec<CapturedScope>,
     output: Vec<String>,
     _modules: HashMap<String, Program>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
@@ -95,8 +98,7 @@ impl Vm {
         let globals = stdlib::builtins();
         Self {
             globals,
-            locals: vec![HashMap::new()],
-            functions: HashMap::new(),
+            locals: vec![CapturedScope::new()],
             output: Vec::new(),
             _modules: HashMap::new(),
             expectation_failure: None,
@@ -131,20 +133,13 @@ impl Vm {
         let tokens = Lexer::tokenize(&source)?;
         let ast = redblue_parser::Parser::new(tokens).parse()?;
 
+        // A module's functions are not bound to a name, so a member stays unreachable
+        // — see FINDINGS.md. The `set` below is the whole of what an import
+        // currently contributes.
         for stmt in &ast.statements {
-            match &stmt.statement {
-                Statement::Set { name, value } => {
-                    let val = self.evaluate(value)?;
-                    self.globals.insert(name.clone(), val);
-                }
-                Statement::Function {
-                    name,
-                    params: _,
-                    body,
-                } => {
-                    self.functions.insert(name.clone(), body.clone());
-                }
-                _ => {}
+            if let Statement::Set { name, value } = &stmt.statement {
+                let val = self.evaluate(value)?;
+                self.globals.insert(name.clone(), val);
             }
         }
 
@@ -167,11 +162,29 @@ impl Vm {
     }
 
     fn push_scope(&mut self) {
-        self.locals.push(HashMap::new());
+        self.locals.push(CapturedScope::new());
     }
 
     fn pop_scope(&mut self) {
         self.locals.pop();
+    }
+
+    /// Builds the function value for a declaration, closing over every local
+    /// scope that is live where the declaration is executed.
+    ///
+    /// The capture is a copy taken at declaration time, so a variable the
+    /// function reads is the value it had where the function was written, and
+    /// a variable it assigns is assigned only for that one call. Globals are
+    /// not captured and are read live, which is what a declaration that
+    /// changes a global — a counter, a registry — is written to do.
+    fn make_function(&self, name: &str, params: &[String], body: &[Stmt]) -> Value {
+        let captured: Captured = self.locals.clone();
+        Value::Function(FunctionValue {
+            name: name.to_string(),
+            params: params.to_vec(),
+            body: Arc::new(body.to_vec()),
+            captured: Arc::new(captured),
+        })
     }
 
     fn get_var(&self, name: &str) -> Option<Value> {
@@ -185,8 +198,17 @@ impl Vm {
         self.globals.get(name).cloned()
     }
 
+    /// Binds `name` in the innermost live scope that already has it, and in a
+    /// global when no local scope does.
+    ///
+    /// This resolves a name exactly as [`Vm::get_var`] does, so a read and a
+    /// write of one name agree. It used to write only into the innermost scope
+    /// and fall straight through to a global otherwise, which meant that
+    /// assigning to a variable of an enclosing scope — a parameter from inside
+    /// a loop body, or a captured name from inside a function that closed over
+    /// it — silently created a global of that name instead.
     fn set_var(&mut self, name: &str, value: Value) {
-        if let Some(scope) = self.locals.last_mut() {
+        for scope in self.locals.iter_mut().rev() {
             if scope.contains_key(name) {
                 scope.insert(name.to_string(), value);
                 return;
@@ -349,9 +371,9 @@ impl Vm {
                 None => Ok(Value::Nothing),
             },
             Statement::Function { name, params, body } => {
+                let function = self.make_function(name, params, body);
                 self.declare(name);
-                self.set_var(name, Value::Function(name.clone(), params.clone()));
-                self.functions.insert(name.clone(), body.clone());
+                self.set_var(name, function);
 
                 Ok(Value::Nothing)
             }
@@ -1114,7 +1136,7 @@ impl Vm {
                     Some(Value::Nothing) => "nothing",
                     Some(Value::List(_)) => "list",
                     Some(Value::Record(_)) => "record",
-                    Some(Value::Function(_, _)) => "function",
+                    Some(Value::Function(_)) => "function",
                     Some(Value::Builtin(_)) => "builtin",
                     Some(Value::Object(_, _)) => "object",
                     None => "nothing",
@@ -1123,8 +1145,8 @@ impl Vm {
             }
             _ => {
                 // User-defined function
-                if let Some(Value::Function(_, params)) = self.get_var(name) {
-                    self.call_user_function(name, &params, &args)
+                if let Some(Value::Function(function)) = self.get_var(name) {
+                    self.call_user_function(name, &function, &args)
                 } else {
                     Err(Error::Runtime(
                         format!("Unknown function '{}'", name),
@@ -1143,15 +1165,9 @@ impl Vm {
     fn call_user_function(
         &mut self,
         name: &str,
-        params: &[String],
+        function: &FunctionValue,
         args: &[Value],
     ) -> Result<Value> {
-        // A name bound to a function value but with no retained body — e.g. one
-        // brought in by `import` — keeps the previous behaviour of `nothing`.
-        let Some(body) = self.functions.get(name).cloned() else {
-            return Ok(Value::Nothing);
-        };
-
         if self.call_depth >= self.max_call_depth {
             return Err(Error::Runtime(
                 format!(
@@ -1162,16 +1178,26 @@ impl Vm {
             ));
         }
 
-        self.call_depth += 1;
+        // The captured scopes go on the stack *above* the caller's frames, and
+        // the parameters above those, so the body reads its own environment
+        // rather than a same-named binding of whoever called it, and a
+        // parameter shadows what it captured.
+        let caller_depth = self.locals.len();
+        for scope in function.captured.iter() {
+            self.locals.push(scope.clone());
+        }
         self.push_scope();
-        for (index, param) in params.iter().enumerate() {
+        for (index, param) in function.params.iter().enumerate() {
             let value = args.get(index).cloned().unwrap_or(Value::Nothing);
             self.declare(param);
             self.set_var(param, value);
         }
-        let result = self.execute_statements(&body);
-        self.pop_scope();
+        self.call_depth += 1;
+        let result = self.execute_statements(&function.body);
         self.call_depth -= 1;
+        // Truncated rather than popped one at a time, so the stack is balanced
+        // even when the body failed part way through and left a scope behind.
+        self.locals.truncate(caller_depth);
 
         result
     }
@@ -1350,7 +1376,7 @@ fn json_stringify(value: &Value) -> String {
                 .collect();
             format!("{{{}}}", pairs.join(", "))
         }
-        Value::Function(_, _) => "null".to_string(),
+        Value::Function(_) => "null".to_string(),
         Value::Builtin(_) => "null".to_string(),
         Value::Object(_, _) => "null".to_string(),
     }

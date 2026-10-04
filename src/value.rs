@@ -1,8 +1,10 @@
 use std::fmt;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 
 use crate::error::{Error, Result, Span};
+use crate::parser::Stmt;
 
 /// Field storage for records and objects.
 ///
@@ -11,6 +13,58 @@ use crate::error::{Error, Result, Span};
 /// random order, which made `say` and `json.stringify` emit the same record
 /// differently on every run.
 pub type Fields = IndexMap<String, Value>;
+
+/// One lexical scope's bindings, captured when a function value was declared.
+///
+/// `IndexMap` for the same reason [`Fields`] uses it: a captured scope's field
+/// order must not vary between runs, so two closures that closed over equal
+/// bindings always compare equal.
+pub type CapturedScope = IndexMap<String, Value>;
+
+/// The local scopes a function value closed over, outermost first.
+///
+/// A declaration is executed with every enclosing local scope live, and that
+/// stack is what the declaration captures. Globals are deliberately absent:
+/// they live in the interpreter, not on the stack, and a function that reads
+/// one at call time must see the value the program has by then rather than the
+/// value it had where the function was written.
+pub type Captured = Vec<CapturedScope>;
+
+/// A function value: a body, its parameters, and the bindings the declaration
+/// closed over.
+///
+/// Before this existed, `Value::Function` held a name and a parameter list and
+/// the body lived in a single flat map keyed by that name, so a nested
+/// declaration lost its enclosing bindings and two nested declarations of the
+/// same name overwrote each other.
+#[derive(Debug, Clone)]
+pub struct FunctionValue {
+    /// The name in the declaration. Used for display and error messages.
+    pub name: String,
+    /// The declared parameter names, in order.
+    pub params: Vec<String>,
+    /// The declared body.
+    ///
+    /// Behind an `Arc` because reading any variable clones the value bound to
+    /// it, and a recursive call reads the name it was reached through. Cloning
+    /// a function value must therefore not copy the body.
+    pub body: Arc<Vec<Stmt>>,
+    /// The local scopes live where the declaration was executed.
+    pub captured: Arc<Captured>,
+}
+
+/// Two function values are the same function when they were declared with the
+/// same name and parameters and closed over equal bindings.
+///
+/// The body is not compared: `Stmt` has no equality, and every function value
+/// built by one declaration shares that body anyway. Under capture-by-value two
+/// closures from the same declaration over equal environments are the same
+/// function value, which is what comparing them answers.
+impl PartialEq for FunctionValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.params == other.params && self.captured == other.captured
+    }
+}
 
 /// `2^53`, the largest magnitude at which every whole number is still held
 /// exactly by an `f64`.
@@ -80,7 +134,7 @@ pub enum Value {
     List(Vec<Value>),
     Record(Fields),
     Object(String, Fields),
-    Function(String, Vec<String>),
+    Function(FunctionValue),
     Builtin(String),
 }
 
@@ -110,7 +164,7 @@ impl fmt::Display for Value {
                     .collect();
                 write!(f, "{{{}}}", fields.join(", "))
             }
-            Value::Function(name, _) => write!(f, "<function {}>", name),
+            Value::Function(function) => write!(f, "<function {}>", function.name),
             Value::Builtin(name) => write!(f, "<builtin {}>", name),
             Value::Object(_, _) => write!(f, "<object>"),
         }
@@ -137,7 +191,7 @@ impl Value {
             Value::List(items) => !items.is_empty(),
             Value::Record(_) => true,
             Value::Object(_, _) => true,
-            Value::Function(_, _) => true,
+            Value::Function(_) => true,
             Value::Builtin(_) => true,
         }
     }

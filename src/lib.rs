@@ -18,7 +18,10 @@ use crate::lexer::Lexer;
 use testing::reporter::Reporter;
 
 pub use error::{Error, Span};
-pub use value::Value;
+// `FunctionValue` is re-exported because it is the payload of the public
+// `Value::Function` variant: a caller that matches that variant has to be able
+// to name the type it binds.
+pub use value::{FunctionValue, Value};
 pub use vm::{run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV};
 
 pub fn run_file(path: &str) -> Result<(), Error> {
