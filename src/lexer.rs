@@ -1,5 +1,8 @@
 use crate::error::{Error, Result, Span};
 
+/// The byte-order mark some editors write at the start of a UTF-8 file.
+const BOM: char = '\u{FEFF}';
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
@@ -148,7 +151,12 @@ impl Lexer {
 
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.current() {
-            if c.is_whitespace() && c != '\n' {
+            // A byte-order mark is a file-formatting artefact, not a source
+            // character: some editors write it at the start of the file and
+            // some on every line. Left in place it would be read as a stray
+            // character, or glued onto the identifier after it.
+            let insignificant = c == BOM || (c.is_whitespace() && c != '\n' && c != '\r');
+            if insignificant {
                 self.advance();
             } else {
                 break;
@@ -197,13 +205,16 @@ impl Lexer {
             .map_err(|_| Error::Lexer(format!("Invalid number '{}'", text), span))
     }
 
-    fn read_text(&mut self) -> String {
+    fn read_text(&mut self, span: Span) -> Result<String> {
         self.advance(); // consume opening quote
         let mut text = String::new();
-        while let Some(c) = self.current() {
+        loop {
+            let Some(c) = self.current() else {
+                return Err(Error::Lexer("Unterminated string".to_string(), span));
+            };
             if c == '"' {
                 self.advance();
-                break;
+                return Ok(text);
             }
             if c == '\\' {
                 self.advance();
@@ -214,14 +225,13 @@ impl Lexer {
                     Some('\\') => text.push('\\'),
                     Some('"') => text.push('"'),
                     Some(c) => text.push(c),
-                    None => break,
+                    None => return Err(Error::Lexer("Unterminated string".to_string(), span)),
                 }
             } else {
                 text.push(c);
                 self.advance();
             }
         }
-        text
     }
 
     fn read_identifier(&mut self) -> String {
@@ -311,9 +321,15 @@ impl Lexer {
                 break;
             };
 
-            // Handle newline
-            if c == '\n' {
+            // Handle newline, and the CR of a CRLF pair. A lone CR is how a
+            // classic Mac file breaks lines; dropping it would glue two
+            // statements together with no line break between them.
+            if c == '\n' || c == '\r' {
+                let carriage_return = c == '\r';
                 lexer.advance();
+                if carriage_return && lexer.current() == Some('\n') {
+                    lexer.advance();
+                }
                 tokens.push(Token::new(TokenKind::Newline, line, column));
                 continue;
             }
@@ -335,7 +351,7 @@ impl Lexer {
 
             // Strings
             if c == '"' {
-                let text = lexer.read_text();
+                let text = lexer.read_text(Span::new(line, column))?;
                 tokens.push(Token::new(TokenKind::Text(text), line, column));
                 continue;
             }
@@ -407,8 +423,11 @@ impl Lexer {
                     TokenKind::Colon
                 }
                 _ => {
+                    // `escape_debug` keeps a NUL or a BEL readable in a
+                    // terminal, where the raw character would print as
+                    // nothing at all, and leaves printable ones as they are.
                     return Err(Error::Lexer(
-                        format!("Unexpected character '{}'", c),
+                        format!("Unexpected character '{}'", c.escape_debug()),
                         Span::new(line, column),
                     ));
                 }
