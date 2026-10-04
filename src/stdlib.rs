@@ -190,6 +190,13 @@ pub fn builtins() -> HashMap<String, Value> {
     globals
 }
 
+/// Calls the builtin `name`.
+///
+/// `None` means "wrong argument type or wrong argument count", and
+/// `Some(Value::Nothing)` means "the builtin ran and has no answer" — `sqrt` of
+/// a negative number is the last case. It has no real answer, and handing back
+/// `NaN` would put a value into `Value::Number` that no comparison and no
+/// display can be trusted on.
 pub fn builtin_function(name: &str, args: Vec<Value>) -> Option<Value> {
     match name {
         // Math functions
@@ -262,7 +269,10 @@ impl Value {
 
     fn sqrt(&self) -> Value {
         match self {
-            Value::Number(n) => Value::Number(n.sqrt()),
+            Value::Number(n) => match n.sqrt() {
+                root if root.is_finite() => Value::Number(root),
+                _ => Value::Nothing,
+            },
             _ => Value::Nothing,
         }
     }

@@ -98,9 +98,16 @@ test "edge_arithmetic_zero_over_zero_also_faults"
     expect caught to be yes
 end
 
-test "edge_arithmetic_modulo_by_zero_yields_a_number_not_a_crash"
-    set bad to 5 % 0
-    expect type_of(bad) to be "number"
+test "edge_arithmetic_modulo_by_zero_is_a_catchable_runtime_error"
+    // 5 % 0 has no answer: an f64 modulo by zero is NaN, and Redblue refuses to
+    // store a NaN in a number. It is an ordinary catchable runtime error.
+    set caught to no
+    try
+        set bad to 5 % 0
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
 end
 
 test "edge_arithmetic_integers_past_2_53_lose_precision"

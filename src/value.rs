@@ -2,6 +2,8 @@ use std::fmt;
 
 use indexmap::IndexMap;
 
+use crate::error::{Error, Result, Span};
+
 /// Field storage for records and objects.
 ///
 /// `IndexMap` is used rather than `HashMap` so that field order is the order
@@ -9,6 +11,49 @@ use indexmap::IndexMap;
 /// random order, which made `say` and `json.stringify` emit the same record
 /// differently on every run.
 pub type Fields = IndexMap<String, Value>;
+
+/// `2^53`, the largest magnitude at which every whole number is still held
+/// exactly by an `f64`.
+///
+/// A Redblue `number` is an `f64`, so a wider integer is rounded on the way
+/// in: `9007199254740993` reads as `9007199254740992`. Printing such a value
+/// through the `i64` path would state a whole number the program never held, so
+/// the display of a whole number outside this range uses the full `f64` form
+/// instead.
+pub const MAX_EXACT_INT: f64 = 9_007_199_254_740_992.0;
+
+/// The words `say` prints for the three numbers that are not finite.
+///
+/// No Redblue program can produce one — `Value::number` rejects them — but
+/// `Value::Number` is a public variant, so a Rust caller can build
+/// `Value::Number(f64::NAN)` and the display still has to be defined.
+pub fn non_finite_display(n: f64) -> Option<&'static str> {
+    if n.is_finite() {
+        None
+    } else if n.is_nan() {
+        Some("not a number")
+    } else if n > 0.0 {
+        Some("infinity")
+    } else {
+        Some("negative infinity")
+    }
+}
+
+/// The short name of a number that is not finite, for error messages.
+///
+/// Only meaningful where `non_finite_display` would return `Some`: a finite
+/// number has no such name and gives the empty string.
+pub fn non_finite_name(n: f64) -> &'static str {
+    if n.is_finite() {
+        ""
+    } else if n.is_nan() {
+        "NaN"
+    } else if n > 0.0 {
+        "infinity"
+    } else {
+        "-infinity"
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -28,7 +73,9 @@ impl fmt::Display for Value {
         match self {
             Value::Nothing => write!(f, "nothing"),
             Value::Number(n) => {
-                if n.fract() == 0.0 {
+                if let Some(text) = non_finite_display(*n) {
+                    write!(f, "{}", text)
+                } else if n.fract() == 0.0 && n.abs() <= MAX_EXACT_INT {
                     write!(f, "{}", *n as i64)
                 } else {
                     write!(f, "{}", n)
@@ -55,6 +102,23 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    /// Wraps `n` as a `Value::Number`, refusing the values that are not finite.
+    ///
+    /// This is the one door every computed number goes through, so `NaN`,
+    /// `infinity` and `-infinity` cannot enter `Value::Number` silently:
+    /// `5 % 0` and `1e308 * 1e308` are `Runtime` errors rather than values
+    /// that print as `not a number` and compare false against everything.
+    pub fn number(n: f64, span: Span) -> Result<Value> {
+        if n.is_finite() {
+            Ok(Value::Number(n))
+        } else {
+            Err(Error::Runtime(
+                format!("{} is not a finite number", non_finite_name(n)),
+                span,
+            ))
+        }
+    }
+
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Nothing => false,

@@ -206,6 +206,36 @@ set quotient to 10 / 2
 set remainder to 10 mod 3
 ```
 
+#### Numeric semantics
+
+A `number` is a 64-bit float. Every operation on numbers is **total**: it either
+returns a number or fails with a runtime error. There is no third outcome in
+which an operation returns something that is not a number.
+
+| Expression | Outcome |
+|---|---|
+| `1 / 0`, `0 / 0`, `-1 / 0` | runtime error: `Division by zero` |
+| `5 % 0`, `5 % 0.0`, `5 % -0.0` | runtime error: `Modulo by zero` |
+| `-0.0` | the number `0`: negative zero is not a distinct value |
+| `1e308 * 1e308` | runtime error: `infinity is not a finite number` |
+| `1e400` (a literal too large to hold) | runtime error: `infinity is not a finite number` |
+| `-5 % 3` | `-2`: a remainder takes the sign of the dividend |
+
+Three consequences are worth stating plainly:
+
+1. **A number is always finite.** `NaN`, `infinity` and `-infinity` cannot
+   enter a `number`, from arithmetic, from a literal, from `json.parse`, or from
+   a library function. There is no way to obtain one, so there is no value whose
+   comparisons are all false.
+2. **Whole numbers are exact only to 2^53.** `9007199254740993` reads as
+   `9007199254740992`. A whole number wider than 2^53 is printed in full rather
+   than through a 64-bit integer, so it never reports a number the program does
+   not hold.
+3. **Non-finite numbers still print.** A number that is not finite can only be
+   built by a host program embedding Redblue, and it prints as `not a number`,
+   `infinity` or `negative infinity`. `json.stringify` of one is `null`, which is
+   what a JSON writer emits for it.
+
 ### Comparison
 
 ```redblue

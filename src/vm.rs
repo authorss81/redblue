@@ -448,7 +448,7 @@ impl Vm {
 
     fn evaluate(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
-            Expr::Number(n) => Ok(Value::Number(*n)),
+            Expr::Number(n) => Value::number(*n, self.span()),
             Expr::Text(s) => Ok(Value::Text(s.clone())),
             Expr::YesNo(b) => Ok(Value::YesNo(*b)),
             Expr::Nothing => Ok(Value::Nothing),
@@ -535,7 +535,7 @@ impl Vm {
     fn binary_op(&mut self, op: &BinaryOp, left: Value, right: Value) -> Result<Value> {
         match op {
             BinaryOp::Add => match (left, right) {
-                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
+                (Value::Number(a), Value::Number(b)) => Value::number(a + b, self.span()),
                 (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{}{}", a, b))),
                 _ => Err(Error::Runtime(
                     "Cannot add non-numbers".to_string(),
@@ -544,7 +544,7 @@ impl Vm {
             },
             BinaryOp::Sub => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Ok(Value::Number(a - b))
+                    Value::number(a - b, self.span())
                 } else {
                     Err(Error::Runtime(
                         "Cannot subtract non-numbers".to_string(),
@@ -554,7 +554,7 @@ impl Vm {
             }
             BinaryOp::Mul => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Ok(Value::Number(a * b))
+                    Value::number(a * b, self.span())
                 } else {
                     Err(Error::Runtime(
                         "Cannot multiply non-numbers".to_string(),
@@ -567,7 +567,7 @@ impl Vm {
                     if b == 0.0 {
                         Err(Error::Runtime("Division by zero".to_string(), self.span()))
                     } else {
-                        Ok(Value::Number(a / b))
+                        Value::number(a / b, self.span())
                     }
                 } else {
                     Err(Error::Runtime(
@@ -578,7 +578,11 @@ impl Vm {
             }
             BinaryOp::Mod => {
                 if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Ok(Value::Number(a % b))
+                    if b == 0.0 {
+                        Err(Error::Runtime("Modulo by zero".to_string(), self.span()))
+                    } else {
+                        Value::number(a % b, self.span())
+                    }
                 } else {
                     Err(Error::Runtime(
                         "Cannot modulo non-numbers".to_string(),
@@ -1027,7 +1031,9 @@ impl Vm {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                 let r = (now.as_nanos() % 1000000) as f64 / 1000000.0;
-                Ok(Value::Number(min + r * (max - min)))
+                // `max - min` overflows for a range as ordinary as
+                // `-1e308` to `1e308`, which is a number that does not exist.
+                Value::number(min + r * (max - min), self.span())
             }
             "random_choice" => {
                 if let Some(Value::List(items)) = args.first() {
@@ -1157,7 +1163,7 @@ fn parse_json(json: &str, span: Span) -> Result<Value> {
         Ok(Value::YesNo(false))
     } else {
         match json.parse::<f64>() {
-            Ok(n) => Ok(Value::Number(n)),
+            Ok(n) => Value::number(n, span),
             Err(_) => Err(Error::Runtime(format!("Invalid JSON: {}", json), span)),
         }
     }
