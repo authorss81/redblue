@@ -1147,17 +1147,7 @@ impl Vm {
                         ))
                     }
                 };
-                let lines: Vec<Value> = text
-                    .lines()
-                    .map(|line| {
-                        let cells: Vec<Value> = line
-                            .split(',')
-                            .map(|cell| Value::Text(cell.trim().to_string()))
-                            .collect();
-                        Value::List(cells)
-                    })
-                    .collect();
-                Ok(Value::List(lines))
+                parse_csv(text, self.span())
             }
             // Network module
             "network_get" => {
@@ -1170,7 +1160,7 @@ impl Vm {
                         ))
                     }
                 };
-                let client = reqwest::blocking::Client::new();
+                let client = network_client(self.span())?;
                 let response = client.get(url).send().map_err(|e| {
                     Error::Runtime(format!("HTTP request failed: {}", e), self.span())
                 })?;
@@ -1189,7 +1179,7 @@ impl Vm {
                         ))
                     }
                 };
-                let client = reqwest::blocking::Client::new();
+                let client = network_client(self.span())?;
                 let response = client.post(url).body(data.clone()).send().map_err(|e| {
                     Error::Runtime(format!("HTTP request failed: {}", e), self.span())
                 })?;
@@ -1527,6 +1517,29 @@ impl Default for Vm {
     }
 }
 
+/// The whole-request timeout for `network.get` and `network.post`: connect,
+/// send, headers and body read together. It is here because
+/// `reqwest::blocking::Client::new()` has no timeout of its own, and a client
+/// without one waits for the operating system's own connect timeout — about
+/// two and a half minutes on Linux, and forever on a connection that is
+/// accepted and never answered.
+pub const NETWORK_TIMEOUT_SECS: u64 = 10;
+
+/// The connect timeout for the same two functions, so a host that drops
+/// packets is given up on before the whole-request timeout is reached.
+pub const NETWORK_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+/// Builds the client every `network` call uses. A client that cannot be built
+/// is a `Runtime` error rather than a panic: a Redblue program must not be able
+/// to abort the process.
+fn network_client(span: Span) -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(NETWORK_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(NETWORK_CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| Error::Runtime(format!("Cannot create the HTTP client: {}", e), span))
+}
+
 fn parse_json(json: &str, span: Span) -> Result<Value> {
     let json = json.trim();
     if json.starts_with('{') {
@@ -1549,6 +1562,158 @@ fn parse_json(json: &str, span: Span) -> Result<Value> {
     }
 }
 
+/// Reads four hex digits of a `\uXXXX` escape starting at `at`, which is the
+/// index of the escape's first digit.
+fn json_hex4(chars: &[char], at: usize, span: Span) -> Result<u32> {
+    let mut value = 0u32;
+    for offset in 0..4 {
+        let digit = chars
+            .get(at + offset)
+            .and_then(|c| c.to_digit(16))
+            .ok_or_else(|| {
+                Error::Runtime(
+                    "Invalid JSON escape: '\\u' needs four hex digits".to_string(),
+                    span,
+                )
+            })?;
+        value = value * 16 + digit;
+    }
+    Ok(value)
+}
+
+/// Decodes the `\uXXXX` escape whose backslash is at `at`, returning the
+/// character and the index just past it. A character outside the Basic
+/// Multilingual Plane is written as a surrogate pair, and a half of one is an
+/// error rather than a replacement character.
+fn decode_json_unicode_escape(chars: &[char], at: usize, span: Span) -> Result<(char, usize)> {
+    let unpaired = || {
+        Error::Runtime(
+            "Invalid JSON escape: unpaired surrogate in '\\u' escape".to_string(),
+            span,
+        )
+    };
+    let first = json_hex4(chars, at + 2, span)?;
+    match first {
+        0xD800..=0xDBFF => {
+            if chars.get(at + 6) != Some(&'\\') || chars.get(at + 7) != Some(&'u') {
+                return Err(unpaired());
+            }
+            let second = json_hex4(chars, at + 8, span)?;
+            if !(0xDC00..=0xDFFF).contains(&second) {
+                return Err(unpaired());
+            }
+            let combined = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
+            Ok((char::from_u32(combined).ok_or_else(unpaired)?, at + 12))
+        }
+        0xDC00..=0xDFFF => Err(unpaired()),
+        _ => Ok((
+            char::from_u32(first)
+                .ok_or_else(|| Error::Runtime("Invalid JSON escape".to_string(), span))?,
+            at + 6,
+        )),
+    }
+}
+
+/// Parses CSV the way the format spells itself: a field whose first character
+/// is `"` is quoted, and inside a quoted field a comma, a newline and `""` are
+/// data rather than structure. A bare field keeps its old meaning — trimmed of
+/// surrounding whitespace — because that is what the language shipped.
+///
+/// Rows may be ragged: each row is returned with the cells it actually has, so
+/// a short row is a short row rather than an error.
+fn parse_csv(text: &str, span: Span) -> Result<Value> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut rows: Vec<Value> = Vec::new();
+    let mut row: Vec<Value> = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut was_quoted = false;
+    let mut quote_closed = false;
+    let mut at_field_start = true;
+    let mut index = 0;
+
+    while index < chars.len() {
+        let c = chars[index];
+        if in_quotes {
+            if c == '"' && chars.get(index + 1) == Some(&'"') {
+                field.push('"');
+                index += 2;
+                continue;
+            }
+            if c != '"' {
+                field.push(c);
+                index += 1;
+                continue;
+            }
+            in_quotes = false;
+            quote_closed = true;
+            index += 1;
+            continue;
+        }
+        if quote_closed {
+            // Whatever sits between the closing quote and the separator is not
+            // part of the field: the quote already said where the field ends.
+            if c == ',' || c == '\n' || c == '\r' {
+                quote_closed = false;
+            } else {
+                index += 1;
+                continue;
+            }
+        }
+        match c {
+            '"' if at_field_start => {
+                in_quotes = true;
+                was_quoted = true;
+                at_field_start = false;
+            }
+            ',' | '\n' | '\r' => {
+                let cell = if was_quoted {
+                    field.clone()
+                } else {
+                    field.trim().to_string()
+                };
+                row.push(Value::Text(cell));
+                field.clear();
+                was_quoted = false;
+                at_field_start = true;
+                if c != ',' {
+                    // A lone CR and the CR of a CRLF pair both end the row, so a
+                    // file written on either platform reads the same.
+                    if c == '\r' && chars.get(index + 1) == Some(&'\n') {
+                        index += 1;
+                    }
+                    rows.push(Value::List(std::mem::take(&mut row)));
+                }
+            }
+            _ => {
+                field.push(c);
+                at_field_start = false;
+            }
+        }
+        index += 1;
+    }
+
+    if in_quotes {
+        return Err(Error::Runtime(
+            "Invalid CSV: unterminated quoted field".to_string(),
+            span,
+        ));
+    }
+    if at_field_start && row.is_empty() {
+        // The text ended on a row separator, so there is no trailing empty row
+        // — and empty text has no rows at all.
+        return Ok(Value::List(rows));
+    }
+    let cell = if was_quoted {
+        field.clone()
+    } else {
+        field.trim().to_string()
+    };
+    row.push(Value::Text(cell));
+    rows.push(Value::List(row));
+    Ok(Value::List(rows))
+}
+
 fn parse_json_object(json: &str, span: Span) -> Result<Value> {
     let json = json.trim();
     if !json.starts_with('{') || !json.ends_with('}') {
@@ -1562,6 +1727,14 @@ fn parse_json_object(json: &str, span: Span) -> Result<Value> {
     for pair in split_json_pairs(content) {
         let parts: Vec<&str> = pair.splitn(2, ':').collect();
         if parts.len() != 2 {
+            // A pair with no colon is malformed input, not a pair to skip: it
+            // used to vanish and leave a record that was missing its field.
+            if !pair.trim().is_empty() {
+                return Err(Error::Runtime(
+                    "Invalid JSON object: expected \'key: value\'".to_string(),
+                    span,
+                ));
+            }
             continue;
         }
         let key = parse_json_string(parts[0].trim(), span)?;
@@ -1589,29 +1762,74 @@ fn parse_json_array(json: &str, span: Span) -> Result<Value> {
 
 fn parse_json_string(json: &str, span: Span) -> Result<String> {
     let json = json.trim();
-    if !json.starts_with('"') || !json.ends_with('"') {
+    if !json.starts_with('"') || !json.ends_with('"') || json.len() < 2 {
         return Err(Error::Runtime("Invalid JSON string".to_string(), span));
     }
-    let mut result = String::new();
     let chars: Vec<char> = json[1..json.len() - 1].chars().collect();
+    let mut result = String::new();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            match chars[i + 1] {
-                'n' => result.push('\n'),
-                't' => result.push('\t'),
-                'r' => result.push('\r'),
-                '\"' => result.push('"'),
-                '\\' => result.push('\\'),
-                _ => result.push(chars[i + 1]),
-            }
-            i += 2;
-        } else {
+        if chars[i] != '\\' {
             result.push(chars[i]);
             i += 1;
+            continue;
         }
+        let escape = *chars.get(i + 1).ok_or_else(|| {
+            Error::Runtime(
+                "Invalid JSON escape: string ends with '\\'".to_string(),
+                span,
+            )
+        })?;
+        match escape {
+            'n' => result.push('\n'),
+            't' => result.push('\t'),
+            'r' => result.push('\r'),
+            'b' => result.push('\u{8}'),
+            'f' => result.push('\u{c}'),
+            '"' => result.push('"'),
+            '\\' => result.push('\\'),
+            'u' => {
+                let (character, next) = decode_json_unicode_escape(&chars, i, span)?;
+                result.push(character);
+                i = next;
+                continue;
+            }
+            other => {
+                return Err(Error::Runtime(
+                    format!("Invalid JSON escape: '\\{}'", other),
+                    span,
+                ))
+            }
+        }
+        i += 2;
     }
     Ok(result)
+}
+
+/// Escapes `text` for a JSON string body: the quote, the backslash and every
+/// control character that JSON requires be written as an escape.
+fn json_escape_text(text: &str) -> String {
+    let mut result = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            '\u{8}' => result.push_str("\\b"),
+            '\u{c}' => result.push_str("\\f"),
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            other => {
+                if (other as u32) < 0x20 {
+                    result.push_str(&format!("\\u{:04x}", other as u32));
+                } else {
+                    result.push(other);
+                }
+            }
+        }
+    }
+    result.push('"');
+    result
 }
 
 fn split_json_pairs(content: &str) -> Vec<&str> {
@@ -1668,21 +1886,7 @@ fn json_stringify(value: &Value) -> String {
                 format!("{}", n)
             }
         }
-        Value::Text(s) => {
-            let mut result = String::from("\"");
-            for c in s.chars() {
-                match c {
-                    '\n' => result.push_str("\\n"),
-                    '\r' => result.push_str("\\r"),
-                    '\t' => result.push_str("\\t"),
-                    '"' => result.push_str("\\\""),
-                    '\\' => result.push_str("\\\\"),
-                    _ => result.push(c),
-                }
-            }
-            result.push('"');
-            result
-        }
+        Value::Text(s) => json_escape_text(s),
         Value::List(items) => {
             let elements: Vec<String> = items.iter().map(json_stringify).collect();
             format!("[{}]", elements.join(", "))
@@ -1690,7 +1894,7 @@ fn json_stringify(value: &Value) -> String {
         Value::Record(fields) => {
             let pairs: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("\"{}\": {}", k, json_stringify(v)))
+                .map(|(k, v)| format!("{}: {}", json_escape_text(k), json_stringify(v)))
                 .collect();
             format!("{{{}}}", pairs.join(", "))
         }

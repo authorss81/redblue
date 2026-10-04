@@ -25,7 +25,7 @@ pub use value::{FunctionValue, Value};
 pub use vm::{
     resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
     run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS, MAX_ITERATIONS_ENV,
-    MAX_STEPS, MAX_STEPS_ENV,
+    MAX_STEPS, MAX_STEPS_ENV, NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
 
 pub fn run_file(path: &str) -> Result<(), Error> {
