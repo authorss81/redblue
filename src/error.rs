@@ -95,12 +95,14 @@ impl Error {
     pub fn render(&self, source: &str, file: Option<&str>) -> String {
         let mut out = format!("{}: {}", self.label(), self.message());
 
-        let location = match self.location(file) {
-            Some(location) => location,
+        let span = match self.span() {
+            Some(span) => *span,
             None => return out,
         };
-
-        let span = self.span().expect("location implies a known span");
+        let location = match file {
+            Some(name) => format!("{}:{}", name, span),
+            None => span.to_string(),
+        };
         let line_number = span.line.to_string();
         let gutter = " ".repeat(line_number.len());
 

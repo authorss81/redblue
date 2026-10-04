@@ -274,23 +274,198 @@ fn edge_unknown_span_renders_message_only() {
 }
 
 #[test]
+fn edge_crlf_source_renders_a_clean_caret_line() {
+    let source = "set x to 1\r\nsay x +\r\n";
+    let error = error_of(source);
+
+    assert_eq!(
+        error.span(),
+        Some(&Span::new(2, 9)),
+        "a CRLF file must report the same position as an LF file, got: {:?}",
+        error.span()
+    );
+
+    let rendered = error.render(source, Some("crlf.rb"));
+    let lines: Vec<&str> = rendered.lines().collect();
+
+    assert_eq!(
+        lines[2], "2 | say x +",
+        "the echoed line must not keep its \\r"
+    );
+    assert_eq!(
+        lines[3],
+        format!("  | {}^", " ".repeat(8)),
+        "the caret line must not keep a stray \\r, got: {:?}",
+        lines[3]
+    );
+    assert!(
+        !rendered.contains('\r'),
+        "no carriage return may survive into the diagnostic, got: {:?}",
+        rendered
+    );
+}
+
+#[test]
+fn edge_nested_block_error_points_at_the_innermost_statement() {
+    let source = "for each i in [1, 2]\n    if i is 1 then\n        say i / 0\n    end\nend\n";
+    let error = error_of(source);
+
+    assert!(
+        error.to_string().contains("Division by zero"),
+        "the failure must still be reported, got: {}",
+        error
+    );
+    assert_eq!(
+        error.span(),
+        Some(&Span::new(3, 9)),
+        "the innermost statement owns the position, not the loop, got: {:?}",
+        error.span()
+    );
+}
+
+#[test]
+fn edge_nested_analyzer_error_points_at_the_offending_name() {
+    let source =
+        "for each i in [1, 2]\n    if i is 1 then\n        say undefined_name\n    end\nend\n";
+    let error = error_of(source);
+
+    assert!(
+        error.to_string().contains("undefined_name"),
+        "the undefined name must be named, got: {}",
+        error
+    );
+    assert_eq!(
+        error.span(),
+        Some(&Span::new(3, 9)),
+        "the analyzer must point at the nested statement, got: {:?}",
+        error.span()
+    );
+}
+
+#[test]
+fn edge_four_digit_line_number_widens_the_caret_gutter() {
+    let mut source = String::new();
+    for _ in 1..=999 {
+        source.push_str("say 1\n");
+    }
+    source.push_str("say 1 +\n");
+
+    let error = error_of(&source);
+    assert_eq!(
+        error.span(),
+        Some(&Span::new(1000, 8)),
+        "the last line of a long file must be located exactly, got: {:?}",
+        error.span()
+    );
+
+    let rendered = error.render(&source, Some("big.rb"));
+    let lines: Vec<&str> = rendered.lines().collect();
+
+    assert_eq!(lines[1], "  --> big.rb:1000:8", "the location is reported");
+    assert_eq!(lines[2], "1000 | say 1 +", "the source line is echoed");
+    assert_eq!(
+        lines[3],
+        format!("{} | {}^", " ".repeat(4), " ".repeat(7)),
+        "the caret gutter must grow with the line number, got: {:?}",
+        lines[3]
+    );
+}
+
+#[test]
+fn edge_column_past_the_end_of_the_line_does_not_panic() {
+    // A span can point past the end of its line (an unterminated construct is
+    // reported at the end of input). Rendering must still succeed.
+    let error = Error::Parser("Unexpected end of input".to_string(), Span::new(1, 40));
+    let rendered = error.render("say 1\n", Some("short.rb"));
+    let lines: Vec<&str> = rendered.lines().collect();
+
+    assert_eq!(lines[1], "  --> short.rb:1:40", "the position is reported");
+    assert_eq!(lines[2], "1 | say 1", "the short line is echoed");
+    assert_eq!(
+        lines[3],
+        format!("  | {}^", " ".repeat(39)),
+        "the caret sits at the reported column, got: {:?}",
+        lines[3]
+    );
+}
+
+#[test]
+fn test_mixed_width_unicode_columns_are_counted_in_characters() {
+    // Four bytes of emoji, three bytes of CJK and a combining mark before the
+    // failure. The column must be a character count, not a byte count.
+    let source = "say \"\u{1F600}\u{4F60}\u{597D}\u{0065}\u{0301}\" +\n";
+    let error = error_of(source);
+
+    // `say "` is five characters, then the emoji, two CJK characters, a
+    // letter and a combining mark are five more, so the newline that ends the
+    // broken expression is the fourteenth character — not the twenty-third
+    // byte.
+    assert_eq!(
+        error.span(),
+        Some(&Span::new(1, 14)),
+        "mixed-width characters must not inflate the column, got: {:?}",
+        error.span()
+    );
+
+    let rendered = error.render(source, None);
+    let caret_line = rendered.lines().last().expect("render has a caret line");
+    assert_eq!(
+        caret_line,
+        format!("  | {}^", " ".repeat(13)),
+        "the caret must sit under character column 14, got: {:?}",
+        caret_line
+    );
+}
+
+#[test]
 fn test_every_failed_program_reports_a_position() {
+    // One failing program per error path. Every one of them must carry a known
+    // position, and that position must be inside the file (an unterminated
+    // construct is reported at the end of input, which is one line past the
+    // last line and nothing further).
     let failures = [
+        "set x to 1\nset y to @\n",
+        "set x to 1\nend\n",
+        "set x to 1\nif x then\nsay 2\n",
+        "for each i in [1, 2]\nsay i\n",
+        "to add(a, b)\nset c to a + b\n",
+        "set x to (1 + \n",
+        "set\n",
+        "say {1: 2}\n",
+        "test\n",
         "say x +\n",
         "set x to 1\nsay x +\n",
-        "set\n",
-        "for each i in [1]\nsay nope\nend\n",
-        "set x to 1\nif x then\nsay 2\n",
-        "to add(a, b)\nset c to a + b\ngive back c\nend\nset d to add(1, q)\n",
-        "say {1: 2, 3}\n",
+        "set x to 1\nsay x + \"a\"\n",
+        "say 1 / 0\n",
+        "say missing\n",
+        "if 1 is 1 then\n    say nope\nend\n",
+        "to f()\n    give back q\nend\nsay f()\n",
+        "set x to 1\nsay x(2)\n",
+        "import NoSuchModule\nsay 1\n",
     ];
 
     for source in failures {
         let error = error_of(source);
+        let label = source.trim().replace('\n', " ; ");
+
+        let span = error
+            .span()
+            .unwrap_or_else(|| panic!("`{}` must report a source position, got: {}", label, error));
+
+        let last_line = source.lines().count();
         assert!(
-            error.span().is_some(),
-            "`{}` must report a source position, got: {}",
-            source.trim(),
+            span.line >= 1 && span.line <= last_line + 1,
+            "`{}` reported line {} but the file has {} lines, got: {}",
+            label,
+            span.line,
+            last_line,
+            error
+        );
+        assert!(
+            span.column >= 1,
+            "`{}` reported column {} but columns are 1-based, got: {}",
+            label,
+            span.column,
             error
         );
     }
