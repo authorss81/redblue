@@ -17,6 +17,22 @@ wrong before the fix.
 3. **The `errors` list was never written to.** `lint()` returned
    `(vec![], vec![])` for any source that failed to lex or parse, so
    `rb lint` exited 0 on a file that cannot run — a missing `end` included.
+4. **An object named by `extends` was reported as an unused variable.**
+   `Statement::Object` destructured the parent as `extends: _` and dropped it,
+   but `object Child extends Parent` reads `Parent`: the VM walks
+   `self.objects` when the declaration runs (`src/vm.rs:1419`) and the analyser
+   requires the parent to be declared (`src/analyzer.rs:188`). Found by the
+   resumed run, which re-walked the corpus the previous attempt had declared
+   clean. Five warnings in `tests/test_objects.rb` and
+   `tests/test_object_model.rb` were this one false positive.
+5. **The corpus cross-check was blind to it.** `is_binding_mention` in
+   `tests/linter_test.rs` listed `(Some("extends"), _)`, classifying the parent
+   name as a binding. `extends` binds nothing, so the checker that was supposed
+   to catch the previous item could not. Reverting the fix while the checker was
+   corrected makes
+   `edge_no_unused_variable_warning_in_the_corpus_names_a_read_variable` fail
+   with `tests/test_object_model.rb:74 claims 'One' is unused but it is read on
+   [80]`.
 
 ## Findings that belong to other phases
 
@@ -42,20 +58,33 @@ Redblue functions are first class (`set double to to double(v) ... end`, see
 Until the linter tracks values it would fire false positives, so the field stays
 inert and is commented rather than turned into a half-rule.
 
-### F3 — the test corpus now carries true-positive warnings
+### F3 — the test corpus carries true-positive warnings
 
-`rb lint tests/*.rb` reports 23 unused variables and one shadowed parameter
+`rb lint tests/*.rb` reports 17 unused variables and one shadowed parameter
 across the `.rb` suite. Each one was checked by
 `edge_no_unused_variable_warning_in_the_corpus_names_a_read_variable` and
 `edge_every_shadow_warning_in_the_corpus_hides_a_real_outer_binding`, which read
-the source independently of the linter: the names really are never read. Two
-that look wrong at first glance and are not:
+the source independently of the linter: the names really are never read. They
+fall into four groups:
 
-- `tests/test_text.rb:40` `name` — `{name}` inside a text literal. Interpolation
-  is in SPEC.md but unimplemented, so the braces are literal characters and the
-  name is text, not a read. `tests/test_text.rb:38` says so in a comment.
-- `tests/test_objects.rb` `One`, `Two` — `object Two extends One` names the
-  parent at declaration time; neither record is read afterwards.
+- `set <name> to <expr>` inside a `try` whose right-hand side is written to
+  fault (`1 / 0`, `1 + "x"`, `items[999]`, a call to a function that recurses
+  until the depth guard trips) — the binding target is never read because the
+  assignment never completes. 13 of the 17.
+- `tests/test_control_flow.rb:175` `only_inside` and
+  `tests/test_functions.rb:195` `marker` — the test is about the branch or the
+  `catch` being taken, not about the name written there.
+- `tests/test_text.rb:40` `name` and `:139` `word` — `{name}` inside a text
+  literal. Interpolation is in SPEC.md but unimplemented, so the braces are
+  literal characters and the name is text, not a read.
+  `tests/test_text.rb:38` says so in a comment.
+- `tests/test_closures.rb:52` `Parameter 'v' shadows an outer variable` — the
+  test is named "a parameter shadows what the declaration captured", so the
+  shadowing is the behaviour under test.
+
+A fourth group was here and is now fixed: `object Two extends One` used to
+report the parent `One` as an unused variable. See item 4 under "The finding
+reproduced".
 
 If a later gate wants `rb lint` silent over `tests/`, those tests must first
 read their values, which would be a change to the language's test corpus and

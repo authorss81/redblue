@@ -91,6 +91,47 @@ fn an_unused_object_is_reported_like_any_other_variable() {
 }
 
 #[test]
+fn a_parent_object_named_by_extends_is_not_reported() {
+    let source = "object One\nend\n\nobject Two extends One\nend\n\nsay \"hi\"\n";
+    assert_eq!(
+        warnings(source),
+        vec!["Unused variable: 'Two'"],
+        "`extends One` reads the parent record at declaration time (src/vm.rs:1419), \
+         so `One` is used and only the never-referenced child is unused"
+    );
+}
+
+#[test]
+fn edge_extends_of_an_undeclared_parent_is_still_a_plain_read() {
+    // The analyser and the VM both reject an undeclared parent, so the linter
+    // must not read `One` as declared: only `Two` can be reported, and `One`
+    // is not one of the file's variables to report at all.
+    let source = "object Two extends One\nend\nsay \"hi\"\n";
+    assert_eq!(warnings(source), vec!["Unused variable: 'Two'"]);
+}
+
+#[test]
+fn edge_every_parent_in_a_chain_of_extends_is_read() {
+    let source = "object A\nend\n\nobject B extends A\nend\n\nobject C extends B\nend\n\nset c to C\nsay c.label\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "`A` and `B` are named by `extends` and `C` is read: nothing is unused"
+    );
+    assert_eq!(warnings(source), Vec::<String>::new());
+}
+
+#[test]
+fn edge_the_leaf_of_an_extends_chain_is_still_reported_when_unread() {
+    let source = "object A\nend\n\nobject B extends A\nend\n\nset a to A\nsay a.label\n";
+    assert_eq!(
+        warnings(source),
+        vec!["Unused variable: 'B'"],
+        "reading the parent must not mark the child used"
+    );
+}
+
+#[test]
 fn an_underscore_prefixed_name_is_left_alone() {
     let source = "set _ignored to 1\nsay \"hi\"\n";
     assert_eq!(every_message(source), Vec::<String>::new());
@@ -476,6 +517,9 @@ fn is_field_key(tokens: &[String], index: usize) -> bool {
 }
 
 /// True when the mention of `name` on this line binds it rather than reads it.
+/// `extends` is deliberately absent: `object Child extends Parent` binds
+/// nothing and reads `Parent`, so naming it here would hide exactly the false
+/// positive the corpus check exists to find.
 fn is_binding_mention(tokens: &[String], index: usize) -> bool {
     let before = index.checked_sub(1).map(|i| tokens[i].as_str());
     let after = tokens.get(index + 1).map(String::as_str);
@@ -486,7 +530,6 @@ fn is_binding_mention(tokens: &[String], index: usize) -> bool {
             | (Some("for"), Some("from"))
             | (Some("each"), Some("in"))
             | (Some("object"), _)
-            | (Some("extends"), _)
             | (Some("has"), _)
             | (Some("to"), _)
     )
@@ -644,4 +687,61 @@ fn edge_every_shadow_warning_in_the_corpus_hides_a_real_outer_binding() {
             );
         }
     }
+}
+
+// --- the output of `rb lint` itself ---------------------------------------
+
+/// Runs `rb lint` on a file in the project's scratch directory and returns
+/// `(exit code, stderr)`. A diagnostic about a real file is only worth
+/// printing if it says where the file is wrong.
+fn lint_on_the_binary(source: &str) -> (i32, String) {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/linter");
+    fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+    let serial = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = dir.join(format!("lint-{}-{}.rb", std::process::id(), serial));
+    fs::write(&path, source).expect("lint target should be writable");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("lint")
+        .arg(&path)
+        .output()
+        .expect("the rb binary should run");
+    let _ = fs::remove_file(&path);
+
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn edge_rb_lint_prints_the_line_of_every_warning() {
+    let source = "set a to 1\nset b to 2\nset c to 3\nsay \"hi\"\n";
+    let (code, stderr) = lint_on_the_binary(source);
+    assert_eq!(code, 0, "warnings alone do not fail the lint: {stderr}");
+    assert!(
+        stderr.contains("line 1") && stderr.contains("Unused variable: 'a'"),
+        "the first warning must name line 1: {stderr}"
+    );
+    assert!(
+        stderr.contains("line 3") && stderr.contains("Unused variable: 'c'"),
+        "the third warning must name line 3: {stderr}"
+    );
+}
+
+#[test]
+fn edge_rb_lint_prints_the_line_of_a_syntax_error_and_exits_nonzero() {
+    let (code, stderr) = lint_on_the_binary("say \"hi\"\nif yes then\n    say \"no\"\n");
+    assert_eq!(code, 1, "a missing `end` must fail the lint: {stderr}");
+    assert!(
+        stderr.contains("Error:") && stderr.contains("Expected End"),
+        "a missing `end` must be named as such: {stderr}"
+    );
+    // The parser reports at the point the `end` was due, which is end of file,
+    // so the line is the last line rather than the line the `if` opened on.
+    assert!(
+        stderr.contains("line 4"),
+        "the syntax error must name the line it is on: {stderr}"
+    );
 }

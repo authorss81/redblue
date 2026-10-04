@@ -277,10 +277,16 @@ impl Linter {
             }
             Statement::Object {
                 name,
-                extends: _,
+                extends,
                 body,
             } => {
                 self.declare(name, span);
+                // `object Child extends Parent` reads the parent record when
+                // the declaration runs, so `Parent` is used by the declaration
+                // itself and must not be reported as an unused variable.
+                if let Some(parent) = extends {
+                    self.use_name(parent);
+                }
                 self.analyze_body(body);
             }
             Statement::Try {

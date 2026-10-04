@@ -142,11 +142,15 @@ pub fn run_cli() {
                 "lint" => match fs::read_to_string(path) {
                     Ok(source) => {
                         let (errors, warnings) = linter::lint(&source);
+                        // The line is printed with every finding: a file with
+                        // five unused variables says nothing about which `set`
+                        // each one names, and a reader cannot act on that. The
+                        // path is not repeated — the reader named the file.
                         for warning in &warnings {
-                            eprintln!("Warning: {}", warning.message);
+                            eprintln!("Warning: line {}: {}", warning.line, warning.message);
                         }
                         for error in &errors {
-                            eprintln!("Error: {}", error.message);
+                            eprintln!("Error: line {}: {}", error.line, error.message);
                         }
                         if !errors.is_empty() {
                             process::exit(1);
