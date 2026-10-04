@@ -976,3 +976,218 @@ fn edge_grouping_survives_in_what_the_program_computes() {
     assert_eq!(run_program(&formatted), "9\n");
     assert_eq!(run_program("set a to 1 + 2 * 3\nsay a\n"), "7\n");
 }
+
+// ---------------------------------------------------------------------------
+// Forms the specification documents but the parser does not yet build
+//
+// `SPEC.md:383`, `SPEC.md:388`, `SPEC.md:427` and `docs/GRAMMAR.md:472` all
+// document `for each <v> from <a> to <b> [by <step>]`. `docs/GRAMMAR.md:368-371`
+// and `:438` document the relational operators `is less than`,
+// `is greater than`, `is less than or equal to`, `is greater than or equal to`
+// and the symbols `<`, `<=`, `>`, `>=`.
+//
+// Neither reaches the formatter: `src/parser.rs:694` is the only place a loop
+// is built and it builds `Statement::ForEach`, never `Statement::ForRange`, and
+// the lexer has no `<` token. So these forms are reachable by no corpus file
+// and by no other test here, which left the formatter's handling of them
+// unasserted. The tests below pin what the formatter actually does with them.
+//
+// They are deliberately written as *current behaviour*, not desired behaviour.
+// If a later phase gives the parser the `for … from … to … by …` loop or the
+// relational operators, these fail, and that failure is the signal to extend
+// `format_covers_every_statement_form` and
+// `format_keeps_grouping_for_unary_and_every_operator_level`.
+// ---------------------------------------------------------------------------
+
+/// The `for … from … to … by …` loop, exactly as `SPEC.md:388` spells it.
+const SPEC_FOR_FROM_TO_BY: &str = "for each i from 0 to 10 by 5\n    say i\nend\n";
+/// The same loop without the step clause, as `SPEC.md:383` spells it.
+const SPEC_FOR_FROM_TO: &str = "for each i from 1 to 10\n    say i\nend\n";
+/// The symbolic relational operator of `docs/GRAMMAR.md:438`.
+const SPEC_LESS_SYMBOL: &str = "say 1 < 2\n";
+/// The word relational operator of `docs/GRAMMAR.md:368`.
+const SPEC_LESS_WORDS: &str = "say 1 is less than 2\n";
+/// The word relational operator of `docs/GRAMMAR.md:370`.
+const SPEC_GREATER_EQUAL_WORDS: &str = "say 2 is greater than or equal to 1\n";
+
+#[test]
+fn edge_a_for_from_to_loop_is_reported_not_silently_rewritten() {
+    for (label, source) in [
+        ("with a step", SPEC_FOR_FROM_TO_BY),
+        ("without a step", SPEC_FOR_FROM_TO),
+    ] {
+        let error = formatter::format(source).err().unwrap_or_else(|| {
+            panic!(
+                "{}: `for … from … to …` is not grammar, so it must be \
+                 reported rather than formatted into a different program\nsource: {:?}",
+                label, source
+            )
+        });
+
+        assert!(
+            error.starts_with("Parser error"),
+            "{}: expected a parser error naming the unexpected keyword, got: {}",
+            label,
+            error
+        );
+        assert!(
+            error.contains("From"),
+            "{}: the error should name the `from` the parser did not expect, got: {}",
+            label,
+            error
+        );
+    }
+}
+
+#[test]
+fn edge_a_symbolic_relational_operator_is_reported_not_guessed_at() {
+    let error = formatter::format(SPEC_LESS_SYMBOL)
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "`<` has no token in the lexer, so it must be reported\nsource: {:?}",
+                SPEC_LESS_SYMBOL
+            )
+        });
+
+    assert!(
+        error.starts_with("Lexer error"),
+        "expected a lexer error for `<`, got: {}",
+        error
+    );
+    assert!(
+        error.contains('<'),
+        "the error should quote the character it choked on, got: {}",
+        error
+    );
+}
+
+#[test]
+fn edge_a_word_comparison_fails_the_same_way_before_and_after_formatting() {
+    // `is less than` is three ordinary words to the current parser, so this
+    // formats successfully — into three separate statements. That is a
+    // faithful rendering of what the parser actually built, and the program
+    // was already rejected before formatting. What must not happen is the
+    // failure changing: a formatter that made a broken program run, or a
+    // different program break, would be a semantic change.
+    //
+    // Only the error *identity* is compared. The rest of a diagnostic is a
+    // quotation of the source it read, and formatting moved text within that
+    // source, so the quoted line is expected to differ — it is a picture of
+    // the formatted file, not part of the error.
+    let label = "is less than";
+    let source = SPEC_LESS_WORDS;
+
+    let formatted = assert_idempotent(source, label);
+
+    let before = run_rb("run", source);
+    let after = run_rb("run", &formatted);
+
+    assert_eq!(
+        before.code, after.code,
+        "{}: formatting must not change whether the program runs",
+        label
+    );
+    assert_eq!(
+        before.stdout, after.stdout,
+        "{}: formatting must not change what the program prints",
+        label
+    );
+    assert_eq!(
+        error_line(&before.stderr),
+        error_line(&after.stderr),
+        "{}: formatting must not change the error that is reported",
+        label
+    );
+    assert_eq!(
+        before.code, 1,
+        "{}: `is less than` is documented in docs/GRAMMAR.md:368 but is not \
+         built, so this test records a failure and must be revisited when it is",
+        label
+    );
+}
+
+#[test]
+fn edge_a_comparison_containing_or_is_reported_not_silently_rewritten() {
+    // The same spec gap, reached differently: `or` *is* a keyword, so
+    // `is greater than or equal to` does not fall apart into three harmless
+    // statements — it fails to parse, because `or` is read as an operator and
+    // `equal to 1` then sits where a function name belongs. It must be
+    // reported, not guessed at.
+    let error = formatter::format(SPEC_GREATER_EQUAL_WORDS)
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "`… or equal to …` is not grammar, so it must be reported\nsource: {:?}",
+                SPEC_GREATER_EQUAL_WORDS
+            )
+        });
+
+    assert!(
+        error.starts_with("Parser error"),
+        "expected a parser error for `is greater than or equal to`, got: {}",
+        error
+    );
+
+    // The CLI reports it rather than printing a mangled program or exiting 0.
+    let run = run_rb("format", SPEC_GREATER_EQUAL_WORDS);
+    assert_eq!(
+        run.code, 1,
+        "`rb format` must exit 1 on a file it cannot format, got code {}",
+        run.code
+    );
+    assert!(
+        run.stderr.contains("Format error"),
+        "`rb format` must say the file does not format, got: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.stdout, "",
+        "`rb format` must print nothing it could not stand behind, got: {}",
+        run.stdout
+    );
+}
+
+/// The `Error: …` head of a diagnostic, without the quoted source line under
+/// it, which is a rendering of the file rather than part of the error.
+fn error_line(stderr: &str) -> &str {
+    stderr.lines().next().unwrap_or("")
+}
+
+#[test]
+fn edge_every_spec_only_form_is_either_idempotent_or_a_clean_reported_error() {
+    // The umbrella over the three tests above: whatever the parser makes of
+    // these forms, the formatter must be idempotent on what it accepts, must
+    // reject what it cannot parse without a panic, and must never turn a
+    // reported error into a successful format.
+    for source in [
+        SPEC_FOR_FROM_TO_BY,
+        SPEC_FOR_FROM_TO,
+        SPEC_LESS_SYMBOL,
+        SPEC_LESS_WORDS,
+        SPEC_GREATER_EQUAL_WORDS,
+    ] {
+        match formatter::format(source) {
+            Ok(once) => {
+                let twice = formatter::format(&once).unwrap_or_else(|e| {
+                    panic!(
+                        "formatting {:?} once succeeded but failed again: {}",
+                        source, e
+                    )
+                });
+                assert_eq!(
+                    once, twice,
+                    "a form the parser accepts must format idempotently: {:?}",
+                    source
+                );
+            }
+            Err(error) => assert!(
+                error.starts_with("Lexer error") || error.starts_with("Parser error"),
+                "a form the parser rejects must be reported as a lexer or parser \
+                 error, not something else: {:?} -> {}",
+                source,
+                error
+            ),
+        }
+    }
+}
