@@ -89,3 +89,57 @@ reproduced".
 If a later gate wants `rb lint` silent over `tests/`, those tests must first
 read their values, which would be a change to the language's test corpus and
 should be its own phase.
+
+### F4 — `import X as Y` is the documented alias syntax and the parser does not read it
+
+`SPEC.md:645` writes `import MathUtils as M`, `docs/GRAMMAR.md:152` gives
+`import_statement = 'import' identifier { 'as' identifier }`, and `AGENTS.md:182`
+writes `import files, network as net`. `parse_import`
+(`src/parser.rs:479-497`) accepts `to` instead of `as`, and nothing else. So the
+documented form parses the import, drops the alias, and leaves `as M` to be
+re-read as two expression statements.
+
+Reproduced on the built binary:
+
+```
+$ cat target/tmp/lint/alias.rb
+import MathUtils as M
+
+set area to M.circle_area(5)
+say area
+
+$ ./target/debug/rb run target/tmp/lint/alias.rb
+Error: AnalyzerError: Unknown variable 'as'
+Unknown variable 'M'
+Unknown variable 'M'
+  --> target/tmp/lint/alias.rb:1:18
+exit=1
+
+$ ./target/debug/rb lint target/tmp/lint/alias.rb
+Warning: line 1: Unused import: 'MathUtils'
+exit=0
+```
+
+The linter's warning is true of the tree it was handed — nothing in that tree
+mentions `MathUtils` — so it is not a linter false positive. It is the linter
+being honest about a parse that lost the alias. `tests/test_modules.rb:46` and
+`:80` use `import SuiteKit to K` / `import NopeNotHere to N`, so the working
+form is `to` and the documented form is `as`; both cannot be right.
+
+Not this phase's work: it is a change to the parser and a decision about which
+of the two spellings the language keeps, and the linter cannot be made correct
+about `as` without it. Recording it so a grammar phase can settle it.
+
+### F5 — the linter gives a `finally` body a scope the analyser does not
+
+`src/linter.rs:304` walks the `finally` body through `analyze_body`, which pushes
+a scope. `src/analyzer.rs:216-218` walks the same body with no scope pushed, so
+a name written there belongs to the enclosing scope in the analyser.
+
+Nothing observable depends on it today, and `edge_a_finally_binding_does_not_shadow_the_catch_binding`
+pins the behaviour that agrees with the analyser: the `catch` binding's scope is
+closed before `finally` runs, so reusing that name in `finally` is a new binding
+and not a shadow. The divergence would matter only if a rule were ever written
+that reads through a block boundary. Noted so the next phase that touches
+`finally` knows the two walkers disagree.
+

@@ -234,6 +234,113 @@ fn edge_a_catch_binding_that_hides_an_outer_variable_is_reported() {
     );
 }
 
+#[test]
+fn an_unread_object_method_parameter_is_not_an_unused_variable() {
+    // `to can` is a second signature syntax with its own branch in the linter
+    // (`Statement::Method`). An unread parameter there is part of the signature
+    // in exactly the way an unread `to` parameter is.
+    let source = "object Person\n    to can role()\n        give back \"person\"\n    end\n\n    to can greet(who)\n        say \"hello\"\n    end\nend\n\nsay Person.role()\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "an unread method parameter is not a leftover binding: {:?}",
+        every_message(source)
+    );
+
+    // The same method with a body binding in it, to show the body is linted and
+    // the silence above is a decision rather than a linter that walked away.
+    let with_leftover = "object Person\n    to can greet(who)\n        set greeting to who\n        say greeting\n    end\nend\n\nsay Person.greet(\"a\")\n";
+    assert_eq!(
+        every_message(with_leftover),
+        Vec::<String>::new(),
+        "a read body binding is not a finding either: {:?}",
+        every_message(with_leftover)
+    );
+    let (_, warnings) = split("object Person\n    to can greet(who)\n        set greeting to who\n    end\nend\n\nsay Person.greet(\"a\")\n");
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Unused variable: 'greeting'"],
+        "the method body is linted: only `who`, the signature, is left alone"
+    );
+}
+
+#[test]
+fn edge_a_method_parameter_that_hides_a_file_variable_is_reported() {
+    let source = "set who to 1\nobject Person\n    to can greet(who)\n        say who\n    end\nend\n\nsay Person.greet(\"a\")\nsay who\n";
+    assert_eq!(
+        warnings(source),
+        vec!["Parameter 'who' shadows an outer variable"],
+        "the method body sees its own `who`, not the file's"
+    );
+}
+
+// --- object fields ---------------------------------------------------------
+
+#[test]
+fn edge_a_field_declaration_is_not_a_variable_binding() {
+    // `has label` declares a field on the object. It binds no variable, so it
+    // neither reads the file's `label` nor shadows it. The analyser agrees:
+    // `Statement::Has` walks the default expression and ignores the name
+    // (`src/analyzer.rs:176-180`), so a field is never a variable here.
+    let source =
+        "set label to 1\nobject Box\n    has label\nend\n\nset b to Box\nsay b.label\nsay label\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "a field name is not a variable name: {:?}",
+        every_message(source)
+    );
+    // Positive control: the same file with a genuinely unread name is reported,
+    // so the silence above is the linter's decision and not an empty walk.
+    let (_, warnings) = split("set label to 1\nset spare to 1\nobject Box\n    has label\nend\n\nset b to Box\nsay b.label\nsay label\n");
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Unused variable: 'spare'"],
+        "the file's own bindings are still linted"
+    );
+}
+
+#[test]
+fn edge_a_field_default_reads_the_name_it_defaults_from() {
+    let source = "set fallback to \"none\"\nobject Box\n    has label default fallback\nend\n\nset b to Box\nsay b.label\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "the default expression reads `fallback`: {:?}",
+        every_message(source)
+    );
+    let (_, warnings) = split("set fallback to \"none\"\nset spare to 1\nobject Box\n    has label default fallback\nend\n\nset b to Box\nsay b.label\n");
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Unused variable: 'spare'"],
+        "`fallback` is read by the default and `spare` by nothing"
+    );
+}
+
+#[test]
+fn edge_a_literal_field_default_reads_nothing() {
+    let source = "object Box\n    has label default \"none\"\nend\n\nset b to Box\nsay b.label\n";
+    assert_eq!(every_message(source), Vec::<String>::new());
+    let (_, warnings) = split("object Box\n    has label default \"none\"\nend\n\nset spare to 1\nset b to Box\nsay b.label\n");
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Unused variable: 'spare'"],
+        "a literal default reads no name, and the rest of the file is linted"
+    );
+}
+
 // --- source that does not parse -------------------------------------------
 
 #[test]
@@ -298,6 +405,121 @@ fn edge_stray_token_is_an_error_and_not_a_panic() {
 #[test]
 fn edge_unclosed_list_is_an_error_and_not_a_panic() {
     assert_eq!(errors("set items to [1, 2\n").len(), 1);
+}
+
+#[test]
+fn an_unclosed_object_is_an_error_and_not_a_panic() {
+    // The `missing end` rule has to hold for every block, not only `if`: an
+    // `object` whose `end` is missing must fail the lint rather than lint the
+    // half-open body it was given.
+    let found = errors("object Box\n    has label\n");
+    assert_eq!(found.len(), 1, "{:?}", found);
+    assert!(
+        found[0].contains("End"),
+        "the error must name what is missing: {:?}",
+        found
+    );
+    assert!(
+        warnings("object Box\n    has label\n").is_empty(),
+        "a file that does not parse is reported once, not warned about line by line"
+    );
+}
+
+#[test]
+fn edge_print_reads_what_it_prints() {
+    assert_eq!(
+        every_message("set shown to 1\nprint shown\n"),
+        Vec::<String>::new(),
+        "`print` reads its operand the way `say` does"
+    );
+    assert_eq!(
+        warnings("set spare to 1\nprint \"no newline\"\n"),
+        vec!["Unused variable: 'spare'"],
+        "and a name `print` does not mention is still unused"
+    );
+}
+
+#[test]
+fn edge_a_unary_operand_counts_as_read() {
+    // `-n` and `not n` are their own branch in the linter (`Expr::Unary`). If it
+    // did not walk the operand, both of these names would be reported unused.
+    let source =
+        "set n to 5\nset negated to -n\nif not n then\n    say \"impossible\"\nend\nsay negated\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "the operand of a unary operator is read: {:?}",
+        every_message(source)
+    );
+    assert_eq!(
+        warnings("set spare to 1\nsay -1\n"),
+        vec!["Unused variable: 'spare'"]
+    );
+}
+
+#[test]
+fn edge_a_binding_made_in_a_finally_block_is_reported_when_unread() {
+    let clean = "set logged to no\ntry\n    say 1 / 0\ncatch err\n    say \"caught\"\nfinally\n    set logged to yes\nend\nsay logged\n";
+    assert_eq!(
+        every_message(clean),
+        Vec::<String>::new(),
+        "a `finally` binding read after the `try` is used: {:?}",
+        every_message(clean)
+    );
+    let (_, warnings) =
+        split("try\n    say \"fine\"\nfinally\n    set forgotten to 1\nend\nsay \"done\"\n");
+    assert_eq!(warnings.len(), 1, "{:?}", warnings);
+    assert_eq!(warnings[0].message, "Unused variable: 'forgotten'");
+    assert_eq!(
+        warnings[0].line, 4,
+        "the warning points at the `finally` body"
+    );
+}
+
+#[test]
+fn edge_a_finally_binding_does_not_shadow_the_catch_binding() {
+    // The `catch` binding and the `finally` body are sibling blocks: the
+    // analyzer closes the catch scope before it walks `finally`
+    // (`src/analyzer.rs:208-218`), so a name reused there is a new binding and
+    // not a shadow. Reporting it would be the false positive.
+    let source = "try\n    say 1 / 0\ncatch err\n    say err\nfinally\n    set err to \"done\"\nend\nsay err\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "the `catch` binding is a signature and the `finally` name is its own: {:?}",
+        every_message(source)
+    );
+    // Positive control: a `finally` body is walked, and a binding in it that
+    // really does hide a file-level name is reported.
+    let shadowing = "set item to 1\ntry\n    say \"x\"\nfinally\n    for each item in [1]\n        say item\n    end\nend\nsay item\n";
+    assert_eq!(
+        warnings(shadowing),
+        vec!["Variable 'item' shadows an outer variable"],
+        "the `finally` body is linted against the scopes around it"
+    );
+}
+
+#[test]
+fn edge_a_bare_give_back_is_neither_a_read_nor_a_finding() {
+    // `give back` and `return` with no operand are their own branch
+    // (`Return(None)`, `GiveBack(None)`). A body that returns nothing is still a
+    // body, and the linter must not reach past it to claim a name is unread.
+    let source = "to quiet(v)\n    if v is 0 then\n        give back\n    end\n    give back v\nend\n\nto stop()\n    return\nend\n\nsay quiet(1)\nsay stop()\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "a bare `give back` reads nothing and reports nothing: {:?}",
+        every_message(source)
+    );
+    let (_, warnings) = split("to quiet(v)\n    if v is 0 then\n        give back\n    end\n    set leftover to 1\n    give back v\nend\n\nsay quiet(1)\n");
+    assert_eq!(
+        warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Unused variable: 'leftover'"],
+        "the body either side of the bare `give back` is still linted"
+    );
 }
 
 #[test]
@@ -426,6 +648,36 @@ fn nested_scopes_do_not_leak_names_into_each_other() {
 fn edge_a_name_bound_in_a_nested_scope_only_is_still_reported() {
     let source = "repeat 2 times\n    set middle to 1\nend\nsay \"hi\"\n";
     assert_eq!(warnings(source), vec!["Unused variable: 'middle'"]);
+}
+
+#[test]
+fn edge_mutually_recursive_functions_do_not_leak_names_into_each_other() {
+    let source = "to is_even(n)\n    if n is 0 then\n        give back yes\n    end\n    give back is_odd(n - 1)\nend\n\nto is_odd(n)\n    if n is 0 then\n        give back no\n    end\n    give back is_even(n - 1)\nend\n\nsay is_even(4)\n";
+    assert_eq!(
+        every_message(source),
+        Vec::<String>::new(),
+        "each parameter is read inside the function that binds it: {:?}",
+        every_message(source)
+    );
+
+    let (_, warnings) =
+        split("to is_even(n)\n    if n is 0 then\n        give back yes\n    end\n    set leftover to 1\n    give back is_odd(n - 1)\nend\n\nto is_odd(n)\n    if n is 0 then\n        give back no\n    end\n    give back is_even(n - 1)\nend\n\nsay is_even(4)\n");
+    assert_eq!(warnings.len(), 1, "{:?}", warnings);
+    assert_eq!(warnings[0].message, "Unused variable: 'leftover'");
+    assert_eq!(warnings[0].line, 5, "the warning points inside `is_even`");
+}
+
+#[test]
+fn edge_three_nested_scopes_keep_their_own_names() {
+    // A loop inside a loop inside a function: each of the three owns a name,
+    // and the only unread one is the one nobody reads.
+    let source = "set total to 0\nfor each outer_name in [\"a\"]\n    for each inner_name in [\"b\"]\n        to report(label)\n            say label\n            say total\n        end\n        say report(inner_name)\n    end\nend\nsay total\n";
+    assert_eq!(
+        warnings(source),
+        vec!["Unused variable: 'outer_name'"],
+        "only the name no scope reads is reported: {:?}",
+        warnings(source)
+    );
 }
 
 // --- the corpus ------------------------------------------------------------
