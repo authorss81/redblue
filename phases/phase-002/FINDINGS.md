@@ -14,11 +14,14 @@ $ ls rbops
 ls: cannot access 'rbops': No such file or directory
 ```
 
-`rbops/`, `rbops/phases.json` and `phases/` are all absent from the working
-tree. Only `.github/`, `src/`, `tests/`, `examples/`, `modules/`, `docs/` and
-docs files are present. The dispatching pipeline lives outside this checkout
-and was explicitly out of scope to inspect, so the script was not located by
-other means.
+`rbops/` and `rbops/phases.json` are absent from the working tree. Only
+`.github/`, `src/`, `tests/`, `examples/`, `modules/`, `docs/` and docs files are
+present. The dispatching pipeline lives outside this checkout and was explicitly
+out of scope to inspect, so the script was not located by other means.
+
+> Re-checked on the resumed run (2026-10-04): still true for `rbops/`.
+> `phases/` *is* now present — it holds this directory only — so the earlier
+> wording that `phases/` was absent is corrected here.
 
 **Consequence:** gates 1–3 were run and are green (`cargo fmt --all -- --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets` =

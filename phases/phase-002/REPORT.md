@@ -1,32 +1,34 @@
 # Phase 002 — Fix test discovery: stop feeding Rust source to the Redblue harness
 
-> **Accuracy note.** The REPORT.md written by the previous attempt at this phase
-> described a file `tests/harness_discovery_test.rs` containing 15 named tests.
-> No such file exists in the tree, and none of those test names exist anywhere.
-> The committed work is `tests/discovery_test.rs` with 10 tests. That report also
-> claimed "discovery results sorted for a stable report" — the sorting was **not**
-> in the code. This report describes only what is in the tree, verified by
-> running the gates below. See FINDINGS.md F6.
+> **Accuracy note (carried forward).** The `REPORT.md` first committed at this
+> phase (`fa8b1d0`) described a file `tests/harness_discovery_test.rs` containing
+> 15 named tests. No such file exists in the tree, and none of those test names
+> exist anywhere. The committed work is `tests/discovery_test.rs` with 13 tests.
+> That report also claimed "discovery results sorted for a stable report" — the
+> sorting was **not** in the code. See FINDINGS.md F6. This report describes only
+> what is in the tree, re-verified gate by gate on the resumed run.
 
 ## What changed
 
-Two changes across two files. The first was already committed in `fa8b1d0`; the
-second is this run's work.
+Production code is **unchanged by the resumed run**: the fix landed in
+`fa8b1d0`/`5ca4867` and was re-verified here rather than rewritten (details
+below). The resumed run changed documentation only.
 
 | File | Lines | What |
 |---|---|---|
-| `src/testing/mod.rs` | +12 −2 | (this run) `find_test_files` now sorts its result. The recursive walk moved into a private `collect_test_files` so the sort is applied once, globally, to the flattened list rather than per-directory. |
-| `tests/discovery_test.rs` | +108 | (this run) 3 new tests: sorted/stable discovery order, global sort across nesting, and the real-tree assertion that no `tests/*_test.rs` is ever collected. |
-| `src/testing/mod.rs` | +14 −9 | (prior commit `fa8b1d0`) discovery collects `.rb` only; `run_all_tests` dropped its `_test.rs` re-filter; `find_test_files` made `pub`. |
-| `tests/discovery_test.rs` | +289 | (prior commit `fa8b1d0`) 10 tests pinning the discovery contract. |
-| `phases/phase-002/FINDINGS.md` | +77 | (prior commit `fa8b1d0`) out-of-scope defects recorded. |
+| `src/testing/mod.rs` | +12 −2 | `5ca4867` `find_test_files` sorts its result; the recursive walk moved into a private `collect_test_files` so the sort applies once, globally, to the flattened list rather than per-directory |
+| `tests/discovery_test.rs` | +108 | `5ca4867` 3 new tests: sorted/stable discovery order, global sort across nesting, and the real-tree assertion that no `tests/*_test.rs` is ever collected |
+| `src/testing/mod.rs` | +10 −9 | `fa8b1d0` discovery collects `.rb` only; `run_all_tests` dropped its `_test.rs` re-filter; `find_test_files` made `pub` |
+| `tests/discovery_test.rs` | +289 | `fa8b1d0` 10 tests pinning the discovery contract |
+| `phases/phase-002/FINDINGS.md` | +88 −7 | `5ca4867` out-of-scope defects recorded; resumed run corrected F1, which wrongly said `phases/` was absent from the tree |
+| `phases/phase-002/REPORT.md` | +228 −94 | `5ca4867` + resumed run: this file — gate table refreshed against output re-run on the resumed run, duplicate "Known gaps" bullet removed, mutation evidence added |
 
 No language surface, no `tests/*.rb` body, no existing test, no assertion
-loosened. Nothing outside the two files above was touched.
+loosened. Nothing outside those files was touched.
 
 ### The production change, in full
 
-`src/testing/mod.rs:55-87`. Before, `find_test_files` was itself recursive and
+`src/testing/mod.rs:55-85`. Before, `find_test_files` was itself recursive and
 returned `read_dir` order. Now:
 
 ```rust
@@ -43,34 +45,16 @@ The `?` is removed because the inner function no longer returns `Result`; it
 never propagated an error (`read_dir`'s `Err` is swallowed by `if let Ok(..)`,
 unchanged — that behaviour is FINDINGS.md F3). Public signature unchanged, so
 no caller is affected: `find_test_files` has exactly one caller,
-`run_all_tests` at `src/testing/mod.rs:44`.
+`run_all_tests` at `src/testing/mod.rs:44` — re-confirmed on the resumed run
+(`grep -rn 'find_test_files' src/` → one hit).
 
 ## Definition of done — verified, not asserted
 
 | Item | Evidence |
 |---|---|
-| `run_all_tests()` only collects `.rb` | `edge_discovery_never_returns_rust_files`, `edge_repository_rust_suite_is_never_handed_to_the_harness`; no `.rs` literal remains in `src/` (`grep -rn '"rs"\|\.rs"' src/` → no hits) |
+| `run_all_tests()` only collects `.rb` | `edge_discovery_never_returns_rust_files`, `edge_repository_rust_suite_is_never_handed_to_the_harness`; no `.rs` extension literal remains in `src/` (`grep -rn '\.rs\b' src/` → one hit, a doc comment at `src/testing/mod.rs:58`) |
 | `rb test` reports 0 errors for the Rust suite | `cargo run --bin rb -- test` → `Tests run: 22 / Passed: 21 / Failed: 0`; `edge_project_tests_directory_has_no_failures` |
-| no `.rs` path is ever read by the Redblue harness | End-to-end probe below |
-
-The end-to-end probe, run against the current tree. The pre-fix symptom was
-that a Rust file in `tests/` had its body lexed and executed as Redblue:
-
-```
-$ printf 'fn main() {}\n// test "rust source leaked into harness"\nsay "LEAKED_RUST_SOURCE_EXECUTED"\n// end\n' \
-    > tests/zz_probe_test.rs
-$ cargo run --quiet --bin rb -- test
-.....SKIP: // skip "Awaiting full test harness implementation" - // Reason: Need to complete test integration
-................Tests run: 22
-Passed: 21
-Failed: 0
-```
-
-22 tests — identical to the count without the probe — and
-`LEAKED_RUST_SOURCE_EXECUTED` never printed. The probe was deleted immediately;
-`tests/` is back to its 7 tracked files. (The pre-fix run of the same probe
-printed `LEAKED_RUST_SOURCE_EXECUTED` and counted it as a *passing* test, so the
-prompt's "reported as a failure" was the wrong consequence — FINDINGS.md F2.)
+| no `.rs` path is ever read by the Redblue harness | mutation check below |
 
 ## Tests added
 
@@ -96,9 +80,10 @@ Quota: 13 ≥ 6 new `#[test]`s · 12 `edge_*` · 3 assert a *failure* is produce
 (`..._io_error`, `..._as_a_failure`, and the negative half of the unicode test)
 · 0 new `#[ignore]` · 0 `.skip` · 0 `allow(clippy::`.
 
-### Red before green
+## Red before green
 
-Both new ordering tests failed first, against the unchanged production code:
+The two ordering tests failed first, against the unchanged production code
+(commit `fa8b1d0`, before the sort):
 
 ```
 $ cargo test --test discovery_test
@@ -121,11 +106,35 @@ failures:
 test result: FAILED. 11 passed; 2 failed
 ```
 
-The third new test,
-`edge_repository_rust_suite_is_never_handed_to_the_harness`, passed on its first
-run: the `.rb`-only filter landed in `fa8b1d0` and was already correct. It is
-kept because it pins the definition of done against the real tree, which the
-scratch-directory tests cannot do.
+### Mutation check on the resumed run — the `.rs` filter itself
+
+The previous report's `.rb`-only filter was inherited already-committed, so no
+red-then-green record for it existed. The resumed run re-established one by
+reintroducing the pre-fix condition at `src/testing/mod.rs:78` —
+`|| path.extension() == Some("rs".as_ref())`, which is exactly the
+`ext == "rs" || ext == "rb"` predicate from `git show 6cc1281:src/testing/mod.rs`:
+
+```
+$ cargo test --test discovery_test
+---- find_test_files_walks_nested_directories stdout ----
+assertion `left == right` failed: expected two .rb files, got
+  [".../nested/a/b/c/deep.rb", ".../nested/a/b/c/deep_test.rs",
+   ".../nested/top.rb", ".../nested/top_test.rs"]
+  left: 4
+ right: 2
+
+failures:
+    edge_discovery_collects_a_single_rb_file
+    edge_discovery_never_returns_rust_files
+    edge_repository_rust_suite_is_never_handed_to_the_harness
+    find_test_files_walks_nested_directories
+
+test result: FAILED. 9 passed; 4 failed
+```
+
+4 tests go red for the right reason, including the definition-of-done test
+against the real `tests/` tree. The mutation was reverted immediately
+(`git diff` empty, 13 passed) — it is **not** part of the diff.
 
 Filesystem evidence for why sorting was needed (`read_dir` returns hash order,
 not creation order):
@@ -137,11 +146,13 @@ c.rb g.rb d.rb a.rb b.rb h.rb f.rb e.rb
 
 ## Gates
 
+Re-run on the resumed run, this tree, output verbatim:
+
 | Gate | Result |
 |---|---|
-| `cargo fmt --all -- --check` | **pass** — no diff |
-| `cargo clippy --all-targets -- -D warnings` | **pass** — `Finished dev profile`, zero warnings |
-| `cargo test --all-targets` | **pass** — 59 passed, 0 failed, 0 ignored (lib 5, bin 0, discovery_test 13, expect_test 21, redblue_test 5, span_test 15) |
+| `cargo fmt --all -- --check` | **pass** — no diff, exit 0 |
+| `cargo clippy --all-targets -- -D warnings` | **pass** — `Finished dev profile ... in 7.51s`, zero warnings |
+| `cargo test` | **pass** — 59 passed, 0 failed, 0 ignored (lib 5, bin 0, discovery_test 13, expect_test 21, redblue_test 5, span_test 15; doctests 0) |
 | `./rbops/verify.sh phase-002` | **NOT RUN — the script does not exist in this checkout** |
 
 Gate 4 verbatim, not paraphrased:
@@ -162,18 +173,25 @@ I did not go looking for it elsewhere. Full detail and the dispatch-side fix I
 believe is needed: FINDINGS.md F1.
 
 Additional check, not a gate — `rb run` over the backwards-compatibility corpus
-required by AGENTS.md §2:
+required by AGENTS.md §2 (re-run on the resumed run):
 
 ```
 PASS  examples/files.rb          PASS  examples/hello.rb
 PASS  examples/fizzbuzz.rb       PASS  examples/test_arithmetic.rb
 PASS  examples/formats.rb        PASS  examples/time.rb
 FAIL  modules/MathUtils.rb :: Error: ParserError: Expected function name
+  --> modules/MathUtils.rb:4:16
+4 | constant PI to 3.14159
+  |                ^
 ```
 
-`modules/MathUtils.rb` fails **identically with this diff stashed**
-(`git stash -u`, rebuild, same `ParserError: Expected function name  --> modules/MathUtils.rb:4:16`),
-so it is pre-existing and unrelated — FINDINGS.md F9.
+`modules/MathUtils.rb` is a **grammar** defect (`constant … to …` unimplemented),
+pre-existing and unrelated to this phase. The previous attempt verified it with
+`git stash -u` + rebuild; the resumed run re-confirms it by code path instead:
+`src/testing/mod.rs` is reachable only from the `rb test` command
+(`src/lib.rs:63-73` → `run_all_tests`) and from `testing::assertions`, which
+`vm.rs` uses for `expect` equality. `rb run` of a module touches neither, so this
+diff cannot affect it. FINDINGS.md F9.
 
 ## Invariants touched
 
@@ -182,8 +200,7 @@ so it is pre-existing and unrelated — FINDINGS.md F9.
 - Behavioural change outside the language: the Redblue test harness no longer
   reads `.rs` files (was: `rb test` lexed and executed Rust sources as
   Redblue), and discovery output is now sorted (was: filesystem hash order).
-- Public API: unchanged by this run. The prior commit `fa8b1d0` added
-  `redblue::testing::find_test_files` to the public surface.
+- Public API: `find_test_files` was made `pub` in `fa8b1d0`.
 
 ## Test-requirement matrix (phase prompt §"Test requirements")
 
@@ -246,10 +263,11 @@ All recorded in `phases/phase-002/FINDINGS.md`, none fixed here (out of scope):
 - **F3** — `run_all_tests()` hardcodes the relative path `"tests/"`, and
   `find_test_files` swallows `read_dir`'s `Err`, so `rb test` from any other
   directory reports `Tests run: 0` — green, having tested nothing.
-- **F4** — the `// test` marker grammar is line-based; an unterminated block
-  silently swallows the rest of the file.
+- **F4** — fixed in `5ca4867`: discovery order was filesystem hash order; it is
+  now sorted globally.
 - **F5** — the `// test` marker grammar is line-based; an unterminated block
-  silently swallows the rest of the file.
+  silently swallows the rest of the file, and `// tests are fun` reads as a test
+  marker.
 - **F6** — the previous attempt's REPORT.md described a nonexistent test file and
   claimed a sort that was not in the code.
 - **F7** — all 21 tests `rb test` discovers are **vacuous**: every `// test`
@@ -260,5 +278,5 @@ All recorded in `phases/phase-002/FINDINGS.md`, none fixed here (out of scope):
   Redblue works. Suite-authoring work, not a discovery-filter phase.
 - **F8** — a zero-byte `.rb` file is collected and yields zero tests, so it is
   indistinguishable from a valid empty suite.
-- **F9** — `modules/MathUtils.rb` does not parse (pre-existing, verified with
-  the diff stashed).
+- **F9** — `modules/MathUtils.rb` does not parse (`constant … to …` unimplemented;
+  pre-existing, confirmed by code path).
