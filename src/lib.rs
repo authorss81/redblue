@@ -22,7 +22,11 @@ pub use error::{Error, Span};
 // `Value::Function` variant: a caller that matches that variant has to be able
 // to name the type it binds.
 pub use value::{FunctionValue, Value};
-pub use vm::{run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV};
+pub use vm::{
+    resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
+    run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS, MAX_ITERATIONS_ENV,
+    MAX_STEPS, MAX_STEPS_ENV,
+};
 
 pub fn run_file(path: &str) -> Result<(), Error> {
     let source = fs::read_to_string(path).map_err(|e| Error::Io(e.to_string()))?;

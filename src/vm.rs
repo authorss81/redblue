@@ -15,6 +15,67 @@ pub const MAX_CALL_DEPTH: usize = 1000;
 /// The environment variable that overrides [`MAX_CALL_DEPTH`].
 pub const MAX_CALL_DEPTH_ENV: &str = "REDBLUE_MAX_CALL_DEPTH";
 
+/// The default number of iterations any single loop may run. A `while` whose
+/// condition never becomes false, or a `repeat` with a huge count, stops with a
+/// `RuntimeError` naming this limit instead of running until the host kills the
+/// process.
+pub const MAX_ITERATIONS: usize = 1_000_000;
+
+/// The environment variable that overrides [`MAX_ITERATIONS`].
+pub const MAX_ITERATIONS_ENV: &str = "REDBLUE_MAX_ITERATIONS";
+
+/// The default number of statements the VM may execute for one program.
+///
+/// [`MAX_ITERATIONS`] bounds one loop; this bounds the program, because
+/// unboundedness can also be written as many short loops rather than one long
+/// one. It is what a test harness lowers to bound a run deterministically.
+pub const MAX_STEPS: usize = 10_000_000;
+
+/// The environment variable that overrides [`MAX_STEPS`].
+pub const MAX_STEPS_ENV: &str = "REDBLUE_MAX_STEPS";
+
+/// The policy for reading a limit: a limit of zero would make every loop
+/// illegal, which is never what an operator means, so `None` and `Some(0)` both
+/// fall back to the default. Split from the `std::env::var` call so a test can
+/// exercise the policy without mutating the process environment, which is
+/// shared with every test running in parallel.
+fn resolve_limit_from(raw: Option<usize>, default: usize) -> usize {
+    match raw {
+        Some(limit) if limit > 0 => limit,
+        _ => default,
+    }
+}
+
+/// [`resolve_limit_from`] applied to [`MAX_ITERATIONS_ENV`]. `None` means the
+/// variable was unset or not a number.
+pub fn resolve_max_iterations_from(raw: Option<usize>) -> usize {
+    resolve_limit_from(raw, MAX_ITERATIONS)
+}
+
+/// [`resolve_limit_from`] applied to [`MAX_STEPS_ENV`]. `None` means the
+/// variable was unset or not a number.
+pub fn resolve_max_steps_from(raw: Option<usize>) -> usize {
+    resolve_limit_from(raw, MAX_STEPS)
+}
+
+/// The configured per-loop iteration cap.
+pub fn resolve_max_iterations() -> usize {
+    resolve_max_iterations_from(
+        std::env::var(MAX_ITERATIONS_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok()),
+    )
+}
+
+/// The configured step budget for one program.
+pub fn resolve_max_steps() -> usize {
+    resolve_max_steps_from(
+        std::env::var(MAX_STEPS_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok()),
+    )
+}
+
 /// The stack one active call frame is allowed. A frame costs roughly 58 KiB in an
 /// unoptimised build — six nested Rust frames per Redblue call — so
 /// [`MAX_CALL_DEPTH`] needs about 60 MiB, well past the 16 MiB a main thread
@@ -96,6 +157,14 @@ pub struct Vm {
     current_span: Span,
     call_depth: usize,
     max_call_depth: usize,
+    /// Statements executed so far, against [`Vm::max_steps`]. Monotonic for the
+    /// life of the VM and never restored by `try`, so a caught error cannot buy
+    /// a program more budget.
+    steps: usize,
+    max_steps: usize,
+    /// The per-loop iteration cap, applied afresh to every loop so nesting does
+    /// not multiply it.
+    max_iterations: usize,
 }
 
 /// One `object` declaration, after its parent has been merged into it.
@@ -125,6 +194,9 @@ impl Vm {
             current_span: Span::unknown(),
             call_depth: 0,
             max_call_depth: resolve_max_call_depth(),
+            steps: 0,
+            max_steps: resolve_max_steps(),
+            max_iterations: resolve_max_iterations(),
         }
     }
 
@@ -135,6 +207,60 @@ impl Vm {
             vm.max_call_depth = max_call_depth;
         }
         vm
+    }
+
+    /// Builds a VM with an explicit per-loop iteration cap, ignoring the
+    /// environment. A cap of zero is ignored: it would make every loop illegal,
+    /// which is never what a caller means.
+    pub fn with_max_iterations(max_iterations: usize) -> Self {
+        let mut vm = Self::new();
+        vm.max_iterations = resolve_max_iterations_from(Some(max_iterations));
+        vm
+    }
+
+    /// Builds a VM with an explicit step budget, ignoring the environment. A
+    /// budget of zero is ignored, for the same reason as
+    /// [`Vm::with_max_iterations`].
+    pub fn with_max_steps(max_steps: usize) -> Self {
+        let mut vm = Self::new();
+        vm.max_steps = resolve_max_steps_from(Some(max_steps));
+        vm
+    }
+
+    /// Charges one statement to the step budget, failing once the program has
+    /// run [`Vm::max_steps`] statements. Called for every statement, including
+    /// those inside a function body, so the budget bounds the program rather
+    /// than one statement list.
+    fn charge_step(&mut self) -> Result<()> {
+        if self.steps >= self.max_steps {
+            return Err(Error::Runtime(
+                format!(
+                    "Step budget of {} reached before the program finished",
+                    self.max_steps
+                ),
+                self.span(),
+            ));
+        }
+        self.steps += 1;
+        Ok(())
+    }
+
+    /// Charges one iteration to `loop_iterations`, failing once the loop that
+    /// owns the counter has run [`Vm::max_iterations`] times. The counter is a
+    /// local of the loop statement, so the cap is per loop and nesting does not
+    /// multiply it.
+    fn charge_iteration(&self, loop_iterations: &mut usize, kind: &str) -> Result<()> {
+        if *loop_iterations >= self.max_iterations {
+            return Err(Error::Runtime(
+                format!(
+                    "Maximum of {} iterations reached in a '{}' loop",
+                    self.max_iterations, kind
+                ),
+                self.span(),
+            ));
+        }
+        *loop_iterations += 1;
+        Ok(())
     }
 
     /// Takes the structured failure from the most recent failed `expect`, so a
@@ -245,7 +371,9 @@ impl Vm {
 
     fn execute_statement(&mut self, stmt: &Stmt) -> Result<Value> {
         let previous_span = std::mem::replace(&mut self.current_span, stmt.span);
-        let result = self.execute_statement_body(&stmt.statement);
+        let result = self
+            .charge_step()
+            .and_then(|()| self.execute_statement_body(&stmt.statement));
         self.current_span = previous_span;
         result
     }
@@ -309,7 +437,9 @@ impl Vm {
             } => {
                 let iterable_value = self.evaluate(iterable)?;
                 if let Value::List(items) = iterable_value {
+                    let mut loop_iterations = 0;
                     for item in items {
+                        self.charge_iteration(&mut loop_iterations, "for each")?;
                         self.push_scope();
                         self.declare(variable);
                         self.set_var(variable, item);
@@ -339,7 +469,9 @@ impl Vm {
                     (start_val, end_val, step_val)
                 {
                     let mut i = start;
+                    let mut loop_iterations = 0;
                     while i <= end {
+                        self.charge_iteration(&mut loop_iterations, "for each from")?;
                         self.push_scope();
                         self.declare(variable);
                         self.set_var(variable, Value::number(i, self.span())?);
@@ -358,7 +490,9 @@ impl Vm {
             Statement::Repeat { count, body } => {
                 let count_val = self.evaluate(count)?;
                 if let Value::Number(n) = count_val {
+                    let mut loop_iterations = 0;
                     for _ in 0..(n as i64) {
+                        self.charge_iteration(&mut loop_iterations, "repeat")?;
                         self.push_scope();
                         for stmt in body {
                             self.execute_statement(stmt)?;
@@ -369,7 +503,9 @@ impl Vm {
                 Ok(Value::Nothing)
             }
             Statement::While { condition, body } => {
+                let mut loop_iterations = 0;
                 while self.evaluate(condition)?.is_truthy() {
+                    self.charge_iteration(&mut loop_iterations, "while")?;
                     self.push_scope();
                     for stmt in body {
                         self.execute_statement(stmt)?;
