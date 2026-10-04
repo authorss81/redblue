@@ -44,17 +44,20 @@ pub fn run_all_tests() -> Result<TestResults> {
     let test_files = find_test_files("tests/")?;
 
     for file in test_files {
-        if file.ends_with("_test.rs") || file.ends_with(".rb") {
-            if let Err(e) = harness.run_file(&file) {
-                harness.add_error(e.to_string());
-            }
+        if let Err(e) = harness.run_file(&file) {
+            harness.add_error(e.to_string());
         }
     }
 
     Ok(harness.results())
 }
 
-fn find_test_files(dir: &str) -> Result<Vec<String>> {
+/// Collects every Redblue test file under `dir`, recursively.
+///
+/// Only `.rb` is collectable. The Redblue harness parses its input as
+/// Redblue, so handing it Rust source — the `tests/*_test.rs` files that
+/// belong to `cargo test` — can only ever produce noise.
+pub fn find_test_files(dir: &str) -> Result<Vec<String>> {
     let mut files = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -62,10 +65,8 @@ fn find_test_files(dir: &str) -> Result<Vec<String>> {
             let path = entry.path();
             if path.is_dir() {
                 files.extend(find_test_files(&path.to_string_lossy())?);
-            } else if let Some(ext) = path.extension() {
-                if ext == "rs" || ext == "rb" {
-                    files.push(path.to_string_lossy().to_string());
-                }
+            } else if path.extension() == Some("rb".as_ref()) {
+                files.push(path.to_string_lossy().to_string());
             }
         }
     }
