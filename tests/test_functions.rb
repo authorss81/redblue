@@ -1,8 +1,9 @@
 // Redblue function tests.
 //
 // Redblue functions are values: a declaration binds a name to a `function`
-// value. Bodies are not yet retained by the VM (see FINDINGS.md), so these
-// tests pin the declaration behaviour rather than return values.
+// value, and a call runs the body in its own scope and yields the value of its
+// last statement. Call depth is bounded by MAX_CALL_DEPTH (phase-006), so
+// unbounded recursion is a caught error rather than a crash.
 
 test "functions: a declaration binds a function value"
     to add(a, b)
@@ -134,4 +135,64 @@ test "edge_functions_three_nested_declarations_parse"
         give back a
     end
     expect type_of(level_one) to be "function"
+end
+
+test "functions: a call runs the body and yields its last value"
+    to add(a, b)
+        give back a + b
+    end
+    expect add(2, 3) to be 5
+end
+
+test "functions: a call sees only its own parameters"
+    to shadow(v)
+        give back v
+    end
+    set v to 1
+    expect shadow(2) to be 2
+    expect v to be 1
+end
+
+test "edge_functions_unbounded_recursion_is_a_caught_error"
+    to boom(n)
+        boom(n + 1)
+    end
+    set caught to no
+    try
+        boom(0)
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+end
+
+test "edge_functions_mutual_recursion_is_bounded"
+    set caught to no
+    to ping(n)
+        pong(n + 1)
+    end
+    to pong(n)
+        ping(n + 1)
+    end
+    try
+        ping(0)
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+end
+
+test "edge_functions_a_caught_depth_error_leaves_the_program_usable"
+    to boom(n)
+        boom(n + 1)
+    end
+    to double(v)
+        give back v * 2
+    end
+    try
+        boom(0)
+    catch error
+        set marker to yes
+    end
+    expect double(21) to be 42
 end

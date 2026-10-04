@@ -3,7 +3,6 @@ use crate::error::{Error, Result};
 use crate::lexer::Lexer;
 use crate::parser::{Parser, Program, Stmt};
 use crate::testing::{TestError, TestFailure, TestResults};
-use crate::vm::Vm;
 use std::collections::HashMap;
 
 pub struct TestHarness {
@@ -217,8 +216,7 @@ impl TestHarness {
     }
 
     fn execute_test_program(&self, program: &Program) -> std::result::Result<(), TestFailure> {
-        let mut vm = Vm::new();
-        let run = vm.run(program);
+        let (mut vm, run) = crate::vm::run_isolated(program);
 
         if run.is_err() {
             // A failed `expect` carries more than the rendered message; keep the

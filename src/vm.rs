@@ -7,14 +7,87 @@ use crate::value::{Fields, Value};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// The default number of user function calls that may be active at once.
+/// Exceeding it is a `RuntimeError`, not a Rust stack overflow.
+pub const MAX_CALL_DEPTH: usize = 1000;
+
+/// The environment variable that overrides [`MAX_CALL_DEPTH`].
+pub const MAX_CALL_DEPTH_ENV: &str = "REDBLUE_MAX_CALL_DEPTH";
+
+/// The stack one active call frame is allowed. A frame costs roughly 58 KiB in an
+/// unoptimised build — six nested Rust frames per Redblue call — so
+/// [`MAX_CALL_DEPTH`] needs about 60 MiB, well past the 16 MiB a main thread
+/// gets by default. A limit the process cannot physically reach would turn a
+/// clean `RuntimeError` back into the abort this counter exists to prevent, so
+/// the interpreter runs on a thread sized from the limit.
+const STACK_BYTES_PER_CALL: usize = 256 * 1024;
+
+/// Reads the call-depth limit from [`MAX_CALL_DEPTH_ENV`], falling back to
+/// [`MAX_CALL_DEPTH`] for an absent, non-numeric or zero value — a limit of zero
+/// would make every function call illegal, which is never what an operator
+/// means.
+pub fn resolve_max_call_depth() -> usize {
+    match std::env::var(MAX_CALL_DEPTH_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(limit) if limit > 0 => limit,
+            _ => MAX_CALL_DEPTH,
+        },
+        Err(_) => MAX_CALL_DEPTH,
+    }
+}
+
+/// Runs `program` on a thread whose stack is sized for the configured call
+/// depth, and returns the VM it ran in together with the program's result.
+///
+/// The VM is returned rather than dropped so a caller such as the test harness
+/// can still read [`Vm::take_expectation_failure`], which is set on the VM that
+/// ran the assertions.
+pub fn run_isolated(program: &Program) -> (Vm, Result<Value>) {
+    let limit = resolve_max_call_depth();
+    let program = program.clone();
+    let builder = std::thread::Builder::new()
+        .name("redblue-vm".to_string())
+        .stack_size(limit.saturating_mul(STACK_BYTES_PER_CALL));
+
+    let joined = match builder.spawn(move || {
+        let mut vm = Vm::new();
+        let result = vm.run(&program);
+        (vm, result)
+    }) {
+        Ok(handle) => handle.join(),
+        Err(e) => {
+            return (
+                Vm::new(),
+                Err(Error::Io(format!(
+                    "Cannot start the interpreter thread: {}",
+                    e
+                ))),
+            );
+        }
+    };
+
+    match joined {
+        Ok(result) => result,
+        Err(_) => (
+            Vm::new(),
+            Err(Error::Runtime(
+                "The interpreter thread stopped unexpectedly".to_string(),
+                Span::unknown(),
+            )),
+        ),
+    }
+}
+
 pub struct Vm {
     globals: HashMap<String, Value>,
     locals: Vec<HashMap<String, Value>>,
-    functions: HashMap<String, Vec<String>>,
+    functions: HashMap<String, Vec<Stmt>>,
     output: Vec<String>,
     _modules: HashMap<String, Program>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
     current_span: Span,
+    call_depth: usize,
+    max_call_depth: usize,
 }
 
 impl Vm {
@@ -28,7 +101,18 @@ impl Vm {
             _modules: HashMap::new(),
             expectation_failure: None,
             current_span: Span::unknown(),
+            call_depth: 0,
+            max_call_depth: resolve_max_call_depth(),
         }
+    }
+
+    /// Builds a VM with an explicit call-depth limit, ignoring the environment.
+    pub fn with_max_call_depth(max_call_depth: usize) -> Self {
+        let mut vm = Self::new();
+        if max_call_depth > 0 {
+            vm.max_call_depth = max_call_depth;
+        }
+        vm
     }
 
     /// Takes the structured failure from the most recent failed `expect`, so a
@@ -55,10 +139,10 @@ impl Vm {
                 }
                 Statement::Function {
                     name,
-                    params,
-                    body: _,
+                    params: _,
+                    body,
                 } => {
-                    self.functions.insert(name.clone(), params.clone());
+                    self.functions.insert(name.clone(), body.clone());
                 }
                 _ => {}
             }
@@ -261,17 +345,11 @@ impl Vm {
                 Some(e) => self.evaluate(e),
                 None => Ok(Value::Nothing),
             },
-            Statement::Function {
-                name,
-                params,
-                body: _,
-            } => {
+            Statement::Function { name, params, body } => {
                 self.declare(name);
                 self.set_var(name, Value::Function(name.clone(), params.clone()));
-                self.functions.insert(name.clone(), params.clone());
+                self.functions.insert(name.clone(), body.clone());
 
-                // Store function body (simplified - just store params)
-                // Full implementation would store AST
                 Ok(Value::Nothing)
             }
             Statement::Method {
@@ -1002,9 +1080,9 @@ impl Vm {
                 Ok(Value::Text(type_name.to_string()))
             }
             _ => {
-                // User-defined function (simplified)
-                if let Some(Value::Function(_, _)) = self.get_var(name) {
-                    Ok(Value::Nothing)
+                // User-defined function
+                if let Some(Value::Function(_, params)) = self.get_var(name) {
+                    self.call_user_function(name, &params, &args)
                 } else {
                     Err(Error::Runtime(
                         format!("Unknown function '{}'", name),
@@ -1013,6 +1091,47 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// Runs the body of a user function `name` in its own scope and returns the
+    /// value of its last statement.
+    ///
+    /// The call depth is checked first and released again on every exit path,
+    /// including an error, so a caught failure leaves the counter balanced.
+    fn call_user_function(
+        &mut self,
+        name: &str,
+        params: &[String],
+        args: &[Value],
+    ) -> Result<Value> {
+        // A name bound to a function value but with no retained body — e.g. one
+        // brought in by `import` — keeps the previous behaviour of `nothing`.
+        let Some(body) = self.functions.get(name).cloned() else {
+            return Ok(Value::Nothing);
+        };
+
+        if self.call_depth >= self.max_call_depth {
+            return Err(Error::Runtime(
+                format!(
+                    "Maximum call depth of {} reached while calling '{}'",
+                    self.max_call_depth, name
+                ),
+                self.span(),
+            ));
+        }
+
+        self.call_depth += 1;
+        self.push_scope();
+        for (index, param) in params.iter().enumerate() {
+            let value = args.get(index).cloned().unwrap_or(Value::Nothing);
+            self.declare(param);
+            self.set_var(param, value);
+        }
+        let result = self.execute_statements(&body);
+        self.pop_scope();
+        self.call_depth -= 1;
+
+        result
     }
 }
 

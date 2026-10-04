@@ -19,7 +19,7 @@ use testing::reporter::Reporter;
 
 pub use error::{Error, Span};
 pub use value::Value;
-pub use vm::Vm;
+pub use vm::{run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV};
 
 pub fn run_file(path: &str) -> Result<(), Error> {
     let source = fs::read_to_string(path).map_err(|e| Error::Io(e.to_string()))?;
@@ -48,10 +48,8 @@ pub fn run_source(source: &str) -> Result<(), Error> {
     let ast = parser::parse(tokens)?;
     analyzer::analyze(&ast)?;
 
-    let mut vm = Vm::new();
-    vm.run(&ast)?;
-
-    Ok(())
+    let (_vm, result) = vm::run_isolated(&ast);
+    result.map(|_| ())
 }
 
 pub fn run_repl() {
