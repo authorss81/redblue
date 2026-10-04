@@ -219,7 +219,10 @@ which an operation returns something that is not a number.
 | `-0.0` | the number `0`: negative zero is not a distinct value |
 | `1e308 * 1e308` | runtime error: `infinity is not a finite number` |
 | `1e400` (a literal too large to hold) | runtime error: `infinity is not a finite number` |
+| `1e-400` (a literal too small to hold) | the number `0`: see "Underflow", below |
+| `1.2.3`, `2..3`, `3e` (not a number) | lex error: `Invalid number '…'` |
 | `-5 % 3` | `-2`: a remainder takes the sign of the dividend |
+| `5-2` | `3`: a sign belongs to a literal only after its exponent |
 
 Three consequences are worth stating plainly:
 
@@ -235,6 +238,32 @@ Three consequences are worth stating plainly:
    built by a host program embedding Redblue, and it prints as `not a number`,
    `infinity` or `negative infinity`. `json.stringify` of one is `null`, which is
    what a JSON writer emits for it.
+
+#### Literals
+
+A number literal is digits, at most one `.`, then at most one exponent: an `e`,
+an optional sign, and digits. Anything else is a mistake in the source and is
+reported as a lex error naming the literal — never read as `0`.
+
+```
+5-2        // 5 minus 2, because the sign is not after an exponent
+5 + 2      // the same, written with spaces
+1e-3       // 0.001: here the sign is after the exponent, so it is part of it
+2e-3       // 0.002
+1.5e+2     // 150
+.5         // 0.5
+5.         // 5
+1.2.3      // lex error: Invalid number '1.2.3'
+```
+
+#### Underflow
+
+A literal too small to hold is **not** an error, because there is nothing
+outside the reals below it to report: `1e-400` is the number `0`. Overflow is
+different — the answer lies outside the reals and the operation fails rather
+than naming a number the program does not hold. A `0` produced by underflow is
+an ordinary `0` in every other respect, so it is an ordinary zero divisor:
+`1 / 1e-400` is `Division by zero`.
 
 ### Comparison
 

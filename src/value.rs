@@ -55,6 +55,22 @@ pub fn non_finite_name(n: f64) -> &'static str {
     }
 }
 
+/// The same policy as [`Value::number`], for a number that stays a number.
+///
+/// A loop counter is an `f64` and not a `Value`, but it is computed, so it is
+/// held to the same rule: a step that overflows the counter fails rather than
+/// leaving an infinity in it.
+pub fn finite_number(n: f64, span: Span) -> Result<f64> {
+    if n.is_finite() {
+        Ok(n)
+    } else {
+        Err(Error::Runtime(
+            format!("{} is not a finite number", non_finite_name(n)),
+            span,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Nothing,
@@ -109,14 +125,7 @@ impl Value {
     /// `5 % 0` and `1e308 * 1e308` are `Runtime` errors rather than values
     /// that print as `not a number` and compare false against everything.
     pub fn number(n: f64, span: Span) -> Result<Value> {
-        if n.is_finite() {
-            Ok(Value::Number(n))
-        } else {
-            Err(Error::Runtime(
-                format!("{} is not a finite number", non_finite_name(n)),
-                span,
-            ))
-        }
+        finite_number(n, span).map(Value::Number)
     }
 
     pub fn is_truthy(&self) -> bool {

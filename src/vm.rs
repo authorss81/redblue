@@ -3,7 +3,7 @@ use crate::lexer::Lexer;
 use crate::parser as redblue_parser;
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::stdlib;
-use crate::value::{Fields, Value};
+use crate::value::{finite_number, Fields, Value};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -300,12 +300,15 @@ impl Vm {
                     while i <= end {
                         self.push_scope();
                         self.declare(variable);
-                        self.set_var(variable, Value::Number(i));
+                        self.set_var(variable, Value::number(i, self.span())?);
                         for stmt in body {
                             self.execute_statement(stmt)?;
                         }
                         self.pop_scope();
-                        i += step;
+                        // The stepped value is checked too: a step that
+                        // overflows the counter is the same failure as one that
+                        // would put an infinity in the loop variable.
+                        i = finite_number(i + step, self.span())?;
                     }
                 }
                 Ok(Value::Nothing)
@@ -1277,7 +1280,12 @@ fn json_stringify(value: &Value) -> String {
             }
         }
         Value::Number(n) => {
-            if n.fract() == 0.0 && n.abs() < 1e15 {
+            // JSON has no literal for a number that is not finite, so it is
+            // written as `null`, which is what every JSON writer emits for one.
+            // No Redblue program can reach this branch: see SPEC.md.
+            if !n.is_finite() {
+                "null".to_string()
+            } else if n.fract() == 0.0 && n.abs() < 1e15 {
                 format!("{}", *n as i64)
             } else {
                 format!("{}", n)
@@ -1312,5 +1320,37 @@ fn json_stringify(value: &Value) -> String {
         Value::Function(_, _) => "null".to_string(),
         Value::Builtin(_) => "null".to_string(),
         Value::Object(_, _) => "null".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// JSON has no literal for a number that is not finite. A host program
+    /// embedding Redblue can still build one through the public `Value`, so the
+    /// writer has to answer for it, and `null` is the answer every JSON writer
+    /// gives. SPEC.md states this.
+    #[test]
+    fn edge_json_writes_a_number_that_is_not_finite_as_null() {
+        for (value, what) in [
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "infinity"),
+            (f64::NEG_INFINITY, "negative infinity"),
+        ] {
+            assert_eq!(
+                json_stringify(&Value::Number(value)),
+                "null",
+                "{} must be written as null, not as a JSON number",
+                what
+            );
+        }
+        // The widest finite numbers are numbers, and must not be nulled.
+        for finite in [f64::MAX, f64::MIN, f64::MIN_POSITIVE, 0.0, -0.0, 1.5] {
+            let written = json_stringify(&Value::Number(finite));
+            assert_ne!(written, "null", "{} should still be written", finite);
+        }
+        assert_eq!(json_stringify(&Value::Number(42.0)), "42");
+        assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
     }
 }

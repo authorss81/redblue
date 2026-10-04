@@ -165,17 +165,36 @@ impl Lexer {
         }
     }
 
-    fn read_number(&mut self) -> f64 {
-        let mut num_str = String::new();
+    /// Reads one numeric literal, or fails if the characters are not one.
+    ///
+    /// `span` is the position of the literal's first character. A literal is
+    /// digits, at most one `.`, then at most one exponent: an `e`, an optional
+    /// sign, and digits. A `+` or `-` anywhere else is the operator that follows
+    /// the number, not part of it — `5-2` is five minus two. Text outside that
+    /// shape (`1.2.3`, `2..3`, `3e`) is a mistake in the source and used to be
+    /// read as the number 0 in silence.
+    fn read_number(&mut self, span: Span) -> Result<f64> {
+        let mut text = String::new();
+        let mut has_exponent = false;
+        let mut after_exponent = false;
         while let Some(c) = self.current() {
-            if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
-                num_str.push(c);
-                self.advance();
+            if c.is_ascii_digit() || c == '.' {
+                text.push(c);
+                after_exponent = false;
+            } else if (c == 'e' || c == 'E') && !has_exponent {
+                has_exponent = true;
+                after_exponent = true;
+                text.push(c);
+            } else if after_exponent && (c == '+' || c == '-') {
+                after_exponent = false;
+                text.push(c);
             } else {
                 break;
             }
+            self.advance();
         }
-        num_str.parse().unwrap_or(0.0)
+        text.parse()
+            .map_err(|_| Error::Lexer(format!("Invalid number '{}'", text), span))
     }
 
     fn read_text(&mut self) -> String {
@@ -309,7 +328,7 @@ impl Lexer {
             if c.is_ascii_digit()
                 || (c == '.' && lexer.peek().map(|p| p.is_ascii_digit()).unwrap_or(false))
             {
-                let num = lexer.read_number();
+                let num = lexer.read_number(Span::new(line, column))?;
                 tokens.push(Token::new(TokenKind::Number(num), line, column));
                 continue;
             }

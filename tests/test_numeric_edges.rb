@@ -76,3 +76,28 @@ test "numeric: a number wider than i64 is still a number"
     // is - not i64's saturated maximum.
     expect wide is 100000000000000000000 to be yes
 end
+
+test "edge_a minus sign next to a number is a subtraction"
+    // A sign belongs to a literal only after its exponent, so this is five
+    // minus two. It used to be read as one unparseable literal and became 0.
+    expect 5-2 to be 3
+    expect 5+2 to be 7
+    expect 10-2-3 to be 5
+    expect 1e-3 to be 0.001
+    expect 1e+5 to be 100000
+end
+
+test "edge_underflow to zero is the number zero"
+    // There is no infinity below zero to refuse, and zero is a number the
+    // language has, so the outcome is 0 and it is stated in SPEC.md.
+    expect 1e-400 to be 0
+    expect 1e-200 * 1e-200 to be 0
+    // A number that underflowed to zero is a zero divisor like any other.
+    set caught to no
+    try
+        set x to 1 / 1e-400
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+end

@@ -66,6 +66,32 @@ fn display(value: &Value) -> String {
     value.to_string()
 }
 
+/// Lexes `source` and returns the lexer error it produced.
+#[track_caller]
+fn lex_err(source: &str) -> Error {
+    redblue::lexer::Lexer::tokenize(source).expect_err("source should fail to lex")
+}
+
+/// Asserts `source` fails to lex, naming `literal` as the malformed literal.
+#[track_caller]
+fn assert_lexer_error(source: &str, literal: &str) {
+    match lex_err(source) {
+        Error::Lexer(message, span) => {
+            assert!(
+                message.contains(literal),
+                "`{}` should name the literal it could not read, got {}",
+                source,
+                message
+            );
+            assert!(span.is_known(), "`{}` failed without a source span", source);
+        }
+        other => panic!(
+            "`{}` should fail with a Lexer error, got {:?}",
+            source, other
+        ),
+    }
+}
+
 #[test]
 fn modulo_by_zero_is_a_runtime_error() {
     assert_runtime_error("set x to 5 % 0", "Modulo by zero");
@@ -352,4 +378,105 @@ fn edge_non_finite_results_are_refused_inside_a_list_and_record() {
         "set xs to [1, 2]\nset i to 1e308 * 1e308\nset x to xs[i]",
         "infinity is not a finite number",
     );
+}
+
+#[test]
+fn edge_a_sign_right_after_a_number_is_an_operator_not_part_of_the_literal() {
+    // `5-2` used to be read as one literal, "5-2", which is not a number, and it
+    // silently became 0. A sign only belongs to a literal after its exponent.
+    assert_eq!(eval("5-2"), Value::Number(3.0));
+    assert_eq!(eval("5+2"), Value::Number(7.0));
+    assert_eq!(eval("1-2"), Value::Number(-1.0));
+    assert_eq!(eval("10-2-3"), Value::Number(5.0));
+    assert_eq!(eval("7/2"), Value::Number(3.5));
+    assert_eq!(eval("100-1-1"), Value::Number(98.0));
+    // An exponent sign is still part of the literal it belongs to.
+    assert_eq!(eval("1e+5"), Value::Number(100000.0));
+    assert_eq!(eval("1e-3"), Value::Number(0.001));
+    assert_eq!(eval("2E-3"), Value::Number(0.002));
+    assert_eq!(eval("1.5e-1"), Value::Number(0.15));
+    // A number with no fractional part written out still reads as one number.
+    assert_eq!(eval("5."), Value::Number(5.0));
+    assert_eq!(eval(".5"), Value::Number(0.5));
+}
+
+#[test]
+fn edge_a_malformed_number_literal_is_a_lexer_error_not_a_silent_zero() {
+    // A literal that is not a number is a mistake in the source. Every one of
+    // these used to become the number 0 and the program carried on.
+    assert_lexer_error("set x to 1.2.3", "1.2.3");
+    assert_lexer_error("set x to 2..3", "2..3");
+    assert_lexer_error("set x to 3e", "3e");
+    assert_lexer_error("set x to 1e+", "1e+");
+    assert_lexer_error("set x to 1.5e", "1.5e");
+    assert_lexer_error("say 1.2.3", "1.2.3");
+    // The refusal happens in the lexer, so it is the same wherever the literal
+    // sits: a list, a record, an index, or on its own.
+    for source in [
+        "set xs to [1, 2..3]",
+        "set r to {a: 3e}",
+        "set xs to [1, 2]\nset x to xs[1.2.3]",
+        "set x to 1.2.3 + 1",
+    ] {
+        assert!(
+            matches!(lex_err(source), Error::Lexer(..)),
+            "`{}` should be refused by the lexer, not read as 0",
+            source
+        );
+    }
+}
+
+#[test]
+fn edge_a_literal_too_small_to_hold_is_the_number_zero() {
+    // Underflow has no infinity to refuse: zero is a number the language has,
+    // so the outcome is `0` and it is stated in SPEC.md rather than refused.
+    assert_eq!(eval("1e-400"), Value::Number(0.0));
+    assert_eq!(display(&eval("1e-400")), "0");
+    assert_eq!(eval("1e-324"), Value::Number(0.0));
+    assert_eq!(display(&eval("1e-324")), "0");
+    // `5e-324` is the smallest positive double, so it does not underflow.
+    match eval("5e-324") {
+        Value::Number(n) => assert!(n > 0.0, "5e-324 underflowed to {}", n),
+        other => panic!("5e-324 should be a number, got {:?}", other),
+    }
+    // Arithmetic underflows the same way, and only to the same one answer.
+    assert_eq!(eval("1e-200 * 1e-200"), Value::Number(0.0));
+    // A number that underflowed to zero is a zero divisor like any other.
+    assert_runtime_error("set x to 1 / 1e-400", "Division by zero");
+    assert_runtime_error("set x to 5 % 1e-400", "Modulo by zero");
+}
+
+#[test]
+fn edge_a_numeric_for_range_cannot_step_into_a_non_finite_number() {
+    // `for each x from 1 to 10` does not parse, so `Statement::ForRange` is
+    // unreachable from source. It is still a place a number is built, so its
+    // counter goes through the same door: a step that overflows the counter is
+    // a runtime error, not an infinity that ends the loop by accident.
+    let program = redblue::parser::Program {
+        statements: vec![redblue::parser::Stmt {
+            span: redblue::Span::new(1, 1),
+            statement: redblue::parser::Statement::ForRange {
+                variable: "x".to_string(),
+                start: redblue::parser::Expr::Number(1e308),
+                end: redblue::parser::Expr::Number(1.5e308),
+                step: Some(redblue::parser::Expr::Number(1e308)),
+                body: Vec::new(),
+            },
+        }],
+    };
+    let mut vm = redblue::Vm::new();
+    match vm.run(&program) {
+        Err(Error::Runtime(message, span)) => {
+            assert_eq!(message, "infinity is not a finite number");
+            assert!(span.is_known(), "the overflow reported no position");
+        }
+        Err(other) => panic!(
+            "a counter overflow should be a Runtime error, got {:?}",
+            other
+        ),
+        Ok(value) => panic!(
+            "a counter overflow should not return a value, got {:?}",
+            value
+        ),
+    }
 }
