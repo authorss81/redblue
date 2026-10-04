@@ -1,5 +1,38 @@
 # Phase 003 — Write a real Redblue test suite
 
+## Re-verification on resume
+
+This report was written by a first run and then **independently re-verified by a
+second run** on the recovered tree (`da2ffba`, whose parent is `ee528e1`, the
+`main` this phase was measured against). Nothing was rewritten. The second run
+re-executed every gate from scratch and re-ran both mutation checks; every number
+below is what was measured, not what the first run claimed. The two probes were
+created, measured, and deleted again — `git status` is clean of them.
+
+| Claim in this report | Re-measured on `da2ffba` |
+|---|---|
+| `cargo fmt --all -- --check` passes | pass, 0 diff |
+| `cargo clippy --all-targets -- -D warnings` passes | pass, 0 warnings |
+| `cargo test --all-targets` = 67 passed | 67 passed across 7 binaries: 5 + 0 + 13 + 21 + 8 + 5 + 15 |
+| `rb test` = 187 run, 187 passed, 0 failed, 0 skipped | 187 run, 187 passed, 0 failed, 0 skipped, exit 0 |
+| 187 `test` blocks, 322 `expect`/`assert.` lines | 187 blocks, 322 assertion lines |
+| 57 blocks named `edge_*` | 57 |
+| 24 blocks use `try`/`catch error` | 24 (per-file: modules 7, arithmetic 5, suite 3, lists 2, records 2, text 2, integration 2, functions 1) |
+| no tautological `expect x to be x`, no `expect nothing to be nothing` | 0 matches for either |
+| `examples/*.rb` all exit 0 | all 6 exit 0 |
+| only `src/testing/harness.rs` touched in `src/` | confirmed by `git diff ee528e1..HEAD --stat` |
+| no live test removed | the only non-comment deletions in `tests/*.rb` are 3 `say` lines inside commented placeholders |
+
+The mutation checks were repeated, not trusted:
+
+- Dropping `tests/zz_probe.rb` containing `test "zz_mutation_probe"` with
+  `expect x to be 2` (where `x` is 1) → `rb test` printed `Tests run: 188`,
+  `Failed: 1` and exited **1**.
+- Dropping the same file with no `expect` at all →
+  `every_test_block_carries_an_assertion` **FAILED**, panicking at
+  `tests/redblue_suite_test.rs:146`.
+- Both probes were removed; `rb test` is back to 187/187 and `cargo test` to 67.
+
 ## Finding re-verified
 
 The phase prompt's evidence still reproduces on `main` (`ee528e1`). Before this
@@ -164,13 +197,15 @@ Redblue suite: 187 blocks, of which **57 are named `edge_*`** and **24 use
 
 - No `// smoke` marker anywhere: `every_test_block_carries_an_assertion` rejects
   any block without `expect` or `assert.`
-- Mutation-checked. Two temporary files were dropped into `tests/` and both
-  turned the gate red, then were removed:
+- Mutation-checked, twice. The first run dropped two temporary files into
+  `tests/`, both turned the gate red, and removed them; the resumed run repeated
+  both probes and measured the same two failures:
   - a block with no `expect` → `every_test_block_carries_an_assertion` FAILED,
-    naming `tests/zz_tmp_meta.rb:1`;
-  - a block with `expect 1 to be 2` → `edge_suite_reports_at_least_40_redblue_tests`
-    and `edge_suite_runs_no_skipped_tests` FAILED, and `rb test` printed
-    `Failed: 1` and exited 1.
+    naming the probe file (`tests/redblue_suite_test.rs:146`);
+  - a block with `expect x to be 2` where `x` is 1 → `rb test` printed
+    `Tests run: 188`, `Failed: 1` and exited 1, and
+    `edge_suite_reports_at_least_40_redblue_tests` /
+    `edge_suite_runs_no_skipped_tests` FAILED.
 - The suite is deterministic: no wall clock, no network, no randomness. The only
   filesystem access is `modules/SuiteKit.rb`, which is committed to the repo, and
   the file contents are irrelevant to every assertion (only "the import resolved"
@@ -179,22 +214,34 @@ Redblue suite: 187 blocks, of which **57 are named `edge_*`** and **24 use
 
 ## Gates
 
+All five rows below were re-executed by the resumed run, not inherited from the
+first run's claim.
+
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass (0 diff) |
 | `cargo clippy --all-targets -- -D warnings` | pass (0 warnings) |
-| `cargo test` | **67 passed, 0 failed** across 8 binaries (5 + 0 + 13 + 21 + 8 + 5 + 15 + 0) |
+| `cargo test --all-targets` | **67 passed, 0 failed** across 7 binaries (5 + 0 + 13 + 21 + 8 + 5 + 15) |
 | `rb test` | **187 run, 187 passed, 0 failed, 0 skipped**, exit 0 |
 | `./rbops/verify.sh phase-003` | **NOT RUN — `./rbops/` does not exist in this checkout** |
 
 On the fourth gate, exactly: `./rbops/verify.sh` cannot be executed from the
-project root here (`ls: cannot access 'rbops': No such file or directory`). The
-RBOPS tree is not part of this repository, so the phase's own gate script is not
-reachable. I did not inspect, reconstruct or substitute for it. The three gates
-that *can* run were all run and are green, and `.github/workflows/ci.yml` runs
-exactly `cargo build`, `cargo test` and `cargo clippy -- -D warnings` — all three
+project root here (`ls: cannot access 'rbops': No such file or directory`, and
+`find . -name verify.sh -not -path './target/*'` returns nothing). The RBOPS tree
+is not part of this repository, so the phase's own gate script is not reachable.
+I did not inspect, reconstruct or substitute for it. The three gates that *can*
+run were all run and are green, and `.github/workflows/ci.yml` runs exactly
+`cargo build`, `cargo test` and `cargo clippy -- -D warnings` — all three
 verified locally green. **If `verify.sh` enforces anything beyond those three,
 this phase is unverified against it.**
+
+One candidate extra check was run and found **pre-existing across the whole
+repository**, so it is not a regression of this phase and was deliberately not
+"fixed": `rb format --check` reports `File would be reformatted` for all six
+`examples/*.rb`, `modules/MathUtils.rb`, and every `.rb` file this phase
+touched. No `.rb` file in the repository passes `rb format --check`, so that is
+the formatter's debt, not this suite's — recorded rather than churned
+(FINDINGS.md §11 and §14).
 
 Also run, because AGENTS §2 makes the examples load-bearing:
 
@@ -232,9 +279,9 @@ not by edits — this phase changed tests and one test-harness file only.
 
 ## Known gaps / follow-ups
 
-Thirteen findings are recorded in `phases/phase-003/FINDINGS.md`, each with a
+Fourteen findings are recorded in `phases/phase-003/FINDINGS.md`, each with a
 `file:line` anchor, a reproduction, a severity and a suggested acceptance gate.
-The four that block a real language surface:
+The five that block a real language surface:
 
 - **§1** `stdlib::builtin_function` is never called; ~35 stdlib functions
   (`uppercase`, `split`, `abs`, `map`, `to_text`, …) all fail with
@@ -259,11 +306,35 @@ The four that block a real language surface:
   emits `is greater than`, which the parser cannot read — `rb format` can
   produce unparseable code. Consequence: every comparison in the suite is `is` /
   `is not`.
+- **§14** `Formatter::write` (`src/formatter.rs:430-439`) inserts a space between
+  any two adjacent writes, so `format_string_literal` emits `" ab "` for `"ab"` —
+  `rb format` **silently changes every string literal's value**, and it is why
+  `rb format --check` fails on every `.rb` file in the repository. Found by this
+  phase's run of `rb format --check`; it is a formatter bug, not a test-suite
+  bug, so it is a finding and not a fix here. It is the one thing this phase
+  would most like a follow-up phase for, because `rb format` is the only
+  mechanical way to keep the ten suite files readable and currently it would
+  corrupt them.
 
 No test in this suite asserts a *bug* as if it were a feature, except for the
 three tests whose names say so explicitly and which point at the finding:
 `text: braces are ordinary characters in a text literal` (FINDINGS.md §2),
 `lists: a conditional inside a loop does not disturb the iteration` and
 `lists: break inside a loop does not truncate it` (FINDINGS.md §4).
+
+## Definition of done
+
+| Requirement | Measured | Status |
+|---|---|---|
+| ≥ 40 Redblue test blocks, all with assertions | 187 blocks, 322 assertion lines, 0 blocks without an `expect` | met |
+| ≥ 8 named `edge_*` | 57 | met |
+| ≥ 5 tests that assert a failure is produced | 24 blocks use `try`/`catch error` and assert the catch fired | met |
+| `cargo test` green, non-zero | 67 passed, 0 failed | met |
+| `rb test` green, non-zero | 187 run, 187 passed, 0 failed, 0 skipped, exit 0 | met |
+| ≥ 3 new `#[test]` / ≥ 2 new Redblue `test` blocks | 8 new `#[test]` + 165 new Redblue blocks | met |
+| ≥ 1 test named `edge_*` | 57 Redblue + 8 Rust | met |
+| ≥ 1 test asserting a failure is produced | 24 Redblue + `every_test_block_carries_an_assertion` | met |
+| zero new `#[ignore]` / `// skip` / `allow(clippy::` | 0 added; `edge_suite_declares_no_skip_markers` and `edge_suite_runs_no_skipped_tests` enforce it | met |
+| zero newly-failing pre-existing tests | all pre-existing test files untouched; 67 pass | met |
 
 The fourth gate could not be run; see **Gates** above.

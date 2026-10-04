@@ -308,3 +308,52 @@ comparing the whole value (`expect x to be [1, 2, 3]`) or by an explicit loop.
 **Risk: low** for containment (one more `BinaryOp` plus a `contain` keyword);
 **low** for `assert.equal` once finding 1 is fixed, since `stdlib::builtin_function`
 already has an `assert` arm to route.
+
+---
+
+## 14. `rb format` corrupts programs — it inserts spaces inside string literals
+
+`Formatter::write` (`src/formatter.rs:430-439`) inserts a single space between
+any two adjacent writes unless the output already ends in a space or a newline.
+It has no notion of "this write is the inside of a literal", so the three writes
+that `format_string_literal` performs (`src/formatter.rs:385-389`) emit
+`"` → `" ab` → `" ab "`. Every string literal in every formatted program gains a
+leading and a trailing space, which silently changes the program's behaviour.
+
+The same rule produces doubled spacing elsewhere (`write("x")` followed by
+`write(" to ")` yields `set x  to ...`), and because `format` re-renders from the
+AST (`src/formatter.rs:17-25`) rather than from tokens, comments are discarded
+outright.
+
+Reproduction:
+
+```
+$ printf 'say "ab"\n' > /tmp/t.rb && rb format /tmp/t.rb
+say " ab "
+
+$ rb format examples/hello.rb > /tmp/h.rb && rb run /tmp/h.rb
+ Hello, World!          # was: Hello, World!
+ Hello, World!
+$ echo $?
+0
+```
+
+Consequence for this phase: `rb format --check` reports
+`File would be reformatted` for **every** `.rb` file in the repository — all six
+`examples/*.rb`, `modules/MathUtils.rb`, and all ten `tests/*.rb` this phase
+wrote. No `.rb` file passes, so the check cannot be used as a gate and the suite's
+files were not formatted to "fix" it (doing so would rewrite string literals in
+the tests themselves). `rb format` is documented in `AGENTS.md` under
+"Formatter (rbfmt)" and its output is unrunnable-equivalent to the input.
+
+**Severity: blocker** — `rb format` is a semantics-changing command, not a
+cosmetic one, and it currently destroys every string literal in a program.
+**Risk: medium** — the fix is a real-token-aware writer, not a one-line patch:
+`write` needs a "no space before/after" signal for literal interiors and
+punctuation, and comment preservation likely needs the formatter to work from
+tokens rather than the AST.
+
+**Suggested acceptance gate:** `rb format` is idempotent and semantics-preserving
+on a corpus: for every file `F` in `examples/*.rb` plus a new corpus,
+`rb run F` and `rb run <(rb format F)` produce byte-identical stdout, and
+`rb format --check` passes on every file in the repository.
