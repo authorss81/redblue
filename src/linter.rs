@@ -149,6 +149,11 @@ impl Linter {
                     self.analyze_statement(s);
                 }
             }
+            Statement::Has { default, .. } => {
+                if let Some(expr) = default {
+                    self.analyze_expr(expr);
+                }
+            }
             Statement::Object {
                 name,
                 extends: _,
@@ -211,6 +216,16 @@ impl Linter {
                 property: _,
             } => {
                 self.analyze_expr(object);
+            }
+            Expr::MethodCall {
+                receiver,
+                method: _,
+                args,
+            } => {
+                self.analyze_expr(receiver);
+                for arg in args {
+                    self.analyze_expr(arg);
+                }
             }
             Expr::Index { object, index } => {
                 self.analyze_expr(object);

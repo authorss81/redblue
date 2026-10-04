@@ -87,10 +87,29 @@ pub struct Vm {
     locals: Vec<CapturedScope>,
     output: Vec<String>,
     _modules: HashMap<String, Program>,
+    /// Every `object` declaration, by type name. The table is the inheritance
+    /// model: an entry already holds its own fields and methods merged with
+    /// everything it inherits, nearest declaration first, so a lookup is a
+    /// single map read and cannot walk a cyclic parent chain.
+    objects: HashMap<String, ObjectType>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
     current_span: Span,
     call_depth: usize,
     max_call_depth: usize,
+}
+
+/// One `object` declaration, after its parent has been merged into it.
+#[derive(Debug, Clone)]
+struct ObjectType {
+    /// The object this one extends, kept so that a child can be resolved
+    /// against its own parent after a later declaration changes nothing.
+    parent: Option<String>,
+    /// Declared fields, defaults included, in declaration order. A field the
+    /// child declares keeps the child's position and the child's default, and
+    /// a parent field that reaches the same name is not copied in.
+    fields: Fields,
+    /// Methods the type answers to, nearest declaration first.
+    methods: Fields,
 }
 
 impl Vm {
@@ -101,6 +120,7 @@ impl Vm {
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
             _modules: HashMap::new(),
+            objects: HashMap::new(),
             expectation_failure: None,
             current_span: Span::unknown(),
             call_depth: 0,
@@ -377,24 +397,20 @@ impl Vm {
 
                 Ok(Value::Nothing)
             }
-            Statement::Method {
-                name: _,
-                params: _,
-                body: _,
-            } => {
-                // Method implementation
+            Statement::Method { name, params, body } => {
+                let method = self.make_function(name, params, body);
+                self.set_var(name, method);
                 Ok(Value::Nothing)
             }
+            Statement::Has { name, .. } => Err(Error::Runtime(
+                format!("'has {name}' is only valid inside an object declaration"),
+                self.span(),
+            )),
             Statement::Object {
                 name,
-                extends: _,
-                body: _,
-            } => {
-                // Object implementation
-                let record = Value::Record(Fields::new());
-                self.set_var(name, record);
-                Ok(Value::Nothing)
-            }
+                extends,
+                body,
+            } => self.declare_object(name, extends.as_ref(), body),
             Statement::Try {
                 body,
                 catch_var,
@@ -489,7 +505,16 @@ impl Vm {
                 let v = self.evaluate(expr)?;
                 self.unary_op(op, v)
             }
-            Expr::Call { name, args } => self.call(name, args),
+            Expr::Call { name, args } => {
+                let arg_values: Result<Vec<Value>> =
+                    args.iter().map(|a| self.evaluate(a)).collect();
+                self.call(name, &arg_values?)
+            }
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => self.call_method(receiver, method, args),
             Expr::Property { object, property } => {
                 let obj = self.evaluate(object)?;
                 if let Value::Record(fields) = obj {
@@ -721,10 +746,7 @@ impl Vm {
         }
     }
 
-    fn call(&mut self, name: &str, args: &[Expr]) -> Result<Value> {
-        let arg_values: Result<Vec<Value>> = args.iter().map(|a| self.evaluate(a)).collect();
-        let args = arg_values?;
-
+    fn call(&mut self, name: &str, args: &[Value]) -> Result<Value> {
         // Check for built-in functions
         match name {
             "say" => {
@@ -1146,7 +1168,7 @@ impl Vm {
             _ => {
                 // User-defined function
                 if let Some(Value::Function(function)) = self.get_var(name) {
-                    self.call_user_function(name, &function, &args)
+                    self.call_user_function(name, &function, args)
                 } else {
                     Err(Error::Runtime(
                         format!("Unknown function '{}'", name),
@@ -1162,6 +1184,166 @@ impl Vm {
     ///
     /// The call depth is checked first and released again on every exit path,
     /// including an error, so a caught failure leaves the counter balanced.
+    /// Resolves `receiver.method(args)`.
+    ///
+    /// A receiver that names a declared `object` is a method call on that
+    /// type: the method is the one the nearest declaration of that name
+    /// provides, and `this` is bound to the receiver for the length of the
+    /// call. A receiver that names no object is a module function, spelled
+    /// `module_function` — which is what `files.read` and `time.now` are.
+    /// Anything else is an error rather than a guess.
+    fn call_method(&mut self, receiver: &Expr, method: &str, args: &[Expr]) -> Result<Value> {
+        let arg_values: Result<Vec<Value>> = args.iter().map(|a| self.evaluate(a)).collect();
+        let args = arg_values?;
+
+        let name = match receiver {
+            Expr::Variable(name) => name.clone(),
+            _ => {
+                let this = self.evaluate(receiver)?;
+                return Err(Error::Runtime(
+                    format!(
+                        "Cannot call method '{}' on {}, which is not an object",
+                        method, this
+                    ),
+                    self.span(),
+                ));
+            }
+        };
+
+        let object = match self.objects.get(&name) {
+            Some(object) => object.clone(),
+            None => return self.call(&format!("{}_{}", name, method), &args),
+        };
+
+        let function = match object.methods.get(method) {
+            Some(Value::Function(function)) => function.clone(),
+            Some(_) | None => {
+                return Err(Error::Runtime(
+                    format!("Object '{name}' has no method '{method}'"),
+                    self.span(),
+                ))
+            }
+        };
+
+        let this = self.evaluate(receiver)?;
+        self.push_scope();
+        self.declare("this");
+        self.set_var("this", this);
+        let result = self.call_user_function(method, &function, &args);
+        self.pop_scope();
+        result
+    }
+
+    /// Registers an `object Name [extends Parent]` declaration and binds `Name`
+    /// to a record of its resolved fields.
+    ///
+    /// Lookup order, and the whole of it: the declaration's own `has` fields
+    /// and `to can` methods first, then the nearest parent's, then the
+    /// grandparent's, and so on. The first declaration of a name in that walk
+    /// wins and the further ones are not copied in, so a child field shadows
+    /// its parent's field rather than merging with it.
+    ///
+    /// The chain is walked once, here, with every name it visits collected, so
+    /// `object A extends A` and a two-object cycle are reported instead of
+    /// walked again. A parent that is not declared is the same error.
+    fn declare_object(
+        &mut self,
+        name: &str,
+        extends: Option<&String>,
+        body: &[Stmt],
+    ) -> Result<Value> {
+        if self.objects.contains_key(name) {
+            return Err(Error::Runtime(
+                format!("Object '{name}' is already declared"),
+                self.span(),
+            ));
+        }
+
+        let mut fields = Fields::new();
+        let mut methods = Fields::new();
+        let mut rest = Vec::new();
+        for stmt in body {
+            match &stmt.statement {
+                Statement::Has {
+                    name: field,
+                    default,
+                } => {
+                    let value = match default {
+                        Some(expr) => self.evaluate(expr)?,
+                        None => Value::Nothing,
+                    };
+                    fields.insert(field.clone(), value);
+                }
+                Statement::Method {
+                    name: method,
+                    params,
+                    body,
+                } => {
+                    let function = self.make_function(method, params, body);
+                    methods.insert(method.clone(), function);
+                }
+                _ => rest.push(stmt.clone()),
+            }
+        }
+
+        // Nearest parent first, so the child's own entries stay ahead of every
+        // inherited one and `entry` keeps them there.
+        let mut chain = Vec::new();
+        let mut seen = vec![name.to_string()];
+        let mut parent = extends.cloned();
+        while let Some(current) = parent {
+            if seen.contains(&current) {
+                return Err(Error::Runtime(
+                    format!(
+                        "Object '{name}' extends '{current}', which is already in its own parent chain"
+                    ),
+                    self.span(),
+                ));
+            }
+            let Some(object) = self.objects.get(&current).cloned() else {
+                return Err(Error::Runtime(
+                    format!("Object '{name}' extends '{current}', which is not declared"),
+                    self.span(),
+                ));
+            };
+            seen.push(current);
+            parent = object.parent.clone();
+            chain.push(object);
+        }
+
+        for object in &chain {
+            for (field, value) in &object.fields {
+                fields.entry(field.clone()).or_insert_with(|| value.clone());
+            }
+            for (method, function) in &object.methods {
+                methods
+                    .entry(method.clone())
+                    .or_insert_with(|| function.clone());
+            }
+        }
+
+        self.objects.insert(
+            name.to_string(),
+            ObjectType {
+                parent: extends.cloned(),
+                fields: fields.clone(),
+                methods,
+            },
+        );
+        let record = Value::Record(fields);
+        self.declare(name);
+        self.set_var(name, record);
+
+        // A body that is not a field or a method declaration runs in the
+        // enclosing scope, in order, and after the type is registered, so a
+        // nested `object` in the body may extend this one.
+        for stmt in &rest {
+            self.execute_statement(stmt)?;
+        }
+
+        Ok(Value::Nothing)
+    }
+
     fn call_user_function(
         &mut self,
         name: &str,

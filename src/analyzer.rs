@@ -1,5 +1,6 @@
 use crate::error::{Error, Result, Span};
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt};
+use crate::stdlib;
 
 pub struct Analyzer {
     scopes: Vec<std::collections::HashSet<String>>,
@@ -172,6 +173,11 @@ impl Analyzer {
                 }
                 self.pop_scope();
             }
+            Statement::Has { default, .. } => {
+                if let Some(expr) = default {
+                    self.analyze_expr(expr, &span);
+                }
+            }
             Statement::Object {
                 name,
                 extends,
@@ -250,6 +256,25 @@ impl Analyzer {
                 property: _,
             } => {
                 self.analyze_expr(object, span);
+            }
+            Expr::MethodCall {
+                receiver,
+                method: _,
+                args,
+            } => {
+                match &**receiver {
+                    // A bare receiver may be a module rather than a variable —
+                    // `json.parse` is a module function — so it is an unknown
+                    // variable only when it is neither in scope nor a module.
+                    Expr::Variable(name) if !self.lookup(name) && !stdlib::is_module(name) => {
+                        self.add_error(&format!("Unknown variable '{}'", name), *span);
+                    }
+                    Expr::Variable(_) => {}
+                    other => self.analyze_expr(other, span),
+                }
+                for arg in args {
+                    self.analyze_expr(arg, span);
+                }
             }
             Expr::Index { object, index } => {
                 self.analyze_expr(object, span);

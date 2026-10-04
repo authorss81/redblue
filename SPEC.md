@@ -562,6 +562,44 @@ object Employee extends Person
 end
 ```
 
+### Lookup order and shadowing
+
+A declaration is both the type and its prototype: `object Person ... end` binds
+the name `Person` to a record of the fields the declaration resolves to, so
+`type_of(Person)` is `"record"` and `Person` is the value a method sees as
+`this`.
+
+Lookup order, for both fields and methods, is **nearest declaration first**: the
+child's own `has` fields and `to can` methods, then the parent's, then the
+grandparent's, and so on. The first declaration of a name in that order wins
+and the further ones are not copied in, so a child field or method **shadows**
+its parent's rather than merging with it. `Employee.role()` is the child's
+`role`, and `Person.role()` is still the parent's. A field and a method of one
+name are separate: `Employee.name` is the field, `Employee.name()` is the
+method.
+
+Four rules follow from that order:
+
+| Rule | Why |
+|---|---|
+| The parent must be declared before the child | The chain is walked once, at declaration. An undeclared parent is an error, not an empty base. |
+| The chain is acyclic by construction | `object A extends A` is a one-object cycle and is reported as one; a two-object cycle cannot be written, because `A` is already declared when `B` is and re-declaring a name is refused. |
+| `has` twice keeps the later default | One field, one default, in the position of the first mention. |
+| A write is a write to that prototype | `set Person.name to "Ada"` changes the record `Person` names. A child declared afterwards still starts from the *declared* defaults, not from those writes. |
+
+A method writes to the object it was called on through `this`
+(`set this.name to name`) and hands the result back with `give back this`, which
+is the constructor SPEC.md § Constructor is written as. The write does not
+escape to the declaration by itself: a record is a value, so a method that
+mutates `this` and returns nothing leaves the prototype as it was.
+
+A call is a method call when the receiver names a declared object, and a module
+function (`receiver_function`, as `files.read` is) when it does not. `this` is
+bound by a method call and by nothing else, so reaching for it in free code is
+an error rather than an empty record. A method on a receiver that names no
+object is not guessed at: a missing method and a non-object receiver are each
+their own error.
+
 ### Properties
 
 ```redblue

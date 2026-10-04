@@ -1,6 +1,16 @@
 use crate::value::Value;
 use std::collections::HashMap;
 
+/// The module names whose functions are registered as `module_function`
+/// builtins, so that a caller can tell `json.parse` — a module — from a
+/// variable that happens to be followed by a `.`.
+pub const MODULES: &[&str] = &["console", "csv", "files", "json", "network", "time"];
+
+/// Whether `name` is one of the [`MODULES`].
+pub fn is_module(name: &str) -> bool {
+    MODULES.contains(&name)
+}
+
 pub fn builtins() -> HashMap<String, Value> {
     let mut globals = HashMap::new();
 

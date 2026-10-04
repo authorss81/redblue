@@ -207,6 +207,14 @@ impl Formatter {
                 self.dedent();
                 self.write("end");
             }
+            Statement::Has { name, default } => {
+                self.write("has ");
+                self.write(name);
+                if let Some(expr) = default {
+                    self.write(" default ");
+                    self.format_expression(expr);
+                }
+            }
             Statement::Object {
                 name,
                 extends,
@@ -331,6 +339,23 @@ impl Formatter {
                 self.format_expression(object);
                 self.write(".");
                 self.write(property);
+            }
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => {
+                self.format_expression(receiver);
+                self.write(".");
+                self.write(method);
+                self.write("(");
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.format_expression(arg);
+                }
+                self.write(")");
             }
             Expr::Index { object, index } => {
                 self.format_expression(object);

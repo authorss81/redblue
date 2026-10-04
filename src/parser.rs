@@ -37,6 +37,15 @@ pub enum Expr {
         property: String,
     },
 
+    // receiver.method(args) — a call on a value, as opposed to the bare
+    // `name(args)` of [`Expr::Call`]. The runtime reads it as an object method
+    // and, for a receiver that names no object, as a module function.
+    MethodCall {
+        receiver: Box<Expr>,
+        method: String,
+        args: Vec<Expr>,
+    },
+
     // Index access
     Index {
         object: Box<Expr>,
@@ -166,6 +175,12 @@ pub enum Statement {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+    },
+
+    // has name [default <expr>] — a field declaration, only inside an object
+    Has {
+        name: String,
+        default: Option<Expr>,
     },
 
     // object Name ... end
@@ -528,6 +543,15 @@ impl Parser {
                 self.advance();
                 n
             }
+            // `set this.field to …` is how a method writes to the object it was
+            // called on, so `this` is a name a `set` accepts as a target.
+            Some(Token {
+                kind: TokenKind::This,
+                ..
+            }) => {
+                self.advance();
+                "this".to_string()
+            }
             _ => {
                 return Err(Error::Parser(
                     "Expected variable name".to_string(),
@@ -724,6 +748,71 @@ impl Parser {
     fn parse_function(&mut self) -> Result<Option<Statement>> {
         self.advance(); // consume 'to'
 
+        let (name, params, body) = self.parse_callable()?;
+        Ok(Some(Statement::Function { name, params, body }))
+    }
+
+    /// Parses a `to can name(params) ... end` method declaration, the form
+    /// SPEC.md gives inside an `object` body.
+    fn parse_method(&mut self) -> Result<Option<Stmt>> {
+        let span = self.span();
+        self.advance(); // consume 'to'
+
+        if self.current().map(|t| &t.kind) == Some(&TokenKind::Can) {
+            self.advance();
+        }
+
+        let (name, params, body) = self.parse_callable()?;
+        Ok(Some(Stmt {
+            span,
+            statement: Statement::Method { name, params, body },
+        }))
+    }
+
+    /// Parses `has name [default <expr>]` — a field declaration.
+    fn parse_has(&mut self) -> Result<Option<Stmt>> {
+        let span = self.span();
+        self.advance(); // consume 'has'
+
+        let name = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier(name),
+                ..
+            }) => {
+                let n = name.clone();
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(Error::Parser(
+                    "Expected field name after 'has'".to_string(),
+                    self.span(),
+                ))
+            }
+        };
+
+        // `default` is not a keyword in the lexer, so it is matched by name
+        // here rather than by a token kind.
+        let default = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier(word),
+                ..
+            }) if word == "default" => {
+                self.advance();
+                Some(self.parse_expression()?)
+            }
+            _ => None,
+        };
+
+        Ok(Some(Stmt {
+            span,
+            statement: Statement::Has { name, default },
+        }))
+    }
+
+    /// Parses the shared tail of `to name(...)` and `to can name(...)`: the
+    /// name, the parameter list, the body, and the closing `end`.
+    fn parse_callable(&mut self) -> Result<(String, Vec<String>, Vec<Stmt>)> {
         let name = match self.current() {
             Some(Token {
                 kind: TokenKind::Identifier(name),
@@ -786,7 +875,7 @@ impl Parser {
 
         self.expect(&TokenKind::End)?;
 
-        Ok(Some(Statement::Function { name, params, body }))
+        Ok((name, params, body))
     }
 
     fn parse_object(&mut self) -> Result<Option<Statement>> {
@@ -841,7 +930,16 @@ impl Parser {
         while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
             && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
         {
-            if let Some(stmt) = self.parse_statement()? {
+            // Inside an object body, `has` and `to can` declare a field and a
+            // method of the object rather than running as statements. SPEC.md
+            // writes the constructor as `to create(name, age)` without the
+            // `can`, so a bare `to` is a method too.
+            let stmt = match self.current().map(|t| &t.kind) {
+                Some(TokenKind::Has) => self.parse_has()?,
+                Some(TokenKind::To) => self.parse_method()?,
+                _ => self.parse_statement()?,
+            };
+            if let Some(stmt) = stmt {
                 body.push(stmt);
             }
             self.skip_newlines();
@@ -1331,17 +1429,13 @@ impl Parser {
                         expr = Expr::Call { name, args };
                     }
                     Expr::Property { object, property } => {
-                        let module_name = match *object {
-                            Expr::Variable(name) => format!("{}_{}", name, property),
-                            _ => {
-                                return Err(Error::Parser(
-                                    "Expected module name".to_string(),
-                                    self.span(),
-                                ))
-                            }
-                        };
-                        expr = Expr::Call {
-                            name: module_name,
+                        // `receiver.method(args)` — the runtime decides whether
+                        // the receiver names an object (a method) or a module
+                        // (a `module_function` builtin), so both forms stay one
+                        // expression rather than being guessed here.
+                        expr = Expr::MethodCall {
+                            receiver: object,
+                            method: property,
                             args,
                         };
                     }
@@ -1400,6 +1494,13 @@ impl Parser {
             TokenKind::Identifier(name) => {
                 self.advance();
                 Ok(Expr::Variable(name.clone()))
+            }
+            // `this` is a plain variable that only a method call binds, so a
+            // program that reaches for it outside a method gets the ordinary
+            // "Unknown variable 'this'" error rather than a silent nothing.
+            TokenKind::This => {
+                self.advance();
+                Ok(Expr::Variable("this".to_string()))
             }
             TokenKind::LeftParen => {
                 self.advance();
