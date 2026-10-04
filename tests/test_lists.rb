@@ -117,21 +117,78 @@ test "lists: break inside a loop does not truncate it"
     expect total to be 10
 end
 
-test "edge_lists_index_past_the_end_yields_nothing_not_an_error"
+test "edge_lists_index_past_the_end_is_a_caught_error"
     set items to [1, 2, 3]
-    expect items[999] is nothing to be yes
-    expect type_of(items[999]) to be "nothing"
+    set caught to no
+    try
+        set item to items[999]
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+    // A legal index on the same list still answers the element, so the error
+    // above is about the position and not about the list.
+    expect items[2] to be 3
+    expect items[-1] to be 3
 end
 
-test "edge_lists_index_into_an_empty_list_yields_nothing"
+test "edge_lists_index_into_an_empty_list_is_a_caught_error"
     set items to []
-    expect items[0] is nothing to be yes
-    expect items[999] is nothing to be yes
+    set caught_zero to no
+    try
+        set item to items[0]
+    catch error
+        set caught_zero to yes
+    end
+    expect caught_zero to be yes
+    // -1 on an empty list has no last element to count back from, so it fails
+    // too rather than answering nothing.
+    set caught_last to no
+    try
+        set item to items[-1]
+    catch error
+        set caught_last to yes
+    end
+    expect caught_last to be yes
+    set caught_far to no
+    try
+        set item to items[999]
+    catch error
+        set caught_far to yes
+    end
+    expect caught_far to be yes
+    // The empty list is still a list and still supports length.
+    expect length(items) to be 0
 end
 
-test "edge_lists_index_negative_past_the_start_yields_nothing"
+test "edge_lists_index_negative_past_the_start_is_a_caught_error"
     set items to [1, 2, 3]
-    expect items[-99] is nothing to be yes
+    set caught to no
+    try
+        set item to items[-99]
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+    // The whole legal negative range, -1 back to -3, is untouched.
+    expect items[-1] to be 3
+    expect items[-2] to be 2
+    expect items[-3] to be 1
+end
+
+test "edge_lists_a_fractional_index_is_a_caught_error_not_a_truncation"
+    set items to [10, 20, 30]
+    set caught to no
+    try
+        set item to items[0.5]
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+    // A whole number written with a zero fraction is still that whole number,
+    // so only a genuinely fractional index fails.
+    expect items[0.0] to be 10
+    expect items[-0.0] to be 10
 end
 
 test "edge_lists_indexing_through_a_number_is_a_caught_error"

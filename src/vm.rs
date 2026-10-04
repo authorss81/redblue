@@ -482,26 +482,59 @@ impl Vm {
             Expr::Index { object, index } => {
                 let obj = self.evaluate(object)?;
                 let idx = self.evaluate(index)?;
-                if let Value::List(items) = obj {
-                    if let Value::Number(n) = idx {
-                        let i = if n < 0.0 {
-                            items.len() as i64 + n as i64
-                        } else {
-                            n as i64
-                        };
-                        Ok(items.get(i as usize).cloned().unwrap_or(Value::Nothing))
-                    } else {
-                        Err(Error::Runtime(
-                            "Index must be a number".to_string(),
-                            self.span(),
-                        ))
-                    }
-                } else {
-                    Err(Error::Runtime(
+                let Value::List(items) = obj else {
+                    return Err(Error::Runtime(
                         "Cannot index non-list".to_string(),
                         self.span(),
-                    ))
+                    ));
+                };
+                let Value::Number(n) = idx else {
+                    return Err(Error::Runtime(
+                        "Index must be a number".to_string(),
+                        self.span(),
+                    ));
+                };
+                // A fractional index names no element, so it is rejected rather
+                // than truncated: `items[0.5]` must not quietly answer `items[0]`.
+                if n.fract() != 0.0 {
+                    return Err(Error::Runtime(
+                        format!(
+                            "Index {} is out of bounds: a list index must be a whole number",
+                            Value::Number(n)
+                        ),
+                        self.span(),
+                    ));
                 }
+                // A negative index counts from the end, so `n as i64` saturates to
+                // `i64::MIN` at one extreme. That sum is in range while `len` is
+                // non-negative, but the bound is arithmetic rather than a stated
+                // invariant, so it is checked instead of assumed, and the result
+                // is converted rather than cast: a negative offset cast to `usize`
+                // wraps to a huge value and would name a different element than
+                // the program asked for.
+                let element = if n < 0.0 {
+                    (items.len() as i64).checked_add(n as i64)
+                } else {
+                    Some(n as i64)
+                }
+                .and_then(|offset| usize::try_from(offset).ok())
+                .and_then(|offset| items.get(offset))
+                .cloned();
+                element.ok_or_else(|| {
+                    Error::Runtime(
+                        format!(
+                            "Index {} is out of bounds: length is {}, {}",
+                            Value::Number(n),
+                            items.len(),
+                            if items.is_empty() {
+                                "the list is empty, so it has no valid index".to_string()
+                            } else {
+                                format!("valid indexes are 0 to {}", items.len() - 1)
+                            }
+                        ),
+                        self.span(),
+                    )
+                })
             }
             Expr::InterpolatedText(parts) => {
                 let mut result = String::new();

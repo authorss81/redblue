@@ -151,20 +151,61 @@ fn edge_overflow_to_a_non_finite_number_is_a_runtime_error() {
 }
 
 #[test]
-fn edge_an_index_at_the_numeric_limit_is_nothing_not_a_panic() {
+fn edge_an_index_at_the_numeric_limit_is_an_error_not_a_panic() {
     // An index is a number, so it can be as wide as a double. Every one of
-    // these is a value or `nothing` — the cast to an integer saturates and
-    // `len + index` cannot overflow — and none of them is a panic.
+    // these is a value or a `Runtime` error — the cast to an integer saturates,
+    // `len + index` stays in range because a saturated `i64::MIN` plus a
+    // non-negative length does not wrap — and none of them is a panic.
     assert_eq!(eval("[1, 2, 3][0]"), Value::Number(1.0));
     // A negative index counts from the end, so -1 is the last element.
     assert_eq!(eval("[1, 2, 3][-1]"), Value::Number(3.0));
+    // The whole legal range, at both ends.
+    assert_eq!(eval("[1, 2, 3][2]"), Value::Number(3.0));
+    assert_eq!(eval("[1, 2, 3][-3]"), Value::Number(1.0));
     // Empty list, one past the end, far out of bounds, and the two extremes of
-    // a double as an index.
-    assert_eq!(eval("[][0]"), Value::Nothing);
-    assert_eq!(eval("[1, 2, 3][3]"), Value::Nothing);
-    assert_eq!(eval("[1, 2, 3][999]"), Value::Nothing);
-    assert_eq!(eval("[1, 2, 3][1e308]"), Value::Nothing);
-    assert_eq!(eval("[1, 2, 3][-1e308]"), Value::Nothing);
+    // a double as an index: each names no element, so each is an error that
+    // says so rather than an index silently answering `nothing`.
+    assert_runtime_error(
+        "[][0]",
+        "Index 0 is out of bounds: length is 0, the list is empty, so it has no valid index",
+    );
+    assert_runtime_error(
+        "[1, 2, 3][3]",
+        "Index 3 is out of bounds: length is 3, valid indexes are 0 to 2",
+    );
+    assert_runtime_error(
+        "[1, 2, 3][999]",
+        "Index 999 is out of bounds: length is 3, valid indexes are 0 to 2",
+    );
+    // The two extremes of a double as an index. Both saturate to an integer
+    // far outside every list that can exist, so both are errors. The index is
+    // printed with the same expansion `say` gives it, which at these magnitudes
+    // is 300 digits wide, so only the parts that are stable are asserted.
+    for source in ["[1, 2, 3][1e308]", "[1, 2, 3][-1e308]", "[][1e308]"] {
+        match eval_err(source) {
+            Error::Runtime(message, span) => {
+                assert!(message.starts_with("Index "), "unexpected: {}", message);
+                assert!(
+                    message.ends_with(&format!(
+                        "is out of bounds: length is {}, {}",
+                        if source.ends_with("[][1e308]") { 0 } else { 3 },
+                        if source.ends_with("[][1e308]") {
+                            "the list is empty, so it has no valid index"
+                        } else {
+                            "valid indexes are 0 to 2"
+                        }
+                    )),
+                    "unexpected: {}",
+                    message
+                );
+                assert!(span.is_known());
+            }
+            other => panic!(
+                "`{}` should fail with a Runtime error, got {:?}",
+                source, other
+            ),
+        }
+    }
     // An index that is not a number at all never gets that far.
     assert_runtime_error(
         "set xs to [1, 2, 3]\nsay xs[1e400]",

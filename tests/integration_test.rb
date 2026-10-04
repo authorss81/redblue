@@ -41,7 +41,14 @@ test "integration: lists survive assignment and index round trip"
     set last to items[-1]
     expect first to be 1
     expect last to be 3
-    expect items[999] is nothing to be yes
+    // One past the end names no element, so it is caught rather than answered.
+    set caught to no
+    try
+        set past_end to items[999]
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
 end
 
 test "integration: a record survives assignment and field round trip"
@@ -128,7 +135,32 @@ test "integration: deeply nested access stays in range"
     set data to {rows: [{cells: [1, 2, 3]}, {cells: [4, 5, 6]}]}
     expect data.rows[0].cells[0] to be 1
     expect data.rows[1].cells[2] to be 6
-    expect data.rows[9] is nothing to be yes
+    // Every legal position in the walk still answers.
+    expect data.rows[0].cells[2] to be 3
+    expect data.rows[1].cells[0] to be 4
+    expect data.rows[-1].cells[-1] to be 6
+    // Stepping off the outer list is caught at the outer level.
+    set caught_outer to no
+    try
+        set row to data.rows[9]
+    catch error
+        set caught_outer to yes
+    end
+    expect caught_outer to be yes
+    // And stepping off the inner one is caught at the inner level, leaving the
+    // walk above it untouched.
+    set caught_inner to no
+    set cells to no
+    try
+        set cells to data.rows[0].cells[9]
+    catch error
+        set caught_inner to yes
+    end
+    expect caught_inner to be yes
+    expect length(data.rows[0].cells) to be 3
+    // A record field that was never written is still nothing, which is a
+    // different operation from indexing and does not fail.
+    expect data.rows[0].missing is nothing to be yes
 end
 
 test "edge_integration_a_divisor_of_zero_stops_the_program_at_that_line"
