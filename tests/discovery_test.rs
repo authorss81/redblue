@@ -113,6 +113,114 @@ fn edge_discovery_of_empty_and_missing_directory_is_empty() {
     assert!(found.is_empty(), "missing directory produced {:?}", found);
 }
 
+/// Determinism: `read_dir` yields entries in filesystem hash order, so
+/// discovery must impose its own ordering or the test report changes between
+/// machines. Repeated calls must also be byte-for-byte identical.
+#[test]
+fn edge_discovery_order_is_sorted_and_stable_across_calls() {
+    let dir = scratch_dir("order");
+    // Written in reverse-alphabetical creation order so that filesystem order
+    // cannot accidentally look sorted.
+    for name in ["h", "g", "f", "e", "d", "c", "b", "a"] {
+        write_file(
+            &dir,
+            &format!("{}.rb", name),
+            b"// test \"ordering\"\n// end\n",
+        );
+    }
+
+    let first = find_test_files(dir.to_str().expect("utf-8 scratch path"))
+        .expect("discovery should succeed");
+    let second = find_test_files(dir.to_str().expect("utf-8 scratch path"))
+        .expect("second discovery should succeed");
+
+    assert_eq!(
+        first, second,
+        "discovery order must not vary between calls on the same directory"
+    );
+
+    let mut expected = first.clone();
+    expected.sort();
+    assert_eq!(
+        first, expected,
+        "discovery must return paths in sorted order, got {:?}",
+        first
+    );
+}
+
+/// The sort must hold across directory nesting too, not just within one level.
+#[test]
+fn edge_nested_discovery_is_globally_sorted() {
+    let dir = scratch_dir("order-nested");
+    let deep = dir.join("inner");
+    fs::create_dir_all(&deep).expect("nested scratch dir should be creatable");
+    write_file(&dir, "b.rb", b"// test \"b\"\n// end\n");
+    write_file(&dir, "a.rb", b"// test \"a\"\n// end\n");
+    write_file(&deep, "z.rb", b"// test \"z\"\n// end\n");
+    write_file(&deep, "y.rb", b"// test \"y\"\n// end\n");
+
+    let found = find_test_files(dir.to_str().expect("utf-8 scratch path"))
+        .expect("discovery should succeed");
+    assert_eq!(
+        found.len(),
+        4,
+        "expected four .rb files across both levels, got {:?}",
+        found
+    );
+
+    let mut expected = found.clone();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "nested discovery must return paths in global sorted order, got {:?}",
+        found
+    );
+}
+
+/// Definition of done, against the real tree: none of the `tests/*_test.rs`
+/// Rust sources that `cargo test` owns may ever appear in the list the
+/// Redblue harness is handed.
+#[test]
+fn edge_repository_rust_suite_is_never_handed_to_the_harness() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let found = find_test_files(root.join("tests").to_str().expect("utf-8 path"))
+        .expect("discovery should succeed");
+
+    let rust_leaked: Vec<&String> = found.iter().filter(|p| p.ends_with(".rs")).collect();
+    assert!(
+        rust_leaked.is_empty(),
+        "the Redblue harness was handed Rust sources: {:?}",
+        rust_leaked
+    );
+
+    let known_rust = [
+        "discovery_test.rs",
+        "expect_test.rs",
+        "redblue_test.rs",
+        "span_test.rs",
+    ];
+    for name in known_rust {
+        let tracked = root.join("tests").join(name);
+        assert!(
+            tracked.is_file(),
+            "guard assumes {} exists; update the list if tests/ changed",
+            tracked.display()
+        );
+        assert!(
+            !found.iter().any(|p| p.ends_with(name)),
+            "{} is a cargo test file and must never be discovered by the \
+             Redblue harness, got {:?}",
+            name,
+            found
+        );
+    }
+
+    assert!(
+        !found.is_empty(),
+        "no .rb files discovered under the real tests/ directory"
+    );
+}
+
 /// Malformed input: a `.rb` file that is not valid UTF-8 is still collected,
 /// and reading it surfaces a clean `Error::Io` instead of a panic.
 #[test]

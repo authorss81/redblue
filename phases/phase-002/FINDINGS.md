@@ -22,7 +22,7 @@ other means.
 
 **Consequence:** gates 1–3 were run and are green (`cargo fmt --all -- --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets` =
-56 passed / 0 failed / 0 ignored). Gate 4 is reported as **not run**, not as
+59 passed / 0 failed / 0 ignored). Gate 4 is reported as **not run**, not as
 a pass. `REPORT.md` says the same. If gate 4 encodes requirements beyond the
 three cargo commands above, this phase is unverified against them.
 
@@ -55,12 +55,24 @@ anchoring or an explicit error when a requested directory is absent.
 
 Evidence: `src/testing/mod.rs:60` (`if let Ok(entries) = std::fs::read_dir(dir)`).
 
-## 4. Deferred: `find_test_files` returns unsorted `read_dir` order
+## 4. FIXED in this run: `find_test_files` returned unsorted `read_dir` order
 
-`src/testing/mod.rs:60-72` — results are in filesystem enumeration order, not
-deterministic across machines. Harmless today because nothing depends on order
-(the new tests assert on membership and counts, never index), but it is a trap
-for the next thing that reports a test list. One `files.sort()` would close it.
+`src/testing/mod.rs:60-72` — results were in filesystem enumeration order. Fixed:
+`find_test_files` now delegates the recursive walk to a private
+`collect_test_files` and sorts the flattened list, so ordering is global rather
+than per-directory. Two tests pin it, and both failed first against the
+unsorted code (`edge_discovery_order_is_sorted_and_stable_across_calls`,
+`edge_nested_discovery_is_globally_sorted`).
+
+Evidence that this was a real defect, not a hypothetical:
+
+```
+$ for n in h g f e d c b a; do ... > orderprobe/$n.rb; done; ls -U orderprobe
+c.rb g.rb d.rb a.rb b.rb h.rb f.rb e.rb
+```
+
+`read_dir` returns hash order, which is stable on one filesystem and different
+on another.
 
 ## 5. Deferred: the `// test ` marker scanner is purely line-based
 
@@ -75,3 +87,72 @@ or exactly `end`. Two consequences:
 
 Both are real fragility, but both are the marker grammar rather than discovery,
 so they belong to their own phase.
+
+## 6. BLOCKER for the auditor: the previous REPORT.md did not describe the tree
+
+The REPORT.md committed in `fa8b1d0` claimed:
+
+- a file `tests/harness_discovery_test.rs` with 15 named tests
+  (`discovers_only_rb_files_and_never_rust_sources`,
+  `edge_uppercase_extension_is_not_collected`, …). No such file exists; the
+  committed file is `tests/discovery_test.rs` with 10 tests, and **none** of
+  those 15 names exist anywhere in the repository.
+- "discovery results sorted for a stable report". The sort was not in the code.
+  It is now (F4 above).
+
+Either the report was written against a tree state that was never committed, or
+it was written without reading it. `REPORT.md` has been rewritten to describe
+only what is in the tree and to quote gate output verbatim. Per AGENTS.md §8,
+this is logged rather than argued about: the audit trail should show that a
+report can diverge from the diff, and that the four gates cannot detect it —
+three `cargo` commands do not check whether `REPORT.md` is true.
+
+## 7. Deferred: every test `rb test` discovers is vacuous
+
+`rb test` reports `Tests run: 22 / Passed: 21 / Failed: 0`. All 21 non-skipped
+tests assert nothing. Every `// test` block in `tests/suite.rb` (12),
+`tests/integration_test.rb` (5) and `tests/test_arithmetic.rb` (4) is commented
+out line by line, so the scanner finds a `// test "..."` marker, and the body up
+to the next `// end` consists entirely of comments:
+
+```
+// test "Basic addition"
+//     set a to 10
+//     set b to 20
+//     set sum to a + b
+// end
+```
+
+This is why AGENTS.md §3 exists and why it matters here: discovery is now
+correct, and the green `Failed: 0` it produces is still worthless, because the
+suite has no assertions in it. Not fixed in this phase — that is
+suite-authoring work, not a discovery filter.
+
+**What I believe is required:** a phase that replaces the commented-out bodies
+in those three files with real `expect … to be …` assertions, so that
+`rb test` becomes a gate. Until then any `rb test` result, pass or fail, carries
+almost no information.
+
+## 8. Deferred: an empty `.rb` file is indistinguishable from a valid empty suite
+
+A zero-byte `bad_empty.rb` is collected by `find_test_files` and yields zero
+tests, so it is never reported. Not pinned by a test here, because the only
+assertion available would encode the current behaviour as correct. Belongs with
+F5's phase, which owns the marker grammar.
+
+## 9. Deferred: `modules/MathUtils.rb` does not parse
+
+`rb run modules/MathUtils.rb` fails:
+
+```
+Error: ParserError: Expected function name
+  --> modules/MathUtils.rb:4:16
+4 | constant PI to 3.14159
+```
+
+AGENTS.md §2 says `modules/*.rb` are specification-by-example and the gate runs
+them, so this is a backwards-compatibility break that predates this phase.
+Verified pre-existing: identical error with this phase's diff stashed
+(`git stash -u`, rebuild, rerun). The other 11 files in
+`examples/` + `modules/` all pass. `constant … to …` is presumably a keyword
+the parser does not implement; needs its own parser phase.

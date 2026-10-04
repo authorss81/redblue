@@ -57,21 +57,31 @@ pub fn run_all_tests() -> Result<TestResults> {
 /// Only `.rb` is collectable. The Redblue harness parses its input as
 /// Redblue, so handing it Rust source — the `tests/*_test.rs` files that
 /// belong to `cargo test` — can only ever produce noise.
+///
+/// The result is sorted. `read_dir` yields entries in filesystem hash order,
+/// which differs between machines and filesystems; an unsorted list would make
+/// the reported test order — and therefore the failure output — unstable.
 pub fn find_test_files(dir: &str) -> Result<Vec<String>> {
+    let mut files = collect_test_files(dir);
+    files.sort();
+    Ok(files)
+}
+
+fn collect_test_files(dir: &str) -> Vec<String> {
     let mut files = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.is_dir() {
-                files.extend(find_test_files(&path.to_string_lossy())?);
+                files.extend(collect_test_files(&path.to_string_lossy()));
             } else if path.extension() == Some("rb".as_ref()) {
                 files.push(path.to_string_lossy().to_string());
             }
         }
     }
 
-    Ok(files)
+    files
 }
 
 #[derive(Debug, Clone)]
