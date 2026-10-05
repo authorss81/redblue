@@ -43,6 +43,36 @@ fn unused_variable_is_reported_with_its_line() {
 }
 
 #[test]
+fn edge_a_name_assigned_on_several_lines_is_reported_once_at_the_first_set() {
+    // `set` is assignment, so the same name on three lines is one binding that
+    // was assigned three times, not three bindings. Reporting it once, at the
+    // line that introduced it, is what makes `tests/test_numeric_edges.rb`
+    // yield a single warning for `x` rather than one per failing division.
+    let source = "try\n    set x to 1 / 0\ncatch error\n    say \"caught\"\nend\n\
+                  try\n    set x to 5 % 0\ncatch error\n    say \"caught\"\nend\n\
+                  try\n    set x to 1e400\ncatch error\n    say \"caught\"\nend\n\
+                  say \"done\"\n";
+
+    let (lint_errors, found) = split(source);
+    assert!(
+        lint_errors.is_empty(),
+        "the fixture must be valid Redblue: {:?}",
+        lint_errors
+    );
+    assert_eq!(
+        found.len(),
+        1,
+        "one name is one finding however often it is assigned: {:?}",
+        found
+    );
+    assert_eq!(found[0].message, "Unused variable: 'x'");
+    assert_eq!(
+        found[0].line, 2,
+        "the finding must point at the first `set x`, the line that introduced it"
+    );
+}
+
+#[test]
 fn a_variable_that_is_read_is_not_reported() {
     let source = "set total to 1\nset total to total + 1\nsay total\n";
     assert_eq!(

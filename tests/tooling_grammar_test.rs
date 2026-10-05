@@ -376,8 +376,9 @@ fn diagnostics_report_linter_findings_as_warnings() {
     );
     assert_eq!(
         (lint_warnings[0].line, lint_warnings[0].column),
-        (0, 0),
-        "the linter reports a whole-program finding with no position"
+        (1, 1),
+        "the linter must place a finding at the line that defined the variable, \
+         so the editor can underline it"
     );
 
     let found = diagnostics(source);
@@ -434,12 +435,17 @@ fn unused_variable_warnings_come_out_in_a_stable_name_order() {
     // iteration order is per-instance random, so an unsorted implementation
     // produces a different order on almost every call. An editor diffing the
     // diagnostics between two saves would see the same file churn.
+    //
+    // The stable order is the order of the source, because every finding now
+    // carries the line that defined it and a reader scans a file top to bottom.
+    // Where two findings share a line, the name breaks the tie. Name order on
+    // its own would make the reported line numbers jump around.
     let source = "set zeta to 1\nset alpha to 2\nset mid to 3\nset beta to 4\n";
     let expected = vec![
-        "Unused variable: 'alpha'",
-        "Unused variable: 'beta'",
-        "Unused variable: 'mid'",
         "Unused variable: 'zeta'",
+        "Unused variable: 'alpha'",
+        "Unused variable: 'mid'",
+        "Unused variable: 'beta'",
     ];
 
     let messages =
@@ -457,9 +463,18 @@ fn unused_variable_warnings_come_out_in_a_stable_name_order() {
         assert_eq!(
             messages(&found),
             expected,
-            "attempt {}: unused-variable findings must be sorted by name so the \
+            "attempt {}: unused-variable findings must be sorted so the \
              diagnostics JSON is reproducible",
             attempt
+        );
+        assert!(
+            found
+                .windows(2)
+                .all(|pair| { (pair[0].line, pair[0].column) < (pair[1].line, pair[1].column) }),
+            "attempt {}: findings must be ordered by position, which is what \
+             makes the order total: {:?}",
+            attempt,
+            found
         );
         assert!(
             found.iter().all(|d| d.severity == Severity::Warning),

@@ -89,3 +89,35 @@ reproduced".
 If a later gate wants `rb lint` silent over `tests/`, those tests must first
 read their values, which would be a change to the language's test corpus and
 should be its own phase.
+
+### F4 — a module file linted as a program reports its export surface as unused
+
+`rb lint modules/SuiteKit.rb` prints `Warning: line 8: Unused variable:
+'SUITE_KIT_NAME'`. The name really is never read *inside that file* — but it is
+the module's whole public surface today. `load_module` (`src/vm.rs:285-290`)
+copies each top-level `set` into `self.globals` when the file is imported, so
+the read happens in the importing file, which the linter never sees.
+
+This is a false positive of the "unused variable" rule caused by linting a
+module as if it were a program. Unlike F1 it is not hidden by a parse failure:
+`SuiteKit.rb` parses, so the warning is emitted and `rb lint` looks wrong on a
+file the gate runs.
+
+Not fixed here, and the fix is a design decision rather than a patch:
+
+- `redblue::linter::lint` (`src/linter.rs:405`) takes only the source text, so it
+  cannot know whether the text is a module. Adding a path parameter breaks a
+  public signature.
+- The clean shape is an additive `lint_module(&str)` that shares `Linter` with a
+  flag making top-level `set` an export rather than a binding, plus a rule in
+  `run_cli` (`src/lib.rs:153`) for routing — and that rule must agree with how
+  the VM resolves modules, `format!("modules/{}.rb", name)` at `src/vm.rs:578`,
+  or a module linted one way and imported another.
+- Guessing from the path alone (any file under `modules/`, or any file whose
+  stem is imported somewhere) is a heuristic and would produce new false
+  negatives on a program that happens to live in that directory. A linter that
+  guesses wrong is worse than one that says nothing.
+
+Until that exists, `modules/` stays outside the corpus walk in
+`tests/linter_test.rs` and the `SuiteKit` warning is a known, understood output
+rather than a silent gap.
