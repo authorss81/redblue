@@ -80,7 +80,17 @@ fn render_blocks(out: &mut String, chunk: &Chunk, main: &Block) {
         for _ in 0..depth {
             out.push_str("  ");
         }
-        let _ = writeln!(out, "{path} ({}, arity {})", block.kind.name(), block.arity);
+        let params = if block.params.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", block.params.join(", "))
+        };
+        let _ = writeln!(
+            out,
+            "{path} ({}, arity {}){params}",
+            block.kind.name(),
+            block.arity
+        );
 
         for (offset, instruction) in block.code.iter().enumerate() {
             out.push_str(&render_instruction(chunk, block, offset, instruction));

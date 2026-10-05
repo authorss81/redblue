@@ -4,6 +4,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::error::{Error, Result, Span};
+use crate::bytecode::Chunk;
 use crate::parser::Stmt;
 
 /// Field storage for records and objects.
@@ -30,6 +31,44 @@ pub type CapturedScope = IndexMap<String, Value>;
 /// value it had where the function was written.
 pub type Captured = Vec<CapturedScope>;
 
+/// What a function value runs when it is called.
+///
+/// Two VMs exist and a program may be run by either, so a function value has to
+/// be able to hold either representation of a body. This is the whole of the
+/// difference between them: the tree-walker interprets the statements, and the
+/// bytecode VM runs the compiled block, and everything else about a call — how
+/// the parameters are bound, how the captured scopes are restored, how deep a
+/// call chain may be — is the same.
+#[derive(Debug, Clone)]
+pub enum FunctionBody {
+    /// Statements, as the tree-walking VM wants them.
+    Statements(Arc<Vec<Stmt>>),
+    /// A compiled block, named by the chunk it was compiled from and the path of
+    /// child-block indexes that leads to it from that chunk's `main`.
+    ///
+    /// A path and a shared chunk rather than a reference because a `Value` may
+    /// outlive the run that built it — it can be stored in a record, put in a
+    /// list, or returned from a function — and because a module's blocks live in
+    /// a chunk of their own. The bytecode VM reads the path against the chunk.
+    Block {
+        /// The compiled program the block belongs to.
+        chunk: Arc<Chunk>,
+        /// Child-block indexes from that program's `main`.
+        path: Vec<u32>,
+    },
+}
+
+impl FunctionBody {
+    /// The chunk and path that reach the block, or `None` for a body that is
+    /// statements rather than a compiled block.
+    pub fn block(&self) -> Option<(&Arc<Chunk>, &[u32])> {
+        match self {
+            FunctionBody::Statements(_) => None,
+            FunctionBody::Block { chunk, path } => Some((chunk, path)),
+        }
+    }
+}
+
 /// A function value: a body, its parameters, and the bindings the declaration
 /// closed over.
 ///
@@ -43,12 +82,13 @@ pub struct FunctionValue {
     pub name: String,
     /// The declared parameter names, in order.
     pub params: Vec<String>,
-    /// The declared body.
+    /// The declared body, in whichever representation the caller that built this
+    /// function value works in.
     ///
     /// Behind an `Arc` because reading any variable clones the value bound to
     /// it, and a recursive call reads the name it was reached through. Cloning
     /// a function value must therefore not copy the body.
-    pub body: Arc<Vec<Stmt>>,
+    pub body: FunctionBody,
     /// The local scopes live where the declaration was executed.
     pub captured: Arc<Captured>,
 }

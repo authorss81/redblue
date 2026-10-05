@@ -693,7 +693,7 @@ fn a_hand_built_function_value_is_usable_and_displayed() {
     let function = Value::Function(FunctionValue {
         name: "hand_made".to_string(),
         params: Vec::new(),
-        body: std::sync::Arc::new(body),
+        body: redblue::FunctionBody::Statements(std::sync::Arc::new(body)),
         captured: std::sync::Arc::new(Vec::new()),
     });
 

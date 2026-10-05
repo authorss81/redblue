@@ -37,6 +37,7 @@ pub fn compile(program: &Program) -> Result<Chunk> {
             kind: BlockKind::Main,
             name: "main",
             arity: 0,
+            params: &[],
             body: &program.statements,
             span: Span::unknown(),
         },
@@ -59,6 +60,10 @@ struct Decl<'a> {
     /// How many parameters the block takes. `0` for everything but a function,
     /// method or test.
     arity: usize,
+    /// The parameter names, in order. Empty for everything but a function or a
+    /// method: the body reads its arguments by name, so the names have to be in
+    /// the file and not only their count.
+    params: &'a [String],
     body: &'a [Stmt],
     span: Span,
 }
@@ -100,6 +105,7 @@ impl Compiler {
             name: decl.name.to_string(),
             kind: decl.kind,
             arity: decl.arity as u32,
+            params: decl.params.to_vec(),
             code,
             blocks,
         })
@@ -117,6 +123,11 @@ impl Compiler {
         Ok(index)
     }
 
+    /// Compiles `body` into `code`.
+    ///
+    /// `is_last` says whether `body` is the whole of the block it goes in. It is
+    /// only read by a bare expression statement, and it is what makes a block's
+    /// value the one its last statement produced — which is what a call returns.
     fn statements(
         &mut self,
         body: &[Stmt],
@@ -124,18 +135,22 @@ impl Compiler {
         blocks: &mut Vec<Block>,
         depth: usize,
     ) -> Result<()> {
-        for stmt in body {
-            self.statement(stmt, code, blocks, depth)?;
+        let last = body.len().saturating_sub(1);
+        for (index, stmt) in body.iter().enumerate() {
+            self.statement(stmt, code, blocks, depth, index == last)?;
         }
         Ok(())
     }
 
+    /// `last` says `stmt` is the final statement of its block; see
+    /// [`Compiler::statements`].
     fn statement(
         &mut self,
         stmt: &Stmt,
         code: &mut Vec<Instruction>,
         blocks: &mut Vec<Block>,
         depth: usize,
+        last: bool,
     ) -> Result<()> {
         let line = stmt.span.line as u32;
 
@@ -150,7 +165,13 @@ impl Compiler {
             }
             Statement::Expr(expr) => {
                 self.expr(expr, code, line)?;
-                emit(code, Opcode::Pop, 0, 0, line);
+                // The value of a block is the value of its last statement, so a
+                // trailing expression leaves what it produced for the block's
+                // caller. Anywhere else the value is discarded, and `POP` is how
+                // the file says so.
+                if !last {
+                    emit(code, Opcode::Pop, 0, 0, line);
+                }
             }
             Statement::Set { name, value } => {
                 self.expr(value, code, line)?;
@@ -158,15 +179,15 @@ impl Compiler {
                 emit(code, Opcode::Store, name, 0, line);
             }
             Statement::SetProperty {
-                object,
+                object: object_name,
                 property,
                 value,
             } => {
-                let object = self.text(object);
+                let object = self.text(object_name);
                 emit(code, Opcode::Load, object, 0, line);
                 self.expr(value, code, line)?;
-                let property = self.text(property);
-                emit(code, Opcode::SetProperty, property, 0, line);
+                let target = self.text(&format!("{object_name}.{property}"));
+                emit(code, Opcode::SetProperty, target, 0, line);
             }
             Statement::If {
                 condition,
@@ -259,6 +280,7 @@ impl Compiler {
                         kind: BlockKind::Function,
                         name,
                         arity: params.len(),
+                        params,
                         body,
                         span: stmt.span,
                     },
@@ -275,6 +297,7 @@ impl Compiler {
                         kind: BlockKind::Method,
                         name,
                         arity: params.len(),
+                        params,
                         body,
                         span: stmt.span,
                     },
@@ -309,6 +332,7 @@ impl Compiler {
                         kind: BlockKind::Object,
                         name,
                         arity: 0,
+                        params: &[],
                         body,
                         span: stmt.span,
                     },
@@ -341,6 +365,7 @@ impl Compiler {
                             kind: BlockKind::CatchBody,
                             name: &name,
                             arity: 0,
+                            params: &[],
                             body: catch_body,
                             span: stmt.span,
                         },
@@ -358,6 +383,7 @@ impl Compiler {
                             kind: BlockKind::FinallyBody,
                             name: "",
                             arity: 0,
+                            params: &[],
                             body: finally_body,
                             span: stmt.span,
                         },
@@ -382,6 +408,7 @@ impl Compiler {
                         kind: BlockKind::Test,
                         name,
                         arity: 0,
+                        params: &[],
                         body,
                         span: stmt.span,
                     },
@@ -451,8 +478,8 @@ impl Compiler {
                 for arg in args {
                     self.expr(arg, code, line)?;
                 }
-                let method = self.text(method);
-                emit(code, Opcode::CallMethod, method, args.len() as u32, line);
+                let name = self.method_name(receiver, method);
+                emit(code, Opcode::CallMethod, name, args.len() as u32, line);
             }
             Expr::Property { object, property } => {
                 self.expr(object, code, line)?;
@@ -498,6 +525,24 @@ impl Compiler {
         let index = self.constants.len() as u32;
         self.constants.push(constant);
         index
+    }
+
+    /// The name a `CALL_METHOD` carries: the dotted `receiver.method` when the
+    /// receiver is a name, and the bare method name when it is not.
+    ///
+    /// The receiver's *name* is what a method call is resolved against, not the
+    /// value the receiver happens to hold: `files.read` is the builtin
+    /// `files_read` because the receiver is called `files`, and the same spelling
+    /// is how `Counter.bump` finds a method on a declared type. A file that
+    /// carried only the value would say `read` and leave both of those
+    /// unresolvable. A receiver that is an expression rather than a name is the
+    /// one case the language rejects, and a bare method name is how the file
+    /// says so — see [`crate::bytecode::Opcode::CallMethod`].
+    fn method_name(&mut self, receiver: &Expr, method: &str) -> u32 {
+        match receiver {
+            Expr::Variable(name) => self.text(&format!("{name}.{method}")),
+            _ => self.text(method),
+        }
     }
 }
 
