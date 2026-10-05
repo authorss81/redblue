@@ -555,16 +555,29 @@ impl Vm {
             } => {
                 let result = self.execute_statements(body);
 
-                if result.is_err() {
-                    if let Some(var) = catch_var {
+                // A catch is PRESENT whenever the parser saw one, which is not the
+                // same as catch_var being Some: `catch` with no name binding parses
+                // to catch_var == None with a non-empty body. Testing the Option
+                // therefore (a) never ran a bare catch and (b) fell through to
+                // `Ok(Value::Nothing)` below, silently swallowing the error. A
+                // swallowed error is the interpreter lying about what happened.
+                let has_catch = catch_var.is_some() || !catch_body.is_empty();
+
+                match (result, has_catch) {
+                    (Err(_), true) => {
                         self.push_scope();
-                        self.declare(var);
-                        self.set_var(var, Value::Text("error".to_string()));
+                        if let Some(var) = catch_var {
+                            self.declare(var);
+                            self.set_var(var, Value::Text("error".to_string()));
+                        }
                         for stmt in catch_body {
                             self.execute_statement(stmt)?;
                         }
                         self.pop_scope();
                     }
+                    // No catch to handle it: propagate rather than discard.
+                    (Err(e), false) => return Err(e),
+                    (Ok(_), _) => {}
                 }
 
                 for stmt in finally_body {

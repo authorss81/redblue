@@ -372,9 +372,18 @@ impl Formatter {
                 self.newline();
                 self.format_block(body);
 
-                if let Some(var) = catch_var {
-                    self.write_keyword_line("catch ");
-                    self.write(var);
+                // A bare `catch` — one with no name binding — is legal: the parser
+                // leaves catch_var as None and still collects catch_body. Gating
+                // the whole block on `Some(var)` therefore DELETED the body: the
+                // formatter silently discarded code the user wrote. Losing a
+                // statement is the worst thing a formatter can do, so the block is
+                // emitted whenever a catch is actually present.
+                if catch_var.is_some() || !catch_body.is_empty() {
+                    self.write_keyword_line("catch");
+                    if let Some(var) = catch_var {
+                        self.write(" ");
+                        self.write(var);
+                    }
                     self.newline();
                     self.format_block(catch_body);
                 }

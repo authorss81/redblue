@@ -202,3 +202,37 @@ test "edge_control_nothing_is_falsy_in_an_if"
     end
     expect taken to be "matched"
 end
+test "edge: a bare catch runs its body"
+    // `catch` with no name binding. The parser leaves catch_var empty, and both
+    // the VM and the formatter used to treat that as "no catch at all" - so the
+    // body never ran and the formatter deleted it.
+    set seen to "no"
+    try
+        say 1 / 0
+    catch
+        set seen to "yes"
+    end
+    expect seen to be "yes"
+end
+
+test "edge: a bare catch still runs when finally follows"
+    set log to ""
+    try
+        say 1 / 0
+    catch
+        set log to "c"
+    finally
+        set log to log + "f"
+    end
+    expect log to be "cf"
+end
+
+test "edge: a named catch still binds the error"
+    set caught to ""
+    try
+        say 1 / 0
+    catch err
+        set caught to err
+    end
+    expect caught to be "error"
+end

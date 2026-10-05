@@ -976,3 +976,88 @@ fn edge_grouping_survives_in_what_the_program_computes() {
     assert_eq!(run_program(&formatted), "9\n");
     assert_eq!(run_program("set a to 1 + 2 * 3\nsay a\n"), "7\n");
 }
+
+// ---------------------------------------------------------------------------
+// try/catch — the formatter must never delete a block
+// ---------------------------------------------------------------------------
+
+#[test]
+fn edge_bare_catch_body_is_not_deleted() {
+    // `catch` with no name binding is legal: the parser leaves catch_var as None
+    // and still collects the body. Gating the emit on `Some(var)` dropped the
+    // whole block, so the formatter silently deleted statements.
+    let source = "try\n    say 1 / 0\ncatch\n    say \"recovered\"\nend\n";
+
+    let formatted = formatter::format(source).expect("a bare catch must format");
+
+    assert!(
+        formatted.contains("catch"),
+        "the catch keyword must survive formatting, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("recovered"),
+        "THE CATCH BODY WAS DELETED by the formatter, got:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("1 / 0"),
+        "the try body must survive formatting, got:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn edge_bare_catch_program_still_computes_the_same_after_formatting() {
+    // The tree said the block was kept while the text said it was dropped. Run
+    // it: if the body is gone the program cannot recover and cannot print.
+    let source = "try\n    say 1 / 0\ncatch\n    say \"recovered\"\nend\n";
+
+    let formatted = assert_idempotent(source, "bare catch");
+
+    assert_eq!(run_program(source), "recovered\n");
+    assert_eq!(
+        run_program(&formatted),
+        "recovered\n",
+        "formatting changed what the program does — a statement was lost"
+    );
+}
+
+#[test]
+fn edge_named_catch_keeps_its_binding() {
+    // The regression above must not cost the named form: `catch err` has to keep
+    // both the keyword and the binding.
+    let source = "try\n    say 1 / 0\ncatch err\n    say err\nend\n";
+
+    let formatted = assert_idempotent(source, "named catch");
+
+    assert!(
+        formatted.contains("catch err"),
+        "a named catch must keep its binding, got:\n{}",
+        formatted
+    );
+    assert_eq!(run_program(source), run_program(&formatted));
+}
+
+#[test]
+fn edge_finally_still_closes_a_bare_catch() {
+    // `catch` followed by `finally` is the shape most likely to be mangled while
+    // fixing the bare case: the block must close in the right order.
+    let source = "try\n    say 1 / 0\ncatch\n    say \"a\"\nfinally\n    say \"b\"\nend\n";
+
+    let formatted = assert_idempotent(source, "catch then finally");
+
+    let catch_at = formatted.find("catch").expect("catch must survive");
+    let finally_at = formatted.find("finally").expect("finally must survive");
+    let end_at = formatted.find("end").expect("end must survive");
+    assert!(
+        catch_at < finally_at,
+        "catch must precede finally:\n{}",
+        formatted
+    );
+    assert!(
+        finally_at < end_at,
+        "finally must precede end:\n{}",
+        formatted
+    );
+}
