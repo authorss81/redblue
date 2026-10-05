@@ -1,4 +1,4 @@
-use crate::lexer::Lexer;
+use crate::lexer::{Lexer, TokenKind};
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 
 /// A `//` comment recovered from the source text, together with the line it was
@@ -109,31 +109,49 @@ fn collect_comments(source: &str) -> Vec<Comment> {
     comments
 }
 
-/// The source lines of every keyword that closes or reopens a block — `else`,
-/// `catch`, `finally`, `end` — in ascending order.
+/// A keyword of the source that closes or reopens a block — `else`, `catch`,
+/// `finally`, `end` — with the line it was written on.
+#[derive(Clone)]
+struct Closing {
+    line: usize,
+    keyword: TokenKind,
+}
+
+/// Every closing keyword of the source, in the order the source wrote them.
 ///
 /// A comment is attached to the innermost block that contains it, and the tree
 /// alone cannot say where a block stops: only the closing keyword's line does.
 /// With these lines, a block's tail is every comment after its last statement
 /// and before its own closing keyword, which is exactly the set of comments the
 /// source wrote inside that block and had nothing further to attach to.
-fn closing_lines(tokens: &[crate::lexer::Token]) -> Vec<usize> {
-    let mut lines: Vec<usize> = tokens
+///
+/// Which keyword it is matters as much as where it is. The tree records that a
+/// `try` has a catch *body* and that the body has no name — the parser takes a
+/// name after `catch` only if one follows — but the same tree comes from a
+/// `try` with no catch clause at all, and only the keyword on the line tells the
+/// two apart. Without it a bare `catch` cannot be written back out, and the
+/// branch it opens would be dropped.
+fn closing_lines(tokens: &[crate::lexer::Token]) -> Vec<Closing> {
+    let mut closings: Vec<Closing> = tokens
         .iter()
-        .filter(|t| {
-            matches!(
-                t.kind,
-                crate::lexer::TokenKind::Else
-                    | crate::lexer::TokenKind::Catch
-                    | crate::lexer::TokenKind::Finally
-                    | crate::lexer::TokenKind::End
-            )
+        .filter_map(|token| {
+            let keyword = match &token.kind {
+                TokenKind::Else => TokenKind::Else,
+                TokenKind::Catch => TokenKind::Catch,
+                TokenKind::Finally => TokenKind::Finally,
+                TokenKind::End => TokenKind::End,
+                _ => return None,
+            };
+            Some(Closing {
+                line: token.line,
+                keyword,
+            })
         })
-        .map(|t| t.line)
         .collect();
-    lines.sort_unstable();
-    lines.dedup();
-    lines
+    // A stable sort, so keywords written on the same line keep the order they
+    // were written in: that order is the only thing that can tell them apart.
+    closings.sort_by_key(|closing| closing.line);
+    closings
 }
 
 pub struct Formatter {
@@ -141,7 +159,8 @@ pub struct Formatter {
     output: String,
     comments: Vec<Comment>,
     next_comment: usize,
-    closing_lines: Vec<usize>,
+    closing_lines: Vec<Closing>,
+    next_closing: usize,
     last_line: usize,
 }
 
@@ -153,6 +172,7 @@ impl Formatter {
             comments: Vec::new(),
             next_comment: 0,
             closing_lines: Vec::new(),
+            next_closing: 0,
             last_line: 0,
         }
     }
@@ -174,6 +194,7 @@ impl Formatter {
         self.output = String::new();
         self.comments = collect_comments(source);
         self.next_comment = 0;
+        self.next_closing = 0;
         self.last_line = 0;
 
         self.format_program(&program);
@@ -288,10 +309,18 @@ impl Formatter {
                 self.format_expression(condition);
                 // `then` is not optional to the parser.
                 self.write(" then");
-                self.newline();
-                self.format_block(then_branch);
+                self.open_line(stmt.span.line);
+                let closed_by = self.format_block(then_branch);
 
-                if !else_branch.is_empty() {
+                // An `else` the source wrote is written back even when its branch
+                // holds nothing. Dropping it because the branch is empty loses
+                // the comment the author put at the end of that line — with the
+                // keyword gone there is nothing for `// …` to trail, and
+                // `write_keyword_line("end")` re-attached it as `end // …`, a
+                // note about the else branch attached to the line that closed
+                // the whole `if`. The keyword on the line closing this branch is
+                // what says the author wrote one.
+                if closed_by == Some(TokenKind::Else) || !else_branch.is_empty() {
                     self.write_keyword_line("else");
                     self.newline();
                     self.format_block(else_branch);
@@ -307,7 +336,7 @@ impl Formatter {
                 self.write(variable);
                 self.write(" in ");
                 self.format_expression(iterable);
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
@@ -328,7 +357,7 @@ impl Formatter {
                     self.write(" by ");
                     self.format_expression(s);
                 }
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
@@ -336,14 +365,14 @@ impl Formatter {
                 self.write("repeat ");
                 self.format_expression(count);
                 self.write(" times");
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
             Statement::While { condition, body } => {
                 self.write("while ");
                 self.format_expression(condition);
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
@@ -369,13 +398,13 @@ impl Formatter {
             }
             Statement::Function { name, params, body } => {
                 self.write_signature("to ", name, params);
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
             Statement::Method { name, params, body } => {
                 self.write_signature("to can ", name, params);
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
@@ -398,7 +427,7 @@ impl Formatter {
                     self.write(" extends ");
                     self.write(parent);
                 }
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
@@ -409,18 +438,50 @@ impl Formatter {
                 finally_body,
             } => {
                 self.write("try");
-                self.newline();
-                self.format_block(body);
+                self.open_line(stmt.span.line);
+                // Which keyword closed the block just written — `catch` if the
+                // source has a catch clause, `end` if it has none. Reassigned
+                // when a catch clause is written, because then the catch body's
+                // own closing keyword is the one the `finally` is judged against.
+                let mut closed_by = self.format_block(body);
 
-                if let Some(var) = catch_var {
-                    self.write_keyword_line("catch ");
-                    self.write(var);
-                    self.write_trailing_comment(self.last_line);
-                    self.newline();
-                    self.format_block(catch_body);
+                match catch_var {
+                    Some(var) => {
+                        // `catch` takes the error's name, so it cannot go through
+                        // `write_keyword_line`: that helper ends the line with the
+                        // trailing comment, and a name written after a comment
+                        // lands in it — `catch err // note` came out as
+                        // `catch // noteerr`, which does not read back at all. The
+                        // name is written first, then the one trailing comment.
+                        self.write_indent();
+                        self.write("catch ");
+                        self.write(var);
+                        self.write_trailing_comment(self.last_line);
+                        self.newline();
+                        closed_by = self.format_block(catch_body);
+                    }
+                    // The name is optional to the parser, so a `catch` with no
+                    // name is a catch clause like any other and the body after it
+                    // has to be written back out. Keying this arm on the name
+                    // alone dropped the whole clause: `try / say 1 / catch / say
+                    // 2 / end` came back as `try / say 1 / end`, a different
+                    // program. The tree cannot tell a nameless `catch` from no
+                    // `catch` at all — both are `None` with an empty body — so
+                    // the keyword the source wrote on that line is what decides,
+                    // and a nameless `catch` may carry a trailing comment like
+                    // any other line.
+                    None if closed_by == Some(TokenKind::Catch) => {
+                        self.write_keyword_line("catch");
+                        self.newline();
+                        closed_by = self.format_block(catch_body);
+                    }
+                    None => {}
                 }
 
-                if !finally_body.is_empty() {
+                // As with `else`: a `finally` the source wrote is written back
+                // even when its body holds nothing, or the comment trailing that
+                // line migrates onto the `end`.
+                if closed_by == Some(TokenKind::Finally) || !finally_body.is_empty() {
                     self.write_keyword_line("finally");
                     self.newline();
                     self.format_block(finally_body);
@@ -443,7 +504,7 @@ impl Formatter {
             Statement::Test { name, body } => {
                 self.write("test ");
                 self.format_string_literal(name);
-                self.newline();
+                self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
@@ -454,7 +515,9 @@ impl Formatter {
     }
 
     /// Writes a block's statements, each on its own line, indented one level,
-    /// then the comments the block ends with.
+    /// then the comments the block ends with. Returns the keyword the source
+    /// wrote to close or reopen this block — `end`, `else`, `catch` or
+    /// `finally` — or `None` when there was none.
     ///
     /// A comment written after the block's last statement has no statement to
     /// attach to, so without this it would be flushed once the whole enclosing
@@ -462,22 +525,25 @@ impl Formatter {
     /// an `if`/`else` inside the *other* branch, where it would read as a note
     /// on that branch's first statement. The closing keyword's line is the bound
     /// that keeps those comments where the author put them.
-    fn format_block(&mut self, body: &[Stmt]) {
+    fn format_block(&mut self, body: &[Stmt]) -> Option<TokenKind> {
         self.indent();
         self.format_statements(body);
-        self.emit_block_tail();
+        let keyword = self.emit_block_tail();
         self.dedent();
+        keyword
     }
 
     /// Writes the comments between the block just formatted and the keyword that
     /// closes it, and records that keyword's line so a comment written on the
     /// keyword's own line is still recognised as trailing it.
-    fn emit_block_tail(&mut self) {
-        let Some(bound) = self.closing_line_after(self.last_line) else {
-            return;
-        };
+    ///
+    /// The keyword itself is what the caller needs back: it says whether the
+    /// source wrote an `else`, a bare `catch` or a `finally` here, which the tree
+    /// alone cannot say when the branch that follows is empty.
+    fn emit_block_tail(&mut self) -> Option<TokenKind> {
+        let bound = self.closing_for_block()?;
         while let Some(comment) = self.comments.get(self.next_comment) {
-            if comment.line <= self.last_line || comment.line >= bound {
+            if comment.line <= self.last_line || comment.line >= bound.line {
                 break;
             }
             let text = comment.text.clone();
@@ -486,12 +552,42 @@ impl Formatter {
             self.newline();
             self.next_comment += 1;
         }
-        self.last_line = bound;
+        self.last_line = bound.line;
+        Some(bound.keyword)
     }
 
-    /// The line of the next keyword that closes or reopens a block after `line`.
-    fn closing_line_after(&self, line: usize) -> Option<usize> {
-        self.closing_lines.iter().copied().find(|&l| l > line)
+    /// The keyword that closed the block just written.
+    ///
+    /// The line is the authority: the keyword that closes a block sits below the
+    /// block's contents, so the first closing keyword on a later line is this
+    /// block's own — even after a block written on one line has taken a keyword
+    /// that the line alone would have pointed at.
+    ///
+    /// A block the author wrote entirely on one line has no later line to look
+    /// at, and then only the order the keywords were written in can say which
+    /// one closed it. That order is the same post-order the parser read them in
+    /// and the formatter closes blocks in, so the next keyword not yet taken is
+    /// this block's.
+    fn closing_for_block(&mut self) -> Option<Closing> {
+        if let Some(at) = self
+            .closing_lines
+            .iter()
+            .position(|closing| closing.line > self.last_line)
+        {
+            self.next_closing = self.next_closing.max(at + 1);
+            return Some(self.closing_lines[at].clone());
+        }
+
+        while self
+            .closing_lines
+            .get(self.next_closing)
+            .is_some_and(|closing| closing.line < self.last_line)
+        {
+            self.next_closing += 1;
+        }
+        let bound = self.closing_lines.get(self.next_closing)?.clone();
+        self.next_closing += 1;
+        Some(bound)
     }
 
     fn write_signature(&mut self, keyword: &str, name: &str, params: &[String]) {
@@ -755,6 +851,24 @@ impl Formatter {
         self.write_indent();
         self.write(word);
         self.write_trailing_comment(self.last_line);
+    }
+
+    /// Ends the line that *opens* a block: `if … then`, `for each …`,
+    /// `repeat … times`, `while …`, `to …`, `object …`, `try`, `test …` and so
+    /// on, all of which the author may have written a comment at the end of.
+    ///
+    /// Such a comment belongs to the statement's own line, so it is claimed
+    /// here rather than left for the enclosing
+    /// [`Formatter::format_statements`]. Left there it is looked for *after*
+    /// the whole statement has been written, which put it in one of three
+    /// wrong places: as a leading comment on the block's first statement
+    /// (`if 1 is 1 then // note` became a note on the `say` inside), trailing
+    /// the `end` that closed the block, or — for a block with an empty body —
+    /// trailing that same `end`. All three move the note off the line its
+    /// author wrote it on and make it read as a comment about something else.
+    fn open_line(&mut self, line: usize) {
+        self.write_trailing_comment(line);
+        self.newline();
     }
 
     fn write_indent(&mut self) {

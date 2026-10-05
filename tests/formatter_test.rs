@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use redblue::formatter::{self, Formatter};
 use redblue::lexer::Lexer;
-use redblue::parser::{self, Program};
+use redblue::parser::{self, BinaryOp, Expr, ImportItem, Program, Statement, Stmt, UnaryOp};
 
 /// Every `.rb` file in the tree that must survive formatting unchanged in
 /// meaning: the language's specification-by-example, plus the test corpus.
@@ -78,6 +78,13 @@ fn scratch_dir() -> PathBuf {
 /// quotes the path of the file it read, so that path is replaced with a fixed
 /// marker and two runs of the same program stay comparable.
 fn run_rb(mode: &str, source: &str) -> Run {
+    run_rb_args(&[mode], source)
+}
+
+/// Runs `source` with `rb <args…> <file>`, for the invocations a single mode
+/// cannot express — `rb format --check <file>` puts a flag between the mode and
+/// the path.
+fn run_rb_args(args: &[&str], source: &str) -> Run {
     static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let dir = scratch_dir();
     let serial = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -85,7 +92,7 @@ fn run_rb(mode: &str, source: &str) -> Run {
     fs::write(&path, source).expect("program should be writable");
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
-        .arg(mode)
+        .args(args)
         .arg(&path)
         .output()
         .expect("the rb binary should run");
@@ -99,34 +106,349 @@ fn run_rb(mode: &str, source: &str) -> Run {
     }
 }
 
+/// Runs `rb format --check <file>` and returns what the process produced.
+///
+/// This is the CI gate's whole surface: the exit code is the answer and stdout
+/// is the explanation, so both are what the tests below look at.
+fn run_format_check(source: &str) -> Run {
+    run_rb_args(&["format", "--check"], source)
+}
+
 fn parse(source: &str) -> Program {
     let tokens = Lexer::tokenize(source).expect("source must lex");
     parser::parse(tokens).expect("source must parse")
 }
 
-/// Whether two programs mean the same thing: the same tree, compared without
-/// source positions. Formatting moves text by definition, so `Span { … }` is
-/// removed from the debug rendering of both trees before they are compared.
+/// Whether two programs mean the same thing: the same tree, with every field
+/// compared and only the source position left out.
+///
+/// Formatting moves text by definition, so [`Stmt::span`] is expected to
+/// change; nothing else is allowed to.
+///
+/// The comparison walks the tree rather than rendering it with `{:?}` and
+/// editing the resulting string. A debug rendering contains the program's own
+/// text — a literal like `say "Span { line: 1 }"` is part of it — so any scheme
+/// that searches the string for `Span { ` and cuts up to the next ` }` can be
+/// defeated by a program that mentions that shape, and the oracle this file
+/// trusts most would silently compare two different trees. Every variant is
+/// matched here explicitly, and an unmatched pair of variants is reported as a
+/// difference, so a variant added to the AST later fails loudly here instead
+/// of comparing equal by default.
 fn same_program(a: &Program, b: &Program) -> bool {
-    strip_spans(&format!("{:?}", a)) == strip_spans(&format!("{:?}", b))
+    same_stmts(&a.statements, &b.statements)
 }
 
-/// Removes every `Span { line: …, column: … }` from a debug rendering.
-fn strip_spans(debug: &str) -> String {
-    let mut out = String::with_capacity(debug.len());
-    let mut rest = debug;
-    while let Some(start) = rest.find("Span { ") {
-        let after = &rest[start + "Span { ".len()..];
-        match after.find(" }") {
-            Some(end) => {
-                out.push_str(&rest[..start]);
-                rest = &after[end + 2..];
-            }
-            None => break,
+fn same_stmts(a: &[Stmt], b: &[Stmt]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| same_stmt(x, y))
+}
+
+/// `Stmt` is a span and a statement; only the statement is the program.
+fn same_stmt(a: &Stmt, b: &Stmt) -> bool {
+    same_statement(&a.statement, &b.statement)
+}
+
+fn same_statement(a: &Statement, b: &Statement) -> bool {
+    match (a, b) {
+        (Statement::Say(x), Statement::Say(y)) => same_expr(x, y),
+        (Statement::Print(x), Statement::Print(y)) => same_expr(x, y),
+        (Statement::Expr(x), Statement::Expr(y)) => same_expr(x, y),
+        (
+            Statement::Set {
+                name: n1,
+                value: v1,
+            },
+            Statement::Set {
+                name: n2,
+                value: v2,
+            },
+        ) => n1 == n2 && same_expr(v1, v2),
+        (
+            Statement::SetProperty {
+                object: o1,
+                property: p1,
+                value: v1,
+            },
+            Statement::SetProperty {
+                object: o2,
+                property: p2,
+                value: v2,
+            },
+        ) => o1 == o2 && p1 == p2 && same_expr(v1, v2),
+        (
+            Statement::If {
+                condition: c1,
+                then_branch: t1,
+                else_branch: e1,
+            },
+            Statement::If {
+                condition: c2,
+                then_branch: t2,
+                else_branch: e2,
+            },
+        ) => same_expr(c1, c2) && same_stmts(t1, t2) && same_stmts(e1, e2),
+        (
+            Statement::ForEach {
+                variable: v1,
+                iterable: i1,
+                body: b1,
+            },
+            Statement::ForEach {
+                variable: v2,
+                iterable: i2,
+                body: b2,
+            },
+        ) => v1 == v2 && same_expr(i1, i2) && same_stmts(b1, b2),
+        (
+            Statement::ForRange {
+                variable: v1,
+                start: s1,
+                end: e1,
+                step: st1,
+                body: b1,
+            },
+            Statement::ForRange {
+                variable: v2,
+                start: s2,
+                end: e2,
+                step: st2,
+                body: b2,
+            },
+        ) => {
+            v1 == v2
+                && same_expr(s1, s2)
+                && same_expr(e1, e2)
+                && same_optional_expr(st1, st2)
+                && same_stmts(b1, b2)
         }
+        (
+            Statement::Repeat {
+                count: c1,
+                body: b1,
+            },
+            Statement::Repeat {
+                count: c2,
+                body: b2,
+            },
+        ) => same_expr(c1, c2) && same_stmts(b1, b2),
+        (
+            Statement::While {
+                condition: c1,
+                body: b1,
+            },
+            Statement::While {
+                condition: c2,
+                body: b2,
+            },
+        ) => same_expr(c1, c2) && same_stmts(b1, b2),
+        (Statement::Break, Statement::Break) => true,
+        (Statement::Skip, Statement::Skip) => true,
+        (Statement::Return(x), Statement::Return(y)) => same_optional_expr(x, y),
+        (Statement::GiveBack(x), Statement::GiveBack(y)) => same_optional_expr(x, y),
+        (
+            Statement::Function {
+                name: n1,
+                params: p1,
+                body: b1,
+            },
+            Statement::Function {
+                name: n2,
+                params: p2,
+                body: b2,
+            },
+        ) => n1 == n2 && p1 == p2 && same_stmts(b1, b2),
+        (
+            Statement::Method {
+                name: n1,
+                params: p1,
+                body: b1,
+            },
+            Statement::Method {
+                name: n2,
+                params: p2,
+                body: b2,
+            },
+        ) => n1 == n2 && p1 == p2 && same_stmts(b1, b2),
+        (
+            Statement::Has {
+                name: n1,
+                default: d1,
+            },
+            Statement::Has {
+                name: n2,
+                default: d2,
+            },
+        ) => n1 == n2 && same_optional_expr(d1, d2),
+        (
+            Statement::Object {
+                name: n1,
+                extends: x1,
+                body: b1,
+            },
+            Statement::Object {
+                name: n2,
+                extends: x2,
+                body: b2,
+            },
+        ) => n1 == n2 && same_optional_string(x1, x2) && same_stmts(b1, b2),
+        (
+            Statement::Try {
+                body: b1,
+                catch_var: cv1,
+                catch_body: cb1,
+                finally_body: fb1,
+            },
+            Statement::Try {
+                body: b2,
+                catch_var: cv2,
+                catch_body: cb2,
+                finally_body: fb2,
+            },
+        ) => {
+            same_stmts(b1, b2)
+                && same_optional_string(cv1, cv2)
+                && same_stmts(cb1, cb2)
+                && same_stmts(fb1, fb2)
+        }
+        (Statement::Import(x), Statement::Import(y)) => same_imports(x, y),
+        (Statement::Test { name: n1, body: b1 }, Statement::Test { name: n2, body: b2 }) => {
+            n1 == n2 && same_stmts(b1, b2)
+        }
+        // Two different variants are two different programs, and a pair this
+        // file does not name is a new variant rather than an equal one.
+        _ => false,
     }
-    out.push_str(rest);
-    out
+}
+
+fn same_expr(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        // Compared by bit pattern, not by `==`: `0.0` and `-0.0` are the two
+        // numbers the formatter prints differently, and a `NaN` no source can
+        // spell must not make a tree compare unequal with itself.
+        (Expr::Number(x), Expr::Number(y)) => x.to_bits() == y.to_bits(),
+        (Expr::Text(x), Expr::Text(y)) => x == y,
+        (Expr::YesNo(x), Expr::YesNo(y)) => x == y,
+        (Expr::Nothing, Expr::Nothing) => true,
+        (Expr::Variable(x), Expr::Variable(y)) => x == y,
+        (
+            Expr::Binary {
+                op: o1,
+                left: l1,
+                right: r1,
+            },
+            Expr::Binary {
+                op: o2,
+                left: l2,
+                right: r2,
+            },
+        ) => same_binary_op(o1, o2) && same_expr(l1, l2) && same_expr(r1, r2),
+        (Expr::Unary { op: o1, expr: e1 }, Expr::Unary { op: o2, expr: e2 }) => {
+            same_unary_op(o1, o2) && same_expr(e1, e2)
+        }
+        (Expr::Call { name: n1, args: a1 }, Expr::Call { name: n2, args: a2 }) => {
+            n1 == n2 && same_exprs(a1, a2)
+        }
+        (
+            Expr::Property {
+                object: o1,
+                property: p1,
+            },
+            Expr::Property {
+                object: o2,
+                property: p2,
+            },
+        ) => same_expr(o1, o2) && p1 == p2,
+        (
+            Expr::MethodCall {
+                receiver: r1,
+                method: m1,
+                args: a1,
+            },
+            Expr::MethodCall {
+                receiver: r2,
+                method: m2,
+                args: a2,
+            },
+        ) => same_expr(r1, r2) && m1 == m2 && same_exprs(a1, a2),
+        (
+            Expr::Index {
+                object: o1,
+                index: i1,
+            },
+            Expr::Index {
+                object: o2,
+                index: i2,
+            },
+        ) => same_expr(o1, o2) && same_expr(i1, i2),
+        (Expr::InterpolatedText(x), Expr::InterpolatedText(y)) => same_exprs(x, y),
+        (Expr::List(x), Expr::List(y)) => same_exprs(x, y),
+        (Expr::Record(x), Expr::Record(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|((k1, v1), (k2, v2))| k1 == k2 && same_expr(v1, v2))
+        }
+        (
+            Expr::Expect {
+                actual: a1,
+                expected: e1,
+            },
+            Expr::Expect {
+                actual: a2,
+                expected: e2,
+            },
+        ) => same_expr(a1, a2) && same_expr(e1, e2),
+        _ => false,
+    }
+}
+
+fn same_binary_op(a: &BinaryOp, b: &BinaryOp) -> bool {
+    matches!(
+        (a, b),
+        (BinaryOp::Add, BinaryOp::Add)
+            | (BinaryOp::Sub, BinaryOp::Sub)
+            | (BinaryOp::Mul, BinaryOp::Mul)
+            | (BinaryOp::Div, BinaryOp::Div)
+            | (BinaryOp::Mod, BinaryOp::Mod)
+            | (BinaryOp::Equal, BinaryOp::Equal)
+            | (BinaryOp::NotEqual, BinaryOp::NotEqual)
+            | (BinaryOp::Less, BinaryOp::Less)
+            | (BinaryOp::LessEqual, BinaryOp::LessEqual)
+            | (BinaryOp::Greater, BinaryOp::Greater)
+            | (BinaryOp::GreaterEqual, BinaryOp::GreaterEqual)
+            | (BinaryOp::And, BinaryOp::And)
+            | (BinaryOp::Or, BinaryOp::Or)
+            | (BinaryOp::In, BinaryOp::In)
+    )
+}
+
+fn same_unary_op(a: &UnaryOp, b: &UnaryOp) -> bool {
+    matches!(
+        (a, b),
+        (UnaryOp::Neg, UnaryOp::Neg) | (UnaryOp::Not, UnaryOp::Not)
+    )
+}
+
+fn same_exprs(a: &[Expr], b: &[Expr]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| same_expr(x, y))
+}
+
+fn same_optional_expr(a: &Option<Expr>, b: &Option<Expr>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => same_expr(x, y),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn same_optional_string(a: &Option<String>, b: &Option<String>) -> bool {
+    a == b
+}
+
+fn same_imports(a: &[ImportItem], b: &[ImportItem]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.name == y.name && same_optional_string(&x.alias, &y.alias))
 }
 
 /// Formats, then formats the result again: the two must be byte-identical.
@@ -190,6 +512,58 @@ fn format_preserves_the_meaning_of_every_corpus_file() {
             label,
             source,
             formatted
+        );
+    }
+}
+
+#[test]
+fn edge_the_tree_comparison_is_not_fooled_by_text_that_looks_like_a_span() {
+    // `same_program` used to render both trees with `{:?}` and cut every
+    // `Span { … }` out of the string. A debug rendering contains the program's
+    // own text, so a program holding the shape as a literal had the *text*
+    // cut out of it too — and two different programs holding different numbers
+    // inside that text then compared equal. The comparison walks the tree now,
+    // and this asserts it can still tell two programs apart, not merely that it
+    // agrees with itself.
+    let one = "say \"Span { line: 1, column: 1 }\"\n";
+    let two = "say \"Span { line: 2, column: 2 }\"\n";
+
+    let one_formatted = assert_idempotent(one, "span-shaped literal, one");
+    let two_formatted = assert_idempotent(two, "span-shaped literal, two");
+
+    assert!(
+        same_program(&parse(one), &parse(&one_formatted)),
+        "a program holding span-shaped text must still compare equal to itself\n{}",
+        one_formatted
+    );
+    assert!(
+        !same_program(&parse(one), &parse(two)),
+        "two programs differing only inside span-shaped text must NOT compare equal"
+    );
+    assert!(
+        !same_program(&parse(&one_formatted), &parse(&two_formatted)),
+        "and the same must hold for their formatted forms"
+    );
+}
+
+#[test]
+fn edge_the_tree_comparison_detects_a_change_behind_any_shape_of_text() {
+    // The same oracle, on the shapes a debug rendering would have to cut
+    // through: a brace, a quote and a backslash in a literal all survive
+    // formatting, and a difference behind any of them must still be seen.
+    let cases = [
+        ("say \"{\"\nsay 1\n", "say \"{\"\nsay 2\n"),
+        ("say \"Span {\"\nsay 1\n", "say \"Span {\"\nsay 2\n"),
+        ("say \"a } b\"\n", "say \"a } c\"\n"),
+        ("set x to [1, {a: 2}]\n", "set x to [1, {a: 3}]\n"),
+    ];
+
+    for (one, two) in cases {
+        assert!(
+            !same_program(&parse(one), &parse(two)),
+            "{:?} and {:?} are different programs and must not compare equal",
+            one,
+            two
         );
     }
 }
@@ -304,6 +678,109 @@ fn check_compares_exactly_including_the_trailing_newline() {
         formatter::needs_reformat("say 1 \nsay 2\n", formatted),
         "a difference anywhere in the file is a difference"
     );
+}
+
+#[test]
+fn edge_the_check_flag_reports_a_difference_through_the_exit_code() {
+    // `rb format --check` is driven as a CI gate, so its exit code is the
+    // result and the message is only the explanation. This exercises the CLI
+    // branch in `src/lib.rs`, not the `needs_reformat` helper on its own:
+    // `run_rb` takes one mode and cannot say `--check`, which is why the
+    // branch went untested until this.
+    //
+    // Every case below differs from `say 1\n` only in bytes that a `trim()` on
+    // both sides would erase, so the whole set is reported as exit 0 if the
+    // comparison ever starts trimming again.
+    let clean = run_format_check("say 1\n");
+    assert_eq!(
+        clean.code, 0,
+        "an already formatted file must pass, got stdout {} / stderr {}",
+        clean.stdout, clean.stderr
+    );
+    assert_eq!(
+        clean.stdout, "",
+        "a file that passes must print nothing to be parsed"
+    );
+
+    for (label, source) in [
+        ("no trailing newline", "say 1"),
+        ("a trailing blank line", "say 1\n\n"),
+        ("trailing whitespace", "say 1  \n"),
+        ("a whitespace-only last line", "say 1\n   \n"),
+        ("a CRLF line ending", "say 1\r\n"),
+        ("a doubled space inside the line", "say  1\n"),
+        ("a leading blank line", "\nsay 1\n"),
+    ] {
+        let run = run_format_check(source);
+        assert_eq!(
+            run.code, 1,
+            "{}: {:?} differs from its formatted form and must exit 1, got stdout {}",
+            label, source, run.stdout
+        );
+        assert!(
+            run.stdout.contains("File would be reformatted"),
+            "{}: the check must say what it found, got: {}",
+            label,
+            run.stdout
+        );
+    }
+}
+
+#[test]
+fn edge_the_check_flag_rejects_a_file_it_cannot_format() {
+    // Exit 1 is also what a file that does not parse gets, and it must be the
+    // `Format error` diagnostic rather than a silent pass.
+    let run = run_format_check("if 1 is 1 then\n    say 1\n");
+
+    assert_eq!(
+        run.code, 1,
+        "a file the parser rejects must not pass the check, got: {}",
+        run.stdout
+    );
+    assert!(
+        run.stderr.contains("Format error"),
+        "the check must report why it gave up, got: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.stdout, "",
+        "a file that could not be checked must not print a verdict on it"
+    );
+}
+
+#[test]
+fn edge_the_check_flag_accepts_what_the_format_flag_prints() {
+    // The whole loop, through the binary: `rb format` writes out a file, that
+    // output is written back, and `rb format --check` on the result must
+    // accept it. A check that rejected the formatter's own output, or a
+    // formatter whose output the check rejected, would both break here.
+    for path in corpus() {
+        let source = read(&path);
+        let label = path.display().to_string();
+
+        let formatted = run_rb("format", &source);
+        assert_eq!(
+            formatted.code, 0,
+            "{}: `rb format` must succeed on a corpus file: {}",
+            label, formatted.stderr
+        );
+
+        let check = run_format_check(&formatted.stdout);
+        assert_eq!(
+            check.code, 0,
+            "{}: `rb format --check` rejected the output of `rb format`\n--- format ---\n{}\n--- check ---\n{}",
+            label, formatted.stdout, check.stdout
+        );
+
+        // And the check is not vacuous: one trailing space on the last line is
+        // a difference, and it is reported.
+        let dirty = run_format_check(&format!("{} \n", formatted.stdout.trim_end_matches('\n')));
+        assert_eq!(
+            dirty.code, 1,
+            "{}: a trailing space must fail the check\n--- format ---\n{}",
+            label, formatted.stdout
+        );
+    }
 }
 
 #[test]
@@ -542,6 +1019,128 @@ say f(1)
         same_program(&parse(source), &parse(&formatted)),
         "moving the note onto its own line must not change what runs:\n{}",
         formatted
+    );
+}
+
+#[test]
+fn edge_a_comment_trailing_a_catch_line_stays_after_the_name_it_annotates() {
+    // `catch` takes the error's name, so its line is built as
+    // `indent` + `catch ` + name + one trailing comment. It used to go through
+    // the same helper as `else`/`finally`, which writes the keyword, ends the
+    // line with the trailing comment, and only then had the name appended —
+    // turning `catch err // note` into `catch  // noteerr`, which does not
+    // read back as `catch` at all.
+    let source = "\
+try
+    say 1
+catch err // what went wrong
+    say err
+finally // always
+    say 3
+end
+say 4
+";
+
+    let formatted = assert_idempotent(source, "comment trailing a catch line");
+
+    assert_eq!(
+        formatted, source,
+        "the note must stay at the end of the catch line, after the name"
+    );
+    assert!(
+        same_program(&parse(source), &parse(&formatted)),
+        "the formatted program must still mean the same thing:\n{}",
+        formatted
+    );
+    assert!(
+        !formatted.contains("catch //"),
+        "a name written after a comment has been swallowed by it:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn edge_a_comment_trailing_a_block_opening_line_stays_on_that_line() {
+    // Every line that opens a block may carry a comment, and the comment is
+    // about the line it was written on. Claiming it only after the whole
+    // statement had been written put it somewhere else: as a leading comment on
+    // the block's first statement, or trailing the `end` that closed the block
+    // — which for a block with no body meant `end // …`.
+    let source = "\
+if 1 is 1 then // the guard
+    say 1
+else // the other case
+    say 2
+end
+for each x in [1, 2] // the loop
+    say x
+end
+repeat 2 times // twice
+    say 1
+end
+while 1 is 2 // never
+    skip
+end
+to g() // the function
+    say 1
+end
+object O // the object
+    has n default 1
+    to can m() // the method
+        say 1
+    end
+end
+try // the attempt
+    say 1
+catch e // the failure
+    say e
+end
+test \"the test\" // the assertion
+    expect 1 to be 1
+end
+g()
+say 3
+";
+
+    let formatted = assert_idempotent(source, "comment trailing a block opening line");
+
+    assert_eq!(
+        formatted, source,
+        "a comment written at the end of a block-opening line must stay there"
+    );
+    assert!(
+        !formatted.contains("end //"),
+        "no comment may migrate onto the keyword that closes a block:\n{}",
+        formatted
+    );
+    assert!(
+        same_program(&parse(source), &parse(&formatted)),
+        "the formatted program must still mean the same thing:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn edge_a_comment_trailing_the_only_line_of_an_empty_block_stays_there() {
+    // A block with no body has no statement for the comment to attach to as a
+    // leading comment, so it used to land on the `end` — `end // …`, a note
+    // about a block attached to the line that closed it.
+    let source = "\
+to g() // the function
+end
+repeat 2 times // twice
+end
+object O // the object
+end
+g()
+say 1
+";
+
+    let formatted = assert_idempotent(source, "comment trailing an empty block");
+
+    assert_eq!(
+        formatted, source,
+        "a block's own line keeps its comment even when the block is empty"
     );
 }
 
@@ -968,6 +1567,115 @@ say [1, 2][0]
 }
 
 #[test]
+fn edge_a_program_deeper_than_the_parser_budget_is_reported_not_truncated() {
+    // The test above sits at depth 60, inside the parser's budget, so it only
+    // ever exercised the success arm. This one is past the budget, so the
+    // resource-limit path is reached: the formatter must hand back the
+    // parser's own diagnostic rather than format the part it managed to read,
+    // and the binary must exit 1 instead of dying on the stack.
+    //
+    // The depth is a literal rather than `MAX_NESTING_DEPTH + n`, so that
+    // *raising* the limit fails this test rather than silently moving the
+    // target out of reach. It is pinned behaviour: the budget is 64 today, and
+    // changing it is deliberate, so this test has to be re-anchored then.
+    let past_expression = 70;
+    assert!(
+        parser::MAX_NESTING_DEPTH < past_expression,
+        "depth {} is no longer past MAX_NESTING_DEPTH ({}); re-anchor this test \
+         if the parser's budget changes",
+        past_expression,
+        parser::MAX_NESTING_DEPTH
+    );
+    let source = format!("say {}\n", format!("{}+1", 1).repeat(past_expression));
+
+    let error = formatter::format(&source).err().unwrap_or_else(|| {
+        panic!(
+            "{} levels of expression nesting is past MAX_NESTING_DEPTH ({}), so \
+             it must be reported rather than formatted",
+            past_expression,
+            parser::MAX_NESTING_DEPTH
+        )
+    });
+    assert!(
+        error.starts_with("Parser error"),
+        "expected a parser error naming the nesting budget, got: {}",
+        error
+    );
+    assert!(
+        error.contains(&format!(
+            "more than {} levels deep",
+            parser::MAX_NESTING_DEPTH
+        )),
+        "the diagnostic must say which budget was exceeded, got: {}",
+        error
+    );
+
+    // The same through the CLI, where the budget is a user's exit code.
+    let run = run_rb("format", &source);
+    assert_eq!(
+        run.code, 1,
+        "a file too deep to parse must exit 1, got code {} and stdout {}",
+        run.code, run.stdout
+    );
+    assert!(
+        run.stderr.contains("Format error"),
+        "the binary must say the file does not format, got: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.stdout, "",
+        "nothing may be printed for a file that was not understood:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn edge_blocks_deeper_than_the_parser_budget_are_reported_not_truncated() {
+    // `MAX_BLOCK_DEPTH` is the other half of the budget: a block body is parsed
+    // by recursing back into `parse_statement`, so 70 nested `if`s are a
+    // diagnostic and not a stack overflow. Literal depth, for the same reason
+    // as the expression case above.
+    let past_blocks = 70;
+    assert!(
+        parser::MAX_BLOCK_DEPTH < past_blocks,
+        "depth {} is no longer past MAX_BLOCK_DEPTH ({}); re-anchor this test if \
+         the parser's budget changes",
+        past_blocks,
+        parser::MAX_BLOCK_DEPTH
+    );
+    let mut source = String::new();
+    for _ in 0..past_blocks {
+        source.push_str("if 1 is 1 then\n");
+    }
+    source.push_str("say 1\n");
+    for _ in 0..past_blocks {
+        source.push_str("end\n");
+    }
+
+    let error = formatter::format(&source).err().unwrap_or_else(|| {
+        panic!(
+            "{} nested blocks is past MAX_BLOCK_DEPTH ({}), so it must be \
+             reported rather than formatted",
+            past_blocks,
+            parser::MAX_BLOCK_DEPTH
+        )
+    });
+    assert!(
+        error.starts_with("Parser error"),
+        "expected a parser error naming the block budget, got: {}",
+        error
+    );
+    assert!(
+        error.contains(&format!(
+            "more than {} levels deep",
+            parser::MAX_BLOCK_DEPTH
+        )),
+        "the diagnostic must say which budget was exceeded, got: {}",
+        error
+    );
+}
+
+#[test]
 fn edge_a_very_deeply_nested_program_is_handled_or_reported() {
     let depth = 60;
     let source = format!("say {}\n", format!("{}+1", 1).repeat(depth));
@@ -1345,4 +2053,187 @@ fn edge_every_spec_only_form_is_either_idempotent_or_a_clean_reported_error() {
             ),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Review round 3 — a branch the formatter must not drop
+// ---------------------------------------------------------------------------
+
+/// How many statements each `try` in `program` holds in its catch clause, with
+/// `None` for a `try` whose catch has no name.
+///
+/// The catch body's name and size are what the round-3 finding turned on: a
+/// `catch` with a body and no name is a catch clause, and dropping it takes the
+/// statements under it with it.
+fn catch_bodies(program: &Program) -> Vec<Option<usize>> {
+    program
+        .statements
+        .iter()
+        .filter_map(|stmt| match &stmt.statement {
+            Statement::Try {
+                catch_var,
+                catch_body,
+                ..
+            } => Some(if catch_var.is_none() {
+                Some(catch_body.len())
+            } else {
+                None
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn edge_a_catch_without_a_name_keeps_the_branch_it_opens() {
+    // The name after `catch` is optional to the parser — it is taken only if one
+    // follows — so `catch` on its own is a catch clause with a body and no name,
+    // and its tree is indistinguishable from a `try` with no catch clause except
+    // that the body is not empty. Writing the clause only when the name was
+    // there dropped the whole branch: this source came back as
+    // `try / say 1 / finally / say 3 / end / say 4`, which runs three statements
+    // instead of four.
+    let source = "\
+try
+    say 1
+catch
+    say 2
+finally
+    say 3
+end
+say 4
+";
+
+    let formatted = assert_idempotent(source, "a catch with no name");
+
+    assert_eq!(
+        formatted, source,
+        "a bare `catch` and the statements under it must be written back out"
+    );
+    assert!(
+        same_program(&parse(source), &parse(&formatted)),
+        "formatting must not drop the statements of a nameless catch:\n{}",
+        formatted
+    );
+    assert_eq!(
+        catch_bodies(&parse(source)),
+        vec![Some(1)],
+        "the fixture must really be a nameless catch holding one statement, or \
+         this test proves nothing"
+    );
+    assert_eq!(
+        catch_bodies(&parse(&formatted)),
+        vec![Some(1)],
+        "the nameless catch must still hold its statement after formatting:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("catch"),
+        "the clause keyword itself was dropped:\n{}",
+        formatted
+    );
+
+    // And what the program prints must not change either. The virtual machine
+    // binds no name for a nameless catch, so its body does not run — that is the
+    // VM's business and is recorded as F6, not something the formatter may
+    // change — but formatting must not alter which statements run.
+    assert_eq!(
+        run_program(&formatted),
+        run_program(source),
+        "formatting must not change what the program does"
+    );
+}
+
+#[test]
+fn edge_a_branch_written_on_one_line_keeps_its_keywords() {
+    // The same loss in the shape a whole `try` on one line takes: every keyword
+    // that closes or reopens a block then shares the block's line, so there is
+    // no *later* line to look the keyword up on and only the order the source
+    // wrote them in can say which one closed this block. The keywords are still
+    // read in the same post-order the parser read them in, so the next one not
+    // yet taken is this block's.
+    let source = "try say 1 catch say 2 finally say 3 end\n";
+    let expected = "\
+try
+    say 1
+catch
+    say 2
+finally
+    say 3
+end
+";
+
+    let formatted = assert_idempotent(source, "a whole try on one line");
+
+    assert_eq!(
+        formatted, expected,
+        "a nameless catch and a finally written on one line must both survive"
+    );
+    assert!(
+        same_program(&parse(source), &parse(&formatted)),
+        "formatting must not drop a branch of a one-line block:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn edge_an_empty_branch_keeps_its_keyword_and_the_comment_written_on_it() {
+    // `else`, a bare `catch` and `finally` are written back even when the branch
+    // they open holds nothing — a comment and nothing else is not nothing. The
+    // keyword is what the author wrote; dropping it for being empty took the
+    // comment with it, because there was then nothing on that line for `// …` to
+    // trail, and `write_keyword_line("end")` re-attached it as `end // …`: a note
+    // about one branch moved onto the line that closed the whole statement.
+    let source = "\
+if 1 is 1 then
+    say 1
+else // nothing to do here
+    // and nothing here either
+end
+try
+    say 2
+catch // no name to bind
+    // an empty catch
+finally // either way
+    // nothing either
+end
+say 3
+";
+
+    let formatted = assert_idempotent(source, "branches with nothing in them");
+
+    assert_eq!(
+        formatted, source,
+        "a keyword the source wrote must stay, with the comment written on it"
+    );
+    assert!(
+        same_program(&parse(source), &parse(&formatted)),
+        "formatting must not change the program:\n{}",
+        formatted
+    );
+    assert!(
+        !formatted.contains("end //"),
+        "no comment may migrate onto the keyword that closes a block:\n{}",
+        formatted
+    );
+
+    // The keyword matters on its own, not only as the comment's anchor: a branch
+    // with nothing in it and no comment on its line still reads back the way it
+    // was written.
+    let bare = "\
+if 1 is 1 then
+    say 1
+else
+end
+try
+    say 2
+catch
+finally
+end
+";
+    assert_eq!(
+        assert_idempotent(bare, "empty branches with no comments"),
+        bare,
+        "an `else`, a bare `catch` and a `finally` the source wrote must be kept"
+    );
 }
