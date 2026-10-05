@@ -1,4 +1,5 @@
 mod analyzer;
+pub mod bytecode;
 mod error;
 pub mod formatter;
 pub mod lexer;
@@ -26,6 +27,7 @@ pub use lsp::{
 // `FunctionValue` is re-exported because it is the payload of the public
 // `Value::Function` variant: a caller that matches that variant has to be able
 // to name the type it binds.
+pub use bytecode::{compile_source, Chunk};
 pub use value::{FunctionValue, Value};
 pub use vm::{
     resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
@@ -137,6 +139,18 @@ pub fn run_cli() {
                         report(&rendered);
                     }
                 }
+                "compile" => {
+                    if let Err(message) = compile_command(path, None) {
+                        eprintln!("{}", message);
+                        process::exit(1);
+                    }
+                }
+                "dis" => {
+                    if let Err(message) = dis_command(path) {
+                        eprintln!("{}", message);
+                        process::exit(1);
+                    }
+                }
                 "format" => match fs::read_to_string(path) {
                     Ok(source) => match formatter::format(&source) {
                         Ok(formatted) => print!("{}", formatted),
@@ -192,6 +206,12 @@ pub fn run_cli() {
                 }
             }
         }
+        5 if args[1] == "compile" && args[3] == "-o" => {
+            if let Err(message) = compile_command(&args[2], Some(&args[4])) {
+                eprintln!("{}", message);
+                process::exit(1);
+            }
+        }
         4 => {
             let cmd = &args[1];
             if cmd == "format" && args[2] == "--check" {
@@ -223,6 +243,43 @@ pub fn run_cli() {
     }
 }
 
+/// The `.rbc` path `rb compile <file>` writes when no `-o` is given: the
+/// source path with its extension replaced.
+fn bytecode_path_for(source: &str) -> String {
+    match source.rfind('.') {
+        Some(dot) if dot + 1 < source.len() => format!("{}.rbc", &source[..dot]),
+        _ => format!("{source}.rbc"),
+    }
+}
+
+/// `rb compile <file> [-o <out.rbc>]` — the frontend, then the encoder.
+fn compile_command(source: &str, out: Option<&str>) -> Result<(), String> {
+    let text = fs::read_to_string(source).map_err(|e| Error::Io(e.to_string()).to_string())?;
+    let chunk = bytecode::compile_source(&text).map_err(|e| e.render(&text, Some(source)))?;
+    let target = out
+        .map(str::to_string)
+        .unwrap_or_else(|| bytecode_path_for(source));
+
+    fs::write(&target, chunk.encode()).map_err(|e| format!("Error: cannot write {target}: {e}"))?;
+
+    println!("Compiled {source} -> {target}");
+    Ok(())
+}
+
+/// `rb dis <file.rbc>` — the disassembler.
+fn dis_command(path: &str) -> Result<(), String> {
+    if !path.ends_with(".rbc") {
+        return Err(format!(
+            "Error: {path} is not a bytecode file; compile it first and disassemble the .rbc"
+        ));
+    }
+    let bytes = fs::read(path).map_err(|e| Error::Io(e.to_string()).to_string())?;
+    let chunk = bytecode::Chunk::decode(&bytes).map_err(|e| e.to_string())?;
+
+    print!("{}", bytecode::disassemble(&chunk));
+    Ok(())
+}
+
 fn print_help() {
     println!("Redblue v0.1.0 - A programming language as readable as plain English");
     println!();
@@ -235,6 +292,8 @@ fn print_help() {
     println!("  rb format <file>  Format a Redblue file");
     println!("  rb format --check <file>  Check if file needs formatting");
     println!("  rb lint <file>  Lint a Redblue file");
+    println!("  rb compile <file> [-o out.rbc]  Compile to bytecode");
+    println!("  rb dis <file.rbc>  Disassemble bytecode");
     println!("  rb diagnostics <file>  Report errors as JSON for editors");
     println!("  rb grammar  Print the TextMate grammar for .rb files");
     println!("  rb keywords  Print the keyword list");
@@ -245,6 +304,8 @@ fn print_help() {
     println!("  rb examples/hello.rb");
     println!("  rb format examples/hello.rb");
     println!("  rb lint examples/hello.rb");
+    println!("  rb compile examples/hello.rb -o hello.rbc");
+    println!("  rb dis hello.rbc");
 }
 
 fn print_version() {
