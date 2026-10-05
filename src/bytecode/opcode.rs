@@ -96,9 +96,11 @@ pub enum Opcode {
     /// to the object being defined.
     DefMethod,
     /// Starts an object body; block `arg` holds its fields and methods and
-    /// `aux` is 1 when the declaration extends another object.
+    /// `aux` is the constant index of the object it extends, or
+    /// [`NO_CONST`](super::NO_CONST) when it extends nothing.
     DefObject,
-    /// Declares a field named `constants[arg]` on the object being defined.
+    /// Pops a field's initial value and declares a field named
+    /// `constants[arg]` on the object being defined.
     DefField,
     /// Runs what follows with handlers in place: block `arg` is the catch body
     /// and block `aux` the finally body, either being
@@ -300,6 +302,24 @@ impl Opcode {
                 | Opcode::CallMethod
                 | Opcode::DefField
                 | Opcode::Import
+        )
+    }
+
+    /// Whether this opcode's `arg` is an index into the block list of the
+    /// block that holds the instruction.
+    ///
+    /// The disassembler checks it against that list and says so when it is out
+    /// of range, so a corrupt file is read as a diagnostic rather than left for
+    /// whoever runs it next to discover. `Try`'s is the one that may be
+    /// [`NO_BLOCK`](super::NO_BLOCK).
+    pub fn takes_block_index(self) -> bool {
+        matches!(
+            self,
+            Opcode::DefFunction
+                | Opcode::DefMethod
+                | Opcode::DefObject
+                | Opcode::Try
+                | Opcode::Test
         )
     }
 }

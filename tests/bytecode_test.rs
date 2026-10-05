@@ -10,7 +10,7 @@ use std::process::Command;
 
 use redblue::bytecode::{
     compile_source, disassemble, Block, BlockKind, Chunk, Constant, Instruction, Opcode,
-    FORMAT_VERSION, MAGIC,
+    FORMAT_VERSION, MAGIC, NO_BLOCK, NO_CONST,
 };
 
 fn project_root() -> PathBuf {
@@ -264,10 +264,14 @@ fn edge_declared_counts_larger_than_the_file_are_refused() {
         .expect("program should compile")
         .encode();
 
-    // The constant count sits directly after magic and version. Claiming
-    // 4 billion constants must fail on the count, not by trying to allocate.
+    // The constant count sits directly after magic and version. Claiming far
+    // more constants than the file has bytes for must fail on the count, not by
+    // trying to allocate. The count is below the reserved index `NO_CONST`, so
+    // this is the bytes-left check; the reserved one is
+    // `edge_a_pool_that_reaches_the_reserved_index_is_refused`.
+    let too_many = 1_000_000u32;
     let mut lying = bytes.clone();
-    lying[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+    lying[6..10].copy_from_slice(&too_many.to_le_bytes());
 
     let error = Chunk::decode(&lying).expect_err("a count past the end of the file is malformed");
     assert!(
@@ -283,6 +287,27 @@ fn edge_declared_counts_larger_than_the_file_are_refused() {
     assert!(
         error.message().contains("instruction"),
         "the error should name the instruction count, got: {error}"
+    );
+}
+
+/// `NO_CONST` is the operand that says "this instruction names no constant" —
+/// `DEF_OBJECT` writes it for an object that extends nothing. A file claiming a
+/// pool long enough to reach it would make the operand ambiguous, so it is
+/// refused from the declared count, before anything is read or allocated.
+#[test]
+fn edge_a_pool_that_reaches_the_reserved_constant_index_is_refused() {
+    let bytes = compile_source("say 1\n")
+        .expect("program should compile")
+        .encode();
+
+    let mut lying = bytes.clone();
+    lying[6..10].copy_from_slice(&NO_CONST.to_le_bytes());
+
+    let error = Chunk::decode(&lying).expect_err("a pool reaching the reserved index is refused");
+
+    assert!(
+        error.message().contains("reserved") && error.message().contains(&NO_CONST.to_string()),
+        "the refusal should name the reserved index, got: {error}"
     );
 }
 
@@ -409,38 +434,108 @@ fn loops_and_branches_produce_jumps_inside_their_own_block() {
     );
 }
 
+/// Every jump target is inside its own block *or* is that block's documented
+/// exit — the instruction count, one past the last instruction. Both forms are
+/// legal (`docs/BYTECODE.md` §"A jump target is…"); a target past the count is
+/// not, and neither is a jump into another block.
 #[test]
 fn every_jump_target_is_inside_its_own_block() {
-    let chunk = compile_source(
+    let sources = [
         "set total to 0\nrepeat 3 times\n    set total to total + 1\n    if total is 2 then\n        skip\n    end\nend\n",
-    )
-    .expect("program should compile");
+        // A loop and a bare `if` at the end of a block have no instruction
+        // after them, so their exit jumps land on the instruction count. These
+        // two programs are here so the `<=` below is not vacuously true: they
+        // make the exit form the only legal target those jumps can have.
+        "set i to 0\nwhile i is 1\n    say i\nend\n",
+        "set i to 0\nif i is 1 then\n    say i\nend\n",
+    ];
 
     let mut visited = 0usize;
     let mut backward = 0usize;
-    walk(&chunk.main, &mut |block| {
-        visited += 1;
-        for (index, instruction) in block.code.iter().enumerate() {
-            if matches!(instruction.opcode, Opcode::Jump | Opcode::JumpIfFalse) {
-                assert!(
-                    (instruction.arg as usize) < block.code.len(),
-                    "{:?} jumps to {} but block holds {} instructions",
-                    instruction.opcode.name(),
-                    instruction.arg,
-                    block.code.len()
-                );
-                let _ = index;
+    let mut exits = 0usize;
+    for source in sources {
+        let chunk = compile_source(source)
+            .unwrap_or_else(|e| panic!("program should compile: {e}\n{source}"));
+        walk(&chunk.main, &mut |block| {
+            visited += 1;
+            for instruction in &block.code {
+                if matches!(instruction.opcode, Opcode::Jump | Opcode::JumpIfFalse) {
+                    assert!(
+                        (instruction.arg as usize) <= block.code.len(),
+                        "{:?} jumps to {} but block holds {} instructions",
+                        instruction.opcode.name(),
+                        instruction.arg,
+                        block.code.len()
+                    );
+                    if instruction.arg as usize == block.code.len() {
+                        exits += 1;
+                    }
+                }
+                if instruction.opcode == Opcode::Jump {
+                    backward += 1;
+                }
             }
-            if instruction.opcode == Opcode::Jump {
-                backward += 1;
-            }
-        }
-    });
-    assert!(visited >= 1, "the walk should have reached the main block");
+        });
+    }
+    assert!(visited >= 3, "the walk should have reached every block");
     assert_eq!(
-        backward, 1,
-        "`repeat` compiles to exactly one loop-back jump, got {backward}"
+        backward, 2,
+        "`repeat` and `while` each compile to one loop-back jump, got {backward}"
     );
+    assert_eq!(
+        exits, 2,
+        "the `while` and the `if` should each exit their block by jumping to the instruction count, got {exits}"
+    );
+}
+
+/// A loop or a bare `if` at the end of a block has no instruction after it to
+/// jump to, so its exit jump targets the block's instruction count. That is
+/// the documented way out of a block, not a target past the end of one — and
+/// `rb dis` must not report the compiler's own output as malformed.
+#[test]
+fn edge_a_jump_to_the_end_of_a_block_is_the_exit_not_an_out_of_range_target() {
+    for (source, what) in [
+        ("set i to 0\nwhile i is 1\n    say i\nend\n", "while"),
+        ("set i to 0\nif i is 1 then\n    say i\nend\n", "if"),
+    ] {
+        let chunk = compile_source(source).unwrap_or_else(|e| panic!("{what} should compile: {e}"));
+        let end = chunk.main.code.len() as u32;
+
+        let targets: Vec<u32> = chunk
+            .main
+            .code
+            .iter()
+            .filter(|i| matches!(i.opcode, Opcode::Jump | Opcode::JumpIfFalse))
+            .map(|i| i.arg)
+            .collect();
+        assert!(
+            targets.contains(&end),
+            "{what} at the end of a block should jump out to {end}, got {targets:?}"
+        );
+        for target in &targets {
+            assert!(
+                *target <= end,
+                "{what} emitted a jump to {target}, past the end of {end} instructions"
+            );
+        }
+
+        let text = disassemble(&chunk);
+        assert!(
+            !text.contains("outside this block"),
+            "{what} produced a jump `rb dis` calls out of range:\n{text}"
+        );
+        assert!(
+            text.contains("end of block"),
+            "a jump out of the block should say where it lands:\n{text}"
+        );
+
+        let bytes = chunk.encode();
+        assert_eq!(
+            Chunk::decode(&bytes).expect("should round trip"),
+            chunk,
+            "{what}: the exit convention did not survive a round trip"
+        );
+    }
 }
 
 #[test]
@@ -524,13 +619,142 @@ fn functions_tests_and_methods_become_named_blocks() {
     assert_eq!(methods[0].arity, 1);
     assert_eq!(
         names(objects[0]),
-        vec!["DEF_FIELD", "DEF_METHOD"],
-        "an object body declares its fields and its methods"
+        // A `has` with no `default` initialises its field to `nothing`, and
+        // `DEF_FIELD` consumes that value — see
+        // `a_field_default_is_compiled_before_the_declaration_that_consumes_it`.
+        vec!["PUSH_CONST", "DEF_FIELD", "DEF_METHOD"],
+        "an object body initialises its fields and declares its methods"
     );
 
     let tests = blocks_of_kind(&chunk.main, BlockKind::Test);
     assert_eq!(tests.len(), 1);
     assert_eq!(tests[0].name, "thing grows");
+}
+
+/// `object Child extends Parent` has to put `Parent` in the file. A flag
+/// saying "this one extends something" is not enough: the parent chain is
+/// walked by name (`src/vm.rs`, `declare_object`), and a file that carries only
+/// the flag cannot be resolved by anything.
+#[test]
+fn an_extending_object_names_its_parent_in_the_constant_pool() {
+    let chunk = compile_source(
+        "object Base\n    has kind default \"base\"\nend\n\
+         object Child extends Base\n    has size default 1\nend\n",
+    )
+    .expect("program should compile");
+
+    let defs: Vec<&Instruction> = chunk
+        .main
+        .code
+        .iter()
+        .filter(|i| i.opcode == Opcode::DefObject)
+        .collect();
+    assert_eq!(defs.len(), 2, "each object declaration is one DEF_OBJECT");
+
+    assert_eq!(
+        defs[0].aux, NO_CONST,
+        "an object that extends nothing writes the reserved index, not a 0"
+    );
+    assert_eq!(
+        chunk.constants[defs[1].aux as usize],
+        Constant::Text("Base".to_string()),
+        "an extending object names its parent through the constant pool, got {:?}",
+        chunk.constants
+    );
+    assert!(
+        (chunk.constants.len() as u64) < NO_CONST as u64,
+        "no pool this compiler writes can reach the reserved index"
+    );
+    assert_eq!(
+        chunk
+            .constants
+            .iter()
+            .filter(|c| **c == Constant::Text("Base".to_string()))
+            .count(),
+        1,
+        "`Base` is interned once, so the parent and the parent's own binding are \
+         the same constant: {:?}",
+        chunk.constants
+    );
+
+    let bytes = chunk.encode();
+    assert_eq!(
+        Chunk::decode(&bytes).expect("should round trip"),
+        chunk,
+        "the parent name must survive a round trip"
+    );
+
+    let text = disassemble(&chunk);
+    let lines: Vec<&str> = text.lines().filter(|l| l.contains("DEF_OBJECT")).collect();
+    assert_eq!(lines.len(), 2, "one line per declaration:\n{text}");
+    assert!(
+        lines[0].contains(", none"),
+        "an object that extends nothing should read `none`, not a reserved index:\n{text}"
+    );
+    assert!(
+        lines[1].contains("extends Base"),
+        "the disassembly should say which object is extended:\n{text}"
+    );
+}
+
+/// A field's `default` is any expression, so it is compiled: the value is
+/// pushed in front of the `DEF_FIELD` that consumes it. Dropping it, as an
+/// earlier build did, lost `has size default 5 + 2` entirely — the file said
+/// the field existed and nothing about what it was initialised to.
+#[test]
+fn a_field_default_is_compiled_before_the_declaration_that_consumes_it() {
+    let chunk = compile_source("object Thing\n    has size default 5 + 2\n    has label\nend\n")
+        .expect("program should compile");
+
+    let objects = blocks_of_kind(&chunk.main, BlockKind::Object);
+    assert_eq!(objects.len(), 1, "the object body is one block");
+    let body = objects[0];
+
+    assert_eq!(
+        names(body),
+        vec![
+            "PUSH_CONST",
+            "PUSH_CONST",
+            "ADD",
+            "DEF_FIELD", // size, defaulted to 5 + 2
+            "PUSH_CONST",
+            "DEF_FIELD", // label, with no default
+        ],
+        "a default is compiled in front of the declaration that consumes it"
+    );
+
+    assert_eq!(
+        chunk.constants[body.code[0].arg as usize],
+        Constant::Number(5.0),
+        "the default's own constants are in the pool: {:?}",
+        chunk.constants
+    );
+    assert_eq!(
+        chunk.constants[body.code[3].arg as usize],
+        Constant::Text("size".to_string()),
+        "DEF_FIELD names the field; its value came off the stack"
+    );
+    assert_eq!(
+        chunk.constants[body.code[4].arg as usize],
+        Constant::Nothing,
+        "a field with no `default` starts as nothing, which is what the VM gives it"
+    );
+    assert_eq!(
+        chunk.constants[body.code[5].arg as usize],
+        Constant::Text("label".to_string()),
+        "and the second field is named the same way"
+    );
+
+    let bytes = chunk.encode();
+    assert_eq!(
+        Chunk::decode(&bytes).expect("should round trip"),
+        chunk,
+        "a compiled default must survive a round trip"
+    );
+    assert!(
+        disassemble(&chunk).contains("ADD"),
+        "the default should be visible in the disassembly"
+    );
 }
 
 #[test]
@@ -815,6 +1039,65 @@ fn rb_compile_writes_a_rbc_that_rb_dis_reads_back() {
     );
 }
 
+/// The definition of done for this stage, end to end through the binary: every
+/// file under `examples/` compiles to a `.rbc`, and `rb dis` reads each one
+/// back to exactly the text `disassemble` gives.
+#[test]
+fn rb_compile_and_dis_cover_every_example_through_the_binary() {
+    let dir = scratch_dir("cli-examples");
+    let examples = example_sources();
+    assert!(
+        examples.len() >= 6,
+        "examples/ holds {} files; the corpus should not shrink silently",
+        examples.len()
+    );
+
+    for (name, source) in examples {
+        let input = dir.join(&name);
+        fs::write(&input, &source).expect("scratch source should be writable");
+        let out = dir.join(format!("{}.rbc", name.trim_end_matches(".rb")));
+
+        let compile = Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("compile")
+            .arg(&input)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .expect("rb should be runnable");
+        assert!(
+            compile.status.success(),
+            "rb compile examples/{name} failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        assert!(out.exists(), "rb compile wrote no .rbc for examples/{name}");
+
+        let bytes = fs::read(&out).expect("the .rbc should be readable");
+        assert_eq!(
+            bytes,
+            compile_source(&source)
+                .unwrap_or_else(|e| panic!("examples/{name} should compile: {e}"))
+                .encode(),
+            "examples/{name} compiled by the binary differs from the library"
+        );
+
+        let dis = Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("dis")
+            .arg(&out)
+            .output()
+            .expect("rb should be runnable");
+        assert!(
+            dis.status.success(),
+            "rb dis on examples/{name} failed: {}",
+            String::from_utf8_lossy(&dis.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(dis.stdout).expect("disassembly is text"),
+            disassemble(&Chunk::decode(&bytes).expect("the written file should decode")),
+            "rb dis on examples/{name} did not print disassemble()"
+        );
+    }
+}
+
 #[test]
 fn edge_rb_dis_refuses_a_source_file_and_a_missing_file() {
     let dir = scratch_dir("cli-refusals");
@@ -1029,6 +1312,181 @@ fn edge_blocks_nested_past_the_limit_are_refused_when_decoding() {
     assert!(
         error.message().contains("deep"),
         "the refusal should say how deep it got, got: {error}"
+    );
+}
+
+/// A chain of empty blocks `depth` deep.
+///
+/// The compiler refuses to nest past `MAX_BLOCK_DEPTH` and so does the decoder,
+/// but `Block`'s fields are public: a caller can still build a deeper tree, and
+/// everything that walks one has to cope with it.
+fn deep_block_chain(depth: usize) -> Block {
+    let mut block = Block {
+        name: String::new(),
+        kind: BlockKind::Main,
+        arity: 0,
+        code: Vec::new(),
+        blocks: Vec::new(),
+    };
+    for level in 0..depth {
+        block = Block {
+            name: format!("level{level}"),
+            kind: BlockKind::Function,
+            arity: 0,
+            code: Vec::new(),
+            blocks: vec![block],
+        };
+    }
+    block
+}
+
+/// Three thousand levels: deeper than the compiler emits, and deeper than a
+/// stack holds one frame per level. The walk over the tree — `all_blocks`,
+/// `encode` and `disassemble` — keeps its pending blocks on the heap, so this
+/// finishes. The worker thread's stack is deliberately small: if any of the
+/// three recursed per nesting level, this test would abort the process rather
+/// than pass quietly.
+#[test]
+fn edge_a_tree_deeper_than_the_block_limit_still_renders_and_walks() {
+    let depth = 3_000usize;
+    let chunk = Chunk {
+        constants: Vec::new(),
+        main: deep_block_chain(depth),
+    };
+
+    let worker = std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            let blocks = chunk.all_blocks().len();
+            let bytes = chunk.encode().len();
+            let text = disassemble(&chunk);
+            (blocks, bytes, text)
+        })
+        .expect("a worker thread should start");
+
+    let (blocks, bytes, text) = worker
+        .join()
+        .expect("no walk over the tree may recurse per nesting level");
+
+    assert_eq!(
+        blocks,
+        depth + 1,
+        "every block should be reached exactly once, `main` included"
+    );
+    assert!(bytes > 0, "a tree past the limit still encodes");
+    assert!(
+        text.contains("main.blocks[0].blocks[0]"),
+        "the disassembly should name nested blocks:\n{text:.200}"
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("(function, arity 0)"))
+            .count(),
+        depth,
+        "every level should be rendered exactly once"
+    );
+}
+
+/// Every index `rb dis` prints is checked, and the operands that name blocks
+/// used to be the ones it did not check. A corrupt operand has to be reported
+/// where a reader looks rather than read as if it were sound.
+#[test]
+fn edge_the_disassembler_reports_a_block_index_out_of_range() {
+    let chunk = Chunk {
+        constants: vec![
+            Constant::Text("Parent".to_string()),
+            Constant::Text("g".to_string()),
+        ],
+        main: Block {
+            name: "main".to_string(),
+            kind: BlockKind::Main,
+            arity: 0,
+            code: vec![
+                // In range: block 0 is a block of this one.
+                Instruction {
+                    opcode: Opcode::DefFunction,
+                    arg: 0,
+                    aux: 0,
+                    line: 1,
+                },
+                // Past the end of a list that holds one block.
+                Instruction {
+                    opcode: Opcode::DefMethod,
+                    arg: 3,
+                    aux: 0,
+                    line: 2,
+                },
+                Instruction {
+                    opcode: Opcode::Test,
+                    arg: 7,
+                    aux: 0,
+                    line: 3,
+                },
+                // The parent names a real constant; the block is not there.
+                Instruction {
+                    opcode: Opcode::DefObject,
+                    arg: 9,
+                    aux: 0,
+                    line: 4,
+                },
+                // A parent index past the end of the pool.
+                Instruction {
+                    opcode: Opcode::DefObject,
+                    arg: 0,
+                    aux: 5,
+                    line: 5,
+                },
+                // A catch block that is not there, and a finally that is
+                // legitimately absent.
+                Instruction {
+                    opcode: Opcode::Try,
+                    arg: 4,
+                    aux: NO_BLOCK,
+                    line: 6,
+                },
+            ],
+            blocks: vec![Block {
+                name: "f".to_string(),
+                kind: BlockKind::Function,
+                arity: 0,
+                code: Vec::new(),
+                blocks: Vec::new(),
+            }],
+        },
+    };
+
+    let text = disassemble(&chunk);
+
+    assert!(
+        text.contains("block 0 (function, `f`)"),
+        "a block index that is in range should be named:\n{text}"
+    );
+    assert!(
+        text.contains("extends Parent"),
+        "an object with a parent in range should say so:\n{text}"
+    );
+    for past in ["block 3", "block 7", "block 9", "catch block 4"] {
+        assert!(
+            text.contains(&format!("{past} is out of range")),
+            "{past} is past this block's one block and should be reported:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("constant 5 is out of range"),
+        "a parent index past the pool should be reported:\n{text}"
+    );
+    assert!(
+        !text.contains("finally block"),
+        "NO_BLOCK is a legal operand, not an out-of-range one:\n{text}"
+    );
+
+    // The operands are not the decoder's business: the file is structurally
+    // sound, so it decodes, and the report is still there afterwards.
+    let decoded = Chunk::decode(&chunk.encode()).expect("this file is well formed");
+    assert_eq!(
+        disassemble(&decoded),
+        text,
+        "the report must survive a round trip"
     );
 }
 

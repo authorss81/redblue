@@ -76,7 +76,14 @@ required for S1a and none of it is claimed to work.
   `docs/BYTECODE.md`, not an implemented behaviour.
 - **Names are stored, not resolved to slots.** `LOAD`/`STORE` carry a name; a
   Redblue closure resolves it against the captured scope. Slot allocation is a
-  later stage and a version bump, since it changes what a version-1 file means.
-- **`GET_RANGE` operand counts (1, 2, 3) and `DEF_OBJECT`'s "extends" flag are
-  conventions this compiler established.** A VM written later reads them; if a
-  different split proves better it is a new opcode byte and a version bump.
+  later stage and a version bump, since it changes what a version-N file means.
+- **`GET_RANGE` operand counts (1, 2, 3) are a convention this compiler
+  established.** A VM written later reads them; if a different split proves
+  better it is a new opcode byte and a version bump. (The other convention in
+  this list, `DEF_OBJECT`'s "extends" flag, is gone: the parent is a name in
+  the constant pool, which review round 1 fixed. See `REPORT.md`.)
+- **Nothing decides what `NO_CONST` in `DEF_OBJECT` should do about a parent
+  that is not declared.** The tree-walking VM walks the chain by name and
+  reports a missing or cyclic parent at run time (`src/vm.rs`,
+  `declare_object`). A `.rbc` VM has to do the same, and the file gives it
+  everything it needs to: the parent's name, interned like any other.

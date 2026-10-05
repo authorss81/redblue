@@ -1,6 +1,6 @@
 # The Redblue bytecode format (`.rbc`)
 
-**Format version: 1.** This document is the normative description of the file
+**Format version: 2.** This document is the normative description of the file
 `rb compile` writes and `rb dis` reads. The encoder and decoder that implement
 it are `src/bytecode/format.rs`; the instruction set is
 `src/bytecode/opcode.rs`.
@@ -53,8 +53,22 @@ A file that does not begin with the magic is refused with
 
 ### Format version
 
-A `u16`. This build reads and writes `1`. Any other value is refused with
-`unknown bytecode format version <n>: this build reads version 1`.
+A `u16`. This build reads and writes `2`. Any other value is refused with
+`unknown bytecode format version <n>: this build reads version 2`.
+
+#### What each version changed
+
+No byte value and no record layout changed in either version — only what an
+operand means, and one refusal.
+
+| Version | Change |
+|---|---|
+| 1 | The original format. |
+| 2 | `DEF_OBJECT`'s secondary operand became the constant index of the object it extends — `NO_CONST` when it extends nothing — where version 1 wrote a flag that discarded the parent's name. `DEF_FIELD` became the consumer of the value pushed immediately before it, so a field's `default` is compiled instead of dropped. The decoder refuses a constant pool that reaches the reserved index `NO_CONST`. |
+
+A version-1 file is refused rather than half-read: the same bytes would mean
+two different things, and rule 2 above is what makes that a new version rather
+than an edit.
 
 ### Constant pool
 
@@ -75,6 +89,10 @@ the file is refused before anything is allocated.
 
 Text entries are interned by the compiler: a name used a hundred times is one
 entry. Number and `yes`/`no` entries are not interned.
+
+The index `NO_CONST` (`0xFFFFFFFF`) is reserved: it is the operand that says
+"this instruction names no constant", and a file whose declared count would make
+it a real index is refused, so the operand is never ambiguous.
 
 ### Blocks
 
@@ -112,6 +130,14 @@ one by its **index in that list**, so the order is part of the format.
 
 Blocks nest at most `MAX_BLOCK_DEPTH` (64) deep, the same budget the parser
 enforces on `to … end` nesting. A file that nests deeper is refused.
+
+The limit bounds what a *file* may hold, not what the in-memory tree may be:
+`Chunk`'s fields are public, so a caller can build a deeper tree than the
+compiler emits. Every walk over one — `Chunk::encode`, `Chunk::all_blocks` and
+`rb dis` — keeps its pending blocks on the heap, and dropping a `Block` does
+the same, so a tree of any depth is encoded, printed and freed rather than
+overflowing the stack. A tree past the limit is simply a file this build's
+decoder refuses.
 
 ### Instructions
 
@@ -180,8 +206,8 @@ always `0`.
 | 37 | `GET_RANGE` | — | operand count | builds a range: 1 count, or 2 bounds, or 2 bounds and a step |
 | 38 | `DEF_FUNCTION` | block index | parameter count | binds a closure whose body is that block |
 | 39 | `DEF_METHOD` | block index | parameter count | adds a method to the object being defined |
-| 40 | `DEF_OBJECT` | block index | 1 when it extends another | starts an object body; the block holds its fields and methods |
-| 41 | `DEF_FIELD` | field name index | — | declares a field on the object being defined |
+| 40 | `DEF_OBJECT` | block index | parent name index, or `NO_CONST` | starts an object body; the block holds its fields and methods |
+| 41 | `DEF_FIELD` | field name index | — | pops the field's initial value and declares it on the object being defined |
 | 42 | `TRY` | catch block index, or `NO_BLOCK` | finally block index, or `NO_BLOCK` | runs what follows with those handlers in place |
 | 43 | `IMPORT` | module name index | — | imports a module |
 | 44 | `TEST` | block index | — | runs the test body |
@@ -191,6 +217,11 @@ always `0`.
 A `try` with no `catch` and no `finally` writes it in both fields and creates
 no blocks.
 
+`NO_CONST` is `0xFFFFFFFF` too, and says "this instruction names no constant":
+`DEF_OBJECT` writes it for an object that extends nothing. The two reserved
+values are never compared against each other — `NO_BLOCK` appears only in a
+block-index operand and `NO_CONST` only in a constant-index one.
+
 An opcode byte this table does not assign is refused with
 `unknown opcode byte <n>`.
 
@@ -199,6 +230,11 @@ An opcode byte this table does not assign is refused with
 A block is entered with an empty stack. An expression leaves its value on top,
 and a statement leaves nothing behind — `STORE`, `SET_PROPERTY`, `POP`, `SAY`
 and `PRINT` all consume what their statement produced.
+
+`DEF_FIELD` is a statement that consumes one: the code in front of it pushes
+the field's initial value, which is what makes a field's `default` able to be
+any expression rather than only a literal. A `has` with no `default` pushes
+`nothing` first, which is the value the tree-walking VM gives such a field.
 
 Two things are held across a stretch of instructions rather than consumed at
 once:
@@ -211,7 +247,12 @@ once:
   Stage S1b defines how a `catch` block reads it and how a `finally` block runs
   whether or not there was a fault.
 
-Every jump target is an instruction of the block that holds it.
+A jump target is an instruction offset in the block that holds it, or the
+block's instruction count — one past the last instruction — which means "leave
+this block". That second form is not an exception: a `while` loop or a bare
+`if` at the end of a block has no instruction after it, so its exit jump has
+nowhere else to point. A target *past* the instruction count is malformed, and
+`rb dis` reports it.
 
 ### Names, not slots
 
@@ -245,7 +286,15 @@ have to be rewritten to find them.
 `object Name … end` compiles `DEF_OBJECT` naming an object block, then
 `STORE Name`; the object body holds `DEF_FIELD` for each `has` and
 `DEF_METHOD` for each `to can`, and each method is a block of the object body.
-`test "name"` compiles `TEST` naming a test block.
+`object Child extends Parent … end` is the same shape with the parent's name
+in `DEF_OBJECT`'s secondary operand, interned like any other name, so the file
+says *which* object is extended rather than only that one is. `test "name"`
+compiles `TEST` naming a test block.
+
+`has f default e` compiles `e` and then `DEF_FIELD f`, which pops the value the
+expression produced; `has f` compiles a push of `nothing` and then `DEF_FIELD f`.
+Either way the object body reads as one initialisation per field, in source
+order.
 
 `try … end` compiles `TRY` naming a catch block and a finally block, then the
 protected statements inline. The handlers are separate blocks so the protected
@@ -260,6 +309,8 @@ A decoder must refuse, not guess:
 - a file that ends in the middle of any field
 - a count — constants, instructions, blocks, a string length — larger than the
   bytes actually left, **checked before anything is allocated**
+- a constant count that reaches the reserved index `NO_CONST`, checked from the
+  declared count before any entry is read
 - a constant tag, `yes`/`no` byte or block kind this build does not assign
 - a string that is not valid UTF-8
 - a block nested deeper than `MAX_BLOCK_DEPTH`
@@ -268,10 +319,18 @@ A decoder must refuse, not guess:
 Every one of these is an `Error::Parser` with `Span::unknown()` and a message
 naming what was wrong.
 
+An *operand* is a different matter. The decoder reads records; it does not
+interpret what they address, so a file whose constant index, block index, parent
+name or jump target is out of range is structurally sound and is decoded. Those
+values are reported by `rb dis`, which is where a person reads them, and any VM
+has to check them too when it resolves them. What the decoder does refuse is a
+structure it cannot hold: a tag it does not assign, a count past the bytes
+left, a depth past the limit.
+
 ## What `rb dis` prints
 
 ```
-; redblue bytecode v1
+; redblue bytecode v2
 ; constants: 2
 ;   [0] 1
 ;   [1] n
@@ -293,10 +352,24 @@ nesting. The mnemonic column is padded to the width of the longest mnemonic in
 the *whole* table, so it does not shift with the program.
 
 Each instruction line is the offset, the mnemonic, the operands, and a comment
-carrying the source line and, where the operand names one, the constant it
-names. An index outside the pool and a jump outside the block are reported in
-that comment rather than read.
+carrying the source line and what each operand names. **Every index it prints
+is checked** against the thing it indexes, and an index that is out of range is
+reported in that comment rather than read:
+
+- a constant index outside the pool, including the parent of a `DEF_OBJECT`
+- a block index outside the block's own list, for `DEF_FUNCTION`, `DEF_METHOD`,
+  `DEF_OBJECT`, `TEST` and both halves of a `TRY`
+- a jump target past the end of its block; a jump to the block's instruction
+  count is reported as `end of block`, because that is the documented exit
+
+An operand that has no value to name says nothing: `DEF_OBJECT`'s `NO_CONST`
+prints as `none` rather than as a four-billion-and-something index, and a
+`TRY`'s absent handler prints nothing at all. Where an instruction names more
+than one thing, the clauses are separated by `;`.
 
 The disassembler is a pure function of the chunk: it walks blocks and
 instructions in index order and never sorts or hashes, so `rb dis` prints the
-same bytes for the same file on every run.
+same bytes for the same file on every run. It keeps its pending blocks on the
+heap rather than recursing per nesting level, so a `Chunk` far deeper than
+`MAX_BLOCK_DEPTH` — which the public fields let a caller build — is printed in
+full instead of overflowing the stack.

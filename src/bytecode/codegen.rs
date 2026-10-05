@@ -17,7 +17,7 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 
 use crate::bytecode::format::{Block, BlockKind, Chunk, Constant, Instruction, MAX_BLOCK_DEPTH};
 use crate::bytecode::opcode::Opcode;
-use crate::bytecode::NO_BLOCK;
+use crate::bytecode::{NO_BLOCK, NO_CONST};
 
 /// The name a `repeat ... times` loop counts in.
 ///
@@ -283,7 +283,19 @@ impl Compiler {
                 )?;
                 emit(code, Opcode::DefMethod, block, params.len() as u32, line);
             }
-            Statement::Has { name, .. } => {
+            Statement::Has { name, default } => {
+                // The initial value is compiled in front of the declaration
+                // that consumes it, so a `default` may be any expression
+                // rather than only a literal the pool could hold. A field with
+                // no `default` is initialised to `nothing`, which is what the
+                // tree-walking VM gives it.
+                match default {
+                    Some(expr) => self.expr(expr, code, line)?,
+                    None => {
+                        let nothing = self.constant(Constant::Nothing);
+                        emit(code, Opcode::PushConst, nothing, 0, line);
+                    }
+                }
                 let name = self.text(name);
                 emit(code, Opcode::DefField, name, 0, line);
             }
@@ -303,8 +315,14 @@ impl Compiler {
                     depth,
                     blocks,
                 )?;
-                let inherits = u32::from(extends.is_some());
-                emit(code, Opcode::DefObject, block, inherits, line);
+                // The parent goes in as a name, interned like every other name
+                // in the program: a flag saying "this one extends something"
+                // would leave the file unable to say what.
+                let parent = match extends {
+                    Some(parent) => self.text(parent),
+                    None => NO_CONST,
+                };
+                emit(code, Opcode::DefObject, block, parent, line);
                 let name = self.text(name);
                 emit(code, Opcode::Store, name, 0, line);
             }

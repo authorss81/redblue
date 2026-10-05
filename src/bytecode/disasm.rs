@@ -5,12 +5,16 @@
 //! chunk — it walks blocks and instructions in index order and never sorts or
 //! hashes — so `rb dis` prints the same bytes for the same file every time.
 //!
-//! Every index it prints is checked. A hand-built or corrupt chunk with a jump
-//! past the end of its block prints `?` rather than indexing out of range.
+//! Every index it prints is checked: a constant index, a block index, the
+//! object a `DEF_OBJECT` extends, and a jump target are each resolved against
+//! the thing they index, and one that is out of range says so in the
+//! instruction's comment rather than indexing out of range. The walk over the
+//! block tree keeps its pending blocks on the heap, so it renders a tree far
+//! deeper than the compiler emits rather than running out of stack.
 
 use std::fmt::Write as _;
 
-use crate::bytecode::format::{Block, Chunk, Constant};
+use crate::bytecode::format::{Block, Chunk, Constant, Instruction, NO_BLOCK, NO_CONST};
 use crate::bytecode::opcode::Opcode;
 
 /// The width the mnemonic column is padded to.
@@ -34,86 +38,169 @@ pub fn render(chunk: &Chunk) -> String {
     }
     let _ = writeln!(out);
 
-    render_block(&mut out, chunk, &chunk.main, "main", 0);
+    render_blocks(&mut out, chunk, &chunk.main);
     out
 }
 
-fn render_block(out: &mut String, chunk: &Chunk, block: &Block, path: &str, depth: usize) {
-    for _ in 0..depth {
-        out.push_str("  ");
-    }
-    let _ = writeln!(
-        out,
-        "{} ({}, arity {})",
-        path,
-        block.kind.name(),
-        block.arity
-    );
+/// A block still to render, and where it lands in the output.
+struct Pending<'a> {
+    block: &'a Block,
+    /// `main`, then `main.blocks[0]`, then `main.blocks[0].blocks[1]`.
+    path: String,
+    depth: usize,
+    /// Whether a blank line comes before this block. Every nested block has
+    /// one; `main` has nothing in front of it.
+    blank_before: bool,
+}
 
-    for (offset, instruction) in block.code.iter().enumerate() {
-        let opcode = instruction.opcode;
-        let mut line = format!("{offset:04}  {:<MNEMONIC_WIDTH$}", opcode.name());
+/// Renders `main` and every block nested in it, depth first.
+///
+/// The pending blocks are held in a `Vec` rather than in a call frame per level,
+/// so the cost is the tree and not the machine's stack. Output is identical
+/// either way; only the bookkeeping differs.
+fn render_blocks(out: &mut String, chunk: &Chunk, main: &Block) {
+    let mut pending = vec![Pending {
+        block: main,
+        path: "main".to_string(),
+        depth: 0,
+        blank_before: false,
+    }];
 
-        if opcode.has_operand() {
-            let _ = write!(line, "{}", instruction.arg);
-            if opcode.has_aux() {
-                let _ = write!(line, ", {}", instruction.aux);
-            }
+    while let Some(item) = pending.pop() {
+        if item.blank_before {
+            out.push('\n');
+        }
+        let Pending {
+            block,
+            path,
+            depth,
+            blank_before: _,
+        } = item;
+
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+        let _ = writeln!(out, "{path} ({}, arity {})", block.kind.name(), block.arity);
+
+        for (offset, instruction) in block.code.iter().enumerate() {
+            out.push_str(&render_instruction(chunk, block, offset, instruction));
         }
 
-        if let Some(comment) = describe(chunk, block, instruction) {
-            let _ = write!(line, "  ; {comment}");
+        for (index, child) in block.blocks.iter().enumerate().rev() {
+            pending.push(Pending {
+                block: child,
+                path: format!("{path}.blocks[{index}]"),
+                depth: depth + 1,
+                blank_before: true,
+            });
         }
-
-        out.push_str(&line);
-        out.push('\n');
-    }
-
-    for (index, child) in block.blocks.iter().enumerate() {
-        let _ = writeln!(out);
-        let child_path = format!("{path}.blocks[{index}]");
-        render_block(out, chunk, child, &child_path, depth + 1);
     }
 }
 
-/// The trailing comment: the source line the instruction came from, and the
-/// value an operand names when it names one.
-fn describe(
+/// One instruction line: the offset, the mnemonic, the operands, and the
+/// comment.
+fn render_instruction(
     chunk: &Chunk,
     block: &Block,
-    instruction: &crate::bytecode::Instruction,
-) -> Option<String> {
-    let mut comment = format!("line {}", instruction.line);
+    offset: usize,
+    instruction: &Instruction,
+) -> String {
+    let opcode = instruction.opcode;
+    let mut line = format!("{offset:04}  {:<MNEMONIC_WIDTH$}", opcode.name());
 
-    if instruction.opcode.takes_constant_index() {
-        match chunk.constants.get(instruction.arg as usize) {
-            Some(Constant::Text(text)) => {
-                let _ = write!(comment, ": {}", text.escape_debug());
-            }
-            Some(constant) => {
-                let _ = write!(comment, ": {constant}");
-            }
-            None => {
-                let _ = write!(
-                    comment,
-                    ": constant {} is out of range (the pool holds {})",
-                    instruction.arg,
-                    chunk.constants.len()
-                );
+    if opcode.has_operand() {
+        let _ = write!(line, "{}", instruction.arg);
+        if opcode.has_aux() {
+            // `DEF_OBJECT`'s second operand is a name or the reserved index
+            // that means "extends nothing". Printing the reserved index as a
+            // number would bury the one fact a reader wants from the line.
+            if opcode == Opcode::DefObject && instruction.aux == NO_CONST {
+                let _ = write!(line, ", none");
+            } else {
+                let _ = write!(line, ", {}", instruction.aux);
             }
         }
     }
 
-    if matches!(instruction.opcode, Opcode::Jump | Opcode::JumpIfFalse)
-        && (instruction.arg as usize) >= block.code.len()
-    {
-        let _ = write!(
-            comment,
-            ": target {} is outside this block's {} instructions",
-            instruction.arg,
-            block.code.len()
-        );
+    let _ = write!(line, "  ; {}", describe(chunk, block, instruction));
+
+    line.push('\n');
+    line
+}
+
+/// The trailing comment: the source line the instruction came from, then what
+/// each operand names when it names something, then where a value is out of
+/// range.
+fn describe(chunk: &Chunk, block: &Block, instruction: &Instruction) -> String {
+    let mut clauses = Vec::new();
+
+    if instruction.opcode.takes_constant_index() {
+        clauses.push(named_constant(chunk, instruction.arg, ""));
     }
 
-    Some(comment)
+    // `DEF_OBJECT`'s parent is a name, so it is a constant index too — in
+    // `aux`, and reserved when the object extends nothing.
+    if instruction.opcode == Opcode::DefObject && instruction.aux != NO_CONST {
+        clauses.push(named_constant(chunk, instruction.aux, "extends "));
+    }
+
+    if instruction.opcode.takes_block_index() {
+        clauses.extend(named_block(block, instruction.arg, ""));
+    }
+    if instruction.opcode == Opcode::Try {
+        clauses.extend(named_block(block, instruction.arg, "catch "));
+        clauses.extend(named_block(block, instruction.aux, "finally "));
+    }
+
+    if matches!(instruction.opcode, Opcode::Jump | Opcode::JumpIfFalse) {
+        let target = instruction.arg as usize;
+        if target == block.code.len() {
+            // A jump to one past the last instruction is how a loop or an `if`
+            // at the end of a block leaves it. It is a target, not a defect.
+            clauses.push("end of block".to_string());
+        } else if target > block.code.len() {
+            clauses.push(format!(
+                "target {} is outside this block's {} instructions",
+                instruction.arg,
+                block.code.len()
+            ));
+        }
+    }
+
+    if clauses.is_empty() {
+        return format!("line {}", instruction.line);
+    }
+    format!("line {}: {}", instruction.line, clauses.join("; "))
+}
+
+/// What the constant at `index` holds, or that the index is past the end of the
+/// pool. `what` is what the constant is for, so the clause reads as a
+/// sentence: `extends Thing`.
+fn named_constant(chunk: &Chunk, index: u32, what: &str) -> String {
+    match chunk.constants.get(index as usize) {
+        Some(Constant::Text(text)) => format!("{what}{}", text.escape_debug()),
+        Some(constant) => format!("{what}{constant}"),
+        None => format!(
+            "constant {index} is out of range (the pool holds {})",
+            chunk.constants.len()
+        ),
+    }
+}
+
+/// What the block at `index` is, or that the index is past the end of the
+/// block's own list. `NO_BLOCK` is a legal operand rather than an out-of-range
+/// one, so it says nothing.
+fn named_block(block: &Block, index: u32, what: &str) -> Option<String> {
+    match block.blocks.get(index as usize) {
+        Some(child) => Some(format!(
+            "{what}block {index} ({}, `{}`)",
+            child.kind.name(),
+            child.name
+        )),
+        None if index == NO_BLOCK => None,
+        None => Some(format!(
+            "{what}block {index} is out of range (this block holds {})",
+            block.blocks.len()
+        )),
+    }
 }

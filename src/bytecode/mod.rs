@@ -28,6 +28,6 @@ pub use codegen::compile as compile_program;
 pub use disasm::render as disassemble;
 pub use format::{
     compile_source, Block, BlockKind, Chunk, Constant, Instruction, FORMAT_VERSION,
-    INSTRUCTION_SIZE, MAGIC, MAX_BLOCK_DEPTH, NO_BLOCK,
+    INSTRUCTION_SIZE, MAGIC, MAX_BLOCK_DEPTH, NO_BLOCK, NO_CONST,
 };
 pub use opcode::Opcode;

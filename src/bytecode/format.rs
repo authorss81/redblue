@@ -27,13 +27,30 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 /// A file whose version is anything else is refused rather than guessed at.
 /// Changing anything that an older file would decode differently must bump
 /// this.
-pub const FORMAT_VERSION: u16 = 1;
+///
+/// Version 2 changed two operands a version-1 file reads differently, so a
+/// version-1 file is refused rather than half-understood:
+///
+/// - `DefObject`'s secondary operand is the constant index of the object it
+///   extends — [`NO_CONST`] when it extends nothing — where version 1 wrote a
+///   flag that discarded the parent's name.
+/// - `DefField` consumes the value pushed immediately before it, so a field's
+///   `default` is compiled instead of being dropped.
+pub const FORMAT_VERSION: u16 = 2;
 
 /// The operand that says "there is no block here".
 ///
 /// `Try` names a catch body and a finally body; a `try` with neither writes
 /// this value rather than inventing an empty block.
 pub const NO_BLOCK: u32 = u32::MAX;
+
+/// The operand that says "there is no constant here".
+///
+/// `DefObject` names the object it extends through its secondary operand and
+/// writes this value when it extends nothing. It has to be a value the pool
+/// can never hold: [`Chunk::decode`] refuses a pool that reaches it, so the
+/// operand is never ambiguous.
+pub const NO_CONST: u32 = u32::MAX;
 
 /// Bytes per instruction record: opcode, `arg`, `aux`, `line`.
 pub const INSTRUCTION_SIZE: usize = 13;
@@ -181,6 +198,22 @@ pub struct Chunk {
     pub main: Block,
 }
 
+/// Dropping a nested `Vec<Block>` would put one frame of drop glue on the stack
+/// per level of nesting, so a tree deeper than the compiler emits — the public
+/// fields let a caller build one — could abort the process in a destructor
+/// rather than in a walk. The children are taken out and dropped here one at a
+/// time, so the depth costs heap instead of stack.
+impl Drop for Block {
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.blocks);
+        while let Some(mut block) = pending.pop() {
+            // Moved out before the block is dropped, so the drop below finds no
+            // children and this implementation does not recurse.
+            pending.append(&mut block.blocks);
+        }
+    }
+}
+
 impl Chunk {
     /// Compiles Redblue source to bytecode.
     ///
@@ -195,6 +228,12 @@ impl Chunk {
     }
 
     /// The bytes of this chunk, in the format `docs/BYTECODE.md` specifies.
+    ///
+    /// Walks the block tree with an explicit stack, so a `Chunk` nested deeper
+    /// than [`MAX_BLOCK_DEPTH`] — which the public fields let a caller build,
+    /// and which neither the compiler nor the decoder produces — is encoded
+    /// rather than being a stack overflow. The bytes are the same either way;
+    /// a tree past the limit is a file this build's decoder refuses.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC);
@@ -203,7 +242,7 @@ impl Chunk {
         for constant in &self.constants {
             write_constant(&mut out, constant);
         }
-        write_block(&mut out, &self.main);
+        write_block_tree(&mut out, &self.main);
 
         out
     }
@@ -239,7 +278,24 @@ impl Chunk {
             ));
         }
 
-        let constants = reader.count("constant", 1, |reader: &mut Reader| reader.constant())?;
+        // `NO_CONST` is a reserved index, so a pool that could reach it would make the
+        // operand ambiguous. It is the maximum `u32`, so equality is the whole
+        // of this check; it is refused from the declared count, before any
+        // entry is read or anything is allocated.
+        let constant_count = reader.u32()?;
+        if constant_count == NO_CONST {
+            return Err(Error::Parser(
+                format!(
+                    "a file claims {constant_count} constants, which reaches the reserved index \
+                     {NO_CONST} that means 'no constant'",
+                ),
+                Span::unknown(),
+            ));
+        }
+        let constants = reader.count(constant_count, "constant", 1, |reader: &mut Reader| {
+            reader.constant()
+        })?;
+
         let main = reader.block(0)?;
 
         if reader.pos != bytes.len() {
@@ -263,19 +319,17 @@ impl Chunk {
 
     /// Every block of the tree, `main` first, then each block's own children in
     /// order.
+    ///
+    /// Walks with an explicit stack, so the depth of the tree is bounded by the
+    /// heap rather than by the call stack.
     pub fn all_blocks(&self) -> Vec<&Block> {
         let mut all = Vec::new();
-        self.main.collect(&mut all);
-        all
-    }
-}
-
-impl Block {
-    fn collect<'a>(&'a self, all: &mut Vec<&'a Block>) {
-        all.push(self);
-        for child in &self.blocks {
-            child.collect(all);
+        let mut pending = vec![&self.main];
+        while let Some(block) = pending.pop() {
+            all.push(block);
+            pending.extend(block.blocks.iter().rev());
         }
+        all
     }
 }
 
@@ -315,20 +369,28 @@ fn write_constant(out: &mut Vec<u8>, constant: &Constant) {
     }
 }
 
-fn write_block(out: &mut Vec<u8>, block: &Block) {
-    out.push(block.kind as u8);
-    write_u32(out, block.arity);
-    write_string(out, &block.name);
-    write_u32(out, block.code.len() as u32);
-    for instruction in &block.code {
-        out.push(instruction.opcode.to_byte());
-        write_u32(out, instruction.arg);
-        write_u32(out, instruction.aux);
-        write_u32(out, instruction.line);
-    }
-    write_u32(out, block.blocks.len() as u32);
-    for child in &block.blocks {
-        write_block(out, child);
+/// Writes `main` and every block nested in it, in the order a depth-first walk
+/// visits them.
+///
+/// The pending blocks sit on the heap, not on the call stack: the walk costs
+/// the same whether the tree is two deep or two hundred, and nothing here can
+/// overflow. Children are pushed in reverse because the stack is popped from
+/// its end, which makes them come out first-to-last.
+fn write_block_tree(out: &mut Vec<u8>, main: &Block) {
+    let mut pending = vec![main];
+    while let Some(block) = pending.pop() {
+        out.push(block.kind as u8);
+        write_u32(out, block.arity);
+        write_string(out, &block.name);
+        write_u32(out, block.code.len() as u32);
+        for instruction in &block.code {
+            out.push(instruction.opcode.to_byte());
+            write_u32(out, instruction.arg);
+            write_u32(out, instruction.aux);
+            write_u32(out, instruction.line);
+        }
+        write_u32(out, block.blocks.len() as u32);
+        pending.extend(block.blocks.iter().rev());
     }
 }
 
@@ -386,14 +448,16 @@ impl<'a> Reader<'a> {
     /// Reads `count` entries, refusing a count the file cannot hold.
     ///
     /// `per_entry` is the smallest number of bytes one entry can occupy; a
-    /// count above `remaining / per_entry` is malformed, not merely large.
+    /// count above `remaining / per_entry` is malformed, not merely large. The
+    /// count itself is read by the caller, which is what lets a caller bound it
+    /// before this is reached.
     fn count<T>(
         &mut self,
+        count: u32,
         what: &str,
         per_entry: usize,
         mut read: impl FnMut(&mut Reader<'a>) -> Result<T>,
     ) -> Result<Vec<T>> {
-        let count = self.u32()?;
         if per_entry > 0 && count as usize > self.remaining() / per_entry {
             return Err(shortfall(&format!("{count} {what}s"), self.remaining()));
         }
@@ -457,10 +521,17 @@ impl<'a> Reader<'a> {
 
         let arity = self.u32()?;
         let name = self.string("block name")?;
-        let code = self.count("instruction", INSTRUCTION_SIZE, |reader: &mut Reader| {
-            reader.instruction()
+        let instruction_count = self.u32()?;
+        let code = self.count(
+            instruction_count,
+            "instruction",
+            INSTRUCTION_SIZE,
+            |reader: &mut Reader| reader.instruction(),
+        )?;
+        let child_count = self.u32()?;
+        let blocks = self.count(child_count, "block", 1, |reader: &mut Reader| {
+            reader.block(depth + 1)
         })?;
-        let blocks = self.count("block", 1, |reader: &mut Reader| reader.block(depth + 1))?;
 
         Ok(Block {
             name,
