@@ -73,6 +73,14 @@ pub enum Opcode {
     Call,
     /// Calls `constants[arg]` on the receiver below the arguments, with `aux`
     /// arguments.
+    ///
+    /// The name is dotted: `files.read` for a receiver the source named `files`,
+    /// and the bare `read` when the receiver was an expression rather than a
+    /// name. A call is resolved against the receiver's *name* — `files.read` is
+    /// the builtin `files_read`, and `Counter.bump` is a method on a declared
+    /// type — so the file has to carry the name, not only the value the receiver
+    /// held. A bare name is the one shape the language rejects, because it says
+    /// the receiver was not a name at all.
     CallMethod,
     /// Returns the top of the stack, or `nothing` when the return had no value.
     Return,
