@@ -120,6 +120,10 @@ pub enum Opcode {
     Test,
     /// Compares the two values on top of the stack as an `expect`.
     Expect,
+    /// Ends the innermost `try`: pops its handlers and runs its `finally`, so
+    /// the protected region is the run of instructions between `TRY` and this
+    /// rather than the rest of the block.
+    EndTry,
 }
 
 impl Opcode {
@@ -173,6 +177,7 @@ impl Opcode {
         Opcode::Import,
         Opcode::Test,
         Opcode::Expect,
+        Opcode::EndTry,
     ];
 
     /// The opcode a byte stands for, or `None` when the byte is not assigned.
@@ -235,6 +240,7 @@ impl Opcode {
             Opcode::Import => "IMPORT",
             Opcode::Test => "TEST",
             Opcode::Expect => "EXPECT",
+            Opcode::EndTry => "END_TRY",
         }
     }
 
@@ -272,6 +278,7 @@ impl Opcode {
                 | Opcode::Skip
                 | Opcode::GetIter
                 | Opcode::Expect
+                | Opcode::EndTry
         )
     }
 }

@@ -59,7 +59,7 @@ use crate::vm::{
 ///
 /// The path is checked rather than trusted: it came out of an operand, and a file
 /// that names a block which is not there is a file that cannot be run.
-fn block_at(chunk: &Chunk, path: &[u32]) -> Option<&Block> {
+fn block_at<'a>(chunk: &'a Chunk, path: &[u32]) -> Option<&'a Block> {
     let mut block = &chunk.main;
     for index in path {
         block = block.blocks.get(*index as usize)?;
@@ -89,6 +89,9 @@ struct Loop {
     exit: u32,
     /// Turns run so far, against [`BytecodeVm::max_iterations`].
     iterations: usize,
+    /// The frame running this loop, so that a loop is looked up by the block it
+    /// is in rather than by its offsets alone.
+    frame: usize,
     /// The operand stack height before this loop pushed anything, which is what
     /// leaving the loop truncates back to.
     stack_base: usize,
@@ -136,7 +139,9 @@ fn peek(sequence: &Sequence) -> Option<Value> {
 fn take(sequence: &mut Sequence, span: Span) -> Result<Option<Value>> {
     match sequence {
         Sequence::Each { items, index } => {
-            let value = items.get(*index).cloned()?;
+            let Some(value) = items.get(*index).cloned() else {
+                return Ok(None);
+            };
             *index += 1;
             Ok(Some(value))
         }
@@ -166,10 +171,13 @@ fn take(sequence: &mut Sequence, span: Span) -> Result<Option<Value>> {
 /// that is the last statement of its block — which is what every program in
 /// `examples/` and `tests/` writes — covers exactly the statements the
 /// tree-walking VM protects.
+#[derive(Clone)]
 struct Handler {
     /// The `catch` body together with the name it binds, or `None` for a `try`
     /// with no `catch`.
     catch: Option<((Arc<Chunk>, Vec<u32>), String)>,
+    /// The name a `catch` binds, empty when there is no `catch` to bind it.
+    catch_var: String,
     /// The `finally` body, or `None` for a `try` with no `finally`.
     finally: Option<(Arc<Chunk>, Vec<u32>)>,
     /// The operand stack height the protected code started at, which is what the
@@ -190,7 +198,11 @@ struct ObjectPending {
 }
 
 /// One `object` declaration, after its parent has been merged into it.
+#[derive(Clone)]
 struct ObjectType {
+    /// The object this one extends, kept so that a child can be resolved
+    /// against its own parent after a later declaration changes nothing.
+    parent: Option<String>,
     fields: Fields,
     methods: Fields,
 }
@@ -282,7 +294,7 @@ fn loop_sites(block: &Block) -> Vec<LoopSite> {
         let exit = if iterator {
             back_edge + 1
         } else {
-            (top..index)
+            (top as usize..index)
                 .find(|at| {
                     block.code[*at].opcode == Opcode::JumpIfFalse
                         && block.code[*at].arg > back_edge
@@ -525,6 +537,7 @@ impl BytecodeVm {
             handler_base: self.handlers.len(),
             locals_base: self.locals.len(),
             object_body: false,
+            is_call: false,
             globals_only: false,
             sites,
         }
@@ -543,12 +556,16 @@ impl BytecodeVm {
         Ok((self.frames[frame].chunk.clone(), path))
     }
 
-    /// The block `arg` names inside the frame's own block, or a failure naming
-    /// the path — a block index is an operand a file wrote, so it is checked
-    /// rather than trusted.
-    fn child_block(&self, frame: usize, arg: u32) -> Result<&Block> {
+    /// The name of the block `arg` names inside the frame's own block, or a
+    /// failure naming the path — a block index is an operand a file wrote, so it
+    /// is checked rather than trusted.
+    ///
+    /// The name is taken out by value because the chunk it comes from is a clone
+    /// that dies with this call, so a borrow of it could not outlive the frame
+    /// that named the block.
+    fn child_block_name(&self, frame: usize, arg: u32) -> Result<String> {
         let (chunk, path) = self.child_path(frame, arg)?;
-        self.block_of(&chunk, &path)
+        Ok(self.block_of(&chunk, &path)?.name.clone())
     }
 
     /// [`block_at`] with a failure that says which path was not there.
@@ -627,7 +644,11 @@ impl BytecodeVm {
     /// Called where the loop is about to run its body again, which is the same
     /// point the tree-walking VM charges: after a sequence has been found to have
     /// a value left, and after a `while`'s condition has come out true.
-    fn charge_iteration(&self, iterations: &mut usize, kind: &str) -> Result<()> {
+    fn charge_loop(&mut self, index: usize) -> Result<()> {
+        let Some(entry) = self.loops.get_mut(index) else {
+            return Ok(());
+        };
+        let (iterations, kind) = (&mut entry.iterations, entry.kind);
         if *iterations >= self.max_iterations {
             return Err(Error::Runtime(
                 format!(
@@ -724,12 +745,12 @@ impl BytecodeVm {
     fn constant_value(&self, index: u32) -> Result<Value> {
         match self.constant(index)? {
             Constant::Nothing => Ok(Value::Nothing),
-            Constant::YesNo(b) => Ok(Value::YesNo(*b)),
+            Constant::YesNo(b) => Ok(Value::YesNo(b)),
             Constant::Text(text) => Ok(Value::Text(text.clone())),
             // Checked here rather than at decode, so that a number a file
             // carries as `NaN` is refused when a program uses it rather than
             // making an otherwise sound file unreadable.
-            Constant::Number(n) => Value::number(*n, self.span()),
+            Constant::Number(n) => Value::number(n, self.span()),
         }
     }
 
@@ -738,8 +759,21 @@ impl BytecodeVm {
     /// Runs instructions until the frame stack is down to `base`.
     fn drive(&mut self, base: usize) -> Result<()> {
         loop {
-            while self.frames.len() > base && self.top_finished() {
-                self.unwind_frame()?;
+            // Unwinding is a place a failure can come from as much as stepping
+            // is: an `object` body registers its type on the way out, so a
+            // self-extending declaration faults here rather than at its
+            // `DEF_OBJECT`. Both go through the handlers, or a `catch` around
+            // such a declaration would not catch it.
+            if self.frames.len() > base && self.top_finished() {
+                match self.unwind_frame() {
+                    Ok(()) => continue,
+                    Err(error) => {
+                        if !self.handle_failure(&error)? {
+                            return Err(error);
+                        }
+                        continue;
+                    }
+                }
             }
             if self.frames.len() <= base {
                 return Ok(());
@@ -759,12 +793,15 @@ impl BytecodeVm {
         }
     }
 
-    /// Finishes the top frame and leaves its value on the caller's stack.
+    /// Finishes the top frame, leaving its value for whoever was waiting on it.
     ///
-    /// A block's value is the value its last statement produced, so it is whatever
-    /// the frame's own slice of the operand stack holds; a block that produced
-    /// nothing — because every statement consumed what it made, or because it ran
-    /// out of instructions first — is `nothing`.
+    /// Only a *call* leaves a value behind. A frame entered as a block — a
+    /// `test` body, a `try` handler, an `object` body, a module — is a
+    /// statement, and a statement consumes what it produced, so those frames
+    /// discard the stack rather than pushing onto their caller's. Pushing for
+    /// them too would leak one operand-stack slot per block run, which a
+    /// program with many `test` blocks notices as a stack that is deeper than its
+    /// frames can account for.
     fn unwind_frame(&mut self) -> Result<()> {
         let Some(frame) = self.frames.pop() else {
             return Ok(());
@@ -790,6 +827,9 @@ impl BytecodeVm {
             value = self.stack.pop().expect("the stack holds a value");
         }
         self.stack.truncate(frame.stack_base);
+        if !frame.is_call {
+            return Ok(());
+        }
         if self.frames.is_empty() {
             self.outcome = value;
         } else {
@@ -815,6 +855,7 @@ impl BytecodeVm {
             .pending_object
             .take()
             .expect("an object declaration being assembled");
+        let pending_parent = pending.parent.clone();
         let mut fields = pending.fields;
         let mut methods = pending.methods;
 
@@ -841,7 +882,7 @@ impl BytecodeVm {
                 ));
             };
             seen.push(current.clone());
-            parent = None;
+            parent = object.parent.clone();
             chain.push((current, object));
         }
 
@@ -859,6 +900,7 @@ impl BytecodeVm {
         self.objects.insert(
             pending.name,
             ObjectType {
+                parent: pending_parent,
                 methods,
                 fields: fields.clone(),
             },
@@ -1040,6 +1082,21 @@ impl BytecodeVm {
                 let mut new_frame = self.frame_for(&chunk, path);
                 new_frame.stack_base = self.stack.len();
                 self.frames.push(new_frame);
+                self.advance(frame);
+                Ok(())
+            }
+            Opcode::EndTry => {
+                // The protected region ran to here without failing, so only the
+                // `finally` is owed. The handler is popped on this path so that
+                // the failure path above does not run the `finally` twice.
+                let Some(handler) = self.handlers.last() else {
+                    self.advance(frame);
+                    return Ok(());
+                };
+                let handler = handler.clone();
+                self.handlers.pop();
+                self.run_finally(&handler)?;
+                self.advance(frame);
                 Ok(())
             }
             Opcode::Expect => {
@@ -1083,8 +1140,7 @@ impl BytecodeVm {
                 .copied()
             {
                 let index = self.loop_entry(frame, site);
-                let kind = self.loops[index].kind;
-                self.charge_iteration(&mut self.loops[index].iterations, kind)?;
+                self.charge_loop(index)?;
             }
         }
         self.set_ip(frame, target);
@@ -1098,7 +1154,7 @@ impl BytecodeVm {
     /// The sequence is pushed as a placeholder purely so the operand stack height
     /// is where the file expects it; the sequence itself is held in the loop
     /// entry, and the `STORE` at the loop's `top` draws from it.
-    fn start_loop(sequence: Option<Sequence>, frame: usize) -> Result<()> {
+    fn start_loop(&mut self, sequence: Option<Sequence>, frame: usize) -> Result<()> {
         let value = self.pop()?;
         let sequence = Some(sequence.unwrap_or(match value {
             // Anything that is not a list has no values to draw, so the loop runs
@@ -1173,6 +1229,7 @@ impl BytecodeVm {
             back_edge: site.back_edge,
             exit: site.exit,
             iterations: 0,
+            frame,
             stack_base,
         });
         self.advance(frame);
@@ -1211,8 +1268,7 @@ impl BytecodeVm {
             self.leave_loop(frame, index);
             return Ok(());
         }
-        let kind = self.loops[index].kind;
-        self.charge_iteration(&mut self.loops[index].iterations, kind)?;
+        self.charge_loop(index)?;
         let span = self.span();
         let sequence = self.loops[index].iterator.as_mut().expect("a sequence");
         let value = take(sequence, span)?.unwrap_or(Value::Nothing);
@@ -1231,9 +1287,15 @@ impl BytecodeVm {
 
     /// The index in [`BytecodeVm::loops`] of the loop at `site`, creating it the
     /// first time that loop is reached.
+    ///
+    /// Matched on the frame as well as the offsets. Offsets alone are not
+    /// enough: two blocks in one file — a second `test`, say — have the same
+    /// instruction offsets for their first loop, so a lookup that ignored the
+    /// frame would find the *other* block's loop, and its stack base would be
+    /// truncated to on the way out.
     fn loop_entry(&mut self, frame: usize, site: LoopSite) -> usize {
         if let Some(index) = self.loops.iter().position(|entry| {
-            entry.top == site.top && entry.back_edge == site.back_edge
+            entry.frame == frame && entry.top == site.top && entry.back_edge == site.back_edge
         }) {
             return index;
         }
@@ -1244,6 +1306,7 @@ impl BytecodeVm {
             back_edge: site.back_edge,
             exit: site.exit,
             iterations: 0,
+            frame,
             stack_base: self.frames[frame].stack_base,
         });
         self.loops.len() - 1
@@ -1259,40 +1322,24 @@ impl BytecodeVm {
         self.set_ip(frame, exit as usize);
     }
 
-    /// `break`: leaves the innermost loop the current instruction is inside.
+    /// `BREAK`: no effect.
+    ///
+    /// The tree-walking VM parses `break` and does nothing with it — see the
+    /// `Statement::Break` arm in `crate::vm` and the two tests in
+    /// `tests/test_lists.rb` that pin the iteration count rather than the
+    /// break. This VM has the loop-exit machinery that a real `break` would
+    /// need, and it is not wired up here, because the two VMs disagreeing about
+    /// what a program means is worse than a language feature being unfinished.
+    /// `FINDINGS.md` carries the gap.
     fn break_loop(&mut self, frame: usize) -> Result<()> {
-        let Some(index) = self.enclosing_loop(frame) else {
-            return Err(Error::Runtime(
-                "'break' is not inside a loop".to_string(),
-                self.span(),
-            ));
-        };
-        self.leave_loop(frame, index);
+        self.advance(frame);
         Ok(())
     }
 
-    /// `skip`: the innermost loop goes on to its next turn.
+    /// `SKIP`: no effect, for the same reason as [`Self::break_loop`].
     fn skip_loop(&mut self, frame: usize) -> Result<()> {
-        let Some(index) = self.enclosing_loop(frame) else {
-            return Err(Error::Runtime(
-                "'skip' is not inside a loop".to_string(),
-                self.span(),
-            ));
-        };
-        let top = self.loops[index].top as usize;
-        self.set_ip(frame, top);
+        self.advance(frame);
         Ok(())
-    }
-
-    /// The innermost active loop whose region holds the current instruction.
-    fn enclosing_loop(&self, frame: usize) -> Option<usize> {
-        let ip = self.frames[frame].ip as u32;
-        self.loops
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.top <= ip && ip <= entry.back_edge)
-            .map(|(index, _)| index)
-            .next_back()
     }
 
     // -- properties ---------------------------------------------------------
@@ -1331,9 +1378,23 @@ impl BytecodeVm {
             self.advance(frame);
             return Ok(());
         }
+        // `return` is an ordinary statement in Redblue, not an escape: the
+        // tree-walking VM evaluates it and the block carries on to the next
+        // statement, and only the block's *last* statement is its value. So the
+        // value survives only when this return is the block's final
+        // instruction, which is exactly when the tree-walker would return it.
+        //
+        // The operand stack is cut back to where the frame started either way,
+        // because a `return` in the middle of a block leaves nothing behind:
+        // the tree-walker has no stack to leave a stray value on.
+        let last = self.frames[frame].ip + 1 >= self.code_len(frame);
         self.stack.truncate(self.frames[frame].stack_base);
-        self.stack.push(value);
-        self.frames[frame].ip = usize::MAX;
+        if last {
+            self.stack.push(value);
+            self.frames[frame].ip = usize::MAX;
+        } else {
+            self.advance(frame);
+        }
         Ok(())
     }
 
@@ -1354,7 +1415,11 @@ impl BytecodeVm {
             return Ok(());
         }
         match self.get_var(name) {
-            Some(Value::Function(function)) => self.call_function(&function, args),
+            Some(Value::Function(function)) => {
+                self.call_function(&function, args, None)?;
+                self.advance(frame);
+                Ok(())
+            }
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),
@@ -1371,9 +1436,11 @@ impl BytecodeVm {
     fn call_method(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let dotted = self.constant_text(instruction.arg)?;
         let args = self.pop_n(instruction.aux)?;
-        let receiver = self.pop()?;
 
         let Some((object_name, method)) = split_dotted(&dotted) else {
+            // A receiver that was an expression rather than a name pushed its
+            // value, and the file says so by carrying the bare method name.
+            let receiver = self.pop()?;
             return Err(Error::Runtime(
                 format!(
                     "Cannot call method '{}' on {}, which is not an object",
@@ -1381,6 +1448,17 @@ impl BytecodeVm {
                 ),
                 self.span(),
             ));
+        };
+        // A receiver that was a name pushed nothing: the name is the whole of
+        // what a call resolves against. An object method still needs a `this`,
+        // which is the *binding* the name holds rather than the type's declared
+        // fields — `set Greeter.name to "Ada"` writes that binding, and the
+        // method has to see it, which is why the tree-walking VM evaluates its
+        // receiver as a variable.
+        let receiver = if self.objects.contains_key(object_name) {
+            Some(self.get_var(object_name).unwrap_or(Value::Nothing))
+        } else {
+            None
         };
 
         let Some(object) = self.objects.get(object_name).cloned() else {
@@ -1392,20 +1470,21 @@ impl BytecodeVm {
                 self.span(),
             ));
         };
-        // `this` is bound for the length of the call, in a scope of its own.
-        self.locals.push(CapturedScope::new());
-        self.locals
-            .last_mut()
-            .expect("a scope to bind into")
-            .insert("this".to_string(), receiver);
-        let outcome = self.call_function(&function, &args);
-        self.locals.pop();
-        let _ = frame;
-        outcome
+        // `this` is bound below the callee's captured scopes and its parameters,
+        // so a parameter named `this` shadows the receiver the way it shadows a
+        // captured binding in the tree-walking VM.
+        self.call_function(&function, &args, receiver)?;
+        self.advance(frame);
+        Ok(())
     }
 
     /// Runs a closure's block, binding `args` to its parameters.
-    fn call_function(&mut self, function: &FunctionValue, args: &[Value]) -> Result<()> {
+    fn call_function(
+        &mut self,
+        function: &FunctionValue,
+        args: &[Value],
+        this: Option<Value>,
+    ) -> Result<()> {
         let Some((chunk, path)) = function.body.block() else {
             return Err(Error::Runtime(
                 format!(
@@ -1430,7 +1509,14 @@ impl BytecodeVm {
         // the parameters above those, so the body reads its own environment
         // rather than a same-named binding of whoever called it, and a parameter
         // shadows what it captured.
+        // Taken before `this` is pushed, so the binding lives exactly as long as
+        // the frame and is gone when the call returns.
         let locals_base = self.locals.len();
+        if let Some(receiver) = this {
+            let mut scope = CapturedScope::new();
+            scope.insert("this".to_string(), receiver);
+            self.locals.push(scope);
+        }
         let captured: Captured = (*function.captured).clone();
         for scope in captured {
             self.locals.push(scope);
@@ -1443,7 +1529,7 @@ impl BytecodeVm {
                 .expect("a scope to bind into")
                 .insert(param.clone(), value);
         }
-        let mut new_frame = self.frame_for(chunk, path.to_vec());
+        let mut new_frame = self.frame_for(&chunk, path.to_vec());
         new_frame.locals_base = locals_base;
         new_frame.stack_base = self.stack.len();
         new_frame.is_call = true;
@@ -1471,7 +1557,7 @@ impl BytecodeVm {
     /// file writes next binds it.
     fn def_function(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let (chunk, path) = self.child_path(frame, instruction.arg)?;
-        let block = self.block_at(&chunk, &path)?.clone();
+        let block = self.block_of(&chunk, &path)?.clone();
         let closure = self.make_function(&chunk, &path, &block);
         self.push(closure);
         self.advance(frame);
@@ -1483,7 +1569,7 @@ impl BytecodeVm {
     /// does with a top-level `to can`.
     fn def_method(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let (chunk, path) = self.child_path(frame, instruction.arg)?;
-        let block = self.block_at(&chunk, &path)?.clone();
+        let block = self.block_of(&chunk, &path)?.clone();
         let method = self.make_function(&chunk, &path, &block);
         let name = block.name.clone();
         if let Some(pending) = self.pending_object.as_mut() {
@@ -1521,6 +1607,7 @@ impl BytecodeVm {
             methods: Fields::new(),
         });
         self.frames.push(new_frame);
+        self.advance(frame);
         Ok(())
     }
 
@@ -1529,16 +1616,15 @@ impl BytecodeVm {
     fn object_name(&self, frame: usize, instruction: Instruction) -> Result<String> {
         let next = self.frames[frame].ip + 1;
         if next < self.code_len(frame) {
-            let block = self.block_at(
-                &self.frames[frame].chunk.clone(),
-                &self.frames[frame].path.clone(),
-            )?;
+            let chunk = self.frames[frame].chunk.clone();
+            let path = self.frames[frame].path.clone();
+            let block = self.block_of(&chunk, &path)?;
             let following = &block.code[next];
             if following.opcode == Opcode::Store {
                 return self.constant_text(following.arg);
             }
         }
-        Ok(self.child_block(frame, instruction.arg)?.name.clone())
+        self.child_block_name(frame, instruction.arg)
     }
 
     // -- try ----------------------------------------------------------------
@@ -1549,7 +1635,7 @@ impl BytecodeVm {
             None
         } else {
             let (chunk, path) = self.child_path(frame, instruction.arg)?;
-            let catch_var = self.block_at(&chunk, &path)?.name.clone();
+            let catch_var = self.block_of(&chunk, &path)?.name.clone();
             Some(((chunk, path), catch_var))
         };
         let finally = if instruction.aux == NO_BLOCK {
@@ -1558,10 +1644,14 @@ impl BytecodeVm {
             Some(self.child_path(frame, instruction.aux)?)
         };
         self.handlers.push(Handler {
-            catch: catch.as_ref().map(|((chunk, path), _)| (chunk.clone(), path.clone())),
-            catch_var: catch.map(|(_, var)| var).unwrap_or_default(),
+            catch: catch.clone(),
+            catch_var: catch
+                .as_ref()
+                .map(|(_, var)| var.clone())
+                .unwrap_or_default(),
             finally,
             stack_base: self.frames[frame].stack_base,
+            loop_base: self.loops.len(),
         });
         self.advance(frame);
         Ok(())
@@ -1575,52 +1665,131 @@ impl BytecodeVm {
     /// `?` — so an error in a `catch` is not swallowed by the `try` that caught
     /// it.
     fn handle_failure(&mut self, _error: &Error) -> Result<bool> {
-        let frame = self.frames.len() - 1;
-        if self.handlers.len() <= self.frames[frame].handler_base {
-            return Ok(false);
-        }
+        // The handler is the innermost frame's only when the failure happened in
+        // the frame that installed it. A failure inside a call made by the
+        // protected code is caught by the caller's `try` instead, which is what
+        // the tree-walking VM does when `?` propagates out of a call — so the
+        // frames in between are dropped first, and the call depth they charged
+        // is given back so a caught failure leaves the counter balanced.
+        let frame = match (0..self.frames.len())
+            .rev()
+            .find(|index| self.handlers.len() > self.frames[*index].handler_base)
+        {
+            Some(frame) => frame,
+            None => return Ok(false),
+        };
+        self.discard_frames_above(frame);
+
         let handler = self.handlers.pop().expect("a handler");
-        self.loops.truncate(frame);
+        // Truncated to where the protected code started rather than to the frame
+        // that raised the failure: a loop the failing statement opened is half
+        // drawn and cannot be resumed, but a loop the `try` is *inside* is still
+        // the one that turns next.
+        self.loops.truncate(handler.loop_base);
         self.stack.truncate(handler.stack_base);
-        // A `catch` binds the failure's message to its name; the tree-walking VM
-        // binds the word `error`, so this does too rather than inventing a
-        // message the language does not produce.
-        if let Some(((chunk, path), _)) = &handler.catch {
-            self.locals.push(CapturedScope::new());
-            if !handler.catch_var.is_empty() {
-                self.locals
-                    .last_mut()
-                    .expect("a scope to bind into")
-                    .insert(handler.catch_var.clone(), Value::Text("error".to_string()));
-            }
-            let mut catch_frame = self.frame_for(chunk, path.clone());
-            catch_frame.locals_base = self.locals.len() - 1;
-            catch_frame.stack_base = handler.stack_base;
-            self.frames.push(catch_frame);
-            self.run_frames()?;
-            self.locals.pop();
-        }
-        if let Some((chunk, path)) = &handler.finally {
-            let locals_base = self.locals.len();
-            let mut finally_frame = self.frame_for(chunk, path.clone());
-            finally_frame.locals_base = locals_base;
-            finally_frame.stack_base = handler.stack_base;
-            self.frames.push(finally_frame);
-            self.run_frames()?;
-        }
-        // The protected code is the rest of the block, so the statement after it
-        // is past the end of the block; inside a loop the next turn is where
-        // execution goes on.
+        self.run_catch(&handler)?;
+        self.run_finally(&handler)?;
+
+        // The protected region is the instructions between `TRY` and the
+        // `END_TRY` that closes it, so execution carries on at the `END_TRY` —
+        // which is where the `finally` would run had it not just run above, and
+        // which pops the handler in the ordinary way rather than here. A `try`
+        // with no `END_TRY` to go to — a file the compiler did not write — ends
+        // the block instead of resuming into whatever follows.
         if self.frames.is_empty() {
             return Ok(true);
         }
-        let resume = self
-            .loops
-            .last()
-            .map(|entry| entry.top as usize)
-            .unwrap_or_else(|| self.code_len(self.frames.len() - 1));
-        self.set_ip(self.frames.len() - 1, resume);
+        match self.end_try_after(frame) {
+            Some(target) => self.set_ip(frame, target),
+            None => self.set_ip(frame, self.code_len(frame)),
+        }
         Ok(true)
+    }
+
+    /// Drops every frame above `keep`, releasing the call depth they charged.
+    ///
+    /// Nothing is left on the operand stack for them: the failure is being
+    /// handled, so the partial values a frame had built are gone rather than
+    /// handed to whoever catches it — the tree-walking VM drops them with the
+    /// frames when `?` leaves a call.
+    fn discard_frames_above(&mut self, keep: usize) {
+        while self.frames.len() > keep + 1 {
+            let Some(frame) = self.frames.pop() else {
+                break;
+            };
+            self.loops.truncate(frame.loop_base);
+            self.handlers.truncate(frame.handler_base);
+            self.locals.truncate(frame.locals_base);
+            if frame.is_call {
+                self.call_depth = self.call_depth.saturating_sub(1);
+            }
+        }
+    }
+
+    /// The `catch` body of `handler`, if it has one.
+    ///
+    /// A `catch` binds the failure's message to its name; the tree-walking VM
+    /// binds the word `error`, so this does too rather than inventing a message
+    /// the language does not produce.
+    fn run_catch(&mut self, handler: &Handler) -> Result<()> {
+        let Some(((chunk, path), _)) = &handler.catch else {
+            return Ok(());
+        };
+        self.locals.push(CapturedScope::new());
+        if !handler.catch_var.is_empty() {
+            self.locals
+                .last_mut()
+                .expect("a scope to bind into")
+                .insert(handler.catch_var.clone(), Value::Text("error".to_string()));
+        }
+        let mut catch_frame = self.frame_for(chunk, path.clone());
+        catch_frame.locals_base = self.locals.len() - 1;
+        catch_frame.stack_base = handler.stack_base;
+        self.frames.push(catch_frame);
+        let outcome = self.drive(self.frames.len() - 1);
+        self.locals.pop();
+        outcome
+    }
+
+    /// The `finally` body of `handler`, if it has one.
+    ///
+    /// It runs whether or not the protected code failed, which is what
+    /// `END_TRY` is for: this is the same code both paths take.
+    fn run_finally(&mut self, handler: &Handler) -> Result<()> {
+        let Some((chunk, path)) = &handler.finally else {
+            return Ok(());
+        };
+        let locals_base = self.locals.len();
+        let mut finally_frame = self.frame_for(chunk, path.clone());
+        finally_frame.locals_base = locals_base;
+        finally_frame.stack_base = handler.stack_base;
+        self.frames.push(finally_frame);
+        self.drive(self.frames.len() - 1)
+    }
+
+    /// The offset of the `END_TRY` that closes the `try` running in `frame`, or
+    /// `None` when the block has none.
+    ///
+    /// Scanned forward from the current instruction, because a failure inside
+    /// the protected code is in the middle of the region it has to skip. A
+    /// *nested* `try` ends at its own `END_TRY` first, so those are stepped
+    /// over rather than mistaken for this region's end.
+    fn end_try_after(&self, frame: usize) -> Option<usize> {
+        let code = block_at(&self.frames[frame].chunk, &self.frames[frame].path)?;
+        let mut depth = 0usize;
+        for (offset, instruction) in code.code.iter().enumerate().skip(self.frames[frame].ip) {
+            match instruction.opcode {
+                Opcode::Try => depth += 1,
+                Opcode::EndTry => {
+                    if depth == 0 {
+                        return Some(offset);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     // -- imports ------------------------------------------------------------
@@ -1642,8 +1811,13 @@ impl BytecodeVm {
                 module_frame.stack_base = self.stack.len();
                 module_frame.locals_base = self.locals.len();
                 self.frames.push(module_frame);
-                self.run_frames()?;
+                self.drive(self.frames.len() - 1)?;
                 self.advance(frame);
+                // `IMPORT` is followed by a `STORE` that consumes what the
+                // statement produced. An import produces `nothing` — which is
+                // what the tree-walking VM binds the module's name to — so that
+                // is what is pushed for the store to bind.
+                self.push(Value::Nothing);
                 return Ok(());
             }
         }
@@ -1697,7 +1871,7 @@ impl Default for Limits {
 
 /// Runs `chunk` and returns what `main` produced.
 pub fn run(chunk: &Chunk) -> Result<Value> {
-    BytecodeVm::with_chunk(Arc::new(chunk.clone())).run(chunk)
+    BytecodeVm::new().run(chunk)
 }
 
 /// The limits, re-exported from the tree-walking VM so a caller does not have to
@@ -1707,7 +1881,3 @@ pub const DEFAULT_MAX_CALL_DEPTH: usize = MAX_CALL_DEPTH;
 pub const DEFAULT_MAX_ITERATIONS: usize = MAX_ITERATIONS;
 /// See [`DEFAULT_MAX_CALL_DEPTH`].
 pub const DEFAULT_MAX_STEPS: usize = MAX_STEPS;
-
-/// `BlockKind` is only read for documentation here; this keeps the import used
-/// rather than dead.
-const _: Option<BlockKind> = None;

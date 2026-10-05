@@ -169,7 +169,14 @@ impl Compiler {
                 // trailing expression leaves what it produced for the block's
                 // caller. Anywhere else the value is discarded, and `POP` is how
                 // the file says so.
-                if !last {
+                //
+                // An `expect` is the one expression that pushes nothing — it pops
+                // both of its operands to compare them, and the tree-walking VM
+                // gives an `expect` statement the value `nothing`. A `POP` after
+                // one would therefore underflow rather than discard, and the
+                // operand stack is already where a discarded value would leave
+                // it.
+                if !last && !matches!(expr, Expr::Expect { .. }) {
                     emit(code, Opcode::Pop, 0, 0, line);
                 }
             }
@@ -393,6 +400,14 @@ impl Compiler {
                 };
                 emit(code, Opcode::Try, catch, finally, line);
                 self.statements(body, code, blocks, depth)?;
+                // `END_TRY` is what makes the protected region the statements
+                // between it and `TRY` rather than the rest of the block: it is
+                // where the handlers are popped and the `finally` runs, whether
+                // or not the protected code failed. Without it a failure in a
+                // statement *after* the `try` would be caught by this `try`,
+                // and a `finally` would never run at all on the path where
+                // nothing failed.
+                emit(code, Opcode::EndTry, 0, 0, line);
             }
             Statement::Import(items) => {
                 for item in items {
@@ -474,7 +489,15 @@ impl Compiler {
                 method,
                 args,
             } => {
-                self.expr(receiver, code, line)?;
+                // A receiver that is a plain name is not loaded: `CALL_METHOD`
+                // already carries `receiver.method`, and resolves it against the
+                // receiver's *name*. Loading it would ask for a binding that
+                // need not exist — `json.parse` names a module, and `json` is
+                // never a variable. A receiver that is an expression is loaded,
+                // because the value is what says whether it is an object at all.
+                if !matches!(receiver.as_ref(), Expr::Variable(_)) {
+                    self.expr(receiver, code, line)?;
+                }
                 for arg in args {
                     self.expr(arg, code, line)?;
                 }

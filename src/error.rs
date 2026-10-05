@@ -61,7 +61,12 @@ impl Error {
         }
     }
 
-    fn label(&self) -> &'static str {
+    /// The name of this error's kind, as it appears in a rendered failure.
+    ///
+    /// Public so that a caller comparing two failures — the bytecode VM against
+    /// the tree-walking one — can assert on the kind without matching the whole
+    /// rendered string.
+    pub fn label(&self) -> &'static str {
         match self {
             Error::Lexer(_, _) => "LexerError",
             Error::Parser(_, _) => "ParserError",

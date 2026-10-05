@@ -285,6 +285,16 @@ impl Vm {
         self.expectation_failure.take()
     }
 
+    /// Takes the lines `say` produced, for a caller that wants them rather than
+    /// the printing.
+    ///
+    /// The printing happens in [`Vm::run`], so this is only useful afterwards.
+    /// It exists so that a caller comparing this VM with the bytecode VM can see
+    /// what each printed without capturing a process's stdout.
+    pub fn take_output(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.output)
+    }
+
     fn load_module(&mut self, path: &str) -> Result<()> {
         let bound = runtime::load_module(path, |expr| self.evaluate(expr))?;
         for (name, value) in bound {
