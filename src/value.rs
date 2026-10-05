@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::error::{Error, Result, Span};
 use crate::bytecode::Chunk;
+use crate::error::{Error, Result, Span};
 use crate::parser::Stmt;
 
 /// Field storage for records and objects.

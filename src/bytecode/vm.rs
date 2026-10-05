@@ -50,8 +50,8 @@ use crate::value::{
     finite_number, Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Value,
 };
 use crate::vm::{
-    resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from,
-    resolve_max_steps, resolve_max_steps_from, MAX_CALL_DEPTH, MAX_ITERATIONS, MAX_STEPS,
+    resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps,
+    resolve_max_steps_from, MAX_CALL_DEPTH, MAX_ITERATIONS, MAX_STEPS,
 };
 
 /// The block at `path` of `chunk`, or `None` when a name a file wrote points past
@@ -95,6 +95,36 @@ struct Loop {
     /// The operand stack height before this loop pushed anything, which is what
     /// leaving the loop truncates back to.
     stack_base: usize,
+    /// The binding this loop's variable shadowed when the loop started, put back
+    /// when the loop is left, or `None` for a loop that binds no variable.
+    ///
+    /// The tree-walking VM pushes a scope for each turn of a `for each`, declares
+    /// the variable in it and pops the scope when the turn ends, so the variable
+    /// belongs to the loop and a name of the same name outside it is untouched.
+    /// This VM compiles the body inline and so has one binding for the whole loop;
+    /// recording what it displaced is what makes leaving the loop restore the
+    /// outer name.
+    variable: Option<LoopVariable>,
+}
+
+/// The name a loop binds, and what it was bound to before.
+struct LoopVariable {
+    /// The name the loop's `STORE` writes.
+    name: String,
+    /// What the name was bound to when the loop started.
+    shadowed: Shadowed,
+}
+
+/// The value a name was bound to before a loop started, and where.
+#[derive(Default)]
+enum Shadowed {
+    /// The name was bound nowhere, so leaving the loop unbinds it.
+    #[default]
+    Unbound,
+    /// The name was bound in the local scope at this index, to this value.
+    Local(usize, Value),
+    /// The name was bound as a global, to this value.
+    Global(Value),
 }
 
 /// The sequence a loop draws its values from.
@@ -163,6 +193,9 @@ fn take(sequence: &mut Sequence, span: Span) -> Result<Option<Value>> {
     }
 }
 
+/// A `catch` body paired with the name its handler binds.
+type CatchHandler = ((Arc<Chunk>, Vec<u32>), String);
+
 /// One `try` whose protected code is still running.
 ///
 /// `TRY` names its handlers rather than jumping to them, and the protected code
@@ -175,7 +208,7 @@ fn take(sequence: &mut Sequence, span: Span) -> Result<Option<Value>> {
 struct Handler {
     /// The `catch` body together with the name it binds, or `None` for a `try`
     /// with no `catch`.
-    catch: Option<((Arc<Chunk>, Vec<u32>), String)>,
+    catch: Option<CatchHandler>,
     /// The name a `catch` binds, empty when there is no `catch` to bind it.
     catch_var: String,
     /// The `finally` body, or `None` for a `try` with no `finally`.
@@ -296,8 +329,7 @@ fn loop_sites(block: &Block) -> Vec<LoopSite> {
         } else {
             (top as usize..index)
                 .find(|at| {
-                    block.code[*at].opcode == Opcode::JumpIfFalse
-                        && block.code[*at].arg > back_edge
+                    block.code[*at].opcode == Opcode::JumpIfFalse && block.code[*at].arg > back_edge
                 })
                 .map(|at| block.code[at].arg)
                 // A `while` whose body cannot leave of its own accord — an empty
@@ -525,9 +557,7 @@ impl BytecodeVm {
     /// A frame for `path` of `chunk`, with this VM's current stack heights as
     /// its bases.
     fn frame_for(&self, chunk: &Arc<Chunk>, path: Vec<u32>) -> Frame {
-        let sites = block_at(chunk, &path)
-            .map(loop_sites)
-            .unwrap_or_default();
+        let sites = block_at(chunk, &path).map(loop_sites).unwrap_or_default();
         Frame {
             chunk: chunk.clone(),
             path,
@@ -678,16 +708,21 @@ impl BytecodeVm {
     }
 
     /// Pops `count` values, oldest first.
+    ///
+    /// A frame may only take what it pushed: anything below `stack_base` belongs
+    /// to its caller, so asking for more than the frame pushed is malformed
+    /// bytecode and is reported rather than reaching into the caller's values.
     fn pop_n(&mut self, count: u32) -> Result<Vec<Value>> {
         let count = count as usize;
-        let base = self.stack.len().saturating_sub(count);
         let floor = self.frames.last().map_or(0, |frame| frame.stack_base);
-        if base < floor {
+        let available = self.stack.len().saturating_sub(floor);
+        if count > available {
             return Err(Error::Runtime(
                 format!("bytecode asked for {count} values its frame never pushed"),
                 self.span(),
             ));
         }
+        let base = self.stack.len() - count;
         Ok(self.stack.split_off(base))
     }
 
@@ -915,8 +950,7 @@ impl BytecodeVm {
             self.frames[frame].ip = usize::MAX;
             return Ok(());
         };
-        let previous_span =
-            std::mem::replace(&mut self.current_span, line_span(instruction.line));
+        let previous_span = std::mem::replace(&mut self.current_span, line_span(instruction.line));
         let outcome = self
             .charge_step()
             .and_then(|()| self.execute(instruction, frame));
@@ -990,7 +1024,7 @@ impl BytecodeVm {
             Opcode::BuildRecord => {
                 let flat = self.pop_n(instruction.arg.saturating_mul(2))?;
                 let mut fields = Fields::new();
-                for pair in flat.chunks_exact(2) {
+                for pair in flat.as_chunks::<2>().0 {
                     let Value::Text(key) = &pair[0] else {
                         return Err(Error::Runtime(
                             "a record key must be text".to_string(),
@@ -1231,6 +1265,7 @@ impl BytecodeVm {
             iterations: 0,
             frame,
             stack_base,
+            variable: None,
         });
         self.advance(frame);
     }
@@ -1259,11 +1294,7 @@ impl BytecodeVm {
         let index = self.loop_entry(frame, site);
         // The value for this turn is taken before the turn is charged, so a loop
         // that has run out does not spend an iteration on the fact.
-        let has_next = self.loops[index]
-            .iterator
-            .as_ref()
-            .and_then(|sequence| peek(sequence))
-            .is_some();
+        let has_next = self.loops[index].iterator.as_ref().and_then(peek).is_some();
         if !has_next {
             self.leave_loop(frame, index);
             return Ok(());
@@ -1297,6 +1328,15 @@ impl BytecodeVm {
         if let Some(index) = self.loops.iter().position(|entry| {
             entry.frame == frame && entry.top == site.top && entry.back_edge == site.back_edge
         }) {
+            // The entry was made by the loop's own opening instruction, which runs
+            // before the loop's `STORE` — and so before the loop has displaced
+            // anything. Recording the shadow here, on the first turn, is what puts
+            // back the binding that was there *before* the loop rather than the
+            // one the loop itself wrote.
+            if self.loops[index].variable.is_none() {
+                let shadowed = self.shadow_of(site, frame);
+                self.loops[index].variable = shadowed;
+            }
             return index;
         }
         self.loops.push(Loop {
@@ -1308,18 +1348,74 @@ impl BytecodeVm {
             iterations: 0,
             frame,
             stack_base: self.frames[frame].stack_base,
+            variable: self.shadow_of(site, frame),
         });
         self.loops.len() - 1
+    }
+
+    /// What the name at `site`'s `STORE` is bound to right now, or `None` when the
+    /// site is not an iterator's variable or the name is bound nowhere.
+    ///
+    /// Recorded once, when the loop entry is created, so every turn of the loop
+    /// displaces the same binding — the one that was there before the loop, not
+    /// the one a previous turn wrote.
+    fn shadow_of(&self, site: LoopSite, frame: usize) -> Option<LoopVariable> {
+        if !site.iterator {
+            return None;
+        }
+        let instruction = self.instruction_at(frame, site.top as usize).ok()??;
+        let name = self.constant_text(instruction.arg).ok()?;
+        let shadowed = match self
+            .locals
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, scope)| scope.get(&name).map(|value| (index, value.clone())))
+        {
+            Some((index, value)) => Shadowed::Local(index, value),
+            None => match self.globals.get(&name) {
+                Some(value) => Shadowed::Global(value.clone()),
+                None => Shadowed::Unbound,
+            },
+        };
+        Some(LoopVariable { name, shadowed })
     }
 
     /// Leaves the loop at `index`: its sequence is released and execution
     /// continues after it.
     fn leave_loop(&mut self, frame: usize, index: usize) {
-        let exit = self.loops[index].exit;
-        let base = self.loops[index].stack_base;
-        self.loops.remove(index);
+        let loop_entry = self.loops.remove(index);
+        let exit = loop_entry.exit;
+        let base = loop_entry.stack_base;
         self.stack.truncate(base);
+        if let Some(variable) = loop_entry.variable {
+            self.restore_shadowed(variable);
+        }
         self.set_ip(frame, exit as usize);
+    }
+
+    /// Puts back the binding a loop's variable displaced, as the tree-walking VM
+    /// does when it pops the scope each turn of the loop ran in.
+    fn restore_shadowed(&mut self, variable: LoopVariable) {
+        let LoopVariable { name, shadowed } = variable;
+        match shadowed {
+            Shadowed::Unbound => {
+                for scope in self.locals.iter_mut().rev() {
+                    if scope.shift_remove(&name).is_some() {
+                        return;
+                    }
+                }
+                self.globals.remove(&name);
+            }
+            Shadowed::Local(index, value) => {
+                if let Some(scope) = self.locals.get_mut(index) {
+                    scope.insert(name, value);
+                }
+            }
+            Shadowed::Global(value) => {
+                self.globals.insert(name, value);
+            }
+        }
     }
 
     /// `BREAK`: no effect.

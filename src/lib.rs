@@ -299,12 +299,16 @@ fn dis_command(path: &str) -> Result<(), String> {
 /// gap is in `phases/phase-019/FINDINGS.md`.
 fn vm_command(path: &str) -> Result<(), String> {
     if !path.ends_with(".rbc") {
-        return Err(format!("Error: {path} is not a bytecode file; compile it first"));
+        return Err(format!(
+            "Error: {path} is not a bytecode file; compile it first"
+        ));
     }
     let bytes = fs::read(path).map_err(|e| Error::Io(e.to_string()).to_string())?;
     let chunk = bytecode::Chunk::decode(&bytes).map_err(|e| e.to_string())?;
 
-    bytecode::vm::run(&chunk).map(|_| ()).map_err(|e| e.to_string())
+    bytecode::vm::run(&chunk)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn print_help() {
