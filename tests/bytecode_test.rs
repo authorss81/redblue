@@ -232,10 +232,12 @@ fn edge_unknown_opcode_byte_is_rejected() {
 /// whose other fields are known — so it locates the offset directly.
 fn first_opcode_offset() -> usize {
     // The constant pool of `say 1` is a single number constant (tag + 8
-    // bytes), so the layout is fixed and small enough to walk by hand.
+    // bytes), so the layout is fixed and small enough to walk by hand. A block
+    // header is kind, arity, parameter count, the empty parameter list, the
+    // name length and the name `main`, then the instruction count.
     let header = 4 + 2 + 4;
     let constants = 1 + 8;
-    let block_header = 1 + 4 + 4 + 4 + 4;
+    let block_header = 1 + 4 + 4 + 4 + 4 + 4;
     header + constants + block_header
 }
 
@@ -376,8 +378,23 @@ fn calls_carry_their_name_and_arity_and_properties_carry_their_name() {
     assert_eq!(call.aux, 1, "CALL_METHOD carries its argument count");
     assert_eq!(
         chunk.constants[call.arg as usize],
-        Constant::Text("read".to_string()),
-        "CALL_METHOD names the method through the constant pool"
+        Constant::Text("files.read".to_string()),
+        "CALL_METHOD names the receiver as well as the method, because a call is \
+         resolved against the receiver's name"
+    );
+
+    let chunk = compile_source("set p to { name: 1 }\nset p.name to 2\n").expect("should compile");
+    let set = chunk
+        .main
+        .code
+        .iter()
+        .find(|i| i.opcode == Opcode::SetProperty)
+        .expect("an assignment to a field is a SET_PROPERTY");
+    assert_eq!(
+        chunk.constants[set.arg as usize],
+        Constant::Text("p.name".to_string()),
+        "SET_PROPERTY names the binding as well as the field, because the field is \
+         written back to it"
     );
 }
 
@@ -927,14 +944,15 @@ fn edge_numeric_boundaries_survive_the_constant_pool() {
             }
             ref other => panic!("expected a number constant for {literal}, got {other:?}"),
         }
-        // The documented layout, counted out. 46 bytes of overhead: magic,
+        // The documented layout, counted out. 50 bytes of overhead: magic,
         // version, constant count, one number constant, one text constant for
-        // the name `n`, the main block header and its zero child count. Every
+        // the name `n`, the main block header — kind, arity, parameter count,
+        // name length and the name `main` — and its zero child count. Every
         // instruction is then exactly INSTRUCTION_SIZE bytes.
         let bytes = chunk.encode();
         assert_eq!(
             bytes.len(),
-            46 + 13 * chunk.main.code.len(),
+            50 + 13 * chunk.main.code.len(),
             "the file must be the documented size for {literal}"
         );
         if literal.starts_with('-') {
@@ -1289,6 +1307,7 @@ fn edge_blocks_nested_past_the_limit_are_refused_when_decoding() {
         name: String::new(),
         kind: BlockKind::Main,
         arity: 0,
+        params: Vec::new(),
         code: Vec::new(),
         blocks: Vec::new(),
     };
@@ -1297,6 +1316,7 @@ fn edge_blocks_nested_past_the_limit_are_refused_when_decoding() {
             name: "deep".to_string(),
             kind: BlockKind::Function,
             arity: 0,
+            params: Vec::new(),
             code: Vec::new(),
             blocks: vec![block],
         };
@@ -1325,6 +1345,7 @@ fn deep_block_chain(depth: usize) -> Block {
         name: String::new(),
         kind: BlockKind::Main,
         arity: 0,
+        params: Vec::new(),
         code: Vec::new(),
         blocks: Vec::new(),
     };
@@ -1333,6 +1354,7 @@ fn deep_block_chain(depth: usize) -> Block {
             name: format!("level{level}"),
             kind: BlockKind::Function,
             arity: 0,
+            params: Vec::new(),
             code: Vec::new(),
             blocks: vec![block],
         };
@@ -1401,6 +1423,7 @@ fn edge_the_disassembler_reports_a_block_index_out_of_range() {
             name: "main".to_string(),
             kind: BlockKind::Main,
             arity: 0,
+            params: Vec::new(),
             code: vec![
                 // In range: block 0 is a block of this one.
                 Instruction {
@@ -1449,6 +1472,7 @@ fn edge_the_disassembler_reports_a_block_index_out_of_range() {
                 name: "f".to_string(),
                 kind: BlockKind::Function,
                 arity: 0,
+                params: Vec::new(),
                 code: Vec::new(),
                 blocks: Vec::new(),
             }],
@@ -1499,6 +1523,7 @@ fn edge_an_unassigned_byte_in_any_enum_is_rejected() {
         name: "main".to_string(),
         kind: BlockKind::Main,
         arity: 0,
+        params: Vec::new(),
         code: Vec::new(),
         blocks: Vec::new(),
     };
@@ -1571,6 +1596,7 @@ fn edge_the_disassembler_reports_an_out_of_range_operand_instead_of_panicking() 
             name: "main".to_string(),
             kind: BlockKind::Main,
             arity: 0,
+            params: Vec::new(),
             code: vec![
                 Instruction {
                     opcode: Opcode::PushConst,

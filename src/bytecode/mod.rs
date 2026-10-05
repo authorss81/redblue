@@ -23,6 +23,7 @@ mod codegen;
 mod disasm;
 mod format;
 mod opcode;
+pub mod vm;
 
 pub use codegen::compile as compile_program;
 pub use disasm::render as disassemble;
