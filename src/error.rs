@@ -71,7 +71,12 @@ impl Error {
         }
     }
 
-    fn message(&self) -> &str {
+    /// The failure message on its own, with no position.
+    ///
+    /// Editor tooling carries the position in its own field, so it wants the
+    /// message alone rather than the multi-line [`fmt::Display`] form, which
+    /// repeats the location on a second line.
+    pub fn message(&self) -> &str {
         match self {
             Error::Lexer(msg, _)
             | Error::Parser(msg, _)

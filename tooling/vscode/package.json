@@ -1,0 +1,36 @@
+{
+  "name": "redblue-vscode",
+  "displayName": "Redblue",
+  "description": "Syntax highlighting for the Redblue programming language",
+  "version": "0.1.0",
+  "publisher": "redblue-lang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "redblue",
+        "aliases": [
+          "Redblue",
+          "redblue"
+        ],
+        "extensions": [
+          ".rb"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "redblue",
+        "scopeName": "source.redblue",
+        "path": "./syntaxes/redblue.tmLanguage.json"
+      }
+    ]
+  }
+}

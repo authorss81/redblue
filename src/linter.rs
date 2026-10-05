@@ -40,15 +40,25 @@ impl Linter {
             self.analyze_statement(stmt);
         }
 
-        // Check for unused variables
-        for var in &self.defined_vars {
-            if !self.used_vars.contains(var) && !var.starts_with('_') {
-                self.warnings.push(LintWarning {
-                    message: format!("Unused variable: '{}'", var),
-                    line: 0,
-                    column: 0,
-                });
-            }
+        // Check for unused variables. `defined_vars` is a `HashSet`, so its
+        // own iteration order changes from run to run: the findings are
+        // collected in name order instead, or the same file would report its
+        // unused variables in a different order every time — and `rb
+        // diagnostics` would emit that order into its JSON array.
+        let mut unused: Vec<&str> = self
+            .defined_vars
+            .iter()
+            .filter(|var| !var.starts_with('_') && !self.used_vars.contains(*var))
+            .map(String::as_str)
+            .collect();
+        unused.sort_unstable();
+
+        for var in unused {
+            self.warnings.push(LintWarning {
+                message: format!("Unused variable: '{}'", var),
+                line: 0,
+                column: 0,
+            });
         }
     }
 
@@ -268,6 +278,8 @@ impl Default for Linter {
     }
 }
 
+/// Lints `source`, lexing and parsing it first. Returns no findings when the
+/// source does not parse: there is no program to lint.
 pub fn lint(source: &str) -> (Vec<LintError>, Vec<LintWarning>) {
     let tokens = match Lexer::tokenize(source) {
         Ok(t) => t,
@@ -280,8 +292,15 @@ pub fn lint(source: &str) -> (Vec<LintError>, Vec<LintWarning>) {
         Err(_) => return (Vec::new(), Vec::new()),
     };
 
+    lint_program(&program)
+}
+
+/// Lints an already-parsed [`Program`], for a caller that has the AST in hand
+/// — [`crate::lsp::diagnostics`], which lexes and parses the file once for its
+/// own diagnostics, must not make the linter do it again.
+pub fn lint_program(program: &Program) -> (Vec<LintError>, Vec<LintWarning>) {
     let mut linter = Linter::new();
-    linter.lint(&program);
+    linter.lint(program);
 
     (linter.get_errors(), linter.get_warnings())
 }

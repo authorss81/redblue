@@ -1,7 +1,71 @@
+use std::sync::OnceLock;
+
 use crate::error::{Error, Result, Span};
 
 /// The byte-order mark some editors write at the start of a UTF-8 file.
 const BOM: char = '\u{FEFF}';
+
+/// Every word the lexer treats as a keyword, paired with the token it produces.
+///
+/// This table is the single source of truth for the keyword set: the lexer
+/// matches through it (`Lexer::keyword`) and editor tooling highlights it
+/// (`crate::lsp::keyword_pattern`). Keeping one table is what stops the shipped
+/// TextMate grammar from drifting away from the language.
+pub const KEYWORDS: &[(&str, TokenKind)] = &[
+    ("set", TokenKind::Set),
+    ("to", TokenKind::To),
+    ("is", TokenKind::Is),
+    ("are", TokenKind::Are),
+    ("if", TokenKind::If),
+    ("then", TokenKind::Then),
+    ("else", TokenKind::Else),
+    ("end", TokenKind::End),
+    ("when", TokenKind::When),
+    ("unless", TokenKind::Unless),
+    ("for", TokenKind::For),
+    ("each", TokenKind::Each),
+    ("in", TokenKind::In),
+    ("from", TokenKind::From),
+    ("times", TokenKind::Times),
+    ("while", TokenKind::While),
+    ("repeat", TokenKind::Repeat),
+    ("until", TokenKind::Until),
+    ("break", TokenKind::Break),
+    ("skip", TokenKind::Skip),
+    ("return", TokenKind::Return),
+    ("give", TokenKind::GiveBack),   // give back
+    ("back", TokenKind::GiveBack),   // give back
+    ("might", TokenKind::MightFail), // might fail
+    ("fail", TokenKind::MightFail),  // might fail
+    ("say", TokenKind::Say),
+    ("print", TokenKind::Print),
+    ("ask", TokenKind::Ask),
+    ("try", TokenKind::Try),
+    ("catch", TokenKind::Catch),
+    ("finally", TokenKind::Finally),
+    ("and", TokenKind::And),
+    ("or", TokenKind::Or),
+    ("not", TokenKind::Not),
+    ("yes", TokenKind::YesNo(true)),
+    ("no", TokenKind::YesNo(false)),
+    ("nothing", TokenKind::Nothing),
+    ("module", TokenKind::Module),
+    ("import", TokenKind::Import),
+    ("export", TokenKind::Export),
+    ("test", TokenKind::Test),
+    ("expect", TokenKind::Expect),
+    ("object", TokenKind::Object),
+    ("has", TokenKind::Has),
+    ("can", TokenKind::Can),
+    ("this", TokenKind::This),
+    ("that", TokenKind::That),
+    ("new", TokenKind::New),
+    ("extends", TokenKind::Extends),
+    ("async", TokenKind::Async),
+    ("wait", TokenKind::Wait),
+    ("parallel", TokenKind::Parallel),
+    ("done", TokenKind::Done),
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -248,62 +312,26 @@ impl Lexer {
     }
 
     fn keyword(&self, ident: &str) -> TokenKind {
-        match ident {
-            "set" => TokenKind::Set,
-            "to" => TokenKind::To,
-            "is" => TokenKind::Is,
-            "are" => TokenKind::Are,
-            "if" => TokenKind::If,
-            "then" => TokenKind::Then,
-            "else" => TokenKind::Else,
-            "end" => TokenKind::End,
-            "when" => TokenKind::When,
-            "unless" => TokenKind::Unless,
-            "for" => TokenKind::For,
-            "each" => TokenKind::Each,
-            "in" => TokenKind::In,
-            "from" => TokenKind::From,
-            "times" => TokenKind::Times,
-            "while" => TokenKind::While,
-            "repeat" => TokenKind::Repeat,
-            "until" => TokenKind::Until,
-            "break" => TokenKind::Break,
-            "skip" => TokenKind::Skip,
-            "return" => TokenKind::Return,
-            "give" => TokenKind::GiveBack,   // give back
-            "back" => TokenKind::GiveBack,   // give back
-            "might" => TokenKind::MightFail, // might fail
-            "fail" => TokenKind::MightFail,  // might fail
-            "say" => TokenKind::Say,
-            "print" => TokenKind::Print,
-            "ask" => TokenKind::Ask,
-            "try" => TokenKind::Try,
-            "catch" => TokenKind::Catch,
-            "finally" => TokenKind::Finally,
-            "and" => TokenKind::And,
-            "or" => TokenKind::Or,
-            "not" => TokenKind::Not,
-            "yes" => TokenKind::YesNo(true),
-            "no" => TokenKind::YesNo(false),
-            "nothing" => TokenKind::Nothing,
-            "module" => TokenKind::Module,
-            "import" => TokenKind::Import,
-            "export" => TokenKind::Export,
-            "test" => TokenKind::Test,
-            "expect" => TokenKind::Expect,
-            "object" => TokenKind::Object,
-            "has" => TokenKind::Has,
-            "can" => TokenKind::Can,
-            "this" => TokenKind::This,
-            "that" => TokenKind::That,
-            "new" => TokenKind::New,
-            "extends" => TokenKind::Extends,
-            "async" => TokenKind::Async,
-            "wait" => TokenKind::Wait,
-            "parallel" => TokenKind::Parallel,
-            "done" => TokenKind::Done,
-            _ => TokenKind::Identifier(ident.to_string()),
+        for (word, kind) in KEYWORDS {
+            if *word == ident {
+                return kind.clone();
+            }
         }
+
+        TokenKind::Identifier(ident.to_string())
+    }
+
+    /// The words this lexer recognises as keywords, sorted and deduplicated,
+    /// for editor tooling.
+    pub fn keywords() -> &'static [&'static str] {
+        static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+        WORDS.get_or_init(|| {
+            let mut words: Vec<&'static str> = KEYWORDS.iter().map(|(word, _)| *word).collect();
+            words.sort_unstable();
+            words.dedup();
+            words
+        })
     }
 
     pub fn tokenize(source: &str) -> Result<Vec<Token>> {

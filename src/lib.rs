@@ -3,6 +3,7 @@ mod error;
 pub mod formatter;
 pub mod lexer;
 pub mod linter;
+pub mod lsp;
 pub mod parser;
 pub mod repl;
 pub mod stdlib;
@@ -18,6 +19,10 @@ use crate::lexer::Lexer;
 use testing::reporter::Reporter;
 
 pub use error::{Error, Span};
+pub use lsp::{
+    diagnostics, diagnostics_json, diagnostics_to_json, textmate_grammar, Diagnostic, Severity,
+    GRAMMAR_PATH, LANGUAGE_CONFIG_PATH,
+};
 // `FunctionValue` is re-exported because it is the payload of the public
 // `Value::Function` variant: a caller that matches that variant has to be able
 // to name the type it binds.
@@ -104,6 +109,12 @@ pub fn run_cli() {
                         process::exit(1);
                     }
                 }
+                "grammar" => print!("{}", textmate_grammar()),
+                "keywords" => {
+                    for keyword in Lexer::keywords() {
+                        println!("{}", keyword);
+                    }
+                }
                 _ => {
                     if let Err(rendered) = run_file_with_diagnostic(cmd) {
                         report(&rendered);
@@ -149,6 +160,24 @@ pub fn run_cli() {
                             eprintln!("Error: {}", error.message);
                         }
                         if !errors.is_empty() {
+                            process::exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading file: {}", e);
+                        process::exit(1);
+                    }
+                },
+                "diagnostics" => match fs::read_to_string(path) {
+                    Ok(source) => {
+                        let found = diagnostics(&source);
+                        // Rendered from the findings just computed: re-running
+                        // the frontend to format them would lex, parse and
+                        // analyze the file a second time.
+                        println!("{}", diagnostics_to_json(&found));
+                        // Exit non-zero when anything is an error, the way
+                        // `rb lint` does, so this is usable as a CI check.
+                        if found.iter().any(|d| d.severity == Severity::Error) {
                             process::exit(1);
                         }
                     }
@@ -206,6 +235,9 @@ fn print_help() {
     println!("  rb format <file>  Format a Redblue file");
     println!("  rb format --check <file>  Check if file needs formatting");
     println!("  rb lint <file>  Lint a Redblue file");
+    println!("  rb diagnostics <file>  Report errors as JSON for editors");
+    println!("  rb grammar  Print the TextMate grammar for .rb files");
+    println!("  rb keywords  Print the keyword list");
     println!("  rb help        Show this help");
     println!("  rb version     Show version");
     println!();
