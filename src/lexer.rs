@@ -452,6 +452,49 @@ impl Lexer {
                     lexer.advance();
                     TokenKind::Colon
                 }
+                // The comparison symbols. `<=` and `>=` are two characters but
+                // one token: the compound is consumed here so the parser sees
+                // a single `LessEqual`/`GreaterEqual` rather than a `<` that a
+                // separate token would then have to glue to the `=`. The
+                // parser also reads a bare `Less`/`Greater` followed by
+                // `Equal` as the compound, so both paths agree on what `x <= y`
+                // means. `=` and `==` are the same token, and `!=` is likewise
+                // read as `Not` followed by `Equal` by the parser, so `!` alone
+                // stays a prefix rather than becoming a second spelling of `!=`.
+                '<' => {
+                    lexer.advance();
+                    if lexer.current() == Some('=') {
+                        lexer.advance();
+                        TokenKind::LessEqual
+                    } else {
+                        TokenKind::Less
+                    }
+                }
+                '>' => {
+                    lexer.advance();
+                    if lexer.current() == Some('=') {
+                        lexer.advance();
+                        TokenKind::GreaterEqual
+                    } else {
+                        TokenKind::Greater
+                    }
+                }
+                '=' => {
+                    lexer.advance();
+                    if lexer.current() == Some('=') {
+                        lexer.advance();
+                    }
+                    TokenKind::Equal
+                }
+                '!' => {
+                    lexer.advance();
+                    if lexer.current() == Some('=') {
+                        lexer.advance();
+                        TokenKind::NotEqual
+                    } else {
+                        TokenKind::Not
+                    }
+                }
                 _ => {
                     // `escape_debug` keeps a NUL or a BEL readable in a
                     // terminal, where the raw character would print as
