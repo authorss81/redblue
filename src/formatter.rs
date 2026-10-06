@@ -264,6 +264,15 @@ impl Formatter {
                 }
                 self.write_keyword_line("end");
             }
+            Statement::Unless { condition, body } => {
+                self.write("unless ");
+                self.format_expression(condition);
+                // `then` is not optional to the parser.
+                self.write(" then");
+                self.newline();
+                self.format_block(body);
+                self.write_keyword_line("end");
+            }
             Statement::ForEach {
                 variable,
                 iterable,

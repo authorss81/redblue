@@ -226,6 +226,16 @@ impl Compiler {
                     patch_here(code, to_end);
                 }
             }
+            Statement::Unless { condition, body } => {
+                self.expr(condition, code, line)?;
+                // There is no `JumpIfTrue`, so the condition is negated and the
+                // existing jump runs the body exactly when it was false. The
+                // `end` of a one-branch block is that jump's landing pad.
+                emit(code, Opcode::Not, 0, 0, line);
+                let to_end = jump(code, Opcode::JumpIfFalse, line);
+                self.statements(body, code, blocks, depth)?;
+                patch_here(code, to_end);
+            }
             Statement::ForEach {
                 variable,
                 iterable,

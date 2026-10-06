@@ -594,6 +594,17 @@ impl Vm {
                 }
                 Ok(Value::Nothing)
             }
+            Statement::Unless { condition, body } => {
+                // The body is taken exactly when the condition is false, so a
+                // true condition leaves the interpreter where it was.
+                let cond = self.evaluate(condition)?;
+                if !cond.is_truthy() {
+                    for stmt in body {
+                        self.execute_statement(stmt)?;
+                    }
+                }
+                Ok(Value::Nothing)
+            }
             Statement::ForEach {
                 variable,
                 iterable,

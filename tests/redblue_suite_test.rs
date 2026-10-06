@@ -25,8 +25,8 @@ fn read(path: &str) -> String {
 
 /// Keywords that open a Redblue block and are closed by `end`. `else`,
 /// `catch`, `finally` and `until` continue an open block and add no depth.
-const BLOCK_OPENERS: [&str; 9] = [
-    "test", "if", "for", "repeat", "while", "try", "object", "to", "module",
+const BLOCK_OPENERS: [&str; 10] = [
+    "test", "if", "unless", "for", "repeat", "while", "try", "object", "to", "module",
 ];
 
 fn opens_a_block(line: &str) -> bool {
@@ -35,8 +35,11 @@ fn opens_a_block(line: &str) -> bool {
 }
 
 /// A test block starts at a `test "..."` header line and ends at the `end` that
-/// matches it. Nested `if`/`for`/`try`/`object`/`to` blocks inside a test carry
-/// their own `end`, so the body is read with a depth counter.
+/// matches it. Nested `if`/`unless`/`for`/`try`/`object`/`to` blocks inside a
+/// test carry their own `end`, so the body is read with a depth counter. Every
+/// keyword in [`BLOCK_OPENERS`] must be listed: a missing one makes the counter
+/// reach zero at the inner `end` and silently truncate the body, which reads as
+/// "the block has no assertion" rather than as a harness bug.
 fn test_blocks(source: &str) -> Vec<(usize, String, String)> {
     let lines: Vec<&str> = source.lines().collect();
     let mut blocks = Vec::new();

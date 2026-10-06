@@ -236,3 +236,30 @@ test "edge: a named catch still binds the error"
     end
     expect caught to be "error"
 end
+
+test "control: unless takes its body when the condition is false"
+    set branch to "none"
+    set n to 0
+    unless n is 1 then
+        set branch to "body"
+    end
+    expect branch to be "body"
+end
+
+test "control: unless skips its body when the condition is true"
+    set branch to "none"
+    set n to 1
+    unless n is 1 then
+        set branch to "body"
+    end
+    expect branch to be "none"
+end
+
+test "edge: an unless with an empty body changes nothing"
+    set branch to "none"
+    unless no then
+    end
+    unless yes then
+    end
+    expect branch to be "none"
+end

@@ -232,6 +232,10 @@ impl Linter {
                 self.analyze_body(then_branch);
                 self.analyze_body(else_branch);
             }
+            Statement::Unless { condition, body } => {
+                self.analyze_expr(condition);
+                self.analyze_body(body);
+            }
             Statement::ForEach {
                 variable,
                 iterable,

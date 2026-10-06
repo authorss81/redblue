@@ -131,6 +131,17 @@ pub enum Statement {
         else_branch: Vec<Stmt>,
     },
 
+    // unless condition then ... end
+    //
+    // The body is taken when the condition is *false*, and there is no second
+    // branch: `unless` has an `else` only as its own absence, so a second
+    // alternative is written `if`. `unless condition ... end` and
+    // `if not condition ... end` therefore mean the same thing.
+    Unless {
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
+
     // for each x in list ... end
     ForEach {
         variable: String,
@@ -341,6 +352,7 @@ impl Parser {
         matches!(
             self.current().map(|token| &token.kind),
             Some(TokenKind::If)
+                | Some(TokenKind::Unless)
                 | Some(TokenKind::For)
                 | Some(TokenKind::Repeat)
                 | Some(TokenKind::While)
@@ -437,6 +449,7 @@ impl Parser {
             TokenKind::Set => self.parse_set()?,
             TokenKind::Constant => self.parse_constant()?,
             TokenKind::If => self.parse_if()?,
+            TokenKind::Unless => self.parse_unless()?,
             TokenKind::For => self.parse_for()?,
             TokenKind::Repeat => self.parse_repeat()?,
             TokenKind::While => self.parse_while()?,
@@ -683,6 +696,36 @@ impl Parser {
             then_branch,
             else_branch,
         }))
+    }
+
+    /// Parses `unless <expr> then ... end`.
+    ///
+    /// The condition grammar is `if`'s — the same [`Parser::parse_expression`]
+    /// call — and the block is closed by the same `end`. There is no `else`
+    /// arm: `else` here is a token the grammar does not accept, and it fails
+    /// at [`Parser::expect`] with a spanned parser error rather than being
+    /// swallowed as an alternative branch.
+    fn parse_unless(&mut self) -> Result<Option<Statement>> {
+        self.advance(); // consume 'unless'
+        let condition = self.parse_expression()?;
+
+        self.skip_newlines();
+        self.expect(&TokenKind::Then)?;
+        self.skip_newlines();
+
+        let mut body = Vec::new();
+        while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
+            && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
+        {
+            if let Some(stmt) = self.parse_statement()? {
+                body.push(stmt);
+            }
+            self.skip_newlines();
+        }
+
+        self.expect(&TokenKind::End)?;
+
+        Ok(Some(Statement::Unless { condition, body }))
     }
 
     fn parse_for(&mut self) -> Result<Option<Statement>> {

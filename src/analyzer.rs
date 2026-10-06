@@ -186,6 +186,14 @@ impl Analyzer {
                 }
                 self.pop_scope();
             }
+            Statement::Unless { condition, body } => {
+                self.analyze_expr(condition, &span);
+                self.push_scope();
+                for stmt in body {
+                    self.analyze_statement(stmt);
+                }
+                self.pop_scope();
+            }
             Statement::ForEach {
                 variable,
                 iterable,
@@ -474,6 +482,9 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
             } => {
                 collect_later_names(then_branch, out);
                 collect_later_names(else_branch, out);
+            }
+            Statement::Unless { body, .. } => {
+                collect_later_names(body, out);
             }
             Statement::ForEach { body, .. }
             | Statement::ForRange { body, .. }
