@@ -252,10 +252,18 @@ repeat_until     = 'repeat'
 
 ```
 break_statement  = 'break'
-skip_statement   = 'skip' [ expression ]
+skip_statement   = 'skip'
 return_statement = 'return' [ expression ]
                  | 'give back' [ expression ]
 ```
+
+Neither `break` nor `skip` takes an operand: both act on the innermost loop the
+statement is written inside, and end the block they were written in as well as
+the loop — a `catch`, `finally`, `test` or `object` body inside a loop is inside
+that loop. With no enclosing loop they are a runtime error,
+`'<keyword>' is only valid inside a loop`, which
+`try ... catch error` catches; a function body is not inside the loop that called
+it, so a `break` in one is refused too. See SPEC.md, "Break and Skip".
 
 ### 4.5 Function Declaration
 

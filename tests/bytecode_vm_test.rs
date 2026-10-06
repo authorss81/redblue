@@ -637,7 +637,31 @@ fn generated_corpus() -> Vec<(String, String)> {
         "say \"a\" is \"a\"\nsay \"a\" is \"b\"\n".to_string(),
     );
     add(
-        "flow/a-break-inside-a-bounded-while-is-not-a-jump-yet",
+        "flow/a-finally-runs-every-statement-on-the-way-out-of-a-break",
+        "set cleaned to 0\nrepeat 3 times\n    try\n        break\n    finally\n        set cleaned to cleaned + 1\n        set cleaned to cleaned + 10\n    end\nend\nsay cleaned\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-loop-inside-a-try-keeps-the-try-installed",
+        "try\n    for each i in [1, 2, 3]\n        if i is 2 then\n            break\n        end\n        say i\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-nested-loop-inside-a-try-leaves-the-outer-try-installed",
+        "try\n    for each a in [1, 2]\n        for each b in [1, 2]\n            try\n                if b is 2 then\n                    break\n                end\n            finally\n                say \"inner cleaned\"\n            end\n        end\n        say \"outer turn\"\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"outer cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-while-inside-a-try-keeps-the-try-installed",
+        "try\n    set n to 0\n    while n is not 4\n        set n to n + 1\n        if n is 2 then\n            break\n        end\n        say n\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-failing-finally-on-the-way-out-of-a-break-does-not-end-the-next-loop",
+        "set caught to no\ntry\n    repeat 3 times\n        try\n            break\n        finally\n            set bad to 1 + \"one\"\n        end\n    end\ncatch error\n    set caught to yes\nend\nset n to 0\nrepeat 3 times\n    set n to n + 1\nend\nsay caught\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-a-loop-inside-a-try-keeps-the-try-installed",
+        "try\n    for each i in [1, 2, 3]\n        if i is 2 then\n            skip\n        end\n        say i\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-bounded-while-leaves-the-loop",
         "set n to 0\nset seen to 0\nwhile n is not 4\n    set n to n + 1\n    set seen to seen + 1\n    if n is 2 then\n        break\n    end\nend\nsay n\nsay seen\n".to_string(),
     );
     add(
@@ -670,8 +694,77 @@ fn generated_corpus() -> Vec<(String, String)> {
         "to first_even(xs)\n    for each x in xs\n        if x % 2 is 0 then\n            give back x\n        end\n    end\n    give back nothing\nend\nsay first_even([1, 3, 4, 5])\n".to_string(),
     );
     add(
-        "flow/a-skip-inside-a-bounded-loop-is-not-a-jump-yet",
+        "flow/a-skip-inside-a-bounded-loop-leaves-its-own-iteration-out",
         "set total to 0\nfor each v in [1, 2, 3]\n    skip\n    set total to total + v\nend\nsay total\n".to_string(),
+    );
+    // -- a break or a skip in a block that has a frame of its own -------------
+    //
+    // A `test`, `catch`, `finally` or `object` body is a block with a frame of
+    // its own on the bytecode VM, and it is still written inside the loop around
+    // it. Each of these is the shape the two VMs used to answer differently: the
+    // tree-walking VM counts the loops a statement is lexically inside, and the
+    // bytecode VM looked only at the frame the instruction ran in, so it refused
+    // these where the other VM honoured them.
+    add(
+        "flow/a-break-in-a-catch-body-inside-a-loop-leaves-that-loop",
+        "set n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        set bad to 1 + \"one\"\n    catch error\n        if n is 2 then\n            break\n        end\n        say \"caught\"\n    end\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-a-catch-body-inside-a-loop-advances-that-loop",
+        "set seen to \"\"\nfor each i in [\"one\", \"two\", \"three\"]\n    try\n        set bad to 1 + \"one\"\n    catch error\n        if i is \"two\" then\n            skip\n        end\n        set seen to seen + i\n    end\n    set seen to seen + \"!\"\nend\nsay seen\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-finally-body-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        say \"try\"\n    finally\n        if n is 2 then\n            break\n        end\n        set log to log + \"f\"\n    end\n    set log to log + \".\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-test-body-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    test \"a test written inside a loop\"\n        if n is 2 then\n            break\n        end\n        set log to log + \"t\"\n    end\n    set log to log + \".\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-an-object-body-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nfor each x in [\"a\", \"b\"]\n    set log to log + x\n    object Once\n        has a\n        break\n        set log to log + \"unreachable\"\n    end\n    set log to log + \".\"\nend\nsay log\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-block-within-a-block-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nrepeat 2 times\n    set log to log + \"t\"\n    test \"outer\"\n        test \"inner\"\n            break\n            set log to log + \"unreachable\"\n        end\n        set log to log + \"after the inner test\"\n    end\n    set log to log + \".\"\nend\nsay log\n".to_string(),
+    );
+    // The exemption: a function body is not lexically inside the loop that called
+    // it, so the block it is written in records no loop and the `break` is
+    // refused — while the loop that called it survives and goes round again.
+    add(
+        "flow/a-break-in-a-test-body-inside-a-function-called-from-a-loop-is-refused",
+        "to escape()\n    test \"a test inside a function inside a loop\"\n        break\n    end\nend\nset caught to no\nset n to 0\nrepeat 2 times\n    set n to n + 1\n    try\n        escape()\n    catch error\n        set caught to yes\n    end\nend\nsay n\nsay caught\n".to_string(),
+    );
+    // The loop's variable is still bound while the `finally` the signal passed
+    // through runs: the turn the `break` stopped has not ended yet.
+    add(
+        "flow/a-catch-body-reads-the-loop-variable-before-the-turn-ends",
+        "set seen to \"none\"\nset i to \"outer\"\nfor each i in [1, 2]\n    try\n        set bad to 1 + \"one\"\n    catch error\n        break\n    finally\n        set seen to i\n    end\nend\nsay seen\nsay i\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-nested-try-inside-a-catch-runs-its-finally",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        set bad to 1 + \"one\"\n    catch error\n        try\n            break\n        finally\n            set log to log + \"i\"\n        end\n        set log to log + \"unreachable\"\n    finally\n        set log to log + \"o\"\n    end\n    set log to log + \"after\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-finally-inside-a-catch-runs-the-finally-it-passed-through",
+        "set seen to \"none\"\nset i to \"outer\"\nfor each i in [1, 2]\n    try\n        set bad to 1 + \"one\"\n    catch error\n        try\n            say \"caught\"\n        finally\n            break\n        end\n    finally\n        set seen to i\n    end\nend\nsay seen\nsay i\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-catch-inside-a-loop-inside-a-test-leaves-the-inner-loop",
+        "set log to \"\"\nrepeat 2 times\n    test \"a test around the loop\"\n        for each x in [1, 2, 3]\n            try\n                set bad to 1 + \"one\"\n            catch error\n                if x is 2 then\n                    break\n                end\n                set log to log + \"c\"\n            finally\n                set log to log + \"f\"\n            end\n            set log to log + \".\"\n        end\n        set log to log + \"|\"\n    end\n    set log to log + \";\"\nend\nsay log\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-a-finally-inside-a-loop-advances-the-turn",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        set log to log + \"t\"\n    finally\n        if n is 2 then\n            skip\n        end\n        set log to log + \"f\"\n    end\n    set log to log + \".\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-catch-body-inside-a-while-leaves-the-while",
+        "set n to 0\nwhile n is not 9\n    set n to n + 1\n    try\n        set bad to 1 + \"one\"\n    catch error\n        break\n    end\n    say \"after the try\"\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-catch-body-inside-a-loop-inside-a-function-leaves-the-loop",
+        "to walk(items)\n    set log to \"\"\n    for each item in items\n        try\n            set bad to 1 + \"one\"\n        catch error\n            if item is \"two\" then\n                break\n            end\n            set log to log + \"c\"\n        end\n        set log to log + item\n    end\n    give back log\nend\nsay walk([\"one\", \"two\", \"three\"])\n".to_string(),
     );
     add(
         "flow/a-statement-after-a-return",
@@ -1133,6 +1226,75 @@ fn generated_corpus() -> Vec<(String, String)> {
     add(
         "object/two-objects-that-are-alike",
         "object A\n    has n default 1\nend\nobject B\n    has n default 2\nend\nsay A.n + B.n\n"
+            .to_string(),
+    );
+    // An `object` body written inside another `object`'s body. The bytecode VM
+    // held the declaration being assembled in one slot, so the inner
+    // declaration took the outer one's place and the outer body's finish found
+    // nothing left — a panic, where the tree-walking VM ran the program. See
+    // `objects_an_object_declared_inside_an_object_body_declares_both_types`.
+    add(
+        "object/an-object-declared-inside-an-object-body",
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n    end\nend\n\
+         say Outer.o + Inner.i\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-may-extend-the-body-it-is-written-in",
+        "object Outer\n    has o default 1\n    object Inner extends Outer\n        has i default 2\n    end\n\
+         say Inner.o + Inner.i\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-may-extend-two-levels-up",
+        "object One\n    has n default 1\n    object Two\n        object Three extends One\n            has k default 3\n\
+         end\n    end\nend\nsay Three.n + Three.k\n"
+            .to_string(),
+    );
+    add(
+        "object/three-nested-object-bodies",
+        "object L1\n    object L2\n        object L3\n            has deep default \"deep\"\n        end\n    end\nend\n\
+         say \"ran\"\n"
+            .to_string(),
+    );
+    add(
+        "object/two-declarations-nested-in-the-same-body",
+        "object Outer\n    has o default 1\n    object First\n        has a default 1\n    end\n\
+         object Second extends Outer\n        has b default 2\n    end\nend\nsay First.a + Second.b + Second.o\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-reusing-the-enclosing-name-is-refused",
+        "object A\n    has a default 1\n    object A\n        has b default 2\n    end\nend\nsay \"ran\"\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-extending-its-own-name-is-a-cycle",
+        "object A\n    object B extends B\n        has b default 1\n    end\nend\nsay \"ran\"\n"
+            .to_string(),
+    );
+    add(
+        "object/a-failure-inside-a-nested-body-is-caught-outside-both",
+        "set caught to \"no\"\ntry\n    object A\n        object B\n            has b default 1\n            set bad to 1 + \"one\"\n\
+         end\n    end\ncatch error\n    set caught to \"yes\"\nend\nsay caught\n"
+            .to_string(),
+    );
+    add(
+        "object/a-failure-inside-a-nested-body-is-caught-inside-the-outer-one",
+        "set after to \"no\"\nobject A\n    object B\n        has b default 1\n        try\n            set bad to 1 + \"one\"\n\
+         catch error\n            say \"inner\"\n        end\n    end\n    set after to \"yes\"\nend\nsay after\n"
+            .to_string(),
+    );
+    add(
+        "object/an-object-body-nested-in-a-loop-can-break-out-of-it",
+        "set n to 0\nrepeat 3 times\n    object A\n        object B\n            has b default 1\n        end\n        set n to n + 1\n\
+         break\n    end\nend\nsay n\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-body-that-recovers-leaves-both-types-declared",
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n        try\n            set bad to 1 + \"one\"\n\
+         catch error\n            set inner_ok to \"caught\"\n        end\n    end\n    set outer_ok to \"registered\"\nend\nsay Outer.o\nsay outer_ok\nsay inner_ok\n"
             .to_string(),
     );
     add("print/print-of-a-list", "print [1, [2]]\n".to_string());
@@ -1938,6 +2100,110 @@ fn edge_a_return_that_is_not_the_blocks_last_statement_does_not_end_the_block() 
         vec!["after".to_string(), "nothing".to_string()],
         "the statement after a `return` runs, and the block's value is the last \
          statement's, both as in the tree-walker"
+    );
+}
+
+/// An `object` body written inside another `object`'s body declares two types,
+/// and the bytecode VM registers both.
+///
+/// The bytecode VM held the declaration being assembled in one slot, so the
+/// inner `DEF_OBJECT` took the outer one's place and the outer body's finish
+/// found nothing left to register — `finish_object` panicked on
+/// `pending_object.take().expect(...)`, taking the whole process down on a
+/// program the tree-walking VM ran to completion. This is the test that says the
+/// panic is gone and both VMs declare the same two types.
+#[test]
+fn objects_an_object_declared_inside_an_object_body_declares_both_types() {
+    // The nested type's field is read from inside the outer body, because the
+    // analyzer only declares an `object`'s own name to the scope the declaration
+    // is written in.
+    let source = concat!(
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n    end\n",
+        "    say Inner.i\nend\nsay Outer.o\n",
+    );
+    assert_agrees(source);
+    assert_eq!(
+        bytecode(source).output,
+        vec!["2".to_string(), "1".to_string()],
+        "both types are registered, each with its own field"
+    );
+}
+
+/// The same shape with `extends`: a declaration nested in an `object` body may
+/// name the body it is written in as its parent.
+///
+/// The tree-walking VM registers a type before it runs the statements after its
+/// declarations, so the parent is already there. This VM runs the nested
+/// declaration first, so the parent is a declaration still being assembled rather
+/// than a registered type, and the chain walk has to look for it there.
+#[test]
+fn objects_a_nested_declaration_may_extend_the_body_it_is_written_in() {
+    let source = concat!(
+        "object Outer\n    has o default 1\n    object Inner extends Outer\n        has i default 2\n    end\n",
+        "    say Inner.o\n    say Inner.i\nend\n",
+    );
+    assert_agrees(source);
+    assert_eq!(
+        bytecode(source).output,
+        vec!["1".to_string(), "2".to_string()],
+        "the nested type inherits the enclosing declaration's field and keeps its own"
+    );
+}
+
+/// A name an open `object` body has already taken is refused, whichever body
+/// wrote it.
+///
+/// The tree-walking VM has registered the outer type before the nested
+/// declaration runs, so `objects` alone is enough for it. This VM has not, so
+/// the check has to ask about the declarations being assembled too.
+#[test]
+fn edge_objects_a_nested_declaration_reusing_the_enclosing_name_is_refused() {
+    let cases = [
+        (
+            "object A\n    has a default 1\n    object A\n        has b default 2\n    end\nend\nsay \"ran\"\n",
+            "RuntimeError: Object 'A' is already declared",
+        ),
+        (
+            "object A\n    object B\n        has b default 1\n        object B\n            has c default 2\n        end\n    end\nend\nsay \"ran\"\n",
+            "RuntimeError: Object 'B' is already declared",
+        ),
+        (
+            "object Outer\n    object Inner\n        has i default 1\n    end\n    object Inner\n        has j default 2\n    end\nend\nsay \"ran\"\n",
+            "RuntimeError: Object 'Inner' is already declared",
+        ),
+    ];
+    for (source, expected) in cases {
+        let byte = bytecode(source);
+        assert_eq!(
+            byte.result
+                .as_ref()
+                .map(String::as_str)
+                .map_err(String::as_str),
+            Err(expected),
+            "a name an open declaration has taken is refused: {byte:?}"
+        );
+        assert_eq!(
+            tree_walk(source).result,
+            byte.result,
+            "both VMs refuse a name an open declaration has taken"
+        );
+    }
+}
+
+/// A loop written around an `object` body can be left from inside the body, and
+/// the body's declaration is registered on the way out.
+///
+/// This is the path where an abrupt exit finishes an `object` body rather than
+/// running it to its end, so it is where the declaration stack and the frame
+/// stack have to agree about which declaration is whose.
+#[test]
+fn edge_objects_an_object_body_nested_in_a_loop_can_break_out_of_it() {
+    let source = "set n to 0\nrepeat 3 times\n    object Outer\n        has o default 1\n        object Inner\n            has i default 2\n        end\n        set n to n + 1\n        break\n    end\nend\nsay n\n";
+    assert_agrees(source);
+    assert_eq!(
+        bytecode(source).output,
+        vec!["1".to_string()],
+        "the loop is left after its first turn"
     );
 }
 

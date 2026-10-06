@@ -439,3 +439,110 @@ fn edge_malformed_object_declarations_are_parse_errors() {
         other => panic!("expected a Parser error, got {:?}", other),
     }
 }
+
+/// An `object` written inside another `object`'s body is declared too, so a
+/// body nests a second declaration rather than absorbing it.
+#[test]
+fn object_a_declaration_nested_in_a_body_declares_its_own_type() {
+    eval(
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n    end\n    \
+         expect Inner.i to be 2\nend\n\
+         expect Outer.o to be 1\n",
+    );
+}
+
+/// The type is registered before the statements after its declarations run, so a
+/// declaration nested in a body may name that body as its parent.
+#[test]
+fn object_a_nested_declaration_may_extend_the_body_it_is_written_in() {
+    eval(
+        "object Outer\n    has o default 1\n    object Inner extends Outer\n        has i default 2\n    end\n    \
+         expect Inner.o to be 1\n    expect Inner.i to be 2\nend\n\
+         expect Outer.o to be 1\n",
+    );
+}
+
+/// Three levels: the innermost body inherits through a parent that is itself
+/// still being declared two bodies up.
+#[test]
+fn object_a_nested_declaration_may_extend_two_levels_up() {
+    eval(
+        "object One\n    has n default 1\n    object Two\n        object Three extends One\n            has k default 3\n\
+         end\n        expect Three.n to be 1\n    end\nend\n",
+    );
+}
+
+/// A name an open body has already taken is refused rather than redeclared,
+/// whichever body wrote it — the outer type is registered before the nested
+/// declaration runs, so the inner one finds it there.
+#[test]
+fn edge_object_a_nested_declaration_reusing_the_enclosing_name_is_refused() {
+    assert_runtime_error(
+        "object A\n    has a default 1\n    object A\n        has b default 2\n    end\nend\n",
+        "Object 'A' is already declared",
+    );
+    assert_runtime_error(
+        "object A\n    object B\n        has b default 1\n        object B\n            has c default 2\n        end\n    end\nend\n",
+        "Object 'B' is already declared",
+    );
+}
+
+/// A parent chain that reaches back to the declaration that is walking it is the
+/// cycle it is, however deep the nesting is that set it up.
+#[test]
+fn edge_object_a_nested_declaration_extending_its_own_name_is_a_cycle() {
+    assert_runtime_error(
+        "object A\n    object B extends B\n        has b default 1\n    end\nend\n",
+        "Object 'B' extends 'B', which is already in its own parent chain",
+    );
+}
+
+/// A failure inside a nested body is a failure of the program, so the `try` that
+/// encloses both bodies catches it and neither type is left half-registered.
+#[test]
+fn edge_object_a_failure_inside_a_nested_body_is_caught_outside_both() {
+    eval(
+        "set caught to \"no\"\n\
+         try\n    object Outer\n        has o default 1\n        object Inner\n            has i default 2\n            \
+         set bad to 1 + \"one\"\n        end\n    end\n\
+         catch error\n    set caught to \"yes\"\nend\n\
+         expect caught to be \"yes\"\n",
+    );
+}
+
+/// A nested body that recovers leaves both types declared, so the outer body's
+/// name and the nested one's are both readable afterwards.
+#[test]
+fn edge_object_a_nested_body_that_recovers_leaves_both_types_declared() {
+    eval(
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n        \
+         try\n            set bad to 1 + \"one\"\n        catch error\n            set inner_ok to \"caught\"\n        end\n    end\n    \
+         set outer_ok to \"registered\"\nend\n\
+         expect Outer.o to be 1\n\
+         expect outer_ok to be \"registered\"\n\
+         expect inner_ok to be \"caught\"\n",
+    );
+}
+
+/// A `break` written after a nested declaration inside an `object` body written
+/// in a loop still leaves the loop, and the body registers its type on the way
+/// out.
+#[test]
+fn edge_object_an_object_body_nested_in_a_loop_can_break_out_of_it() {
+    eval(
+        "set n to 0\n\
+         repeat 3 times\n    object Once\n        has v default 1\n        object Inner\n            has w default 2\n        end\n        \
+         set n to n + 1\n        break\n    end\nend\n\
+         expect n to be 1\n",
+    );
+}
+
+/// A declaration inside a body is a declaration, so a failure reporting it names
+/// the nested type rather than the one it is written in.
+#[test]
+fn edge_object_a_nested_declaration_with_an_unknown_parent_is_reported() {
+    assert_runtime_error(
+        "object Outer\n    object Inner extends Missing\n        has i default 1\n    end\nend\n",
+        "Object 'Inner' extends 'Missing', which is not declared",
+    );
+}

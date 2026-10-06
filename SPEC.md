@@ -432,6 +432,57 @@ for each i from 1 to 100
 end
 ```
 
+`break` leaves the loop it is written in and `skip` goes on to its next turn,
+abandoning the rest of this one. Neither takes an operand: there is nothing for
+one to say, because the loop they act on is the one around them and the turn they
+go to is the next one. Either ends the block it was written in as well as the
+loop, so the statements after one in the same `if` branch, `try` body,
+`catch` body, `finally` body or `test` body are part of the turn the signal
+stopped and do not run. A `finally` is still owed on the way out — an abrupt exit
+from a protected region is not a failure — and the loop's variable is still bound
+while it runs, because the turn it stopped has not ended until it has.
+
+The loop is the one *around* the statement, wherever the statement was written: a
+`break` in a `catch`, `finally`, `test` or `object` body inside a loop leaves that
+loop.
+
+```redblue
+set saved to nothing
+for each name in names
+    try
+        set record to files.read("records/{name}.rb")
+    catch error
+        break
+    end
+    set saved to record
+end
+```
+
+With no enclosing loop there is nothing to leave, and saying so is the point: a
+`break` in no loop is a mistake in the program, and a mistake that runs to
+completion reporting success is worse than one that stops with a message naming
+the statement.
+
+```redblue
+break
+```
+
+```
+RuntimeError: 'break' is only valid inside a loop
+```
+
+Two placements are refused for the same reason, and with the same message:
+
+- **A function body.** A function body is not written inside the loop that calls
+  it, so a `break` there is in no loop even when the call was made from one. The
+  caller's loop survives the refusal and goes on to its next turn.
+- **An `object` body outside any loop.** The statements of an `object` body are run
+  once, when the type is declared, so a `break` in one is a `break` in no loop. The
+  same body written inside a loop leaves that loop, as above.
+
+The refusal is a runtime error rather than a compile error, so `try ... catch
+error` catches it like any other and the program carries on afterwards.
+
 ---
 
 ## Functions

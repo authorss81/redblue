@@ -187,6 +187,26 @@ pub struct Vm {
     /// The per-loop iteration cap, applied afresh to every loop so nesting does
     /// not multiply it.
     max_iterations: usize,
+    /// Loops the statement being executed is lexically inside. Zero means a
+    /// `break` or a `skip` has no loop to act on, which is a
+    /// [`Error::Runtime`] rather than a silent no-op. Raised for the body of a
+    /// loop and released on every path out of it, so an error caught by a `try`
+    /// inside the body does not leave it raised.
+    loop_depth: usize,
+    /// The signal the body of the running loop raised, cleared by the loop that
+    /// consumes it. A flag rather than a returned error, because a `break` is
+    /// not a failure: it has to unwind past `if` statements and `try` bodies
+    /// that have no idea a loop is around them.
+    loop_control: Option<LoopControl>,
+}
+
+/// What a `break` or a `skip` asks the innermost enclosing loop to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControl {
+    /// Leave the loop, discarding the iterations that would have followed.
+    Break,
+    /// Go on to the next iteration, discarding the rest of this one's body.
+    Skip,
 }
 
 /// One `object` declaration, after its parent has been merged into it.
@@ -278,6 +298,8 @@ impl Vm {
             steps: 0,
             max_steps: resolve_max_steps(),
             max_iterations: resolve_max_iterations(),
+            loop_depth: 0,
+            loop_control: None,
         }
     }
 
@@ -341,6 +363,101 @@ impl Vm {
             ));
         }
         *loop_iterations += 1;
+        Ok(())
+    }
+
+    /// Runs one iteration of a loop: binds `variable` to `value` in a fresh
+    /// scope, runs `body`, and reports the [`LoopControl`] the body raised.
+    ///
+    /// The scope and [`Vm::loop_depth`] are released on every path out,
+    /// including the failing one, so an error that a `try` inside the body
+    /// catches does not leave the depth raised and make a later `break` — one
+    /// written outside every loop — look legal.
+    ///
+    /// Stops at the first `break` or `skip` in the body rather than running the
+    /// statements after it, and hands the signal to the caller, which is the
+    /// only place that knows whether it leaves the loop or goes round again.
+    /// A `break` therefore leaves the innermost loop and only that one: the
+    /// enclosing loop never sees the signal, because this call already took it.
+    fn run_iteration(
+        &mut self,
+        variable: Option<&str>,
+        value: Option<Value>,
+        body: &[Stmt],
+    ) -> Result<Option<LoopControl>> {
+        self.loop_depth += 1;
+        let outcome = self.run_iteration_body(variable, value, body);
+        self.loop_depth -= 1;
+        if outcome.is_err() {
+            // A turn that failed is unwinding out of the loop on its own, so a
+            // signal it raised before failing — a `break` inside a `try` body
+            // whose `finally` then failed — has no loop left to act on. Left
+            // pending it would be handed to the next loop in the program, which
+            // would end one turn early for a `break` it never contained.
+            self.loop_control = None;
+        }
+        outcome
+    }
+
+    /// The body half of [`Vm::run_iteration`], run with the scope and the loop
+    /// depth already raised.
+    fn run_iteration_body(
+        &mut self,
+        variable: Option<&str>,
+        value: Option<Value>,
+        body: &[Stmt],
+    ) -> Result<Option<LoopControl>> {
+        let scope_base = self.locals.len();
+        self.push_scope();
+        let bound = match variable {
+            Some(variable) => {
+                self.declare(variable);
+                self.set_var(variable, value.unwrap_or(Value::Nothing))
+            }
+            None => Ok(()),
+        };
+        let outcome = bound.and_then(|()| self.run_block(body));
+        // Truncated rather than popped, so the stack is balanced even when the
+        // turn failed part way through: a scope left behind keeps the loop's
+        // variable alive for the rest of the program, and it is a different
+        // variable for every one of those turns.
+        self.locals.truncate(scope_base);
+        let signal = outcome?;
+        // The signal was this turn's loop to act on and it has been handed over,
+        // so nothing outside this turn may find it still pending.
+        self.loop_control = None;
+        Ok(signal)
+    }
+
+    /// Runs `statements` and reports the [`LoopControl`] one of them raised,
+    /// leaving the signal in place for the loop that owns it.
+    ///
+    /// Every block in the language runs its statements through here or through
+    /// [`Vm::execute_statements`], because a `break` or a `skip` has to stop the
+    /// block it was written in as well as the loop: `if c then break say "x" end`
+    /// must not run the `say`, and the statements after a `break` inside a
+    /// `try` body must not run either. A block that kept going would leave the
+    /// signal raised while the program ran on past the loop, and the next loop
+    /// to reach a `break` of its own would find it already set.
+    fn run_block(&mut self, statements: &[Stmt]) -> Result<Option<LoopControl>> {
+        self.execute_statements(statements)?;
+        Ok(self.loop_control)
+    }
+
+    /// The signal a `break` or a `skip` raises in the innermost enclosing loop,
+    /// or a [`Error::Runtime`] when there is no loop to raise it in.
+    ///
+    /// The refusal is the point: a `break` in no loop is a mistake in the
+    /// program, and a mistake that runs to completion reporting success is
+    /// worse than one that stops with a message naming the statement.
+    fn raise_loop_control(&mut self, keyword: &str, signal: LoopControl) -> Result<()> {
+        if self.loop_depth == 0 {
+            return Err(Error::Runtime(
+                format!("'{keyword}' is only valid inside a loop"),
+                self.span(),
+            ));
+        }
+        self.loop_control = Some(signal);
         Ok(())
     }
 
@@ -582,14 +699,14 @@ impl Vm {
                 else_branch,
             } => {
                 let cond = self.evaluate(condition)?;
+                // A `break` or a `skip` in either branch ends the branch as
+                // well as the loop: the statements after it in the same branch
+                // are not part of what the program meant to run. The signal is
+                // left pending for the loop, which is what consumes it.
                 if cond.is_truthy() {
-                    for stmt in then_branch {
-                        self.execute_statement(stmt)?;
-                    }
+                    self.run_block(then_branch)?;
                 } else {
-                    for stmt in else_branch {
-                        self.execute_statement(stmt)?;
-                    }
+                    self.run_block(else_branch)?;
                 }
                 Ok(Value::Nothing)
             }
@@ -603,13 +720,11 @@ impl Vm {
                     let mut loop_iterations = 0;
                     for item in items {
                         self.charge_iteration(&mut loop_iterations, "for each")?;
-                        self.push_scope();
-                        self.declare(variable);
-                        self.set_var(variable, item)?;
-                        for stmt in body {
-                            self.execute_statement(stmt)?;
+                        if self.run_iteration(Some(variable), Some(item), body)?
+                            == Some(LoopControl::Break)
+                        {
+                            break;
                         }
-                        self.pop_scope();
                     }
                 }
                 Ok(Value::Nothing)
@@ -635,13 +750,12 @@ impl Vm {
                     let mut loop_iterations = 0;
                     while i <= end {
                         self.charge_iteration(&mut loop_iterations, "for each from")?;
-                        self.push_scope();
-                        self.declare(variable);
-                        self.set_var(variable, Value::number(i, self.span())?)?;
-                        for stmt in body {
-                            self.execute_statement(stmt)?;
+                        let value = Value::number(i, self.span())?;
+                        if self.run_iteration(Some(variable), Some(value), body)?
+                            == Some(LoopControl::Break)
+                        {
+                            break;
                         }
-                        self.pop_scope();
                         // The stepped value is checked too: a step that
                         // overflows the counter is the same failure as one that
                         // would put an infinity in the loop variable.
@@ -656,11 +770,9 @@ impl Vm {
                     let mut loop_iterations = 0;
                     for _ in 0..(n as i64) {
                         self.charge_iteration(&mut loop_iterations, "repeat")?;
-                        self.push_scope();
-                        for stmt in body {
-                            self.execute_statement(stmt)?;
+                        if self.run_iteration(None, None, body)? == Some(LoopControl::Break) {
+                            break;
                         }
-                        self.pop_scope();
                     }
                 }
                 Ok(Value::Nothing)
@@ -669,20 +781,18 @@ impl Vm {
                 let mut loop_iterations = 0;
                 while self.evaluate(condition)?.is_truthy() {
                     self.charge_iteration(&mut loop_iterations, "while")?;
-                    self.push_scope();
-                    for stmt in body {
-                        self.execute_statement(stmt)?;
+                    if self.run_iteration(None, None, body)? == Some(LoopControl::Break) {
+                        break;
                     }
-                    self.pop_scope();
                 }
                 Ok(Value::Nothing)
             }
             Statement::Break => {
-                // TODO: Implement proper control flow
+                self.raise_loop_control("break", LoopControl::Break)?;
                 Ok(Value::Nothing)
             }
             Statement::Skip => {
-                // TODO: Implement proper control flow
+                self.raise_loop_control("skip", LoopControl::Skip)?;
                 Ok(Value::Nothing)
             }
             Statement::Return(expr) | Statement::GiveBack(expr) => match expr {
@@ -716,7 +826,12 @@ impl Vm {
                 catch_body,
                 finally_body,
             } => {
-                let result = self.execute_statements(body);
+                // All three of the protected code, the catch and the finally run
+                // through `run_block`, so a `break` or a `skip` written in any of
+                // them stops the rest of that block. An abrupt exit from the
+                // protected region is not a failure: the catch does not run, the
+                // finally does, and the signal stays pending for the loop.
+                let failure = self.run_block(body).err();
 
                 // A catch is PRESENT whenever the parser saw one, which is not the
                 // same as catch_var being Some: `catch` with no name binding parses
@@ -726,26 +841,15 @@ impl Vm {
                 // swallowed error is the interpreter lying about what happened.
                 let has_catch = catch_var.is_some() || !catch_body.is_empty();
 
-                match (result, has_catch) {
-                    (Err(_), true) => {
-                        self.push_scope();
-                        if let Some(var) = catch_var {
-                            self.declare(var);
-                            self.set_var(var, Value::Text("error".to_string()))?;
-                        }
-                        for stmt in catch_body {
-                            self.execute_statement(stmt)?;
-                        }
-                        self.pop_scope();
-                    }
+                if let Some(failure) = failure {
                     // No catch to handle it: propagate rather than discard.
-                    (Err(e), false) => return Err(e),
-                    (Ok(_), _) => {}
+                    if !has_catch {
+                        return Err(failure);
+                    }
+                    self.run_catch_body(catch_var.as_deref(), catch_body)?;
                 }
 
-                for stmt in finally_body {
-                    self.execute_statement(stmt)?;
-                }
+                self.run_finally_body(finally_body)?;
 
                 Ok(Value::Nothing)
             }
@@ -773,19 +877,72 @@ impl Vm {
             }
             Statement::Test { name: _, body } => {
                 // Execute test body
-                for stmt in body {
-                    self.execute_statement(stmt)?;
-                }
+                self.run_block(body)?;
                 Ok(Value::Nothing)
             }
             Statement::Expr(expr) => self.evaluate(expr),
         }
     }
 
+    /// The `catch` body of a `try`, in a scope of its own, with `catch_var`
+    /// bound to the word `error` if there is one to bind.
+    ///
+    /// The scope is truncated rather than popped on the way out, so a `catch`
+    /// that fails part way through — or that a `break` leaves part way through
+    /// — does not leave the name it binds alive in the enclosing block.
+    fn run_catch_body(&mut self, catch_var: Option<&str>, catch_body: &[Stmt]) -> Result<()> {
+        let scope_base = self.locals.len();
+        self.push_scope();
+        let outcome = match catch_var {
+            Some(var) => {
+                self.declare(var);
+                self.set_var(var, Value::Text("error".to_string()))
+            }
+            None => Ok(()),
+        }
+        .and_then(|()| self.run_block(catch_body));
+        self.locals.truncate(scope_base);
+        outcome?;
+        Ok(())
+    }
+
+    /// The `finally` body of a `try`, on the way out of its region however the
+    /// region was left — by its own end, by a failure its `catch` handled, or by
+    /// a `break` or a `skip` passing through it.
+    ///
+    /// A pending signal is *held* across the body rather than left in place while
+    /// it runs. Two things depend on that. The cleanup is owed, so every
+    /// statement of it runs: a field left pending would stop the block after its
+    /// first statement, which is a `finally` that cleans up one thing and not the
+    /// other. And the `finally` is a block in its own right, so a `break` written
+    /// in it ends *it* — the statements after it in the same block — and names
+    /// the loop the signal already named, which is then still that loop's to
+    /// consume.
+    fn run_finally_body(&mut self, finally_body: &[Stmt]) -> Result<()> {
+        let pending = self.loop_control.take();
+        let outcome = self.run_block(finally_body);
+        // A signal the `finally` raised replaces the one it was holding rather
+        // than joining it: there is one loop to act on it, and the nearest
+        // statement to it asked for that.
+        self.loop_control = self.loop_control.or(pending);
+        outcome?;
+        Ok(())
+    }
+
+    /// Runs `statements` and answers what the last of them produced.
+    ///
+    /// Stops at the first `break` or a `skip` one of them raises and leaves the
+    /// signal pending, because the block is not the thing that consumes it — the
+    /// loop is. The signal is reported through [`Vm::loop_control`] for the
+    /// caller to hand over, rather than returned here, so that every block in
+    /// the language stops at one and none of them can swallow it.
     fn execute_statements(&mut self, statements: &[Stmt]) -> Result<Value> {
         let mut result = Value::Nothing;
         for stmt in statements {
             result = self.execute_statement(stmt)?;
+            if self.loop_control.is_some() {
+                return Ok(result);
+            }
         }
         Ok(result)
     }
@@ -1039,9 +1196,7 @@ impl Vm {
         // A body that is not a field or a method declaration runs in the
         // enclosing scope, in order, and after the type is registered, so a
         // nested `object` in the body may extend this one.
-        for stmt in &rest {
-            self.execute_statement(stmt)?;
-        }
+        self.run_block(&rest)?;
 
         Ok(Value::Nothing)
     }
@@ -1077,12 +1232,25 @@ impl Vm {
             self.set_var(param, value)?;
         }
         self.call_depth += 1;
+        // A function body is not lexically inside the caller's loop, so a
+        // `break` written there has no loop of its own and must be refused
+        // rather than reaching out and ending the caller's iteration. The
+        // depth is restored on the way out, including the failing path.
+        //
+        // The pending signal is saved with it: a call made while a `break` or a
+        // `skip` is raised — from a `finally` running on the way out of a loop —
+        // is still inside the region that raised it, so the signal belongs to
+        // the loop's caller and the call must not touch it.
+        let caller_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        let caller_loop_control = self.loop_control.take();
         // A function value the bytecode VM built names a compiled block instead
         // of statements, and cannot be run by this walker. `rb run` only ever
         // builds statements itself, so reaching this is a caller mixing the two
         // VMs rather than a program that did something.
         let FunctionBody::Statements(body) = &function.body else {
             self.call_depth -= 1;
+            self.loop_depth = caller_loop_depth;
+            self.loop_control = caller_loop_control;
             self.locals.truncate(caller_depth);
             return Err(Error::Runtime(
                 format!(
@@ -1094,6 +1262,8 @@ impl Vm {
         };
         let result = self.execute_statements(body);
         self.call_depth -= 1;
+        self.loop_depth = caller_loop_depth;
+        self.loop_control = caller_loop_control;
         // Truncated rather than popped one at a time, so the stack is balanced
         // even when the body failed part way through and left a scope behind.
         self.locals.truncate(caller_depth);
