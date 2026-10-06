@@ -171,6 +171,28 @@ pub struct Vm {
     /// them goes by. An entry is what makes a second import of the same module a
     /// no-op rather than a second binding of the same names.
     modules: HashMap<String, Program>,
+    /// Every module name an `import` has bound, to the module it names.
+    ///
+    /// An alias — `import json as J` — binds `J`, and `J.parse(...)` has to
+    /// reach the same function `json.parse(...)` does. That is what this table
+    /// is for: a call through a name it holds is a call through the module it
+    /// points at, so the alias is a name for the module rather than a second
+    /// copy of it.
+    module_aliases: HashMap<String, String>,
+    /// The modules whose bodies are running, innermost last. A module that
+    /// reaches itself through an `import` is a circular import, and this is
+    /// what says so instead of walking the cycle.
+    importing: Vec<String>,
+    /// Every `module` declaration that has run, by module name.
+    ///
+    /// An entry is what a second declaration of the same name is refused
+    /// against, and what an `import` of the name finds in place of a file.
+    declared_modules: HashMap<String, DeclaredModule>,
+    /// How many `module` bodies are running. Above zero a `set` writes into the
+    /// module's own scope instead of becoming a global, which is what makes a
+    /// module declaration a boundary rather than a sequence of top-level
+    /// statements.
+    module_depth: usize,
     /// Every `object` declaration, by type name. The table is the inheritance
     /// model: an entry already holds its own fields and methods merged with
     /// everything it inherits, nearest declaration first, so a lookup is a
@@ -188,6 +210,41 @@ pub struct Vm {
     /// The per-loop iteration cap, applied afresh to every loop so nesting does
     /// not multiply it.
     max_iterations: usize,
+}
+
+/// One `module` declaration, after its body has run.
+///
+/// The published names are the members the module's own namespace answers to,
+/// which is what an `export` decides. They are held here rather than in
+/// [`Vm::modules`] because a declared module is one the program itself
+/// declared, not one read out of a file.
+#[derive(Debug, Default, Clone)]
+struct DeclaredModule {
+    /// The published members of a declared module: each name, the
+    /// `module_member` name it is reached by, and its value.
+    members: Vec<(String, String, Value)>,
+}
+
+/// The name a member of module `module` is reached by: `MathUtils.circle_area`
+/// is `MathUtils_circle_area`, which is the same `module_function` name the
+/// builtin namespaces use, so both kinds are called by the one lookup.
+fn qualified_member(module: &str, member: &str) -> String {
+    format!("{module}_{member}")
+}
+
+/// What a module body's last `export` says: the names it lists, and whether it
+/// says `all`. `None` is a body with no `export` at all.
+///
+/// The *last* `export` is what counts, because that is the one written where
+/// the declaration closes — the position `docs/GRAMMAR.md` § 3.1 gives it.
+fn module_exports(body: &[Stmt]) -> Option<(Vec<String>, bool)> {
+    let mut found = None;
+    for stmt in body {
+        if let Statement::Export { names, all } = &stmt.statement {
+            found = Some((names.clone(), *all));
+        }
+    }
+    found
 }
 
 /// One `object` declaration, after its parent has been merged into it.
@@ -253,7 +310,7 @@ pub fn module_bound_names(name: &str) -> Vec<String> {
         return Vec::new();
     };
 
-    ast.statements
+    redblue_parser::module_body(&ast)
         .iter()
         .filter_map(|stmt| match &stmt.statement {
             Statement::Set { name, .. } | Statement::Constant { name, .. } => Some(name.clone()),
@@ -271,6 +328,10 @@ impl Vm {
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
             modules: HashMap::new(),
+            module_aliases: HashMap::new(),
+            importing: Vec::new(),
+            declared_modules: HashMap::new(),
+            module_depth: 0,
             objects: HashMap::new(),
             expectation_failure: None,
             current_span: Span::unknown(),
@@ -381,8 +442,21 @@ impl Vm {
             return Ok(());
         }
 
-        let program = runtime::module_program(path)?;
-        let bound = runtime::module_bindings(&program, |expr| self.evaluate(expr))?;
+        self.importing.push(name.to_string());
+        let program = match runtime::module_program(path) {
+            Ok(program) => program,
+            Err(error) => {
+                self.importing.pop();
+                return Err(error);
+            }
+        };
+        let bound = match runtime::module_bindings(&program, |expr| self.evaluate(expr)) {
+            Ok(bound) => bound,
+            Err(error) => {
+                self.importing.pop();
+                return Err(error);
+            }
+        };
         for (name, value, is_const) in bound {
             if is_const {
                 self.bind_constant(&name, value)?;
@@ -390,9 +464,156 @@ impl Vm {
                 self.bind_module_name(&name, value)?;
             }
         }
+        self.importing.pop();
+
+        // The module's functions are reached as `Name.function`, which is the
+        // `module_function` name a builtin namespace member has too, so the two
+        // kinds of module are called the same way. Binding them is what makes
+        // `import MathUtils as M` then `M.circle_area(5)` run.
+        //
+        // They are built in a scope of the module's own, so a function the
+        // module declares is not a name the importing program reads.
+        self.push_scope();
+        let mut failure = None;
+        for stmt in crate::parser::module_body(&program) {
+            if failure.is_some() {
+                continue;
+            }
+            if matches!(stmt.statement, Statement::Function { .. }) {
+                if let Err(error) = self.execute_statement(stmt) {
+                    failure = Some(error);
+                }
+            }
+        }
+        if failure.is_none() {
+            for member in crate::parser::module_declared_names(crate::parser::module_body(&program))
+            {
+                let Some(value) = self.declare_member(&member) else {
+                    continue;
+                };
+                self.globals.insert(qualified_member(name, &member), value);
+            }
+        }
+        self.pop_scope();
+        if let Some(error) = failure {
+            return Err(error);
+        }
 
         self.modules.insert(name.to_string(), program);
         Ok(())
+    }
+
+    /// Whether `name` names a module this program can call into: a module file
+    /// it imported, a module it declared, or a builtin namespace.
+    fn is_module_name(&self, name: &str) -> bool {
+        self.modules.contains_key(name)
+            || self.declared_modules.contains_key(name)
+            || stdlib::is_module(name)
+    }
+
+    /// The value of a name a module body declares, or `None` when it declares
+    /// nothing of that name — an `export` of a name the module does not define
+    /// is what notices the absence, not this.
+    fn declare_member(&mut self, name: &str) -> Option<Value> {
+        let index = self
+            .locals
+            .iter()
+            .rposition(|scope| scope.contains_key(name))?;
+        self.locals[index].get(name).cloned()
+    }
+
+    /// Runs a `module Name ... export ... end` declaration.
+    ///
+    /// The body runs in a scope of its own, so a `set` inside a module is not a
+    /// name of the program that declared it — the module is a boundary, which
+    /// is the whole point of the declaration. What the module publishes is
+    /// bound back as `Name.member`, the name a call through the module reaches.
+    fn declare_module(&mut self, name: &str, body: &[Stmt]) -> Result<Value> {
+        if self.declared_modules.contains_key(name) {
+            return Err(Error::Runtime(
+                format!("Module '{name}' is already declared"),
+                self.span(),
+            ));
+        }
+
+        // What the module publishes is decided from its own declarations,
+        // before anything runs: an `export` of a name the module does not
+        // define is a fault in the declaration, and reporting it here leaves
+        // the module unregistered rather than half-declared.
+        let declared = crate::parser::module_declared_names(body);
+        let exported = match module_exports(body) {
+            // No `export` at all: a module publishes nothing, which is not an
+            // error — the declaration says what it offers and offers nothing.
+            None => Vec::new(),
+            Some((_, true)) => declared.clone(),
+            Some((names, false)) => {
+                for exported in &names {
+                    if !declared.contains(exported) {
+                        return Err(Error::Runtime(
+                            format!(
+                                "Module '{name}' exports '{exported}', which it does not define"
+                            ),
+                            self.span(),
+                        ));
+                    }
+                }
+                names
+            }
+        };
+
+        // Registered before the body runs, so an `import` of this module from
+        // inside its own body is a circular import rather than a second
+        // declaration or a miss.
+        self.declared_modules
+            .insert(name.to_string(), DeclaredModule::default());
+        self.importing.push(name.to_string());
+
+        self.push_scope();
+        self.module_depth += 1;
+        let mut failure = None;
+        for stmt in body {
+            if failure.is_some() {
+                continue;
+            }
+            // The `export` has already been read; running it again would
+            // publish nothing.
+            if !matches!(stmt.statement, Statement::Export { .. }) {
+                if let Err(error) = self.execute_statement(stmt) {
+                    failure = Some(error);
+                }
+            }
+        }
+
+        // Read while the module's scope is still live: a member that is not
+        // bound is not published, which is what stops a module offering a
+        // function whose declaration failed.
+        let mut members = Vec::new();
+        if failure.is_none() {
+            for member in &exported {
+                let Some(value) = self.declare_member(member) else {
+                    continue;
+                };
+                let qualified = qualified_member(name, member);
+                self.globals.insert(qualified.clone(), value.clone());
+                members.push((member.clone(), qualified, value));
+            }
+        }
+
+        self.module_depth -= 1;
+        self.pop_scope();
+        self.importing.pop();
+
+        if let Some(error) = failure {
+            self.declared_modules.remove(name);
+            return Err(error);
+        }
+
+        self.declared_modules
+            .insert(name.to_string(), DeclaredModule { members });
+        self.module_aliases
+            .entry(name.to_string())
+            .or_insert_with(|| name.to_string());
+        Ok(Value::Nothing)
     }
 
     pub fn run(&mut self, program: &Program) -> Result<Value> {
@@ -516,6 +737,16 @@ impl Vm {
                 scope.insert(name.to_string(), value);
                 return Ok(());
             }
+        }
+        if self.module_depth > 0 {
+            // A `set` in a module body is the module's own name, not a global
+            // of the program that declared it — the boundary `module ... end`
+            // exists to draw. A name already held by an enclosing scope is
+            // still that scope's, which the loop above has already answered.
+            if let Some(scope) = self.locals.last_mut() {
+                scope.insert(name.to_string(), value);
+            }
+            return Ok(());
         }
         self.refuse_constant_rebind(name)?;
         self.globals.insert(name.to_string(), value);
@@ -768,26 +999,75 @@ impl Vm {
             }
             Statement::Import(items) => {
                 for item in items {
-                    let Some(path) = module_path(&item.name) else {
+                    if self.importing.iter().any(|name| name == &item.name) {
+                        // A module reaching itself is a cycle, and saying so is
+                        // the difference between a clean error and a walk that
+                        // never ends. The scan is over the chain of imports
+                        // currently being loaded, which is as deep as the
+                        // chain of module files — a bounded walk, not a walk
+                        // that grows with the program.
+                        return Err(Error::Runtime(
+                            format!("Circular import of module '{}'", item.name),
+                            self.span(),
+                        ));
+                    }
+
+                    if let Some(path) = module_path(&item.name) {
+                        // The path is there but may not be readable: that is an
+                        // Io error, not a miss, so it is reported rather than
+                        // folded into the "cannot find" below.
+                        self.load_module(&path, &item.name)?;
+                    } else if !self.declared_modules.contains_key(&item.name)
+                        && !stdlib::is_module(&item.name)
+                    {
                         return Err(Error::Runtime(
                             format!("Cannot find module '{}'", item.name),
                             self.span(),
                         ));
-                    };
-                    // The path is there but may not be readable: that is an Io
-                    // error, not a miss, so it is reported rather than folded
-                    // into the "cannot find" above.
-                    self.load_module(&path, &item.name)?;
+                    }
 
-                    let target_name = item.alias.as_ref().unwrap_or(&item.name);
-                    // The name the import itself binds goes through the same
-                    // refusal as the names the module contributes: it is a
-                    // program-level name like they are.
-                    let target_name = target_name.clone();
-                    self.bind_module_name(&target_name, Value::Nothing)?;
+                    let target_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
+                    // The alias is a name for the module, so a call through it
+                    // reaches the module it names.
+                    self.module_aliases
+                        .insert(target_name.clone(), item.name.clone());
+                    // The module's own name names it too — `import json as J`
+                    // leaves `json.parse` working — unless the program has bound
+                    // that name already, which is the shadowing rule every
+                    // declaration in the language follows.
+                    self.module_aliases
+                        .entry(item.name.clone())
+                        .or_insert_with(|| item.name.clone());
+
+                    // A module this program declared has no file to read, so
+                    // its published members are copied to the alias's own
+                    // `alias_member` names here rather than by the loader.
+                    if let Some(declared) = self.declared_modules.get(&item.name) {
+                        let members: Vec<(String, String, Value)> = declared.members.clone();
+                        for (member, _, value) in members {
+                            self.globals
+                                .insert(qualified_member(&target_name, &member), value);
+                        }
+                    }
+
+                    // The names the import itself binds go through the same
+                    // refusal as the names the module contributes: they are
+                    // program-level names like they are. A name the program
+                    // already holds is that program's, and an import does not
+                    // take it over.
+                    if self.get_var(&item.name).is_none() {
+                        self.bind_module_name(&item.name, Value::Nothing)?;
+                    }
+                    if self.get_var(&target_name).is_none() {
+                        self.bind_module_name(&target_name, Value::Nothing)?;
+                    }
                 }
                 Ok(Value::Nothing)
             }
+            Statement::Module { name, body } => self.declare_module(name, body),
+            // An `export` outside a module declaration publishes nothing: there
+            // is no module for it to publish into.
+            Statement::Export { .. } => Ok(Value::Nothing),
             Statement::Test { name: _, body } => {
                 // Execute test body
                 for stmt in body {
@@ -931,7 +1211,26 @@ impl Vm {
 
         let object = match self.objects.get(&name) {
             Some(object) => object.clone(),
-            None => return self.call(&format!("{}_{}", name, method), &args),
+            None => {
+                // A module function: the receiver names a module, so the
+                // function is `module_function`. An alias is resolved to the
+                // module it names first, so `import json as J` then
+                // `J.parse(..)` reaches the same function `json.parse(..)`
+                // does.
+                let module = self
+                    .module_aliases
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone());
+                let qualified = qualified_member(&module, method);
+                if self.get_var(&qualified).is_none() && self.is_module_name(&module) {
+                    return Err(Error::Runtime(
+                        format!("Module '{module}' has no function '{method}'"),
+                        self.span(),
+                    ));
+                }
+                return self.call(&qualified, &args);
+            }
         };
 
         let function = match object.methods.get(method) {

@@ -53,7 +53,7 @@ pub fn module_bindings(
     // unreachable — see FINDINGS.md. The two declarations below are the whole of
     // what an import currently contributes.
     let mut bound = Vec::new();
-    for stmt in &program.statements {
+    for stmt in crate::parser::module_body(program) {
         let (name, value, is_const) = match &stmt.statement {
             Statement::Set { name, value } => (name, value, false),
             Statement::Constant { name, value } => (name, value, true),

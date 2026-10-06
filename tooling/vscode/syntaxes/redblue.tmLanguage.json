@@ -8,7 +8,7 @@
     {"name":"comment.line.double-slash.redblue","match":"//.*$"},
     {"name":"constant.language.redblue","match":"\\b(?:yes|no|nothing)\\b"},
     {"name":"constant.numeric.redblue","match":"(?:\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|\\.\\d+)"},
-    {"name":"keyword.control.redblue","match":"\\b(?:set|constant|to|is|are|if|then|else|end|when|unless|for|each|in|from|times|while|repeat|until|break|skip|return|give|back|might|fail|say|print|ask|try|catch|finally|and|or|not|mod|yes|no|nothing|module|import|export|test|expect|object|has|can|this|that|new|extends|async|wait|parallel|done)\\b"},
+    {"name":"keyword.control.redblue","match":"\\b(?:set|constant|to|is|are|if|then|else|end|when|unless|for|each|in|from|times|while|repeat|until|break|skip|return|give|back|might|fail|say|print|ask|try|catch|finally|and|or|not|mod|yes|no|nothing|module|import|export|as|test|expect|object|has|can|this|that|new|extends|async|wait|parallel|done)\\b"},
     {"name":"entity.name.function.redblue","match":"\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"},
     {"name":"keyword.operator.redblue","match":"==|!=|<=|>=|<|>|\\+|-|\\*|/|%"},
     {"name":"punctuation.separator.redblue","match":"[,.()\\[\\]{}]"}

@@ -377,6 +377,25 @@ impl Formatter {
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
+            Statement::Module { name, body } => {
+                self.write("module ");
+                self.write(name);
+                self.newline();
+                self.format_block(body);
+                self.write_keyword_line("end");
+            }
+            Statement::Export { names, all } => {
+                self.write("export ");
+                if *all {
+                    self.write("all");
+                }
+                for (i, exported) in names.iter().enumerate() {
+                    if *all || i > 0 {
+                        self.write(", ");
+                    }
+                    self.write(exported);
+                }
+            }
             Statement::Try {
                 body,
                 catch_var,

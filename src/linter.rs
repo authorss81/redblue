@@ -333,6 +333,10 @@ impl Linter {
                     }
                 }
             }
+            Statement::Module { body, .. } => {
+                self.analyze_body(body);
+            }
+            Statement::Export { .. } => {}
             Statement::Test { body, .. } => {
                 self.analyze_body(body);
             }
