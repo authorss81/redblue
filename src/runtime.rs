@@ -644,18 +644,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         // Type conversion
         "type_of" => {
-            let type_name = match args.first() {
-                Some(Value::Number(_)) => "number",
-                Some(Value::Text(_)) => "text",
-                Some(Value::YesNo(_)) => "yes/no",
-                Some(Value::Nothing) => "nothing",
-                Some(Value::List(_)) => "list",
-                Some(Value::Record(_)) => "record",
-                Some(Value::Function(_)) => "function",
-                Some(Value::Builtin(_)) => "builtin",
-                Some(Value::Object(_, _)) => "object",
-                None => "nothing",
-            };
+            let type_name = args.first().map(|v| v.type_name()).unwrap_or("nothing");
             Ok(Some(Value::Text(type_name.to_string())))
         }
         _ => Ok(None),

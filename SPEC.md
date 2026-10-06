@@ -388,7 +388,24 @@ end
 for each i from 0 to 100 by 5
     say i
 end
+
+// A negative step counts down
+for each i from 5 to 1 by -1
+    say i
+end
 ```
+
+Both ends are inclusive: `from 3 to 3` visits 3 once, and a range whose step can
+never reach its end — `from 5 to 1` — visits nothing at all.
+
+The step decides the direction. A positive step counts up while the counter is
+at or below `to`; a negative one counts down while it is at or above it. An
+omitted step is `1`. A zero step never moves the counter, so the loop is endless
+and is stopped by the same iteration limit every other loop obeys.
+
+`from`, `to` and `by` must all be numbers. A bound that is not one is a
+`RuntimeError` naming the argument and the type it was given, not a loop that
+quietly runs zero times.
 
 ### Repeat Loop
 

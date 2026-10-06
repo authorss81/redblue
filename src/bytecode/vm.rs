@@ -47,7 +47,8 @@ use crate::parser::{self, BinaryOp, Program, Statement, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
-    finite_number, Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Value,
+    expect_range_number, finite_number, range_has_next, Captured, CapturedScope, Fields,
+    FunctionBody, FunctionValue, Value,
 };
 use crate::vm::{
     resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps,
@@ -143,8 +144,10 @@ enum Sequence {
 fn peek(sequence: &Sequence) -> Option<Value> {
     match sequence {
         Sequence::Each { items, index } => items.get(*index).cloned(),
-        Sequence::Range { current, end, .. } => {
-            if current <= end {
+        Sequence::Range {
+            current, end, step, ..
+        } => {
+            if range_has_next(*current, *end, *step) {
                 Some(Value::Number(*current))
             } else {
                 None
@@ -176,7 +179,7 @@ fn take(sequence: &mut Sequence, span: Span) -> Result<Option<Value>> {
             Ok(Some(value))
         }
         Sequence::Range { current, end, step } => {
-            if current > end {
+            if !range_has_next(*current, *end, *step) {
                 return Ok(None);
             }
             let value = *current;
@@ -1275,21 +1278,19 @@ impl BytecodeVm {
                 },
             },
             _ => {
-                let (Some(Value::Number(start)), Some(Value::Number(end))) =
-                    (operands.first(), operands.get(1))
-                else {
-                    // Bounds that are not numbers run no times, which is what the
-                    // tree-walking VM does with them.
-                    self.push_loop(Some(Sequence::Repeat { remaining: 0 }), frame);
-                    return Ok(());
-                };
-                let step = match operands.get(2) {
-                    Some(Value::Number(n)) => *n,
-                    _ => 1.0,
-                };
+                let span = self.span();
+                let start =
+                    expect_range_number(operands.first().unwrap_or(&Value::Nothing), "from", span)?;
+                let end =
+                    expect_range_number(operands.get(1).unwrap_or(&Value::Nothing), "to", span)?;
+                let step = expect_range_number(
+                    operands.get(2).unwrap_or(&Value::Number(1.0)),
+                    "by",
+                    span,
+                )?;
                 Sequence::Range {
-                    current: *start,
-                    end: *end,
+                    current: start,
+                    end,
                     step,
                 }
             }

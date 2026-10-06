@@ -712,33 +712,92 @@ impl Parser {
                     }
                 };
 
-                self.expect(&TokenKind::In)?;
-                let iterable = self.parse_expression()?;
-                self.skip_newlines();
+                // `from A to B [by C]` and `in <iterable>` share the loop
+                // variable and the body; only what sits between them differs.
+                if self.current().map(|t| &t.kind) == Some(&TokenKind::From) {
+                    self.advance();
 
-                let mut body = Vec::new();
-                while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
-                    && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
-                {
-                    if let Some(stmt) = self.parse_statement()? {
-                        body.push(stmt);
-                    }
-                    self.skip_newlines();
+                    let start = self.parse_expression()?;
+                    self.expect(&TokenKind::To)?;
+                    let end = self.parse_expression()?;
+
+                    let step = if self.at_range_step_marker() {
+                        self.advance();
+                        Some(self.parse_expression()?)
+                    } else {
+                        None
+                    };
+
+                    let body = self.parse_loop_body()?;
+
+                    Ok(Some(Statement::ForRange {
+                        variable,
+                        start,
+                        end,
+                        step,
+                        body,
+                    }))
+                } else {
+                    self.expect(&TokenKind::In)?;
+                    let iterable = self.parse_expression()?;
+                    let body = self.parse_loop_body()?;
+
+                    Ok(Some(Statement::ForEach {
+                        variable,
+                        iterable,
+                        body,
+                    }))
                 }
-
-                self.expect(&TokenKind::End)?;
-
-                Ok(Some(Statement::ForEach {
-                    variable,
-                    iterable,
-                    body,
-                }))
             }
             _ => Err(Error::Parser(
                 "Expected 'each' after 'for'".to_string(),
                 self.span(),
             )),
         }
+    }
+
+    /// Whether the token at the cursor is the `by` of a range loop's optional
+    /// step.
+    ///
+    /// `by` is read positionally rather than taken from the `KEYWORDS` table
+    /// (`src/lexer.rs:14-69`) because it is not a reserved word: reserving it
+    /// would refuse `to can grow(by)` / `say by`, a parameter name the language
+    /// has always allowed (`tests/bytecode_test.rs:602`). It means "step" in
+    /// this one place and nowhere else, which is what a positional marker buys.
+    /// `TokenKind::By` is accepted too, so the token is honoured if `by` is ever
+    /// added to the table without this arm needing to change.
+    fn at_range_step_marker(&self) -> bool {
+        match self.current() {
+            Some(Token {
+                kind: TokenKind::By,
+                ..
+            }) => true,
+            Some(Token {
+                kind: TokenKind::Identifier(name),
+                ..
+            }) => name == "by",
+            _ => false,
+        }
+    }
+
+    /// Parses the `{ statement } 'end'` tail every loop form shares, consuming
+    /// the `end`.
+    fn parse_loop_body(&mut self) -> Result<Vec<Stmt>> {
+        self.skip_newlines();
+
+        let mut body = Vec::new();
+        while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
+            && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
+        {
+            if let Some(stmt) = self.parse_statement()? {
+                body.push(stmt);
+            }
+            self.skip_newlines();
+        }
+
+        self.expect(&TokenKind::End)?;
+
+        Ok(body)
     }
 
     fn parse_repeat(&mut self) -> Result<Option<Statement>> {

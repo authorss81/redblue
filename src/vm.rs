@@ -12,7 +12,8 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
-    finite_number, Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Value,
+    expect_range_number, finite_number, range_has_next, Captured, CapturedScope, Fields,
+    FunctionBody, FunctionValue, Value,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -628,25 +629,30 @@ impl Vm {
                     None => Value::Number(1.0),
                 };
 
-                if let (Value::Number(start), Value::Number(end), Value::Number(step)) =
-                    (start_val, end_val, step_val)
-                {
-                    let mut i = start;
-                    let mut loop_iterations = 0;
-                    while i <= end {
-                        self.charge_iteration(&mut loop_iterations, "for each from")?;
-                        self.push_scope();
-                        self.declare(variable);
-                        self.set_var(variable, Value::number(i, self.span())?)?;
-                        for stmt in body {
-                            self.execute_statement(stmt)?;
-                        }
-                        self.pop_scope();
-                        // The stepped value is checked too: a step that
-                        // overflows the counter is the same failure as one that
-                        // would put an infinity in the loop variable.
-                        i = finite_number(i + step, self.span())?;
+                let span = self.span();
+                let start = expect_range_number(&start_val, "from", span)?;
+                let end = expect_range_number(&end_val, "to", span)?;
+                let step = expect_range_number(&step_val, "by", span)?;
+
+                let mut i = start;
+                let mut loop_iterations = 0;
+                // The step's sign is the direction of travel, so a negative
+                // `by` counts down. A zero step never leaves the bound, and the
+                // iteration guard is what stops it: a range is not special
+                // enough to get its own escape.
+                while range_has_next(i, end, step) {
+                    self.charge_iteration(&mut loop_iterations, "for each from")?;
+                    self.push_scope();
+                    self.declare(variable);
+                    self.set_var(variable, Value::number(i, self.span())?)?;
+                    for stmt in body {
+                        self.execute_statement(stmt)?;
                     }
+                    self.pop_scope();
+                    // The stepped value is checked too: a step that
+                    // overflows the counter is the same failure as one that
+                    // would put an infinity in the loop variable.
+                    i = finite_number(i + step, self.span())?;
                 }
                 Ok(Value::Nothing)
             }

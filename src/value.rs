@@ -165,6 +165,42 @@ pub fn finite_number(n: f64, span: Span) -> Result<f64> {
     }
 }
 
+/// The bound of a `for each x from <argument> ...` loop, refused when it is
+/// not a number.
+///
+/// `from`, `to` and `by` are all bounds of the same arithmetic, so all three
+/// are named in the failure. Silently skipping a loop whose bounds are text
+/// would leave the reader with a program that runs and does nothing.
+pub fn expect_range_number(value: &Value, argument: &str, span: Span) -> Result<f64> {
+    match value {
+        Value::Number(n) => Ok(*n),
+        other => Err(Error::Runtime(
+            format!(
+                "The '{}' value of a range loop must be a number, but it is {}",
+                argument,
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+/// Whether a `for each x from current to end by step` range has another value
+/// to visit.
+///
+/// The step's sign decides the direction: a positive step counts up while
+/// `current <= end`, a negative one counts down while `current >= end`. A zero
+/// step is not special-cased here — it never reaches `end`, so the caller's
+/// iteration guard stops the loop, which is the same error a `while` that never
+/// ends gives.
+pub fn range_has_next(current: f64, end: f64, step: f64) -> bool {
+    if step < 0.0 {
+        current >= end
+    } else {
+        current <= end
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Nothing,
@@ -220,6 +256,22 @@ impl Value {
     /// that print as `not a number` and compare false against everything.
     pub fn number(n: f64, span: Span) -> Result<Value> {
         finite_number(n, span).map(Value::Number)
+    }
+
+    /// The name `type_of` reports, and the name a `Runtime` error quotes when
+    /// it has to say what it was handed instead of the type it wanted.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Nothing => "nothing",
+            Value::Number(_) => "number",
+            Value::Text(_) => "text",
+            Value::YesNo(_) => "yes/no",
+            Value::List(_) => "list",
+            Value::Record(_) => "record",
+            Value::Object(_, _) => "object",
+            Value::Function(_) => "function",
+            Value::Builtin(_) => "builtin",
+        }
     }
 
     pub fn is_truthy(&self) -> bool {

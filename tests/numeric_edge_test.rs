@@ -489,10 +489,13 @@ fn edge_a_literal_too_small_to_hold_is_the_number_zero() {
 
 #[test]
 fn edge_a_numeric_for_range_cannot_step_into_a_non_finite_number() {
-    // `for each x from 1 to 10` does not parse, so `Statement::ForRange` is
-    // unreachable from source. It is still a place a number is built, so its
-    // counter goes through the same door: a step that overflows the counter is
-    // a runtime error, not an infinity that ends the loop by accident.
+    // `for each x from 1 to 10` did not parse when this was written, so
+    // `Statement::ForRange` was reachable only from a hand-built AST. It parses
+    // now (phase-028), and this test still builds the AST by hand because the
+    // overflow it covers needs a `from` larger than the grammar would be read
+    // as: `for each x from 1e308 to 1.5e308 by 1e308`. The counter goes through
+    // the same door as any computed number — a step that overflows it is a
+    // runtime error, not an infinity that ends the loop by accident.
     let program = redblue::parser::Program {
         statements: vec![redblue::parser::Stmt {
             span: redblue::Span::new(1, 1),
