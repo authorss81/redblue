@@ -1204,6 +1204,100 @@ impl Parser {
         Ok(left)
     }
 
+    /// Whether the token `offset` positions after the current one is an
+    /// identifier spelled `word`. The word forms of comparison (`greater`,
+    /// `less`, `than`, `equal`) are plain identifiers to the lexer, so they
+    /// are matched by name here rather than by token kind.
+    fn is_word_ahead(&self, offset: usize, word: &str) -> bool {
+        matches!(
+            self.tokens.get(self.pos + offset),
+            Some(Token {
+                kind: TokenKind::Identifier(found),
+                ..
+            }) if found == word
+        )
+    }
+
+    /// Whether the whole `or equal to` tail of a compound word comparison sits
+    /// at the current position. It is matched as one phrase rather than as an
+    /// `or` for `parse_or` to bind later, so `x is greater than or equal to y`
+    /// is one comparison and not `(x is greater than y) or equal to y`.
+    fn or_equal_to_ahead(&self) -> bool {
+        matches!(
+            self.current(),
+            Some(Token {
+                kind: TokenKind::Or,
+                ..
+            })
+        ) && self.is_word_ahead(1, "equal")
+            && matches!(
+                self.tokens.get(self.pos + 2),
+                Some(Token {
+                    kind: TokenKind::To,
+                    ..
+                })
+            )
+    }
+
+    /// Reads the comparison operator that follows an `is`, in either its word
+    /// form (`is greater than or equal to`) or its symbolic one (`is =`,
+    /// `is not`). Bare `is` is equality.
+    ///
+    /// A word only counts as an operator when the *whole* phrase is there: a
+    /// variable named `greater` or `than` still compares for equality, so
+    /// nothing is consumed on a partial match and the rest of the line is
+    /// parsed exactly as it was before this phase.
+    fn parse_is_operator(&mut self) -> BinaryOp {
+        if self.is_word_ahead(0, "equal") && matches!(self.current_at(1), Some(TokenKind::To)) {
+            self.advance();
+            self.advance();
+            return BinaryOp::Equal;
+        }
+
+        let adjectives = [
+            ("greater", BinaryOp::Greater, BinaryOp::GreaterEqual),
+            ("less", BinaryOp::Less, BinaryOp::LessEqual),
+        ];
+        for (adjective, strict_op, loose_op) in adjectives {
+            if !(self.is_word_ahead(0, adjective) && self.is_word_ahead(1, "than")) {
+                continue;
+            }
+            self.advance();
+            self.advance();
+            if self.or_equal_to_ahead() {
+                self.advance();
+                self.advance();
+                self.advance();
+                return loose_op;
+            }
+            return strict_op;
+        }
+
+        match self.current() {
+            Some(Token {
+                kind: TokenKind::Equal,
+                ..
+            }) => {
+                self.advance();
+                BinaryOp::Equal
+            }
+            Some(Token {
+                kind: TokenKind::Not,
+                ..
+            }) => {
+                self.advance();
+                BinaryOp::NotEqual
+            }
+            // "is" alone means equality
+            _ => BinaryOp::Equal,
+        }
+    }
+
+    /// The kind of the token `offset` positions after the current one.
+    fn current_at(&self, offset: usize) -> Option<&TokenKind> {
+        self.tokens.get(self.pos + offset).map(|token| &token.kind)
+    }
+
     fn parse_comparison(&mut self) -> Result<Expr> {
         let mut left = self.parse_addition()?;
         let mut chained = 0usize;
@@ -1215,24 +1309,7 @@ impl Parser {
                     ..
                 }) => {
                     self.advance();
-                    // Check for compound comparisons
-                    if let Some(Token {
-                        kind: TokenKind::Equal,
-                        ..
-                    }) = self.current()
-                    {
-                        self.advance();
-                        BinaryOp::Equal
-                    } else if let Some(Token {
-                        kind: TokenKind::Not,
-                        ..
-                    }) = self.current()
-                    {
-                        self.advance();
-                        BinaryOp::NotEqual
-                    } else {
-                        BinaryOp::Equal // "is" alone means equality
-                    }
+                    self.parse_is_operator()
                 }
                 Some(Token {
                     kind: TokenKind::Equal,

@@ -183,3 +183,103 @@ test "comparisons: a comparison inside a loop counts what clears the bar"
     end
     expect wide to be 3
 end
+test "comparisons: the word forms take the branch they name"
+    set x to 20
+    set taken to "none"
+    if x is greater than 10 then
+        set taken to "greater"
+    end
+    expect taken to be "greater"
+    if x is greater than or equal to 20 then
+        set taken to "greater or equal"
+    end
+    expect taken to be "greater or equal"
+    if x is less than 10 then
+        set taken to "less"
+    end
+    expect taken to be "greater or equal"
+    if x is less than or equal to 20 then
+        set taken to "less or equal"
+    end
+    expect taken to be "less or equal"
+    if x is equal to 20 then
+        set taken to "equal"
+    end
+    expect taken to be "equal"
+    if x is not 10 then
+        set taken to "not"
+    end
+    expect taken to be "not"
+end
+
+test "edge comparisons: `or equal to` is one comparison, not a logical or"
+    set x to 5
+    set y to 5
+    expect x is greater than or equal to y to be yes
+    expect x is greater than y to be no
+    expect x is less than or equal to y to be yes
+    expect x is less than y to be no
+    set z to 6
+    expect x is greater than or equal to z to be no
+    expect z is greater than or equal to x to be yes
+    // A real `or` still binds looser than the word comparison on either side.
+    expect x is greater than z or x is less than z to be yes
+    expect x is greater than z or x is greater than z to be no
+end
+
+// `expect x is equal to be no` cannot be written, because `is equal to`
+// would swallow the `to` that `expect` needs. So this one uses `if`.
+test "edge comparisons: a variable named greater or equal still compares for equality"
+    set greater to 5
+    set equal to 7
+    set x to 5
+    expect x is greater to be yes
+    set taken to no
+    if x is equal then
+        set taken to yes
+    end
+    expect taken to be no
+end
+
+test "edge comparisons: ordering a number against text in the word form is catchable"
+    set entered to yes
+    set caught to no
+    try
+        set entered to no
+        if 1 is greater than "a" then
+            set entered to "branch"
+        end
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+    expect entered to be no
+end
+
+test "edge comparisons: ordering a record against a number in the word form is catchable"
+    set entered to yes
+    set caught to no
+    try
+        set entered to no
+        if {a: 1} is less than 1 then
+            set entered to "branch"
+        end
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+    expect entered to be no
+end
+
+test "edge comparisons: a range check in the word forms uses both ends inclusively"
+    set x to 100
+    set in_range to no
+    if x is greater than 0 and x is less than 100 then
+        set in_range to yes
+    end
+    expect in_range to be no
+    if x is greater than or equal to 0 and x is less than or equal to 100 then
+        set in_range to yes
+    end
+    expect in_range to be yes
+end
