@@ -2020,8 +2020,7 @@ impl BytecodeVm {
         let tokens = Lexer::tokenize(&source)?;
         let ast = parser::parse(tokens)?;
         let program = Program {
-            statements: ast
-                .statements
+            statements: parser::module_body(&ast)
                 .iter()
                 .filter(|stmt| {
                     matches!(

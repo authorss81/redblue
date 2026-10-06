@@ -326,9 +326,29 @@ impl Analyzer {
                     for name in crate::vm::module_bound_names(&item.name) {
                         self.declare(&name);
                     }
-                    self.declare(item.alias.as_ref().unwrap_or(&item.name));
+                    // Both the name the import gives the module and the alias
+                    // it may give it under are names of the program: an
+                    // import's own name is readable (`import json as J` leaves
+                    // `json.parse` working), so both are declared.
+                    self.declare(&item.name);
+                    if let Some(alias) = &item.alias {
+                        self.declare(alias);
+                    }
                 }
             }
+            // A module declaration is a boundary: its body is analyzed in a
+            // scope of its own, so a `set` inside a module is not a name the
+            // importing program reads, and an `export` publishes a name rather
+            // than declaring one here.
+            Statement::Module { name, body } => {
+                self.declare(name);
+                self.push_scope();
+                for stmt in body {
+                    self.analyze_statement(stmt);
+                }
+                self.pop_scope();
+            }
+            Statement::Export { .. } => {}
             Statement::Expr(expr) => {
                 self.analyze_expr(expr, &span);
             }
@@ -493,6 +513,7 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
             Statement::Function { body, .. }
             | Statement::Method { body, .. }
             | Statement::Object { body, .. }
+            | Statement::Module { body, .. }
             | Statement::Test { body, .. } => collect_later_names(body, out),
             Statement::Try {
                 body,
@@ -513,6 +534,7 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
             | Statement::Break
             | Statement::Skip
             | Statement::Has { .. }
+            | Statement::Export { .. }
             | Statement::Expr(_) => {}
         }
     }

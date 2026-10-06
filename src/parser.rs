@@ -220,6 +220,18 @@ pub enum Statement {
     // import module
     Import(Vec<ImportItem>),
 
+    // module Name ... export ... end
+    Module {
+        name: String,
+        body: Vec<Stmt>,
+    },
+
+    // export name, ... | export all
+    Export {
+        names: Vec<String>,
+        all: bool,
+    },
+
     // test "name" ... end
     Test {
         name: String,
@@ -243,6 +255,48 @@ pub struct Stmt {
 #[derive(Debug, Clone)]
 pub struct Program {
     pub statements: Vec<Stmt>,
+}
+
+/// The statements a module file's body is: the inside of its `module ...
+/// end` declaration where it has one, and its top level where it does not.
+///
+/// The two spellings of a module are the same module — `module MathUtils ...
+/// export all end` and a bare file of `constant` and `to` are both read as the
+/// declarations they hold — so everything that reads a module's names reads
+/// them through here.
+pub fn module_body(program: &Program) -> &[Stmt] {
+    let declarations: Vec<&Stmt> = program
+        .statements
+        .iter()
+        .filter(|stmt| matches!(stmt.statement, Statement::Module { .. }))
+        .collect();
+    if let [only] = declarations.as_slice() {
+        return match &only.statement {
+            Statement::Module { body, .. } => body,
+            _ => &program.statements,
+        };
+    }
+    &program.statements
+}
+
+/// The names a module body's top-level statements declare: every `to`
+/// function's, plus every `set` and `constant`.
+///
+/// Read by the VM to decide what `export all` publishes and what an `export`
+/// naming one thing has already found. Takes the body rather than a file so a
+/// declared module and a loaded one are read by the same rule.
+pub fn module_declared_names(body: &[Stmt]) -> Vec<String> {
+    let mut names = Vec::new();
+    for stmt in body {
+        match &stmt.statement {
+            Statement::Function { name, .. } => names.push(name.clone()),
+            Statement::Set { name, .. } | Statement::Constant { name, .. } => {
+                names.push(name.clone())
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// The deepest an expression may nest before the parser gives up with a
@@ -448,6 +502,8 @@ impl Parser {
             }
             TokenKind::Set => self.parse_set()?,
             TokenKind::Constant => self.parse_constant()?,
+            TokenKind::Module => self.parse_module()?,
+            TokenKind::Export => self.parse_export()?,
             TokenKind::If => self.parse_if()?,
             TokenKind::Unless => self.parse_unless()?,
             TokenKind::For => self.parse_for()?,
@@ -496,29 +552,31 @@ impl Parser {
                         let name = name.clone();
                         self.advance();
 
-                        let alias = if let Some(Token {
-                            kind: TokenKind::To,
-                            ..
-                        }) = self.current()
-                        {
-                            self.advance();
-                            if let Some(Token {
-                                kind: TokenKind::Identifier(alias),
-                                ..
-                            }) = self.current()
-                            {
-                                let a = alias.clone();
-                                self.advance();
-                                Some(a)
-                            } else {
-                                return Err(Error::Parser(
-                                    "Expected alias after 'to'".to_string(),
-                                    self.span(),
-                                ));
-                            }
-                        } else {
-                            None
-                        };
+                        let alias =
+                            match self.current().map(|t| &t.kind) {
+                                // `as` is the spelling `SPEC.md` and
+                                // `docs/GRAMMAR.md` § 3.1 write; `to` is the older
+                                // one, kept because programs in `tests/` use it.
+                                Some(TokenKind::As) | Some(TokenKind::To) => {
+                                    self.advance();
+                                    match self.current() {
+                                        Some(Token {
+                                            kind: TokenKind::Identifier(alias),
+                                            ..
+                                        }) => {
+                                            let a = alias.clone();
+                                            self.advance();
+                                            Some(a)
+                                        }
+                                        _ => return Err(Error::Parser(
+                                            "Expected alias name after the import alias keyword"
+                                                .to_string(),
+                                            self.span(),
+                                        )),
+                                    }
+                                }
+                                _ => None,
+                            };
 
                         items.push(ImportItem { name, alias });
                     } else {
@@ -1015,6 +1073,98 @@ impl Parser {
         self.expect(&TokenKind::End)?;
 
         Ok((name, params, body))
+    }
+
+    /// `module Name ... export ... end` — the declaration form `SPEC.md` §
+    /// Modules and `docs/GRAMMAR.md` § 3.1 write.
+    ///
+    /// The body is any statement, so an `export` inside it parses as the
+    /// statement it is and the VM reads what it published. An unclosed module
+    /// is refused here rather than swallowing the rest of the file.
+    fn parse_module(&mut self) -> Result<Option<Statement>> {
+        self.advance(); // consume 'module'
+
+        let name = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier(name),
+                ..
+            }) => {
+                let n = name.clone();
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(Error::Parser(
+                    "Expected module name".to_string(),
+                    self.span(),
+                ))
+            }
+        };
+
+        self.skip_newlines();
+
+        let mut body = Vec::new();
+        while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
+            && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
+        {
+            if let Some(stmt) = self.parse_statement()? {
+                body.push(stmt);
+            }
+            self.skip_newlines();
+        }
+
+        self.expect(&TokenKind::End)?;
+
+        Ok(Some(Statement::Module { name, body }))
+    }
+
+    /// `export name, ...` or `export all` — what a module declaration
+    /// publishes.
+    fn parse_export(&mut self) -> Result<Option<Statement>> {
+        self.advance(); // consume 'export'
+
+        let mut names = Vec::new();
+        let mut all = false;
+        loop {
+            // `all` is not a keyword: it is a word only in this one position,
+            // so it is read as the identifier it lexes to and nothing else in
+            // the language changes.
+            match self.current() {
+                Some(Token {
+                    kind: TokenKind::Identifier(name),
+                    ..
+                }) if name == "all" => {
+                    self.advance();
+                    all = true;
+                }
+                Some(Token {
+                    kind: TokenKind::Identifier(name),
+                    ..
+                }) => {
+                    let n = name.clone();
+                    self.advance();
+                    names.push(n);
+                }
+                _ => {
+                    return Err(Error::Parser(
+                        "Expected a name to export after 'export'".to_string(),
+                        self.span(),
+                    ))
+                }
+            }
+
+            if let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = self.current()
+            {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+
+        Ok(Some(Statement::Export { names, all }))
     }
 
     fn parse_object(&mut self) -> Result<Option<Statement>> {

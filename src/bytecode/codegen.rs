@@ -435,6 +435,15 @@ impl Compiler {
                     emit(code, Opcode::Store, bound, 0, line);
                 }
             }
+            // A module declaration is compiled as its body run inline: the
+            // bytecode compiler has no module declaration opcode yet, so what
+            // is emitted here is the same run the tree-walker performs. See
+            // FINDINGS.md — `Opcode::Module` is the honest encoding and is
+            // not part of this change.
+            Statement::Module { body, .. } => {
+                self.statements(body, code, blocks, depth)?;
+            }
+            Statement::Export { .. } => {}
             Statement::Test { name, body } => {
                 let block = self.nested(
                     Decl {
