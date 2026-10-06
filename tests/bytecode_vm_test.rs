@@ -118,10 +118,15 @@ fn assert_agrees(source: &str) {
 ///
 /// A differential test is only worth anything if it is deterministic, and one of
 /// these prints the wall clock, so its two runs differ by a second however
-/// faithfully both VMs behave. They are still executed by `redblue_suite_test.rs`
-/// and by the gate's examples run, so excluding them here loses no coverage —
-/// it only keeps a comparison from being meaningless.
-const NOT_COMPARABLE: &[&str] = &["examples/time.rb", "examples/random.rb"];
+/// faithfully both VMs behave. It is still executed by `redblue_suite_test.rs`
+/// and by the gate's examples run, so excluding it here loses no coverage — it
+/// only keeps a comparison from being meaningless.
+///
+/// Named rather than pattern-matched so that a corpus that quietly drops a file
+/// is visible in the diff. [`corpus`] checks that every name here is still a
+/// file that exists, so a stale entry fails the gate instead of sitting here
+/// looking like coverage.
+const NOT_COMPARABLE: &[&str] = &["examples/time.rb"];
 
 /// The corpus the differential test runs: every program under `examples/`,
 /// `modules/` and `tests/` that [`NOT_COMPARABLE`] does not name, plus the
@@ -132,6 +137,17 @@ const NOT_COMPARABLE: &[&str] = &["examples/time.rb", "examples/random.rb"];
 /// so a failure names a case rather than a line inside a fixture.
 fn corpus() -> BTreeMap<String, String> {
     let mut programs = BTreeMap::new();
+
+    // A name that no longer names a file is a silent hole in the corpus, so it
+    // fails here rather than sitting in the list looking like coverage.
+    for name in NOT_COMPARABLE {
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(name).is_file(),
+            "NOT_COMPARABLE names {name}, which is not a file: either it was \
+             removed or the entry is stale, and until that is settled the corpus \
+             cannot say what it skipped"
+        );
+    }
 
     for dir in ["examples", "modules", "tests"] {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
@@ -2073,7 +2089,6 @@ fn edge_both_vms_answer_the_same_at_a_nesting_depth_neither_overflows() {
         "the innermost list holds one element on both VMs"
     );
 }
-
 // -- constants and modules ----------------------------------------------
 
 /// A `constant` is read-only on the bytecode VM exactly as it is on the

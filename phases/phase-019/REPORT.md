@@ -33,6 +33,31 @@ $ rb run x.rb          ->  3.14159
 $ rb vm  x.rbc         ->  3.141592653589793
 ```
 
+### This run: the resumed tree had two unresolved merge conflicts
+
+The tree arrived with `<<<<<<<` markers still on disk in
+`tests/bytecode_vm_test.rs` and `phases/phase-019/FINDINGS.md`, and **no
+REPORT.md at all** — which alone fails the phase. Resolved first, keeping both
+sides:
+
+| Conflict | Resolution |
+|---|---|
+| `tests/bytecode_vm_test.rs:121` — the `NOT_COMPARABLE` doc and list | kept the recovery branch's documented intent (*named, not pattern-matched*, and checked for staleness) and dropped `examples/random.rb` from the list, because `git log --all -- examples/random.rb` is empty — that file has never existed on any branch, so the name was a hole in the corpus that looked like coverage. `corpus()` now asserts every name in `NOT_COMPARABLE` is still a file, which is the check the doc had promised but the code did not do. |
+| `tests/bytecode_vm_test.rs:2088` — the tail | the recovery branch's file ends at `edge_both_vms_answer_the_same_at_a_nesting_depth_neither_overflows` (`git show origin/rbops-recovery/phase-019:tests/bytecode_vm_test.rs \| wc -l` → 2080), i.e. it contributes nothing after the common tail. Nothing of it was lost: the newer side's nine constants/modules tests are kept verbatim. |
+| `phases/phase-019/FINDINGS.md` | both sides are distinct, verified findings, so both are kept. The newer side is §1–§8 (the merge and the round-1 review); the recovery side's §1–§8 became §9–§16 under a `Carried from the recovery branch` heading. Five `file:line` citations in the recovered half had drifted on the newer tree and were corrected against the files as they are now (`src/vm.rs:529-536`→`680-687`, `src/bytecode/vm.rs:1430/1436`→`1495/1501`, `src/value.rs:169`→`174`, `src/runtime.rs:248`→`263`); every one of the fourteen other citations was re-read and is accurate. §16's `examples/random.rb` was corrected the same way. |
+
+Re-verified on the resolved tree, with `target/debug/rb` — the three defects the
+recovered findings describe are fixed, not merely claimed:
+
+```
+$ printf 'import MathUtils\nsay PI\n' > a.rb
+  rb run a.rb -> 3.14159        rb vm a.rbc -> 3.14159      (equal)
+$ printf 'import MathUtils\nimport MathUtils\nsay PI\n' > b.rb
+  rb run b.rb -> 3.14159        rb vm b.rbc -> 3.14159      (equal)
+$ nested.rb (inner try caught inside an outer try)
+  rb run nested.rb -> acfbF     rb vm nested.rbc -> acfbF   (equal)
+```
+
 ## Round 1 — the review findings
 
 The first pass fixed that divergence and introduced three of its own, which the
@@ -64,11 +89,12 @@ loosened, and the frozen byte table keeps `DeclareConst` on byte 46.
 | `src/bytecode/disasm.rs` | +8 −1 | says `end of a protected region` on a marked `NOP`, so `rb dis` shows which one closes a region |
 | `docs/BYTECODE.md` | +19 −1 | the `NOP` row and a paragraph on `END_TRY_MARKER`: it is no longer "never emitted by this compiler", and the filler is no longer the same instruction |
 | `src/vm.rs` | +48 −16 | repaired the merge's half-written `load_module`; resolves the module path once via `module_path` instead of reading the source and re-deriving the path; binds a module's `constant` through `bind_constant` so an imported constant is read-only; parses the module once |
-| `tests/bytecode_vm_test.rs` | +300 −0 | the tests below |
+| `tests/bytecode_vm_test.rs` | +319 −4 | the tests below |
 | `tests/bytecode_test.rs` | +63 −1 | one test: what a `try` compiles to, on the format side |
 
-Line counts are against the branch point (`e97983a`), which is what `git diff
---numstat` reports; FINDINGS §7 and §8 give the round-1 split.
+Line counts are `git diff --numstat e97983a -- src/ docs/ tests/`, which is the
+merge this resumed run sits on top of; `must_touch: ["src/"]` is satisfied by six
+changed files under `src/`. FINDINGS §7 and §8 give the round-1 split.
 
 ## Tests added
 
