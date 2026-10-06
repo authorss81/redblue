@@ -646,7 +646,10 @@ impl Formatter {
             BinaryOp::GreaterEqual => ">=",
             BinaryOp::And => "and",
             BinaryOp::Or => "or",
-            BinaryOp::In => "in",
+            // `in` has no symbol of its own, and `x in list` does not parse:
+            // membership is reached through `is`, so the formatter must write
+            // the `is` back or the formatted source stops being Redblue.
+            BinaryOp::In => "is in",
         };
         self.write(s);
     }

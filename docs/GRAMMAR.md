@@ -357,7 +357,7 @@ prefix           = postfix
 multiplicative   = prefix
                  | multiplicative '*' prefix           // multiply
                  | multiplicative '/' prefix           // divide
-                 | multiplicative 'mod' prefix         // modulo
+                 | multiplicative 'mod' prefix         // modulo (same as '%')
 ```
 
 ### 5.5 Additive Expressions
@@ -378,7 +378,7 @@ comparison       = additive
                  | comparison 'is greater than' additive // >
                  | comparison 'is less than or equal to' additive // <=
                  | comparison 'is greater than or equal to' additive // >=
-                 | comparison 'in' additive           // in (contains)
+                 | comparison 'is in' additive         // in (list membership)
 ```
 
 ### 5.7 Logical AND Expressions
@@ -443,10 +443,10 @@ object_literal   = 'new' identifier '(' [ argument { ',' argument } ] ')'
 |------------|-------------|---------------|
 | 1 | `or` | Left |
 | 2 | `and` | Left |
-| 3 | `is`, `is not`, `in` | Left |
+| 3 | `is`, `is not`, `is in` | Left |
 | 4 | `<`, `<=`, `>`, `>=` | Left |
 | 5 | `+`, `-` | Left |
-| 6 | `*`, `/`, `mod` | Left |
+| 6 | `*`, `/`, `mod`, `%` | Left |
 | 7 | `not`, unary `-` | Right |
 | 8 | `of` | Left |
 | 9 | property access, call, index | Left |

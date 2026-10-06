@@ -47,6 +47,7 @@ pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("and", TokenKind::And),
     ("or", TokenKind::Or),
     ("not", TokenKind::Not),
+    ("mod", TokenKind::Mod),
     ("yes", TokenKind::YesNo(true)),
     ("no", TokenKind::YesNo(false)),
     ("nothing", TokenKind::Nothing),

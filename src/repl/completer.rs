@@ -41,6 +41,7 @@ impl ReplCompleter {
                 "and".to_string(),
                 "or".to_string(),
                 "not".to_string(),
+                "mod".to_string(),
                 "yes".to_string(),
                 "no".to_string(),
                 "nothing".to_string(),

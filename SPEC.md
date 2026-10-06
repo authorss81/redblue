@@ -325,6 +325,12 @@ set count to length of items
 if "hello" is in words
 ```
 
+`is in` tests **list membership**: the right side must be a `list`, and the
+answer is `yes` when the left side equals one of its elements by value. There
+is no substring form — `x is in "abc"` is a runtime error
+`Right side of 'in' must be a list`, not a search — and no `is not in`;
+write `if not (x is in haystack)`.
+
 ---
 
 ## Statements

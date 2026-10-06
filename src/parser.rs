@@ -1300,12 +1300,14 @@ impl Parser {
 
     /// Reads the comparison operator that follows an `is`, in either its word
     /// form (`is greater than or equal to`) or its symbolic one (`is =`,
-    /// `is not`). Bare `is` is equality.
+    /// `is not`). Bare `is` is equality; `is in` is membership.
     ///
     /// A word only counts as an operator when the *whole* phrase is there: a
     /// variable named `greater` or `than` still compares for equality, so
     /// nothing is consumed on a partial match and the rest of the line is
-    /// parsed exactly as it was before this phase.
+    /// parsed exactly as it was before this phase. `in` needs no such guard
+    /// because it is a keyword: it cannot name a variable, so nothing that used
+    /// to parse as `is <variable>` can be mistaken for `is in`.
     fn parse_is_operator(&mut self) -> BinaryOp {
         if self.is_word_ahead(0, "equal") && matches!(self.current_at(1), Some(TokenKind::To)) {
             self.advance();
@@ -1346,6 +1348,13 @@ impl Parser {
             }) => {
                 self.advance();
                 BinaryOp::NotEqual
+            }
+            Some(Token {
+                kind: TokenKind::In,
+                ..
+            }) => {
+                self.advance();
+                BinaryOp::In
             }
             // "is" alone means equality
             _ => BinaryOp::Equal,
