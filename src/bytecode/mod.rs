@@ -32,3 +32,4 @@ pub use format::{
     INSTRUCTION_SIZE, MAGIC, MAX_BLOCK_DEPTH, NO_BLOCK, NO_CONST,
 };
 pub use opcode::Opcode;
+pub use opcode::END_TRY_MARKER;

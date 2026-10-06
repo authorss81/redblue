@@ -169,7 +169,7 @@ always `0`.
 
 | Byte | Name | `arg` | `aux` | Stack effect |
 |---|---|---|---|---|
-| 0 | `NOP` | — | — | nothing; a filler, never emitted by this compiler |
+| 0 | `NOP` | `END_TRY_MARKER`, or `0` for the filler | — | nothing; see below |
 | 1 | `PUSH_CONST` | constant index | — | pushes the constant |
 | 2 | `POP` | — | — | drops the top |
 | 3 | `LOAD` | name index | — | pushes the value of a variable |
@@ -225,6 +225,24 @@ no blocks.
 `DEF_OBJECT` writes it for an object that extends nothing. The two reserved
 values are never compared against each other — `NO_BLOCK` appears only in a
 block-index operand and `NO_CONST` only in a constant-index one.
+
+`END_TRY_MARKER` is `0xFFFFFFFF` as well, and is the one value of a `NOP`'s
+`arg` that is not the filler: it is the end of a `try`'s protected region,
+where the handlers are popped and the `finally` runs. Every other `arg` — the
+`0` a filler carries — leaves the instruction doing nothing. A `NOP`'s `arg`
+indexes nothing at all, so this third user of the reserved value is in neither of
+the two operand kinds the sentence above compares.
+
+The compiler writes exactly one `NOP` per `try`, immediately after that `try`'s
+protected code, carrying `END_TRY_MARKER`. Without it a failure in a statement
+*after* the `try` would be caught by that `try`, and a `finally` would never run
+at all on the path where nothing failed. A `NOP` is one byte with two meanings
+because the table is frozen: byte 46 is the last instruction, so an end-of-try
+byte of its own would have had to renumber an instruction whose byte value is
+part of the format. The operand is what tells the two apart, which is why a
+filler `NOP` anywhere — including inside protected code — closes nothing, runs
+no `finally`, and does not shorten the region a failure skips. `rb dis` prints
+`end of a protected region` on a marked one.
 
 An opcode byte this table does not assign is refused with
 `unknown opcode byte <n>`.

@@ -2073,3 +2073,303 @@ fn edge_both_vms_answer_the_same_at_a_nesting_depth_neither_overflows() {
         "the innermost list holds one element on both VMs"
     );
 }
+
+// -- constants and modules ----------------------------------------------
+
+/// A `constant` is read-only on the bytecode VM exactly as it is on the
+/// tree-walking one: the name binds, a read returns what was declared, and a
+/// later `set` onto it is refused rather than shadowing it.
+#[test]
+fn a_constant_binds_and_is_read_only_on_both_vms() {
+    let source = "constant TAU to 6.28318\nsay TAU\nset TAU to 1\nsay TAU\n".to_string();
+
+    assert_agrees(&source);
+
+    let byte = bytecode(&source);
+    assert_eq!(
+        byte.output,
+        vec!["6.28318".to_string()],
+        "the declaration bound the name and the read returned it"
+    );
+    let failure = byte
+        .result
+        .as_ref()
+        .expect_err("a set onto a constant must be refused, not shadow it");
+    assert_eq!(
+        failure, "RuntimeError: Cannot assign to constant 'TAU'",
+        "the refusal should name the constant, matching the tree-walking VM"
+    );
+}
+
+/// Declaring one name twice is refused on both VMs, and the first declaration
+/// is what survives. This is the case `DECLARE_CONST` exists for: a `STORE`
+/// would have overwritten `A` with 2 and said nothing.
+#[test]
+fn edge_a_constant_declared_twice_is_refused_and_the_first_value_survives() {
+    let source = "constant A to 1\nconstant A to 2\nsay A\n".to_string();
+
+    assert_agrees(&source);
+
+    let byte = bytecode(&source);
+    assert_eq!(
+        byte.result,
+        Err("RuntimeError: Constant 'A' is already declared".to_string()),
+        "the second declaration must be refused by name"
+    );
+    assert_eq!(
+        tree_walk(&source).result,
+        byte.result,
+        "both VMs must refuse it the same way"
+    );
+}
+
+/// A module's `constant` binds the importing program's name.
+///
+/// The module loader kept only the module's `set` statements, so a module that
+/// declares `constant PI` bound nothing and the read fell through to the
+/// builtin's `PI` — the two VMs printed different numbers for the same program.
+#[test]
+fn edge_a_modules_constant_binds_rather_than_falling_through_to_the_builtin() {
+    // `MathUtils` declares `constant PI to 3.14159`, and `PI` is also a
+    // builtin, so the two agree only if the module's declaration reached the
+    // importing program. They did not: the module loader kept only `set`, so
+    // the read fell through to the builtin's `PI`.
+    let source = "import MathUtils\nsay PI\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["3.14159".to_string()],
+        "the module's constant must be visible to the importer, not the builtin's"
+    );
+}
+
+/// A module's `constant` is read-only in the importing program too, so a
+/// program that writes onto an imported name is refused rather than shadowing
+/// the module's declaration.
+#[test]
+fn edge_a_modules_constant_cannot_be_rebound_by_the_importing_program() {
+    // `MathUtils` declares `constant TAU`, so this writes onto an imported
+    // name. The module is read-only to the program that imported it, exactly as
+    // a `constant` written in that program would be.
+    let source = "import MathUtils\nset TAU to 8\nsay TAU\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).result,
+        Err("RuntimeError: Cannot assign to constant 'TAU'".to_string()),
+        "an imported constant stays read-only in the program that imported it"
+    );
+}
+
+/// A filler `NOP` is the filler everywhere: inside a protected region it closes
+/// nothing, on the path where nothing failed and on the path where something did.
+///
+/// Hand-built, because the compiler emits no filler of its own — `rb compile`
+/// writes exactly one `NOP` per `try`, the marked one that closes the region — so
+/// a program compiled from source cannot exercise this and a test built from
+/// source would pass without ever reaching it. A `.rbc` is a file, so it can hold
+/// a `NOP` anywhere, and the two ways a VM that read every `NOP` as a region end
+/// goes wrong are both here: it runs the `finally` early when nothing failed, and
+/// it resumes inside the region it had just caught a failure in.
+#[test]
+fn edge_a_filler_nop_does_not_close_a_protected_region() {
+    for (name, source, anchor, expected) in [
+        (
+            "nothing failed",
+            "set log to \"\"\ntry\n    set log to log + \"t\"\n    set log to log + \"n\"\nfinally\n    set log to log + \"f\"\nend\nsay log\n",
+            // The `TRY`, so the filler is the region's first instruction.
+            Opcode::Try,
+            "tnf",
+        ),
+        (
+            "something failed",
+            "set log to \"\"\ntry\n    set log to log + \"t\"\n    say 1 / 0\n    set log to log + \"u\"\ncatch\n    set log to log + \"c\"\nend\nsay log\n",
+            // The `DIV` that fails, so the filler is inside the region the
+            // failure has to skip to the end of.
+            Opcode::Div,
+            "tc",
+        ),
+    ] {
+        assert_agrees(source);
+        let mut chunk = compile_source(source).expect("the program should compile");
+        let at = chunk
+            .main
+            .code
+            .iter()
+            .position(|instruction| instruction.opcode == anchor)
+            .unwrap_or_else(|| panic!("the program should contain a {anchor:?}"));
+        // Neither program has a jump, so splicing an instruction in moves
+        // nothing that names an offset.
+        chunk.main.code.insert(
+            at + 1,
+            Instruction {
+                opcode: Opcode::Nop,
+                arg: 0,
+                aux: 0,
+                line: 1,
+            },
+        );
+
+        let mut vm = BytecodeVm::new();
+        let outcome = vm.run(&chunk);
+        assert_eq!(
+            vm.take_output(),
+            vec![expected.to_string()],
+            "a filler NOP changed what the {name} path did: {outcome:?}"
+        );
+    }
+
+    // A filler with no `try` above it is the filler it has always been: no
+    // handler, so nothing runs, and the program carries on.
+    let mut chunk = compile_source("say 1\n").expect("a trivial program should compile");
+    chunk.main.code.insert(
+        0,
+        Instruction {
+            opcode: Opcode::Nop,
+            arg: 0,
+            aux: 0,
+            line: 1,
+        },
+    );
+    let mut vm = BytecodeVm::new();
+    assert!(
+        vm.run(&chunk).is_ok(),
+        "a filler NOP is not a failure and must not fail the program"
+    );
+    assert_eq!(
+        vm.take_output(),
+        vec!["1".to_string()],
+        "a filler NOP costs a step and changes nothing"
+    );
+}
+
+/// A handled inner `try` leaves the enclosing region as it found it: still
+/// protected, and with its `finally` still owed to the end of *its* own
+/// protected code.
+///
+/// This is what a resume-*at*-the-region-end gets wrong. The inner region's
+/// closing `NOP` pops whatever handler is on top, which after the inner failure
+/// has been handled is the enclosing one — so the enclosing `finally` ran in the
+/// middle of its protected region and everything after the inner `try` ran with
+/// no protection at all. Both programs here fail on the bytecode VM without the
+/// fix, one with the letters in the wrong order and one with an uncaught error.
+#[test]
+fn edge_a_handled_inner_try_leaves_the_enclosing_region_protected() {
+    for (name, source, expected) in [
+        (
+            "the finally runs last",
+            concat!(
+                "set log to \"\"\n",
+                "try\n",
+                "    set log to log + \"a\"\n",
+                "    try\n",
+                "        say 1 / 0\n",
+                "    catch\n",
+                "        set log to log + \"c\"\n",
+                "    finally\n",
+                "        set log to log + \"f\"\n",
+                "    end\n",
+                "    set log to log + \"b\"\n",
+                "finally\n",
+                "    set log to log + \"F\"\n",
+                "end\n",
+                "say log\n",
+            ),
+            "acfbF",
+        ),
+        (
+            "the enclosing catch still runs",
+            concat!(
+                "set log to \"\"\n",
+                "try\n",
+                "    try\n",
+                "        say 1 / 0\n",
+                "    catch\n",
+                "        set log to log + \"c\"\n",
+                "    end\n",
+                "    say 1 / 0\n",
+                "catch\n",
+                "    set log to log + \"d\"\n",
+                "end\n",
+                "say log\n",
+            ),
+            "cd",
+        ),
+    ] {
+        assert_agrees(source);
+        assert_eq!(
+            bytecode(source).output,
+            vec![expected.to_string()],
+            "the handled inner try disturbed the enclosing region on the {name} path"
+        );
+    }
+}
+
+/// A module is loaded once. A second `import` of the same module binds nothing a
+/// second time — which is what makes a module's `constant` importable at all,
+/// since a constant cannot be declared twice and re-running the module declares
+/// it twice.
+#[test]
+fn edge_importing_the_same_module_twice_loads_it_once() {
+    let source = "import MathUtils\nimport MathUtils\nsay PI\n".to_string();
+
+    assert_agrees(&source);
+
+    let twice = bytecode(&source);
+    assert_eq!(
+        twice.output,
+        vec!["3.14159".to_string()],
+        "the second import must not re-run the module"
+    );
+    assert!(
+        twice.result.is_ok(),
+        "a second import of a loaded module is a no-op, not a second declaration: {:?}",
+        twice.result
+    );
+}
+
+/// A loop variable shadows a constant rather than being refused by it.
+///
+/// The tree-walking VM gives each turn of a `for each` its own scope, so the
+/// loop's name is a live local inside the loop and the constant is what the name
+/// means everywhere else. Refusing the loop's own binding would make the two VMs
+/// disagree about a program that reads perfectly well.
+#[test]
+fn edge_a_loop_variable_shadows_a_constant_instead_of_being_refused() {
+    let source = "constant X to 1\nfor each X in [1, 2]\n    say X\nend\nsay X\n".to_string();
+
+    assert_agrees(&source);
+
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["1".to_string(), "2".to_string(), "1".to_string()],
+        "the loop's own name is live inside the loop and the constant is back after it"
+    );
+}
+
+/// A `finally` runs exactly once on each path: once when nothing failed, and
+/// once when the catch handled the failure. The marked `NOP` is reached on the
+/// success path and stepped over on the failure path, so a `finally` that ran
+/// twice would show up here as a doubled letter.
+#[test]
+fn edge_a_finally_runs_exactly_once_on_each_path() {
+    for (name, source) in [
+        (
+            "success",
+            "set log to \"\"\ntry\n    set log to log + \"t\"\nfinally\n    set log to log + \"f\"\nend\nsay log\n",
+        ),
+        (
+            "caught failure",
+            "set log to \"\"\ntry\n    say 1 / 0\ncatch\n    set log to log + \"c\"\nfinally\n    set log to log + \"f\"\nend\nsay log\n",
+        ),
+    ] {
+        assert_agrees(source);
+        assert_eq!(
+            bytecode(source).output,
+            vec![match name {
+                "success" => "tf".to_string(),
+                _ => "cf".to_string(),
+            }],
+            "the finally ran the wrong number of times on the {name} path"
+        );
+    }
+}

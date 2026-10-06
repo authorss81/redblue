@@ -17,7 +17,7 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 
 use crate::bytecode::format::{Block, BlockKind, Chunk, Constant, Instruction, MAX_BLOCK_DEPTH};
 use crate::bytecode::opcode::Opcode;
-use crate::bytecode::{NO_BLOCK, NO_CONST};
+use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST};
 
 /// The name a `repeat ... times` loop counts in.
 ///
@@ -410,14 +410,12 @@ impl Compiler {
                 };
                 emit(code, Opcode::Try, catch, finally, line);
                 self.statements(body, code, blocks, depth)?;
-                // `END_TRY` is what makes the protected region the statements
-                // between it and `TRY` rather than the rest of the block: it is
-                // where the handlers are popped and the `finally` runs, whether
-                // or not the protected code failed. Without it a failure in a
-                // statement *after* the `try` would be caught by this `try`,
-                // and a `finally` would never run at all on the path where
-                // nothing failed.
-                emit(code, Opcode::EndTry, 0, 0, line);
+                // The marked `NOP` closes the protected region: it is where the
+                // handlers are popped and the `finally` runs, whether or not the
+                // protected code failed. See `Opcode::Nop` and
+                // `END_TRY_MARKER`; the operand is what tells it apart from the
+                // filler the same byte is everywhere else.
+                emit(code, Opcode::Nop, END_TRY_MARKER, 0, line);
             }
             Statement::Import(items) => {
                 for item in items {

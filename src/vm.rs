@@ -6,13 +6,15 @@
 //! [`crate::runtime`] and are read from here rather than written twice.
 
 use crate::error::{Error, Result, Span};
+use crate::lexer::Lexer;
+use crate::parser as redblue_parser;
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
     finite_number, Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Value,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -212,18 +214,24 @@ fn module_search_paths(name: &str) -> Vec<String> {
     ]
 }
 
+/// The first path the module `name` resolves to, or `None` when no path is
+/// there.
+pub fn module_path(name: &str) -> Option<String> {
+    module_search_paths(name)
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+}
+
 /// The source of the module `name` resolves to, or `None` when no path is
 /// there. A path that is there but cannot be read is an error, not a miss: the
 /// two say different things about the import.
 pub fn module_source(name: &str) -> Result<Option<String>> {
-    for path in module_search_paths(name) {
-        if Path::new(&path).exists() {
-            let source = std::fs::read_to_string(&path)
-                .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
-            return Ok(Some(source));
-        }
-    }
-    Ok(None)
+    let Some(path) = module_path(name) else {
+        return Ok(None);
+    };
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
+    Ok(Some(source))
 }
 
 /// The names `import <name>` binds into the importing program: the module's own
@@ -355,13 +363,34 @@ impl Vm {
         std::mem::take(&mut self.output)
     }
 
-    fn load_module(&mut self, path: &str) -> Result<()> {
-        let bound = runtime::load_module(path, |expr| self.evaluate(expr))?;
-        for (name, value) in bound {
-            self.globals.insert(name, value);
+    /// Runs a module's declarations into this VM, under the name the `import`
+    /// that reached it goes by.
+    ///
+    /// A module already loaded is left alone: importing it twice binds the same
+    /// names twice, and binding a name twice is what a `set` refuses to do and a
+    /// `constant` cannot do at all — the second declaration of the module's own
+    /// `TAU` would be refused as a duplicate of the one the first import bound.
+    ///
+    /// The file is read and parsed once: the bindings and the record that the
+    /// module is loaded both come out of that one `Program`. Reading it a second
+    /// time could fail after some of the bindings were already installed, which
+    /// would leave the program with half a module in it.
+    fn load_module(&mut self, path: &str, name: &str) -> Result<()> {
+        if self.modules.contains_key(name) {
+            return Ok(());
         }
 
-        self.modules.insert(name.to_string(), ast);
+        let program = runtime::module_program(path)?;
+        let bound = runtime::module_bindings(&program, |expr| self.evaluate(expr))?;
+        for (name, value, is_const) in bound {
+            if is_const {
+                self.bind_constant(&name, value)?;
+            } else {
+                self.bind_module_name(&name, value)?;
+            }
+        }
+
+        self.modules.insert(name.to_string(), program);
         Ok(())
     }
 
@@ -722,13 +751,16 @@ impl Vm {
             }
             Statement::Import(items) => {
                 for item in items {
-                    let Some(source) = module_source(&item.name)? else {
+                    let Some(path) = module_path(&item.name) else {
                         return Err(Error::Runtime(
                             format!("Cannot find module '{}'", item.name),
                             self.span(),
                         ));
                     };
-                    self.load_module(&item.name, &source)?;
+                    // The path is there but may not be readable: that is an Io
+                    // error, not a miss, so it is reported rather than folded
+                    // into the "cannot find" above.
+                    self.load_module(&path, &item.name)?;
 
                     let target_name = item.alias.as_ref().unwrap_or(&item.name);
                     // The name the import itself binds goes through the same

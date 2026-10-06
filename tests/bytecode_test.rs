@@ -10,7 +10,7 @@ use std::process::Command;
 
 use redblue::bytecode::{
     compile_source, disassemble, Block, BlockKind, Chunk, Constant, Instruction, Opcode,
-    FORMAT_VERSION, MAGIC, NO_BLOCK, NO_CONST,
+    END_TRY_MARKER, FORMAT_VERSION, MAGIC, NO_BLOCK, NO_CONST,
 };
 
 fn project_root() -> PathBuf {
@@ -809,6 +809,68 @@ fn try_without_handlers_names_no_blocks() {
     assert!(
         chunk.main.blocks.is_empty(),
         "a try with no handlers needs no blocks"
+    );
+}
+
+/// The end of a protected region is a `NOP` carrying the marker operand, and it
+/// is the *only* `NOP` the compiler writes.
+///
+/// The distinction has to be in the file and not in the VM's reading of it: a
+/// `.rbc` may hold a `NOP` anywhere, and one that is not the marker is the filler
+/// the byte has always been. So the marker is a reserved value rather than a
+/// flag the VM could infer — and a reserved value is one no pool or block list
+/// can reach, which is what the first assertion says.
+#[test]
+fn a_trys_region_ends_at_one_marked_nop_and_writes_no_other_filler() {
+    let chunk = compile_source(
+        "try\n    say 1\ncatch\n    say 2\nfinally\n    say 3\nend\ntry\n    say 4\nend\n",
+    )
+    .expect("program should compile");
+
+    let nops: Vec<&Instruction> = chunk
+        .main
+        .code
+        .iter()
+        .filter(|instruction| instruction.opcode == Opcode::Nop)
+        .collect();
+
+    assert_eq!(
+        names(&chunk.main),
+        vec![
+            "TRY",
+            "PUSH_CONST",
+            "SAY",
+            "NOP",
+            "TRY",
+            "PUSH_CONST",
+            "SAY",
+            "NOP"
+        ],
+        "each region is its own TRY's protected code, closed by one NOP, and the \
+         compiler writes no filler"
+    );
+    assert_eq!(nops.len(), 2, "one NOP per try, and no others");
+    for nop in &nops {
+        assert_eq!(
+            nop.arg, END_TRY_MARKER,
+            "the NOP the compiler writes is the region end, not the filler"
+        );
+    }
+
+    assert_eq!(
+        END_TRY_MARKER, NO_BLOCK,
+        "the marker is the format's existing reserved operand, so no pool or block \
+         list can reach it and it cannot be mistaken for an index"
+    );
+    assert_eq!(END_TRY_MARKER, NO_CONST);
+    assert!(
+        disassemble(&chunk).contains("end of a protected region"),
+        "the disassembler should say which NOP closes a region:\n{}",
+        disassemble(&chunk)
+    );
+    assert!(
+        !Opcode::Nop.has_operand() && !Opcode::Nop.takes_constant_index(),
+        "the marker's meaning is in the comment, and it names no constant"
     );
 }
 

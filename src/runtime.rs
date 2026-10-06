@@ -17,34 +17,49 @@
 
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
-use crate::parser::{BinaryOp, Expr, Statement, UnaryOp};
+use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
 use crate::value::Value;
 
-/// Reads a module file and returns the `set` bindings its top level declares.
+/// Parses a module file into the program its top level declares.
 ///
-/// The bindings are returned rather than written into a map so the caller keeps
-/// ownership of its globals: evaluating each value needs the caller's
-/// evaluator, which would otherwise have to be borrowed alongside the map it
-/// writes to.
-pub fn load_module(
-    path: &str,
-    mut evaluate: impl FnMut(&Expr) -> Result<Value>,
-) -> Result<Vec<(String, Value)>> {
+/// The caller keeps the `Program` to remember that the module has already been
+/// loaded, so a second `import` of the same name is a no-op rather than a second
+/// binding of the same names. [`module_bindings`] reads the declarations out of
+/// the same `Program`, so a module is read and parsed once however many names it
+/// contributes.
+pub fn module_program(path: &str) -> Result<Program> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
 
     let tokens = Lexer::tokenize(&source)?;
-    let ast = crate::parser::Parser::new(tokens).parse()?;
+    crate::parser::Parser::new(tokens).parse()
+}
 
+/// The names `program` binds: one per top-level `set` or `constant`.
+///
+/// The caller binds them through whatever refusal its own name resolution uses,
+/// so a module's `constant` is refused a second binding exactly as a `constant`
+/// written in the importing program would be. Returning the kind alongside the
+/// name is what lets the caller choose between its two binding paths.
+///
+/// Takes the parsed program rather than the path so that the file is read once:
+/// reading it again could fail — the file could have gone away between the two
+/// reads — after the caller had already installed some of the bindings.
+pub fn module_bindings(
+    program: &Program,
+    mut evaluate: impl FnMut(&Expr) -> Result<Value>,
+) -> Result<Vec<(String, Value, bool)>> {
     // A module's functions are not bound to a name, so a member stays
-    // unreachable — see FINDINGS.md. The `set` below is the whole of what an
-    // import currently contributes.
+    // unreachable — see FINDINGS.md. The two declarations below are the whole of
+    // what an import currently contributes.
     let mut bound = Vec::new();
-    for stmt in &ast.statements {
-        if let Statement::Set { name, value } = &stmt.statement {
-            let value = evaluate(value)?;
-            bound.push((name.clone(), value));
-        }
+    for stmt in &program.statements {
+        let (name, value, is_const) = match &stmt.statement {
+            Statement::Set { name, value } => (name, value, false),
+            Statement::Constant { name, value } => (name, value, true),
+            _ => continue,
+        };
+        bound.push((name.clone(), evaluate(value)?, is_const));
     }
 
     Ok(bound)

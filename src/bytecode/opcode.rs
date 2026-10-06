@@ -6,12 +6,43 @@
 //! and anything new takes the next free number and bumps
 //! [`FORMAT_VERSION`](super::FORMAT_VERSION).
 
+/// The `arg` that makes a [`Opcode::Nop`] the end of a `try`'s protected region
+/// rather than the filler it is everywhere else.
+///
+/// A `NOP` names no constant and no block, so its `arg` indexes nothing and is
+/// free to say this. **Only** this value is a marker: every other operand —
+/// including the `0` a filler carries — leaves the instruction a filler that
+/// does nothing. That is what keeps a `NOP` a file happens to contain from
+/// closing a protected region, running an enclosing `finally` early, or
+/// truncating the region a failure has to skip.
+///
+/// The marker is the maximum `u32`, which is the format's existing "reserved"
+/// value ([`NO_CONST`](super::NO_CONST), [`NO_BLOCK`](super::NO_BLOCK)): it can
+/// never be a valid index into a pool or a block list, so it cannot be mistaken
+/// for one.
+pub const END_TRY_MARKER: u32 = u32::MAX;
+
 /// One instruction. The byte values are stable; see [`Opcode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
-    /// Does nothing. Written as a filler by later stages; never emitted by the
-    /// compiler in this stage.
+    /// Does nothing.
+    ///
+    /// The one exception is a `NOP` whose `arg` is [`END_TRY_MARKER`]: that one
+    /// ends the protected region of the `try` whose `TRY` is above it, popping
+    /// its handlers and running its `finally`, so the protected region is the
+    /// run of instructions between the two rather than the rest of the block.
+    /// The compiler emits exactly one such `NOP` per `try`, immediately after the
+    /// protected code. Without it a failure in a statement *after* the `try`
+    /// would be caught by that `try`, and a `finally` would never run at all on
+    /// the path where nothing failed.
+    ///
+    /// The marker rides on this byte rather than on one of its own because the
+    /// opcode table is frozen: byte 46 is [`Opcode::DeclareConst`] and is the
+    /// end of the table, so an `END_TRY` byte of its own would have had to
+    /// renumber an instruction whose byte is part of the file format. What
+    /// distinguishes the two meanings is the operand, not the byte — see
+    /// [`END_TRY_MARKER`].
     Nop = 0,
     /// Pushes `constants[arg]`.
     PushConst,
@@ -120,10 +151,14 @@ pub enum Opcode {
     Test,
     /// Compares the two values on top of the stack as an `expect`.
     Expect,
-    /// Ends the innermost `try`: pops its handlers and runs its `finally`, so
-    /// the protected region is the run of instructions between `TRY` and this
-    /// rather than the rest of the block.
-    EndTry,
+    /// Binds the top of the stack to the variable named `constants[arg]` as a
+    /// constant: the name may not be bound again, and no `STORE` writes it.
+    ///
+    /// The declaration `constant NAME to <expr>` compiles to this rather than to
+    /// [`Opcode::Store`], so the file says the name is read-only. A version-2
+    /// file has no way to say that — a `constant` compiled to a `STORE` there —
+    /// which is what version 3 changed.
+    DeclareConst,
 }
 
 impl Opcode {
@@ -177,7 +212,7 @@ impl Opcode {
         Opcode::Import,
         Opcode::Test,
         Opcode::Expect,
-        Opcode::EndTry,
+        Opcode::DeclareConst,
     ];
 
     /// The opcode a byte stands for, or `None` when the byte is not assigned.
@@ -240,7 +275,7 @@ impl Opcode {
             Opcode::Import => "IMPORT",
             Opcode::Test => "TEST",
             Opcode::Expect => "EXPECT",
-            Opcode::EndTry => "END_TRY",
+            Opcode::DeclareConst => "DECLARE_CONST",
         }
     }
 
@@ -278,7 +313,6 @@ impl Opcode {
                 | Opcode::Skip
                 | Opcode::GetIter
                 | Opcode::Expect
-                | Opcode::EndTry
         )
     }
 }

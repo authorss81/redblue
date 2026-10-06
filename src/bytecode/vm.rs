@@ -35,12 +35,12 @@
 //! instruction of the condition for a `while`. [`loop_sites`] finds those once
 //! per block; everything else about a loop follows from them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::bytecode::format::{Block, Chunk, Constant, Instruction};
 use crate::bytecode::opcode::Opcode;
-use crate::bytecode::{NO_BLOCK, NO_CONST};
+use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST};
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser::{self, BinaryOp, Program, Statement, UnaryOp};
@@ -199,11 +199,11 @@ type CatchHandler = ((Arc<Chunk>, Vec<u32>), String);
 /// One `try` whose protected code is still running.
 ///
 /// `TRY` names its handlers rather than jumping to them, and the protected code
-/// is compiled inline, so a handler covers the rest of the block it is in. That
-/// is what `docs/BYTECODE.md` specifies and what this VM implements; a `try`
-/// that is the last statement of its block — which is what every program in
-/// `examples/` and `tests/` writes — covers exactly the statements the
-/// tree-walking VM protects.
+/// is compiled inline, so a handler covers the instructions up to the marked
+/// `NOP` that closes the region — which is what `docs/BYTECODE.md` specifies and
+/// what this VM implements; a `try` that is the last statement of its block —
+/// which is what every program in `examples/` and `tests/` writes — covers
+/// exactly the statements the tree-walking VM protects.
 #[derive(Clone)]
 struct Handler {
     /// The `catch` body together with the name it binds, or `None` for a `try`
@@ -425,6 +425,10 @@ fn split_dotted(name: &str) -> Option<(&str, &str)> {
 /// Runs a compiled Redblue program.
 pub struct BytecodeVm {
     globals: HashMap<String, Value>,
+    /// The names bound by a `constant` declaration. The value lives in
+    /// [`BytecodeVm::globals`] so a read resolves through one name-resolution
+    /// path; what this table adds is the refusal to rebind the name.
+    constants: HashSet<String>,
     /// The live local scopes, outermost first. A call's parameters are the
     /// innermost scope, and a closure pushes the scopes it captured above its
     /// caller's frames — see [`BytecodeVm::call_function`].
@@ -435,6 +439,15 @@ pub struct BytecodeVm {
     output: Vec<String>,
     /// Every `object` declaration, by type name. See [`ObjectType`].
     objects: HashMap<String, ObjectType>,
+    /// The modules an `import` has already run, by the name the program wrote.
+    ///
+    /// A module is run once, because running it twice declares its names twice:
+    /// a `constant` cannot be declared twice at all, so a second `import` of the
+    /// same module would fail on the module's own first declaration. The
+    /// tree-walking VM keeps the parsed program here for the same reason — see
+    /// [`crate::vm::Vm::load_module`], which answers the second import with a
+    /// no-op.
+    modules: HashSet<String>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
     current_span: Span,
     /// The operand stack. Every block is entered with an empty one; the bases
@@ -469,9 +482,11 @@ impl BytecodeVm {
     pub fn new() -> Self {
         Self {
             globals: stdlib::builtins(),
+            constants: HashSet::new(),
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
             objects: HashMap::new(),
+            modules: HashSet::new(),
             expectation_failure: None,
             current_span: Span::unknown(),
             stack: Vec::new(),
@@ -750,6 +765,35 @@ impl BytecodeVm {
         self.globals.insert(name.to_string(), value);
     }
 
+    /// Binds `name` as a constant, refusing a second declaration of a name that
+    /// already holds one.
+    ///
+    /// The refusal is the tree-walking VM's, down to the wording, because a
+    /// `constant` that declared twice silently kept its first value in one VM
+    /// and its second in the other would not be the same language.
+    fn declare_const(&mut self, name: &str, value: Value) -> Result<()> {
+        if !self.constants.insert(name.to_string()) {
+            return Err(Error::Runtime(
+                format!("Constant '{name}' is already declared"),
+                self.span(),
+            ));
+        }
+        self.globals.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    /// The refusal every write onto a constant shares: `Cannot assign to
+    /// constant 'NAME'`.
+    fn refuse_constant_rebind(&self, name: &str) -> Result<()> {
+        if self.constants.contains(name) {
+            return Err(Error::Runtime(
+                format!("Cannot assign to constant '{name}'"),
+                self.span(),
+            ));
+        }
+        Ok(())
+    }
+
     // -- the constant pool --------------------------------------------------
 
     fn constant(&self, index: u32) -> Result<Constant> {
@@ -962,6 +1006,27 @@ impl BytecodeVm {
         let opcode = instruction.opcode;
         match opcode {
             Opcode::Nop => {
+                // A `NOP` is the filler and does nothing — including inside a
+                // protected region, which is what keeps a filler a file happens
+                // to contain from running an enclosing `finally` early. Only the
+                // marker operand closes a region.
+                if instruction.arg != END_TRY_MARKER {
+                    self.advance(frame);
+                    return Ok(());
+                }
+                // The protected region ran to here without failing, so only the
+                // `finally` is owed. The handler is popped on this path so that
+                // the failure path does not run the `finally` twice; it is
+                // resumed *after* this instruction, so the two paths cannot both
+                // be reaching this one. A marker with no handler above it is a
+                // file the compiler did not write, and does nothing.
+                let Some(handler) = self.handlers.last() else {
+                    self.advance(frame);
+                    return Ok(());
+                };
+                let handler = handler.clone();
+                self.handlers.pop();
+                self.run_finally(&handler)?;
                 self.advance(frame);
                 Ok(())
             }
@@ -986,6 +1051,13 @@ impl BytecodeVm {
                 Ok(())
             }
             Opcode::Store => self.store(instruction, frame),
+            Opcode::DeclareConst => {
+                let name = self.constant_text(instruction.arg)?;
+                let value = self.pop()?;
+                self.declare_const(&name, value)?;
+                self.advance(frame);
+                Ok(())
+            }
             Opcode::Say => {
                 let value = self.pop()?;
                 self.output.push(value.to_string());
@@ -1116,20 +1188,6 @@ impl BytecodeVm {
                 let mut new_frame = self.frame_for(&chunk, path);
                 new_frame.stack_base = self.stack.len();
                 self.frames.push(new_frame);
-                self.advance(frame);
-                Ok(())
-            }
-            Opcode::EndTry => {
-                // The protected region ran to here without failing, so only the
-                // `finally` is owed. The handler is popped on this path so that
-                // the failure path above does not run the `finally` twice.
-                let Some(handler) = self.handlers.last() else {
-                    self.advance(frame);
-                    return Ok(());
-                };
-                let handler = handler.clone();
-                self.handlers.pop();
-                self.run_finally(&handler)?;
                 self.advance(frame);
                 Ok(())
             }
@@ -1276,6 +1334,12 @@ impl BytecodeVm {
     /// loop keeps its sequence on the operand stack for the whole body, and the
     /// instruction at `top` is where the next value is drawn from it. Every other
     /// `STORE` binds what the statement pushed.
+    ///
+    /// Only the plain binding refuses a write onto a constant. The loop-variable
+    /// path is the loop's own per-turn binding of its iterator's element rather
+    /// than a write the program wrote, and it shadows: the tree-walking VM gives
+    /// each turn of a `for each` its own scope, so `constant X to 1` followed by
+    /// `for each X in [1, 2]` reads 1 and 2 inside the loop and 1 after it.
     fn store(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let ip = self.frames[frame].ip as u32;
         let name = self.constant_text(instruction.arg)?;
@@ -1285,6 +1349,7 @@ impl BytecodeVm {
             .find(|site| site.iterator && site.top == ip)
             .copied()
         else {
+            self.refuse_constant_rebind(&name)?;
             let value = self.pop()?;
             self.bind(frame, &name, value);
             self.advance(frame);
@@ -1786,17 +1851,20 @@ impl BytecodeVm {
         self.run_catch(&handler)?;
         self.run_finally(&handler)?;
 
-        // The protected region is the instructions between `TRY` and the
-        // `END_TRY` that closes it, so execution carries on at the `END_TRY` —
-        // which is where the `finally` would run had it not just run above, and
-        // which pops the handler in the ordinary way rather than here. A `try`
-        // with no `END_TRY` to go to — a file the compiler did not write — ends
-        // the block instead of resuming into whatever follows.
+        // The protected region is the instructions between `TRY` and the marked
+        // `NOP` that closes it, and both handlers have run above, so execution
+        // carries on *after* that `NOP` rather than at it. Resuming at it would
+        // be wrong twice over: the instruction pops whatever handler is on top,
+        // which for an inner `try` is the *enclosing* one — its `finally` would
+        // run before the rest of its protected code and it would lose its
+        // protection — and the `finally` owed here has already run. A `try` with
+        // no marker to go to — a file the compiler did not write — ends the
+        // block instead of resuming into whatever follows.
         if self.frames.is_empty() {
             return Ok(true);
         }
         match self.end_try_after(frame) {
-            Some(target) => self.set_ip(frame, target),
+            Some(target) => self.set_ip(frame, target + 1),
             None => self.set_ip(frame, self.code_len(frame)),
         }
         Ok(true)
@@ -1849,8 +1917,9 @@ impl BytecodeVm {
 
     /// The `finally` body of `handler`, if it has one.
     ///
-    /// It runs whether or not the protected code failed, which is what
-    /// `END_TRY` is for: this is the same code both paths take.
+    /// It runs whether or not the protected code failed: the success path runs
+    /// it at the marked `NOP` that closes the region, and the failure path runs
+    /// it here. Both reach the same code, by the same handler.
     fn run_finally(&mut self, handler: &Handler) -> Result<()> {
         let Some((chunk, path)) = &handler.finally else {
             return Ok(());
@@ -1863,25 +1932,25 @@ impl BytecodeVm {
         self.drive(self.frames.len() - 1)
     }
 
-    /// The offset of the `END_TRY` that closes the `try` running in `frame`, or
-    /// `None` when the block has none.
+    /// The offset of the marked `NOP` that closes the `try` running in `frame`,
+    /// or `None` when the block has none.
     ///
     /// Scanned forward from the current instruction, because a failure inside
-    /// the protected code is in the middle of the region it has to skip. A
-    /// *nested* `try` ends at its own `END_TRY` first, so those are stepped
-    /// over rather than mistaken for this region's end.
+    /// the protected code is in the middle of the region it has to skip. Only
+    /// the marked `NOP` closes a region — a filler `NOP` inside protected code
+    /// is not an end, so it cannot truncate the region — while a *nested* `try`
+    /// ends at its own marked `NOP` first, which is what the nesting count is
+    /// for: it steps over those and finds the end of this one.
     fn end_try_after(&self, frame: usize) -> Option<usize> {
         let code = block_at(&self.frames[frame].chunk, &self.frames[frame].path)?;
         let mut depth = 0usize;
         for (offset, instruction) in code.code.iter().enumerate().skip(self.frames[frame].ip) {
-            match instruction.opcode {
-                Opcode::Try => depth += 1,
-                Opcode::EndTry => {
-                    if depth == 0 {
-                        return Some(offset);
-                    }
-                    depth -= 1;
-                }
+            match (instruction.opcode, instruction.arg) {
+                (Opcode::Try, _) => depth += 1,
+                (Opcode::Nop, END_TRY_MARKER) if depth == 0 => return Some(offset),
+                (Opcode::Nop, END_TRY_MARKER) => depth -= 1,
+                // A filler `NOP` closes nothing, so it is stepped over like any
+                // other instruction.
                 _ => {}
             }
         }
@@ -1890,40 +1959,60 @@ impl BytecodeVm {
 
     // -- imports ------------------------------------------------------------
 
-    /// `IMPORT`: loads a module's `set` bindings into the globals, then the
-    /// `STORE` the file writes next binds the name.
+    /// `IMPORT`: loads a module's `set` and `constant` declarations into the
+    /// globals, then the `STORE` the file writes next binds the name.
     ///
-    /// Only the `set` statements are kept, and they are compiled and run here
-    /// rather than evaluated from the module's syntax tree, because this VM has
-    /// no evaluator — but the selection is the tree-walking VM's, so the bindings
-    /// that appear are the same ones.
+    /// A module already loaded is not loaded again — see
+    /// [`BytecodeVm::modules`] — but the `STORE` still binds the name, so a
+    /// second `import` of the same module says the same thing to the program as
+    /// the first did.
+    ///
+    /// The declarations are compiled and run here rather than evaluated from the
+    /// module's syntax tree, because this VM has no evaluator — but the selection
+    /// is the tree-walking VM's, so the bindings that appear are the same ones.
     fn import(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let name = self.constant_text(instruction.arg)?;
-        for path in module_paths(&name) {
-            if std::path::Path::new(&path).exists() {
-                let chunk = Arc::new(self.compile_module(&path)?);
-                let mut module_frame = self.frame_for(&chunk, Vec::new());
-                module_frame.globals_only = true;
-                module_frame.stack_base = self.stack.len();
-                module_frame.locals_base = self.locals.len();
-                self.frames.push(module_frame);
-                self.drive(self.frames.len() - 1)?;
-                self.advance(frame);
-                // `IMPORT` is followed by a `STORE` that consumes what the
-                // statement produced. An import produces `nothing` — which is
-                // what the tree-walking VM binds the module's name to — so that
-                // is what is pushed for the store to bind.
-                self.push(Value::Nothing);
-                return Ok(());
-            }
+        let Some(path) = module_paths(&name)
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists())
+        else {
+            return Err(Error::Runtime(
+                format!("Cannot find module '{name}'"),
+                self.span(),
+            ));
+        };
+
+        // Recorded before the module runs rather than after, so a module that
+        // reached this import again would find itself loaded instead of running
+        // a second time.
+        if self.modules.insert(name.clone()) {
+            let chunk = Arc::new(self.compile_module(&path)?);
+            let mut module_frame = self.frame_for(&chunk, Vec::new());
+            module_frame.globals_only = true;
+            module_frame.stack_base = self.stack.len();
+            module_frame.locals_base = self.locals.len();
+            self.frames.push(module_frame);
+            self.drive(self.frames.len() - 1)?;
         }
-        Err(Error::Runtime(
-            format!("Cannot find module '{}'", name),
-            self.span(),
-        ))
+
+        self.advance(frame);
+        // `IMPORT` is followed by a `STORE` that consumes what the statement
+        // produced. An import produces `nothing` — which is what the tree-walking
+        // VM binds the module's name to — so that is what is pushed for the store
+        // to bind.
+        self.push(Value::Nothing);
+        Ok(())
     }
 
-    /// Compiles a module down to the `set` statements its top level declares.
+    /// Compiles a module down to the `set` and `constant` statements its top
+    /// level declares.
+    ///
+    /// Both, because both are bindings the importing program reads: a module
+    /// that declares `constant PI` and one that declares `set PI` bind the same
+    /// name, and dropping the first leaves the name resolving to whatever else
+    /// was already bound — for `PI` that is the builtin's, so `import` followed
+    /// by `say PI` printed the builtin's value on this VM and the module's on the
+    /// tree-walking one.
     fn compile_module(&self, path: &str) -> Result<Chunk> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
@@ -1933,7 +2022,12 @@ impl BytecodeVm {
             statements: ast
                 .statements
                 .iter()
-                .filter(|stmt| matches!(stmt.statement, Statement::Set { .. }))
+                .filter(|stmt| {
+                    matches!(
+                        stmt.statement,
+                        Statement::Set { .. } | Statement::Constant { .. }
+                    )
+                })
                 .cloned()
                 .collect(),
         };

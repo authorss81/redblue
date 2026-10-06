@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 
 use crate::bytecode::format::{Block, Chunk, Constant, Instruction, NO_BLOCK, NO_CONST};
-use crate::bytecode::opcode::Opcode;
+use crate::bytecode::opcode::{Opcode, END_TRY_MARKER};
 
 /// The width the mnemonic column is padded to.
 ///
@@ -160,6 +160,13 @@ fn describe(chunk: &Chunk, block: &Block, instruction: &Instruction) -> String {
     if instruction.opcode == Opcode::Try {
         clauses.extend(named_block(block, instruction.arg, "catch "));
         clauses.extend(named_block(block, instruction.aux, "finally "));
+    }
+
+    // A `NOP` is the filler, and the one thing it is not is noise: this is the
+    // marker that ends a protected region, so a reader looking for where a
+    // `try` stops being protected can see it here rather than inferring it.
+    if instruction.opcode == Opcode::Nop && instruction.arg == END_TRY_MARKER {
+        clauses.push("end of a protected region".to_string());
     }
 
     if matches!(instruction.opcode, Opcode::Jump | Opcode::JumpIfFalse) {
