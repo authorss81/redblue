@@ -1,12 +1,25 @@
+//! The tree-walking interpreter: what `rb run` executes.
+//!
+//! It is the specification of Redblue's behaviour. The bytecode VM in
+//! [`crate::bytecode::vm`] has to answer the same way, so the operations both
+//! need — arithmetic, indexing, the builtin library — live in
+//! [`crate::runtime`] and are read from here rather than written twice.
+
 use crate::error::{Error, Result, Span};
-use crate::lexer::Lexer;
-use crate::parser as redblue_parser;
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
+use crate::runtime;
 use crate::stdlib;
-use crate::value::{finite_number, Captured, CapturedScope, Fields, FunctionValue, Value};
-use std::collections::{HashMap, HashSet};
+use crate::value::{
+    finite_number, Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Value,
+};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+
+// The HTTP timeouts belong to the builtin library, which is `runtime`'s; they
+// are part of this module's public surface because they were declared here
+// before the move.
+pub use crate::runtime::{NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS};
 
 /// The default number of user function calls that may be active at once.
 /// Exceeding it is a `RuntimeError`, not a Rust stack overflow.
@@ -332,37 +345,20 @@ impl Vm {
         self.expectation_failure.take()
     }
 
-    /// Runs a module's declarations into this VM, under the name the `import`
-    /// that reached it goes by.
+    /// Takes the lines `say` produced, for a caller that wants them rather than
+    /// the printing.
     ///
-    /// A module already loaded is left alone: importing it twice binds the same
-    /// names twice, and binding a name twice is what a `set` refuses to do and a
-    /// `constant` cannot do at all — the second declaration of the module's own
-    /// `TAU` would be refused as a duplicate of the one the first import bound.
-    ///
-    /// A module's functions are not bound to a name, so a member stays
-    /// unreachable — see FINDINGS.md. The `set` and the `constant` below are the
-    /// whole of what an import currently contributes.
-    fn load_module(&mut self, name: &str, source: &str) -> Result<()> {
-        if self.modules.contains_key(name) {
-            return Ok(());
-        }
+    /// The printing happens in [`Vm::run`], so this is only useful afterwards.
+    /// It exists so that a caller comparing this VM with the bytecode VM can see
+    /// what each printed without capturing a process's stdout.
+    pub fn take_output(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.output)
+    }
 
-        let tokens = Lexer::tokenize(source)?;
-        let ast = redblue_parser::Parser::new(tokens).parse()?;
-
-        for stmt in &ast.statements {
-            match &stmt.statement {
-                Statement::Set { name, value } => {
-                    let val = self.evaluate(value)?;
-                    self.bind_module_name(name, val)?;
-                }
-                Statement::Constant { name, value } => {
-                    let val = self.evaluate(value)?;
-                    self.bind_constant(name, val)?;
-                }
-                _ => continue,
-            }
+    fn load_module(&mut self, path: &str) -> Result<()> {
+        let bound = runtime::load_module(path, |expr| self.evaluate(expr))?;
+        for (name, value) in bound {
+            self.globals.insert(name, value);
         }
 
         self.modules.insert(name.to_string(), ast);
@@ -405,7 +401,7 @@ impl Vm {
         Value::Function(FunctionValue {
             name: name.to_string(),
             params: params.to_vec(),
-            body: Arc::new(body.to_vec()),
+            body: FunctionBody::Statements(Arc::new(body.to_vec())),
             captured: Arc::new(captured),
         })
     }
@@ -792,71 +788,12 @@ impl Vm {
             } => self.call_method(receiver, method, args),
             Expr::Property { object, property } => {
                 let obj = self.evaluate(object)?;
-                if let Value::Record(fields) = obj {
-                    Ok(fields.get(property).cloned().unwrap_or(Value::Nothing))
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot access property on non-object".to_string(),
-                        self.span(),
-                    ))
-                }
+                runtime::property(self.span(), obj, property)
             }
             Expr::Index { object, index } => {
                 let obj = self.evaluate(object)?;
                 let idx = self.evaluate(index)?;
-                let Value::List(items) = obj else {
-                    return Err(Error::Runtime(
-                        "Cannot index non-list".to_string(),
-                        self.span(),
-                    ));
-                };
-                let Value::Number(n) = idx else {
-                    return Err(Error::Runtime(
-                        "Index must be a number".to_string(),
-                        self.span(),
-                    ));
-                };
-                // A fractional index names no element, so it is rejected rather
-                // than truncated: `items[0.5]` must not quietly answer `items[0]`.
-                if n.fract() != 0.0 {
-                    return Err(Error::Runtime(
-                        format!(
-                            "Index {} is out of bounds: a list index must be a whole number",
-                            Value::Number(n)
-                        ),
-                        self.span(),
-                    ));
-                }
-                // A negative index counts from the end, so `n as i64` saturates to
-                // `i64::MIN` at one extreme. That sum is in range while `len` is
-                // non-negative, but the bound is arithmetic rather than a stated
-                // invariant, so it is checked instead of assumed, and the result
-                // is converted rather than cast: a negative offset cast to `usize`
-                // wraps to a huge value and would name a different element than
-                // the program asked for.
-                let element = if n < 0.0 {
-                    (items.len() as i64).checked_add(n as i64)
-                } else {
-                    Some(n as i64)
-                }
-                .and_then(|offset| usize::try_from(offset).ok())
-                .and_then(|offset| items.get(offset))
-                .cloned();
-                element.ok_or_else(|| {
-                    Error::Runtime(
-                        format!(
-                            "Index {} is out of bounds: length is {}, {}",
-                            Value::Number(n),
-                            items.len(),
-                            if items.is_empty() {
-                                "the list is empty, so it has no valid index".to_string()
-                            } else {
-                                format!("valid indexes are 0 to {}", items.len() - 1)
-                            }
-                        ),
-                        self.span(),
-                    )
-                })
+                runtime::index(self.span(), obj, idx)
             }
             Expr::InterpolatedText(parts) => {
                 let mut result = String::new();
@@ -891,556 +828,24 @@ impl Vm {
     }
 
     fn binary_op(&mut self, op: &BinaryOp, left: Value, right: Value) -> Result<Value> {
-        match op {
-            BinaryOp::Add => match (left, right) {
-                (Value::Number(a), Value::Number(b)) => Value::number(a + b, self.span()),
-                (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{}{}", a, b))),
-                _ => Err(Error::Runtime(
-                    "Cannot add non-numbers".to_string(),
-                    self.span(),
-                )),
-            },
-            BinaryOp::Sub => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Value::number(a - b, self.span())
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot subtract non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::Mul => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Value::number(a * b, self.span())
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot multiply non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::Div => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    if b == 0.0 {
-                        Err(Error::Runtime("Division by zero".to_string(), self.span()))
-                    } else {
-                        Value::number(a / b, self.span())
-                    }
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot divide non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::Mod => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    if b == 0.0 {
-                        Err(Error::Runtime("Modulo by zero".to_string(), self.span()))
-                    } else {
-                        Value::number(a % b, self.span())
-                    }
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot modulo non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::Equal => Ok(Value::YesNo(left == right)),
-            BinaryOp::NotEqual => Ok(Value::YesNo(left != right)),
-            BinaryOp::Less => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Ok(Value::YesNo(a < b))
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot compare non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::LessEqual => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Ok(Value::YesNo(a <= b))
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot compare non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::Greater => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Ok(Value::YesNo(a > b))
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot compare non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::GreaterEqual => {
-                if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                    Ok(Value::YesNo(a >= b))
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot compare non-numbers".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            BinaryOp::And => Ok(Value::YesNo(left.is_truthy() && right.is_truthy())),
-            BinaryOp::Or => Ok(Value::YesNo(left.is_truthy() || right.is_truthy())),
-            BinaryOp::In => {
-                if let Value::List(items) = right {
-                    Ok(Value::YesNo(items.contains(&left)))
-                } else {
-                    Err(Error::Runtime(
-                        "Right side of 'in' must be a list".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-        }
+        runtime::binary_op(self.span(), op, left, right)
     }
 
     fn unary_op(&self, op: &UnaryOp, value: Value) -> Result<Value> {
-        match op {
-            UnaryOp::Neg => {
-                if let Value::Number(n) = value {
-                    Ok(Value::Number(-n))
-                } else {
-                    Err(Error::Runtime(
-                        "Cannot negate non-number".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            UnaryOp::Not => Ok(Value::YesNo(!value.is_truthy())),
-        }
+        runtime::unary_op(self.span(), op, value)
     }
 
     fn call(&mut self, name: &str, args: &[Value]) -> Result<Value> {
-        // Check for built-in functions
-        match name {
-            "say" => {
-                if let Some(arg) = args.first() {
-                    println!("{}", arg);
-                    Ok(Value::Nothing)
-                } else {
-                    Err(Error::Runtime(
-                        "say requires an argument".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            "length" | "len" => {
-                if let Some(Value::List(items)) = args.first().cloned() {
-                    Ok(Value::Number(items.len() as f64))
-                } else if let Some(Value::Text(s)) = args.first().cloned() {
-                    Ok(Value::Number(s.len() as f64))
-                } else {
-                    Err(Error::Runtime(
-                        "length requires a list or text".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            "input" | "ask" => {
-                let mut input = String::new();
-                if let Some(prompt) = args.first() {
-                    print!("{}", prompt);
-                }
-                std::io::stdin()
-                    .read_line(&mut input)
-                    .map_err(|e| Error::Runtime(e.to_string(), self.span()))?;
-                input.pop(); // Remove newline
-                Ok(Value::Text(input))
-            }
-            "random" => {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                Ok(Value::Number((now.as_nanos() % 1000) as f64))
-            }
-            // Files module
-            "files_read" => {
-                let path = match args.first() {
-                    Some(Value::Text(p)) => p,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.read requires a text path".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                std::fs::read_to_string(path)
-                    .map(Value::Text)
-                    .map_err(|e| Error::Io(format!("Failed to read '{}': {}", path, e)))
-            }
-            "files_write" => {
-                let (path, content) = match (args.first(), args.get(1)) {
-                    (Some(Value::Text(p)), Some(Value::Text(c))) => (p, c),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.write requires two text arguments".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                std::fs::write(path, content)
-                    .map_err(|e| Error::Io(format!("Failed to write '{}': {}", path, e)))?;
-                Ok(Value::Nothing)
-            }
-            "files_append" => {
-                let (path, content) = match (args.first(), args.get(1)) {
-                    (Some(Value::Text(p)), Some(Value::Text(c))) => (p, c),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.append requires two text arguments".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
-                    .map_err(|e| Error::Io(format!("Failed to append to '{}': {}", path, e)))?;
-                Ok(Value::Nothing)
-            }
-            "files_exists" => {
-                let path = match args.first() {
-                    Some(Value::Text(p)) => p,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.exists requires a text path".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                Ok(Value::YesNo(std::path::Path::new(path).exists()))
-            }
-            "files_lines" => {
-                let path = match args.first() {
-                    Some(Value::Text(p)) => p,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.lines requires a text path".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                let content = std::fs::read_to_string(path)
-                    .map_err(|e| Error::Io(format!("Failed to read '{}': {}", path, e)))?;
-                let lines: Vec<Value> = content
-                    .lines()
-                    .map(|l| Value::Text(l.to_string()))
-                    .collect();
-                Ok(Value::List(lines))
-            }
-            "files_delete" => {
-                let path = match args.first() {
-                    Some(Value::Text(p)) => p,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.delete requires a text path".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                std::fs::remove_file(path)
-                    .map_err(|e| Error::Io(format!("Failed to delete '{}': {}", path, e)))?;
-                Ok(Value::Nothing)
-            }
-            "files_copy" => {
-                let (from, to) = match (args.first(), args.get(1)) {
-                    (Some(Value::Text(f)), Some(Value::Text(t))) => (f, t),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.copy requires two text arguments".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                std::fs::copy(from, to)
-                    .map(|_| Value::Nothing)
-                    .map_err(|e| Error::Io(format!("Failed to copy '{}' to '{}': {}", from, to, e)))
-            }
-            "files_rename" => {
-                let (from, to) = match (args.first(), args.get(1)) {
-                    (Some(Value::Text(f)), Some(Value::Text(t))) => (f, t),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "files.rename requires two text arguments".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                std::fs::rename(from, to)
-                    .map(|_| Value::Nothing)
-                    .map_err(|e| {
-                        Error::Io(format!("Failed to rename '{}' to '{}': {}", from, to, e))
-                    })
-            }
-            // Time module
-            "time_now" => {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| Error::Runtime(e.to_string(), self.span()))?;
-                let secs = now.as_secs();
-                let nanos = now.subsec_nanos();
-                let record = crate::value::Fields::from([
-                    ("seconds".to_string(), Value::Number(secs as f64)),
-                    ("nanoseconds".to_string(), Value::Number(nanos as f64)),
-                ]);
-                Ok(Value::Record(record))
-            }
-            "time_sleep" => {
-                let seconds = match args.first() {
-                    Some(Value::Number(n)) => *n,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "time.sleep requires a number".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-                Ok(Value::Nothing)
-            }
-            "time_format" => {
-                use std::time::UNIX_EPOCH;
-                let (timestamp, format) = match (args.first(), args.get(1)) {
-                    (Some(Value::Number(ts)), Some(Value::Text(fmt))) => (*ts, fmt.clone()),
-                    (Some(Value::Number(ts)), None) => (*ts, "%Y-%m-%d %H:%M:%S".to_string()),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "time.format requires a number and optional text".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                let datetime = UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
-                let tm = chrono::DateTime::from_timestamp(
-                    datetime.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-                    0,
-                )
-                .ok_or_else(|| Error::Runtime("Invalid timestamp".to_string(), self.span()))?;
-                Ok(Value::Text(tm.format(&format).to_string()))
-            }
-            "time_unix" => {
-                let text = match args.first() {
-                    Some(Value::Text(s)) => s,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "time.unix requires a text".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                let parsed = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
-                    .map_err(|_| {
-                        Error::Runtime(
-                            "Invalid date format, use YYYY-MM-DD HH:MM:SS".to_string(),
-                            self.span(),
-                        )
-                    })?;
-                Ok(Value::Number(parsed.and_utc().timestamp() as f64))
-            }
-            // Formats module (JSON/CSV)
-            "json_parse" => {
-                let text = match args.first() {
-                    Some(Value::Text(s)) => s,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "json.parse requires text".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                parse_json(text, self.span())
-                    .map_err(|e| Error::Runtime(e.to_string(), self.span()))
-            }
-            "json_stringify" => {
-                let value = match args.first() {
-                    Some(v) => v.clone(),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "json.stringify requires a value".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                Ok(Value::Text(json_stringify(&value)))
-            }
-            "csv_parse" => {
-                let text = match args.first() {
-                    Some(Value::Text(s)) => s,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "csv.parse requires text".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                parse_csv(text, self.span())
-            }
-            // Network module
-            "network_get" => {
-                let url = match args.first() {
-                    Some(Value::Text(u)) => u,
-                    _ => {
-                        return Err(Error::Runtime(
-                            "network.get requires a URL".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                let client = network_client(self.span())?;
-                let response = client.get(url).send().map_err(|e| {
-                    Error::Runtime(format!("HTTP request failed: {}", e), self.span())
-                })?;
-                let body = response.text().map_err(|e| {
-                    Error::Runtime(format!("Failed to read response: {}", e), self.span())
-                })?;
-                Ok(Value::Text(body))
-            }
-            "network_post" => {
-                let (url, data) = match (args.first(), args.get(1)) {
-                    (Some(Value::Text(u)), Some(Value::Text(d))) => (u, d),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "network.post requires URL and data".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                let client = network_client(self.span())?;
-                let response = client.post(url).body(data.clone()).send().map_err(|e| {
-                    Error::Runtime(format!("HTTP request failed: {}", e), self.span())
-                })?;
-                let body = response.text().map_err(|e| {
-                    Error::Runtime(format!("Failed to read response: {}", e), self.span())
-                })?;
-                Ok(Value::Text(body))
-            }
-            // Testing module
-            "expect" | "assert" => {
-                let (actual, expected) = match (args.first(), args.get(1)) {
-                    (Some(a), Some(e)) => (a.clone(), e.clone()),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "expect requires two arguments".to_string(),
-                            self.span(),
-                        ))
-                    }
-                };
-                if actual != expected {
-                    return Err(Error::Runtime(
-                        format!(
-                            "Assertion failed: expected {:?} but got {:?}",
-                            expected, actual
-                        ),
-                        self.span(),
-                    ));
-                }
-                Ok(Value::Nothing)
-            }
-            // Console module
-            "console_log" => {
-                if let Some(arg) = args.first() {
-                    println!("{}", arg);
-                }
-                Ok(Value::Nothing)
-            }
-            "console_error" => {
-                if let Some(arg) = args.first() {
-                    eprintln!("{}", arg);
-                }
-                Ok(Value::Nothing)
-            }
-            "console_clear" => {
-                print!("\x1B[2J\x1B[1H");
-                Ok(Value::Nothing)
-            }
-            // Random module
-            "random_number" => {
-                let (min, max) = match (args.first(), args.get(1)) {
-                    (Some(Value::Number(min)), Some(Value::Number(max))) => (*min, *max),
-                    (Some(Value::Number(max)), None) => (0.0, *max),
-                    _ => (0.0, 1.0),
-                };
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                let r = (now.as_nanos() % 1000000) as f64 / 1000000.0;
-                // `max - min` overflows for a range as ordinary as
-                // `-1e308` to `1e308`, which is a number that does not exist.
-                Value::number(min + r * (max - min), self.span())
-            }
-            "random_choice" => {
-                if let Some(Value::List(items)) = args.first() {
-                    if items.is_empty() {
-                        return Ok(Value::Nothing);
-                    }
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                    let idx = (now.as_nanos() as usize) % items.len();
-                    Ok(items[idx].clone())
-                } else {
-                    Err(Error::Runtime(
-                        "random_choice requires a list".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            "random_shuffle" => {
-                if let Some(Value::List(mut items)) = args.first().cloned() {
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                    let seed = now.as_nanos() as usize;
+        if let Some(value) = runtime::builtin(self.span(), name, args)? {
+            return Ok(value);
+        }
 
-                    for i in (1..items.len()).rev() {
-                        let j = seed % (i + 1);
-                        items.swap(i, j);
-                    }
-                    Ok(Value::List(items))
-                } else {
-                    Err(Error::Runtime(
-                        "random_shuffle requires a list".to_string(),
-                        self.span(),
-                    ))
-                }
-            }
-            // Type conversion
-            "type_of" => {
-                let type_name = match args.first() {
-                    Some(Value::Number(_)) => "number",
-                    Some(Value::Text(_)) => "text",
-                    Some(Value::YesNo(_)) => "yes/no",
-                    Some(Value::Nothing) => "nothing",
-                    Some(Value::List(_)) => "list",
-                    Some(Value::Record(_)) => "record",
-                    Some(Value::Function(_)) => "function",
-                    Some(Value::Builtin(_)) => "builtin",
-                    Some(Value::Object(_, _)) => "object",
-                    None => "nothing",
-                };
-                Ok(Value::Text(type_name.to_string()))
-            }
-            _ => {
-                // User-defined function
-                if let Some(Value::Function(function)) = self.get_var(name) {
-                    self.call_user_function(name, &function, args)
-                } else {
-                    Err(Error::Runtime(
-                        format!("Unknown function '{}'", name),
-                        self.span(),
-                    ))
-                }
-            }
+        match self.get_var(name) {
+            Some(Value::Function(function)) => self.call_user_function(name, &function, args),
+            _ => Err(Error::Runtime(
+                format!("Unknown function '{}'", name),
+                self.span(),
+            )),
         }
     }
 
@@ -1640,7 +1045,22 @@ impl Vm {
             self.set_var(param, value)?;
         }
         self.call_depth += 1;
-        let result = self.execute_statements(&function.body);
+        // A function value the bytecode VM built names a compiled block instead
+        // of statements, and cannot be run by this walker. `rb run` only ever
+        // builds statements itself, so reaching this is a caller mixing the two
+        // VMs rather than a program that did something.
+        let FunctionBody::Statements(body) = &function.body else {
+            self.call_depth -= 1;
+            self.locals.truncate(caller_depth);
+            return Err(Error::Runtime(
+                format!(
+                    "'{}' has a compiled body, which only `rb vm` can run",
+                    function.name
+                ),
+                self.span(),
+            ));
+        };
+        let result = self.execute_statements(body);
         self.call_depth -= 1;
         // Truncated rather than popped one at a time, so the stack is balanced
         // even when the body failed part way through and left a scope behind.
@@ -1653,424 +1073,5 @@ impl Vm {
 impl Default for Vm {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// The whole-request timeout for `network.get` and `network.post`: connect,
-/// send, headers and body read together. It is here because
-/// `reqwest::blocking::Client::new()` has no timeout of its own, and a client
-/// without one waits for the operating system's own connect timeout — about
-/// two and a half minutes on Linux, and forever on a connection that is
-/// accepted and never answered.
-pub const NETWORK_TIMEOUT_SECS: u64 = 10;
-
-/// The connect timeout for the same two functions, so a host that drops
-/// packets is given up on before the whole-request timeout is reached.
-pub const NETWORK_CONNECT_TIMEOUT_SECS: u64 = 5;
-
-/// Builds the client every `network` call uses. A client that cannot be built
-/// is a `Runtime` error rather than a panic: a Redblue program must not be able
-/// to abort the process.
-fn network_client(span: Span) -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(NETWORK_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(NETWORK_CONNECT_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| Error::Runtime(format!("Cannot create the HTTP client: {}", e), span))
-}
-
-fn parse_json(json: &str, span: Span) -> Result<Value> {
-    let json = json.trim();
-    if json.starts_with('{') {
-        parse_json_object(json, span)
-    } else if json.starts_with('[') {
-        parse_json_array(json, span)
-    } else if json.starts_with('"') {
-        Ok(Value::Text(parse_json_string(json, span)?))
-    } else if json == "null" {
-        Ok(Value::Nothing)
-    } else if json == "true" {
-        Ok(Value::YesNo(true))
-    } else if json == "false" {
-        Ok(Value::YesNo(false))
-    } else {
-        match json.parse::<f64>() {
-            Ok(n) => Value::number(n, span),
-            Err(_) => Err(Error::Runtime(format!("Invalid JSON: {}", json), span)),
-        }
-    }
-}
-
-/// Reads four hex digits of a `\uXXXX` escape starting at `at`, which is the
-/// index of the escape's first digit.
-fn json_hex4(chars: &[char], at: usize, span: Span) -> Result<u32> {
-    let mut value = 0u32;
-    for offset in 0..4 {
-        let digit = chars
-            .get(at + offset)
-            .and_then(|c| c.to_digit(16))
-            .ok_or_else(|| {
-                Error::Runtime(
-                    "Invalid JSON escape: '\\u' needs four hex digits".to_string(),
-                    span,
-                )
-            })?;
-        value = value * 16 + digit;
-    }
-    Ok(value)
-}
-
-/// Decodes the `\uXXXX` escape whose backslash is at `at`, returning the
-/// character and the index just past it. A character outside the Basic
-/// Multilingual Plane is written as a surrogate pair, and a half of one is an
-/// error rather than a replacement character.
-fn decode_json_unicode_escape(chars: &[char], at: usize, span: Span) -> Result<(char, usize)> {
-    let unpaired = || {
-        Error::Runtime(
-            "Invalid JSON escape: unpaired surrogate in '\\u' escape".to_string(),
-            span,
-        )
-    };
-    let first = json_hex4(chars, at + 2, span)?;
-    match first {
-        0xD800..=0xDBFF => {
-            if chars.get(at + 6) != Some(&'\\') || chars.get(at + 7) != Some(&'u') {
-                return Err(unpaired());
-            }
-            let second = json_hex4(chars, at + 8, span)?;
-            if !(0xDC00..=0xDFFF).contains(&second) {
-                return Err(unpaired());
-            }
-            let combined = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
-            Ok((char::from_u32(combined).ok_or_else(unpaired)?, at + 12))
-        }
-        0xDC00..=0xDFFF => Err(unpaired()),
-        _ => Ok((
-            char::from_u32(first)
-                .ok_or_else(|| Error::Runtime("Invalid JSON escape".to_string(), span))?,
-            at + 6,
-        )),
-    }
-}
-
-/// Parses CSV the way the format spells itself: a field whose first character
-/// is `"` is quoted, and inside a quoted field a comma, a newline and `""` are
-/// data rather than structure. A bare field keeps its old meaning — trimmed of
-/// surrounding whitespace — because that is what the language shipped.
-///
-/// Rows may be ragged: each row is returned with the cells it actually has, so
-/// a short row is a short row rather than an error.
-fn parse_csv(text: &str, span: Span) -> Result<Value> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut rows: Vec<Value> = Vec::new();
-    let mut row: Vec<Value> = Vec::new();
-    let mut field = String::new();
-    let mut in_quotes = false;
-    let mut was_quoted = false;
-    let mut quote_closed = false;
-    let mut at_field_start = true;
-    let mut index = 0;
-
-    while index < chars.len() {
-        let c = chars[index];
-        if in_quotes {
-            if c == '"' && chars.get(index + 1) == Some(&'"') {
-                field.push('"');
-                index += 2;
-                continue;
-            }
-            if c != '"' {
-                field.push(c);
-                index += 1;
-                continue;
-            }
-            in_quotes = false;
-            quote_closed = true;
-            index += 1;
-            continue;
-        }
-        if quote_closed {
-            // Whatever sits between the closing quote and the separator is not
-            // part of the field: the quote already said where the field ends.
-            if c == ',' || c == '\n' || c == '\r' {
-                quote_closed = false;
-            } else {
-                index += 1;
-                continue;
-            }
-        }
-        match c {
-            '"' if at_field_start => {
-                in_quotes = true;
-                was_quoted = true;
-                at_field_start = false;
-            }
-            ',' | '\n' | '\r' => {
-                let cell = if was_quoted {
-                    field.clone()
-                } else {
-                    field.trim().to_string()
-                };
-                row.push(Value::Text(cell));
-                field.clear();
-                was_quoted = false;
-                at_field_start = true;
-                if c != ',' {
-                    // A lone CR and the CR of a CRLF pair both end the row, so a
-                    // file written on either platform reads the same.
-                    if c == '\r' && chars.get(index + 1) == Some(&'\n') {
-                        index += 1;
-                    }
-                    rows.push(Value::List(std::mem::take(&mut row)));
-                }
-            }
-            _ => {
-                field.push(c);
-                at_field_start = false;
-            }
-        }
-        index += 1;
-    }
-
-    if in_quotes {
-        return Err(Error::Runtime(
-            "Invalid CSV: unterminated quoted field".to_string(),
-            span,
-        ));
-    }
-    if at_field_start && row.is_empty() {
-        // The text ended on a row separator, so there is no trailing empty row
-        // — and empty text has no rows at all.
-        return Ok(Value::List(rows));
-    }
-    let cell = if was_quoted {
-        field.clone()
-    } else {
-        field.trim().to_string()
-    };
-    row.push(Value::Text(cell));
-    rows.push(Value::List(row));
-    Ok(Value::List(rows))
-}
-
-fn parse_json_object(json: &str, span: Span) -> Result<Value> {
-    let json = json.trim();
-    if !json.starts_with('{') || !json.ends_with('}') {
-        return Err(Error::Runtime("Invalid JSON object".to_string(), span));
-    }
-    let mut map = crate::value::Fields::new();
-    let content = &json[1..json.len() - 1];
-    if content.trim().is_empty() {
-        return Ok(Value::Record(map));
-    }
-    for pair in split_json_pairs(content) {
-        let parts: Vec<&str> = pair.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            // A pair with no colon is malformed input, not a pair to skip: it
-            // used to vanish and leave a record that was missing its field.
-            if !pair.trim().is_empty() {
-                return Err(Error::Runtime(
-                    "Invalid JSON object: expected \'key: value\'".to_string(),
-                    span,
-                ));
-            }
-            continue;
-        }
-        let key = parse_json_string(parts[0].trim(), span)?;
-        let value = parse_json(parts[1].trim(), span)?;
-        map.insert(key, value);
-    }
-    Ok(Value::Record(map))
-}
-
-fn parse_json_array(json: &str, span: Span) -> Result<Value> {
-    let json = json.trim();
-    if !json.starts_with('[') || !json.ends_with(']') {
-        return Err(Error::Runtime("Invalid JSON array".to_string(), span));
-    }
-    let content = &json[1..json.len() - 1];
-    if content.trim().is_empty() {
-        return Ok(Value::List(Vec::new()));
-    }
-    let mut items = Vec::new();
-    for item in split_json_elements(content) {
-        items.push(parse_json(item, span)?);
-    }
-    Ok(Value::List(items))
-}
-
-fn parse_json_string(json: &str, span: Span) -> Result<String> {
-    let json = json.trim();
-    if !json.starts_with('"') || !json.ends_with('"') || json.len() < 2 {
-        return Err(Error::Runtime("Invalid JSON string".to_string(), span));
-    }
-    let chars: Vec<char> = json[1..json.len() - 1].chars().collect();
-    let mut result = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] != '\\' {
-            result.push(chars[i]);
-            i += 1;
-            continue;
-        }
-        let escape = *chars.get(i + 1).ok_or_else(|| {
-            Error::Runtime(
-                "Invalid JSON escape: string ends with '\\'".to_string(),
-                span,
-            )
-        })?;
-        match escape {
-            'n' => result.push('\n'),
-            't' => result.push('\t'),
-            'r' => result.push('\r'),
-            'b' => result.push('\u{8}'),
-            'f' => result.push('\u{c}'),
-            '"' => result.push('"'),
-            '\\' => result.push('\\'),
-            'u' => {
-                let (character, next) = decode_json_unicode_escape(&chars, i, span)?;
-                result.push(character);
-                i = next;
-                continue;
-            }
-            other => {
-                return Err(Error::Runtime(
-                    format!("Invalid JSON escape: '\\{}'", other),
-                    span,
-                ))
-            }
-        }
-        i += 2;
-    }
-    Ok(result)
-}
-
-/// Escapes `text` for a JSON string body: the quote, the backslash and every
-/// control character that JSON requires be written as an escape.
-fn json_escape_text(text: &str) -> String {
-    let mut result = String::from("\"");
-    for c in text.chars() {
-        match c {
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            '\u{8}' => result.push_str("\\b"),
-            '\u{c}' => result.push_str("\\f"),
-            '"' => result.push_str("\\\""),
-            '\\' => result.push_str("\\\\"),
-            other => {
-                if (other as u32) < 0x20 {
-                    result.push_str(&format!("\\u{:04x}", other as u32));
-                } else {
-                    result.push(other);
-                }
-            }
-        }
-    }
-    result.push('"');
-    result
-}
-
-fn split_json_pairs(content: &str) -> Vec<&str> {
-    let mut pairs = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-    let mut in_string = false;
-    let mut prev_char: Option<char> = None;
-    for (i, c) in content.char_indices() {
-        if c == '"' && prev_char != Some('\\') {
-            in_string = !in_string;
-        }
-        if !in_string {
-            if c == '{' || c == '[' {
-                depth += 1;
-            } else if c == '}' || c == ']' {
-                depth -= 1;
-            } else if c == ',' && depth == 0 {
-                pairs.push(&content[start..i]);
-                start = i + c.len_utf8();
-            }
-        }
-        prev_char = Some(c);
-    }
-    if start < content.len() {
-        pairs.push(&content[start..]);
-    }
-    pairs
-}
-
-fn split_json_elements(content: &str) -> Vec<&str> {
-    split_json_pairs(content)
-}
-
-fn json_stringify(value: &Value) -> String {
-    match value {
-        Value::Nothing => "null".to_string(),
-        Value::YesNo(b) => {
-            if *b {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            }
-        }
-        Value::Number(n) => {
-            // JSON has no literal for a number that is not finite, so it is
-            // written as `null`, which is what every JSON writer emits for one.
-            // No Redblue program can reach this branch: see SPEC.md.
-            if !n.is_finite() {
-                "null".to_string()
-            } else if n.fract() == 0.0 && n.abs() < 1e15 {
-                format!("{}", *n as i64)
-            } else {
-                format!("{}", n)
-            }
-        }
-        Value::Text(s) => json_escape_text(s),
-        Value::List(items) => {
-            let elements: Vec<String> = items.iter().map(json_stringify).collect();
-            format!("[{}]", elements.join(", "))
-        }
-        Value::Record(fields) => {
-            let pairs: Vec<String> = fields
-                .iter()
-                .map(|(k, v)| format!("{}: {}", json_escape_text(k), json_stringify(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
-        }
-        Value::Function(_) => "null".to_string(),
-        Value::Builtin(_) => "null".to_string(),
-        Value::Object(_, _) => "null".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// JSON has no literal for a number that is not finite. A host program
-    /// embedding Redblue can still build one through the public `Value`, so the
-    /// writer has to answer for it, and `null` is the answer every JSON writer
-    /// gives. SPEC.md states this.
-    #[test]
-    fn edge_json_writes_a_number_that_is_not_finite_as_null() {
-        for (value, what) in [
-            (f64::NAN, "NaN"),
-            (f64::INFINITY, "infinity"),
-            (f64::NEG_INFINITY, "negative infinity"),
-        ] {
-            assert_eq!(
-                json_stringify(&Value::Number(value)),
-                "null",
-                "{} must be written as null, not as a JSON number",
-                what
-            );
-        }
-        // The widest finite numbers are numbers, and must not be nulled.
-        for finite in [f64::MAX, f64::MIN, f64::MIN_POSITIVE, 0.0, -0.0, 1.5] {
-            let written = json_stringify(&Value::Number(finite));
-            assert_ne!(written, "null", "{} should still be written", finite);
-        }
-        assert_eq!(json_stringify(&Value::Number(42.0)), "42");
-        assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
     }
 }

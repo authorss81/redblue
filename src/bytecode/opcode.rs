@@ -73,6 +73,14 @@ pub enum Opcode {
     Call,
     /// Calls `constants[arg]` on the receiver below the arguments, with `aux`
     /// arguments.
+    ///
+    /// The name is dotted: `files.read` for a receiver the source named `files`,
+    /// and the bare `read` when the receiver was an expression rather than a
+    /// name. A call is resolved against the receiver's *name* — `files.read` is
+    /// the builtin `files_read`, and `Counter.bump` is a method on a declared
+    /// type — so the file has to carry the name, not only the value the receiver
+    /// held. A bare name is the one shape the language rejects, because it says
+    /// the receiver was not a name at all.
     CallMethod,
     /// Returns the top of the stack, or `nothing` when the return had no value.
     Return,
@@ -112,14 +120,10 @@ pub enum Opcode {
     Test,
     /// Compares the two values on top of the stack as an `expect`.
     Expect,
-    /// Binds the top of the stack to the variable named `constants[arg]` as a
-    /// constant: the name may not be bound again, and no `STORE` writes it.
-    ///
-    /// The declaration `constant NAME to <expr>` compiles to this rather than to
-    /// [`Opcode::Store`], so the file says the name is read-only. A version-2
-    /// file has no way to say that — a `constant` compiled to a `STORE` there —
-    /// which is what version 3 changed.
-    DeclareConst,
+    /// Ends the innermost `try`: pops its handlers and runs its `finally`, so
+    /// the protected region is the run of instructions between `TRY` and this
+    /// rather than the rest of the block.
+    EndTry,
 }
 
 impl Opcode {
@@ -173,7 +177,7 @@ impl Opcode {
         Opcode::Import,
         Opcode::Test,
         Opcode::Expect,
-        Opcode::DeclareConst,
+        Opcode::EndTry,
     ];
 
     /// The opcode a byte stands for, or `None` when the byte is not assigned.
@@ -236,7 +240,7 @@ impl Opcode {
             Opcode::Import => "IMPORT",
             Opcode::Test => "TEST",
             Opcode::Expect => "EXPECT",
-            Opcode::DeclareConst => "DECLARE_CONST",
+            Opcode::EndTry => "END_TRY",
         }
     }
 
@@ -274,6 +278,7 @@ impl Opcode {
                 | Opcode::Skip
                 | Opcode::GetIter
                 | Opcode::Expect
+                | Opcode::EndTry
         )
     }
 }

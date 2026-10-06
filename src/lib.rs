@@ -1,4 +1,4 @@
-mod analyzer;
+pub mod analyzer;
 pub mod bytecode;
 mod error;
 pub mod formatter;
@@ -7,6 +7,7 @@ pub mod linter;
 pub mod lsp;
 pub mod parser;
 pub mod repl;
+mod runtime;
 pub mod stdlib;
 pub mod testing;
 mod value;
@@ -27,8 +28,8 @@ pub use lsp::{
 // `FunctionValue` is re-exported because it is the payload of the public
 // `Value::Function` variant: a caller that matches that variant has to be able
 // to name the type it binds.
-pub use bytecode::{compile_source, Chunk};
-pub use value::{FunctionValue, Value};
+pub use bytecode::{compile_source, Chunk, Opcode};
+pub use value::{FunctionBody, FunctionValue, Value};
 pub use vm::{
     resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
     run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS, MAX_ITERATIONS_ENV,
@@ -167,6 +168,12 @@ pub fn run_cli() {
                         process::exit(1);
                     }
                 }
+                "vm" => {
+                    if let Err(message) = vm_command(path) {
+                        eprintln!("Error: {}", message);
+                        process::exit(1);
+                    }
+                }
                 "format" => match fs::read_to_string(path) {
                     Ok(source) => match formatter::format(&source) {
                         Ok(formatted) => print!("{}", formatted),
@@ -300,6 +307,26 @@ fn dis_command(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `rb vm <file.rbc>` — the bytecode VM, which is bootstrap stage S1b.
+///
+/// A `.rbc` carries no source text, so a failure is reported with the same kind,
+/// message and line the tree-walking VM gives, but without the source line and
+/// caret `rb run` draws: a bytecode file has no text to draw them from. The
+/// gap is in `phases/phase-019/FINDINGS.md`.
+fn vm_command(path: &str) -> Result<(), String> {
+    if !path.ends_with(".rbc") {
+        return Err(format!(
+            "Error: {path} is not a bytecode file; compile it first"
+        ));
+    }
+    let bytes = fs::read(path).map_err(|e| Error::Io(e.to_string()).to_string())?;
+    let chunk = bytecode::Chunk::decode(&bytes).map_err(|e| e.to_string())?;
+
+    bytecode::vm::run(&chunk)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn print_help() {
     println!("Redblue v0.1.0 - A programming language as readable as plain English");
     println!();
@@ -314,6 +341,7 @@ fn print_help() {
     println!("  rb lint <file>  Lint a Redblue file");
     println!("  rb compile <file> [-o out.rbc]  Compile to bytecode");
     println!("  rb dis <file.rbc>  Disassemble bytecode");
+    println!("  rb vm <file.rbc>  Run bytecode");
     println!("  rb diagnostics <file>  Report errors as JSON for editors");
     println!("  rb grammar  Print the TextMate grammar for .rb files");
     println!("  rb keywords  Print the keyword list");
@@ -326,6 +354,7 @@ fn print_help() {
     println!("  rb lint examples/hello.rb");
     println!("  rb compile examples/hello.rb -o hello.rbc");
     println!("  rb dis hello.rbc");
+    println!("  rb vm hello.rbc");
 }
 
 fn print_version() {

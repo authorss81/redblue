@@ -28,6 +28,20 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 /// Changing anything that an older file would decode differently must bump
 /// this.
 ///
+/// Version 3 changed three things a version-2 file reads differently, so a
+/// version-2 file is refused rather than half-understood:
+///
+/// - a block record carries its parameter names after its arity, because a
+///   `LOAD` in a function body names a parameter and a file that held only the
+///   count could not say which name each argument is bound to.
+/// - `CallMethod`'s constant is the dotted `receiver.method` when the receiver
+///   is a name, and the bare method name when it is not. Version 2 wrote only
+///   the method name, which cannot say whether `files.read` is the module
+///   function `files_read` or a method on something called `files`.
+/// - `SetProperty`'s constant is the dotted `object.property`, for the same
+///   reason: the assignment writes the field back to the binding the name
+///   denotes, and a file that held only the field name could not say which one.
+///
 /// Version 2 changed two operands a version-1 file reads differently, so a
 /// version-1 file is refused rather than half-understood:
 ///
@@ -36,12 +50,6 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 ///   flag that discarded the parent's name.
 /// - `DefField` consumes the value pushed immediately before it, so a field's
 ///   `default` is compiled instead of being dropped.
-///
-/// Version 3 added [`DeclareConst`](super::Opcode::DeclareConst), which
-/// `constant NAME to <expr>` compiles to. A version-2 file has no instruction
-/// that says a name is read-only — the same source compiled there wrote a
-/// `Store` — so a version-2 file is refused rather than read as a program that
-/// could rebind a constant.
 pub const FORMAT_VERSION: u16 = 3;
 
 /// The operand that says "there is no block here".
@@ -186,6 +194,12 @@ pub struct Block {
     /// How many parameters a function, method or test block takes. `0` for
     /// every other kind.
     pub arity: u32,
+    /// The parameter names, in order, for a function or method block.
+    ///
+    /// Names and not slots, for the reason [`Opcode::Load`](crate::bytecode::Opcode::Load)
+    /// keeps names: a body reads its own arguments by name, so the file has to
+    /// say which name each argument is bound to. Empty for every other kind.
+    pub params: Vec<String>,
     pub code: Vec<Instruction>,
     /// Nested blocks, in the order the compiler emitted them. An instruction
     /// refers to one by its index here, so this order is part of the format.
@@ -387,6 +401,10 @@ fn write_block_tree(out: &mut Vec<u8>, main: &Block) {
     while let Some(block) = pending.pop() {
         out.push(block.kind as u8);
         write_u32(out, block.arity);
+        write_u32(out, block.params.len() as u32);
+        for param in &block.params {
+            write_string(out, param);
+        }
         write_string(out, &block.name);
         write_u32(out, block.code.len() as u32);
         for instruction in &block.code {
@@ -526,6 +544,10 @@ impl<'a> Reader<'a> {
         })?;
 
         let arity = self.u32()?;
+        let param_count = self.u32()?;
+        let params = self.count(param_count, "parameter name", 4, |reader: &mut Reader| {
+            reader.string("parameter name")
+        })?;
         let name = self.string("block name")?;
         let instruction_count = self.u32()?;
         let code = self.count(
@@ -543,6 +565,7 @@ impl<'a> Reader<'a> {
             name,
             kind,
             arity,
+            params,
             code,
             blocks,
         })
