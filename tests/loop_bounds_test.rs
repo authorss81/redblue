@@ -385,21 +385,29 @@ fn a_zero_limit_falls_back_to_the_default() {
 /// Every example the repository ships must still fit inside the published
 /// limits, or the bound would reject programs the language itself documents.
 ///
-/// `modules/` is deliberately not walked: `modules/MathUtils.rb` does not parse
-/// on `main` (`to circle_area(radius)` — "Expected function name"), so it
-/// cannot be run here. That defect is pre-existing and unrelated to loop
-/// bounds; see FINDINGS.md.
+/// `modules/` is walked too: a module file is a program the loader runs, and
+/// `modules/MathUtils.rb` used to be left out because its `constant`
+/// declarations did not parse.
 #[test]
 fn shipped_examples_fit_inside_the_published_limits() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut checked = 0;
 
-    let entries = std::fs::read_dir(root.join("examples")).expect("examples/ should be readable");
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rb") {
-            continue;
+    // Sorted so that a failure names the same file every run.
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in ["examples", "modules"] {
+        let entries = std::fs::read_dir(root.join(dir))
+            .unwrap_or_else(|e| panic!("{dir}/ should be readable: {e}"));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("rb") {
+                files.push(path);
+            }
         }
+    }
+    files.sort();
+
+    for path in files {
         let source = std::fs::read_to_string(&path).expect("example should be readable");
         let program = parse(&source);
         let mut vm = Vm::new();

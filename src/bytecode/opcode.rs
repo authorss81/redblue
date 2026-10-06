@@ -112,6 +112,14 @@ pub enum Opcode {
     Test,
     /// Compares the two values on top of the stack as an `expect`.
     Expect,
+    /// Binds the top of the stack to the variable named `constants[arg]` as a
+    /// constant: the name may not be bound again, and no `STORE` writes it.
+    ///
+    /// The declaration `constant NAME to <expr>` compiles to this rather than to
+    /// [`Opcode::Store`], so the file says the name is read-only. A version-2
+    /// file has no way to say that — a `constant` compiled to a `STORE` there —
+    /// which is what version 3 changed.
+    DeclareConst,
 }
 
 impl Opcode {
@@ -165,6 +173,7 @@ impl Opcode {
         Opcode::Import,
         Opcode::Test,
         Opcode::Expect,
+        Opcode::DeclareConst,
     ];
 
     /// The opcode a byte stands for, or `None` when the byte is not assigned.
@@ -227,6 +236,7 @@ impl Opcode {
             Opcode::Import => "IMPORT",
             Opcode::Test => "TEST",
             Opcode::Expect => "EXPECT",
+            Opcode::DeclareConst => "DECLARE_CONST",
         }
     }
 
@@ -302,6 +312,7 @@ impl Opcode {
                 | Opcode::CallMethod
                 | Opcode::DefField
                 | Opcode::Import
+                | Opcode::DeclareConst
         )
     }
 

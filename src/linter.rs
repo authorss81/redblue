@@ -206,6 +206,13 @@ impl Linter {
                 self.assign(name, span);
                 self.analyze_expr(value);
             }
+            // A `constant` binds a name exactly as a `set` does, so it is not an
+            // unused variable either: a module's constant is read by whoever
+            // imports the module, which this file cannot see.
+            Statement::Constant { name, value } => {
+                self.assign(name, span);
+                self.analyze_expr(value);
+            }
             Statement::SetProperty { object, value, .. } => {
                 // `set record.field to ...` writes a field of a record. The
                 // record is read here; the field is not a variable binding, so

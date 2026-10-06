@@ -36,7 +36,13 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 ///   flag that discarded the parent's name.
 /// - `DefField` consumes the value pushed immediately before it, so a field's
 ///   `default` is compiled instead of being dropped.
-pub const FORMAT_VERSION: u16 = 2;
+///
+/// Version 3 added [`DeclareConst`](super::Opcode::DeclareConst), which
+/// `constant NAME to <expr>` compiles to. A version-2 file has no instruction
+/// that says a name is read-only — the same source compiled there wrote a
+/// `Store` — so a version-2 file is refused rather than read as a program that
+/// could rebind a constant.
+pub const FORMAT_VERSION: u16 = 3;
 
 /// The operand that says "there is no block here".
 ///

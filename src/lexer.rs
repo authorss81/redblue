@@ -13,6 +13,7 @@ const BOM: char = '\u{FEFF}';
 /// TextMate grammar from drifting away from the language.
 pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("set", TokenKind::Set),
+    ("constant", TokenKind::Constant),
     ("to", TokenKind::To),
     ("is", TokenKind::Is),
     ("are", TokenKind::Are),
@@ -80,6 +81,7 @@ pub enum TokenKind {
 
     // Keywords
     Set,
+    Constant,
     To,
     By,
     Is,

@@ -68,7 +68,7 @@ Redblue has 32 keywords:
 
 | Category | Keywords |
 |----------|----------|
-| Variables | set, to, is, are, nothing |
+| Variables | set, constant, to, is, are, nothing |
 | Control | if, then, else, end, when, unless |
 | Loops | for, each, in, from, times, while, repeat, until |
 | Jumps | break, skip, return, give back |
@@ -646,6 +646,47 @@ import MathUtils as M
 
 set area to M.circle_area(5)
 ```
+
+### Constants
+
+`constant NAME to <expr>` binds a name to a value that no later assignment may
+replace. It exists so a module can give its functions one shared value —
+`PI`, a conversion rate, a prefix — that is written once.
+
+```redblue
+constant TAU to 6.28318
+
+to radians_to_degrees(radians)
+    give back radians * 180 / TAU
+end
+```
+
+The rules:
+
+- The value is the expression's value **where the declaration runs**, and every
+  statement after it reads the name through ordinary lookup.
+- A function body declared above the declaration reads the name, because a body
+  runs when it is called. The call is what has to come after: a body called
+  before the declaration runs before the name is bound, and the read is then the
+  unknown variable any other name read too early gives.
+- A name may hold one constant only. Declaring it twice is an error
+  (`Constant 'TAU' is already declared`) and leaves the first value in place.
+- No `set` rebinds a constant: `set TAU to 7` fails with
+  `Cannot assign to constant 'TAU'`, including from inside a function body and
+  including a module's own `set` bound by an `import`.
+- Reading the name before its declaration is an error, the same unknown-variable
+  error any other name read too early gives.
+- A local of the same name — a parameter, a loop variable — shadows the constant
+  inside its own scope and leaves it unchanged afterwards.
+
+An `import` binds a module's `set` and `constant` names into the importing
+program, where they read as ordinary names from the `import` onwards, and
+importing the same module again is a no-op rather than a second binding of the
+same names.
+
+`rb compile` writes the declaration into the `.rbc` as its own instruction
+(`DECLARE_CONST`, format version 3), not as the store a `set` compiles to, so a
+compiled file says the name is read-only. See `docs/BYTECODE.md`.
 
 ---
 

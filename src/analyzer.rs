@@ -1,23 +1,40 @@
 use crate::error::{Error, Result, Span};
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt};
 use crate::stdlib;
+use std::collections::{HashMap, HashSet};
 
 pub struct Analyzer {
-    scopes: Vec<std::collections::HashSet<String>>,
-    functions: std::collections::HashMap<String, Vec<String>>,
+    scopes: Vec<HashSet<String>>,
+    functions: HashMap<String, Vec<String>>,
     errors: Vec<(String, Span)>,
+    /// The names the program binds somewhere the walk may reach before the
+    /// declaration that binds them. Collected before the statements are walked.
+    later: LaterNames,
+    /// How many function, method and object bodies the walk is inside.
+    ///
+    /// A body runs when it is called, not where it is written, so a read inside
+    /// one is answered by the program as it is at the call rather than as it was
+    /// where the body sits. That is what makes a name a later declaration binds
+    /// visible to a body declared above it, and it is why the fallback below
+    /// applies here and nowhere else: a read at the top level, in the order the
+    /// file writes it, is an error when the declaration has not been reached.
+    deferred_depth: usize,
 }
 
 impl Analyzer {
     pub fn new() -> Self {
         Self {
-            scopes: vec![std::collections::HashSet::new()],
-            functions: std::collections::HashMap::new(),
+            scopes: vec![HashSet::new()],
+            functions: HashMap::new(),
             errors: Vec::new(),
+            later: LaterNames::default(),
+            deferred_depth: 0,
         }
     }
 
     pub fn analyze(&mut self, program: &Program) -> Result<()> {
+        collect_later_names(&program.statements, &mut self.later);
+
         for statement in &program.statements {
             self.analyze_statement(statement);
         }
@@ -36,7 +53,7 @@ impl Analyzer {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(std::collections::HashSet::new());
+        self.scopes.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
@@ -49,12 +66,81 @@ impl Analyzer {
         }
     }
 
+    /// Declares a name a `set` binds, where the VM would put the write.
+    ///
+    /// A `set` writes to the innermost live scope that *already holds* the name
+    /// and to the program's own scope otherwise — that is what `Vm::set_var`
+    /// does, and it is what makes a read and a write of one name agree. So a
+    /// name first set inside a loop, an `if` or a `try` body is a name of the
+    /// whole program, because the write lands on a global and outlives the
+    /// scope. The analyzer used to declare every `set` in the scope it was
+    /// written in, which disagreed with the VM there and reported reading the
+    /// name after the scope ended as an unknown variable.
+    fn declare_assigned(&mut self, name: &str) {
+        for scope in self.scopes.iter().rev() {
+            if scope.contains(name) {
+                return;
+            }
+        }
+        self.declare_in_program_scope(name);
+    }
+
+    /// Declares a name a `constant` binds.
+    ///
+    /// The VM binds a constant to a global whatever scope the declaration is
+    /// written in, so the analyzer does the same: `constant LIMIT to 5` inside
+    /// a function body is a name of the whole program, and the second call of
+    /// that body is the duplicate declaration.
+    fn declare_constant(&mut self, name: &str) {
+        self.declare_in_program_scope(name);
+    }
+
+    fn declare_in_program_scope(&mut self, name: &str) {
+        if let Some(scope) = self.scopes.first_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
     fn lookup(&self, name: &str) -> bool {
         self.scopes.iter().any(|scope| scope.contains(name))
     }
 
+    /// Whether `name` is a name the program binds somewhere the walk has not
+    /// reached, and so a name a body that runs later may read.
+    ///
+    /// This is the second of two questions a read asks: [`Analyzer::lookup`]
+    /// answers whether a scope holds the name where the read is written, and
+    /// this answers whether the program binds the name at all — a `constant`
+    /// declared below the function body that reads it, or a name an `import`
+    /// brings in from a module file. Consulted only inside a body that runs
+    /// later, which [`Analyzer::deferred_depth`] counts; a name neither holds
+    /// is the unknown variable the analyzer reports.
+    fn bound_later(&self, name: &str) -> bool {
+        self.later.bound(name)
+    }
+
+    /// Whether `name` is readable where the walk is.
+    ///
+    /// True when a scope holds it, and — inside a body that runs when it is
+    /// called rather than where it is written — when the program binds it later
+    /// than the walk has reached.
+    fn name_is_bound(&self, name: &str) -> bool {
+        self.lookup(name) || (self.deferred_depth > 0 && self.bound_later(name))
+    }
+
     fn add_error(&mut self, msg: &str, span: Span) {
         self.errors.push((msg.to_string(), span));
+    }
+
+    /// Analyzes the body of a function, method or object, where a read is
+    /// answered by the program as it is at the call rather than as it was where
+    /// the body is written.
+    fn analyze_deferred_body(&mut self, body: &[Stmt]) {
+        self.deferred_depth += 1;
+        for stmt in body {
+            self.analyze_statement(stmt);
+        }
+        self.deferred_depth -= 1;
     }
 
     fn analyze_statement(&mut self, stmt: &Stmt) {
@@ -65,7 +151,15 @@ impl Analyzer {
             }
             Statement::Set { name, value } => {
                 self.analyze_expr(value, &span);
-                self.declare(name);
+                self.declare_assigned(name);
+            }
+            // A `constant` binds its name for every statement after it, exactly
+            // as a `set` does — whether the name may be bound again is a runtime
+            // question, because a function body and a module file can each
+            // declare one without either being visible here.
+            Statement::Constant { name, value } => {
+                self.analyze_expr(value, &span);
+                self.declare_constant(name);
             }
             Statement::SetProperty {
                 object: _,
@@ -153,9 +247,7 @@ impl Analyzer {
                 for param in params {
                     self.declare(param);
                 }
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_deferred_body(body);
                 self.pop_scope();
             }
             Statement::Method {
@@ -168,9 +260,7 @@ impl Analyzer {
                 for param in params {
                     self.declare(param);
                 }
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_deferred_body(body);
                 self.pop_scope();
             }
             Statement::Has { default, .. } => {
@@ -191,9 +281,7 @@ impl Analyzer {
                 }
                 self.push_scope();
                 self.declare("this");
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_deferred_body(body);
                 self.pop_scope();
             }
             Statement::Try {
@@ -217,7 +305,22 @@ impl Analyzer {
                     self.analyze_statement(stmt);
                 }
             }
-            Statement::Import(_) => {}
+            Statement::Import(items) => {
+                // An import binds the module's names into the program it runs
+                // in, so it declares them into the scope it is written in, as
+                // any other declaration does: a read after the import is an
+                // ordinary lookup, and a read before it is the unknown variable
+                // any other name read too early gives. A module's names are only
+                // known by reading its file, so they are parsed here — a module
+                // that cannot be found or parsed binds nothing and is still
+                // reported by the loader, at runtime, where it belongs.
+                for item in items {
+                    for name in crate::vm::module_bound_names(&item.name) {
+                        self.declare(&name);
+                    }
+                    self.declare(item.alias.as_ref().unwrap_or(&item.name));
+                }
+            }
             Statement::Expr(expr) => {
                 self.analyze_expr(expr, &span);
             }
@@ -233,7 +336,7 @@ impl Analyzer {
         match expr {
             Expr::Number(_) | Expr::Text(_) | Expr::YesNo(_) | Expr::Nothing => {}
             Expr::Variable(name) => {
-                if !self.lookup(name) {
+                if !self.name_is_bound(name) {
                     self.add_error(&format!("Unknown variable '{}'", name), *span);
                 }
             }
@@ -266,7 +369,9 @@ impl Analyzer {
                     // A bare receiver may be a module rather than a variable —
                     // `json.parse` is a module function — so it is an unknown
                     // variable only when it is neither in scope nor a module.
-                    Expr::Variable(name) if !self.lookup(name) && !stdlib::is_module(name) => {
+                    Expr::Variable(name)
+                        if !self.name_is_bound(name) && !stdlib::is_module(name) =>
+                    {
                         self.add_error(&format!("Unknown variable '{}'", name), *span);
                     }
                     Expr::Variable(_) => {}
@@ -325,6 +430,80 @@ impl Analyzer {
 impl Default for Analyzer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The names a program binds in a declaration the walk may not have reached
+/// when it reads one of them.
+///
+/// Collected over the whole program before the walk, and read by
+/// [`Analyzer::bound_later`], which consults it only inside a body that runs
+/// later. The walk covers every body at every depth: a `constant` or an
+/// `import` inside a loop, an `if`, a function or a `try` binds the same
+/// program-level name every time that runs, so one of them anywhere counts.
+#[derive(Default)]
+struct LaterNames {
+    /// Every name a `constant` declares.
+    constants: HashSet<String>,
+    /// Every name an `import` brings in, read out of the module files.
+    imported: HashSet<String>,
+}
+
+impl LaterNames {
+    fn bound(&self, name: &str) -> bool {
+        self.constants.contains(name) || self.imported.contains(name)
+    }
+}
+
+fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
+    for stmt in statements {
+        match &stmt.statement {
+            Statement::Constant { name, .. } => {
+                out.constants.insert(name.clone());
+            }
+            Statement::Import(items) => {
+                for item in items {
+                    out.imported
+                        .extend(crate::vm::module_bound_names(&item.name));
+                }
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_later_names(then_branch, out);
+                collect_later_names(else_branch, out);
+            }
+            Statement::ForEach { body, .. }
+            | Statement::ForRange { body, .. }
+            | Statement::Repeat { body, .. }
+            | Statement::While { body, .. } => collect_later_names(body, out),
+            Statement::Function { body, .. }
+            | Statement::Method { body, .. }
+            | Statement::Object { body, .. }
+            | Statement::Test { body, .. } => collect_later_names(body, out),
+            Statement::Try {
+                body,
+                catch_body,
+                finally_body,
+                ..
+            } => {
+                collect_later_names(body, out);
+                collect_later_names(catch_body, out);
+                collect_later_names(finally_body, out);
+            }
+            Statement::Say(_)
+            | Statement::Print(_)
+            | Statement::Set { .. }
+            | Statement::SetProperty { .. }
+            | Statement::Return(_)
+            | Statement::GiveBack(_)
+            | Statement::Break
+            | Statement::Skip
+            | Statement::Has { .. }
+            | Statement::Expr(_) => {}
+        }
     }
 }
 

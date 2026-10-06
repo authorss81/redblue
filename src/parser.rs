@@ -109,6 +109,14 @@ pub enum Statement {
         value: Expr,
     },
 
+    // constant NAME to <expr> — a name bound once, which no assignment may
+    // rebind. A module file uses it for the values every function of the
+    // module shares, as `modules/MathUtils.rb` does for `PI`.
+    Constant {
+        name: String,
+        value: Expr,
+    },
+
     // set x.y to 10
     SetProperty {
         object: String,
@@ -427,6 +435,7 @@ impl Parser {
                 Some(Statement::Print(expr))
             }
             TokenKind::Set => self.parse_set()?,
+            TokenKind::Constant => self.parse_constant()?,
             TokenKind::If => self.parse_if()?,
             TokenKind::For => self.parse_for()?,
             TokenKind::Repeat => self.parse_repeat()?,
@@ -598,6 +607,34 @@ impl Parser {
         let value = self.parse_expression()?;
 
         Ok(Some(Statement::Set { name, value }))
+    }
+
+    /// Parses `constant NAME to <expr>` — a `set` whose name may not be bound
+    /// again afterwards, so the runtime can refuse a later assignment to it.
+    fn parse_constant(&mut self) -> Result<Option<Statement>> {
+        self.advance(); // consume 'constant'
+
+        let name = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier(name),
+                ..
+            }) => {
+                let n = name.clone();
+                self.advance();
+                n
+            }
+            _ => {
+                return Err(Error::Parser(
+                    "Expected constant name after 'constant'".to_string(),
+                    self.span(),
+                ))
+            }
+        };
+
+        self.expect(&TokenKind::To)?;
+        let value = self.parse_expression()?;
+
+        Ok(Some(Statement::Constant { name, value }))
     }
 
     fn parse_if(&mut self) -> Result<Option<Statement>> {

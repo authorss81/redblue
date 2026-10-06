@@ -39,7 +39,7 @@ digit         = '0'..'9'
 ### 1.3 Keywords (Reserved)
 
 ```
-keywords = 'set' | 'to' | 'is' | 'are' | 'nothing' | 'yes' | 'no'
+keywords = 'set' | 'constant' | 'to' | 'is' | 'are' | 'nothing' | 'yes' | 'no'
          | 'if' | 'then' | 'else' | 'end' | 'when' | 'unless'
          | 'for' | 'each' | 'in' | 'from' | 'times' | 'while' | 'repeat'
          | 'break' | 'skip' | 'return' | 'give back'
@@ -178,6 +178,15 @@ declaration      = 'set' identifier { ',' identifier } 'to' expression { ',' exp
 // Constant declaration
 declaration      = 'constant' identifier [ ':' type_expression ] 'to' expression
 ```
+
+A `constant` binds a name of the whole program, so it may be declared once
+only — a second declaration of the same name is a runtime error
+(`Constant 'NAME' is already declared`) — and no `set` may rebind it
+(`Cannot assign to constant 'NAME'`), a module's own `set` bound by an `import`
+included. A local of the same name shadows it for the length of its scope.
+Reading it before its declaration is an unknown variable, as it is for any name;
+a function body declared above the declaration reads it, because a body runs
+when it is called.
 
 ### 4.2 Assignment Statements
 

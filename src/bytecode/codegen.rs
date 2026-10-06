@@ -157,6 +157,16 @@ impl Compiler {
                 let name = self.text(name);
                 emit(code, Opcode::Store, name, 0, line);
             }
+            // `constant` is its own opcode, not the `STORE` a `set` compiles to: the
+            // name is read-only, and the file has to say so for an interpreter
+            // to enforce it. A `STORE` naming a constant is what the
+            // tree-walking VM refuses at runtime and what `DECLARE_CONST`
+            // declares in the file.
+            Statement::Constant { name, value } => {
+                self.expr(value, code, line)?;
+                let name = self.text(name);
+                emit(code, Opcode::DeclareConst, name, 0, line);
+            }
             Statement::SetProperty {
                 object,
                 property,

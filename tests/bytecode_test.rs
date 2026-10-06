@@ -796,6 +796,79 @@ fn try_without_handlers_names_no_blocks() {
 }
 
 #[test]
+fn a_constant_compiles_to_its_own_instruction_not_to_a_store() {
+    let chunk = compile_source("constant TAU to 6.28318\nset TAU to 7\nsay TAU\n")
+        .expect("program should compile");
+
+    assert_eq!(
+        names(&chunk.main),
+        vec![
+            "PUSH_CONST",
+            "DECLARE_CONST",
+            "PUSH_CONST",
+            "STORE",
+            "LOAD",
+            "SAY"
+        ],
+        "a declaration and an assignment must not compile to the same instruction"
+    );
+
+    let declaration = chunk.main.code[1];
+    assert_eq!(
+        chunk.constants[declaration.arg as usize],
+        Constant::Text("TAU".to_string()),
+        "DECLARE_CONST names the constant it binds"
+    );
+    assert!(
+        declaration.arg == chunk.main.code[3].arg,
+        "one name is one constant-pool entry, so both instructions name it"
+    );
+    assert!(
+        disassemble(&chunk).contains("DECLARE_CONST    "),
+        "the disassembler should print the new mnemonic:\n{}",
+        disassemble(&chunk)
+    );
+}
+
+#[test]
+fn edge_the_constant_instruction_has_a_byte_of_its_own() {
+    assert_eq!(
+        Opcode::DeclareConst.to_byte(),
+        46,
+        "the byte value is part of the file format and is never reused"
+    );
+    assert_eq!(
+        Opcode::from_byte(Opcode::DeclareConst.to_byte()),
+        Some(Opcode::DeclareConst),
+        "the byte should decode back to the instruction"
+    );
+    assert_eq!(
+        Opcode::ALL.len(),
+        Opcode::DeclareConst.to_byte() as usize + 1,
+        "the table is indexed by byte value, so it ends at the last instruction"
+    );
+    assert!(
+        Opcode::DeclareConst.has_operand() && Opcode::DeclareConst.takes_constant_index(),
+        "DECLARE_CONST names the constant it binds through `arg`, like STORE"
+    );
+}
+
+#[test]
+fn edge_a_version_2_file_is_refused_because_it_cannot_say_a_name_is_read_only() {
+    let mut bytes = compile_source("constant TAU to 6.28318\n")
+        .expect("program should compile")
+        .encode();
+    bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+
+    let error = Chunk::decode(&bytes).expect_err("a version-2 file must not be accepted");
+    let message = error.message();
+    assert!(
+        message.contains("version 2") && message.contains(&FORMAT_VERSION.to_string()),
+        "the error should name both the file's version and this build's, got: {message}"
+    );
+}
+
+#[test]
 fn imports_compile_to_an_import_per_item_bound_to_its_alias() {
     let chunk = compile_source("import MathUtils, files to net\n").expect("program should compile");
 

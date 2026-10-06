@@ -227,6 +227,12 @@ impl Formatter {
                 self.write(" to ");
                 self.format_expression(value);
             }
+            Statement::Constant { name, value } => {
+                self.write("constant ");
+                self.write(name);
+                self.write(" to ");
+                self.format_expression(value);
+            }
             Statement::SetProperty {
                 object,
                 property,

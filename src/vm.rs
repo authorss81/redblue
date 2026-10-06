@@ -4,7 +4,7 @@ use crate::parser as redblue_parser;
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::stdlib;
 use crate::value::{finite_number, Captured, CapturedScope, Fields, FunctionValue, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -142,12 +142,19 @@ pub fn run_isolated(program: &Program) -> (Vm, Result<Value>) {
 
 pub struct Vm {
     globals: HashMap<String, Value>,
+    /// The names bound by a `constant` declaration. The value lives in
+    /// [`Vm::globals`] so a read resolves through one name resolution path; what
+    /// this table adds is the refusal to rebind the name.
+    constants: HashSet<String>,
     /// The live local scopes, outermost first. A call's parameters are the
     /// innermost scope, and a function value that closed over scopes pushes
     /// them above its caller's frames — see [`Vm::call_user_function`].
     locals: Vec<CapturedScope>,
     output: Vec<String>,
-    _modules: HashMap<String, Program>,
+    /// The module programs already run, by the name the `import` that loaded
+    /// them goes by. An entry is what makes a second import of the same module a
+    /// no-op rather than a second binding of the same names.
+    modules: HashMap<String, Program>,
     /// Every `object` declaration, by type name. The table is the inheritance
     /// model: an entry already holds its own fields and methods merged with
     /// everything it inherits, nearest declaration first, so a lookup is a
@@ -181,14 +188,67 @@ struct ObjectType {
     methods: Fields,
 }
 
+/// The paths `import <name>` looks for, in order: the `modules/` directory, the
+/// same directory written with a leading `./`, and the name as a path of its
+/// own.
+fn module_search_paths(name: &str) -> Vec<String> {
+    vec![
+        format!("modules/{name}.rb"),
+        format!("./modules/{name}"),
+        name.to_string(),
+    ]
+}
+
+/// The source of the module `name` resolves to, or `None` when no path is
+/// there. A path that is there but cannot be read is an error, not a miss: the
+/// two say different things about the import.
+pub fn module_source(name: &str) -> Result<Option<String>> {
+    for path in module_search_paths(name) {
+        if Path::new(&path).exists() {
+            let source = std::fs::read_to_string(&path)
+                .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
+            return Ok(Some(source));
+        }
+    }
+    Ok(None)
+}
+
+/// The names `import <name>` binds into the importing program: the module's own
+/// `set` and `constant` declarations, which is everything the loader runs.
+///
+/// Read by the analyzer, which cannot see into a separate file, so that a read
+/// of one of these names is a read of a name the program binds. A module that
+/// cannot be found, read or parsed binds nothing here — the loader still
+/// reports that at runtime, and the analyzer must not report it first.
+pub fn module_bound_names(name: &str) -> Vec<String> {
+    let Some(source) = module_source(name).unwrap_or(None) else {
+        return Vec::new();
+    };
+    let Ok(tokens) = Lexer::tokenize(&source) else {
+        return Vec::new();
+    };
+    let Ok(ast) = redblue_parser::Parser::new(tokens).parse() else {
+        return Vec::new();
+    };
+
+    ast.statements
+        .iter()
+        .filter_map(|stmt| match &stmt.statement {
+            Statement::Set { name, .. } | Statement::Constant { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 impl Vm {
     pub fn new() -> Self {
         let globals = stdlib::builtins();
         Self {
             globals,
+            constants: HashSet::new(),
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
-            _modules: HashMap::new(),
+            modules: HashMap::new(),
             objects: HashMap::new(),
             expectation_failure: None,
             current_span: Span::unknown(),
@@ -272,23 +332,40 @@ impl Vm {
         self.expectation_failure.take()
     }
 
-    fn load_module(&mut self, path: &str) -> Result<()> {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
+    /// Runs a module's declarations into this VM, under the name the `import`
+    /// that reached it goes by.
+    ///
+    /// A module already loaded is left alone: importing it twice binds the same
+    /// names twice, and binding a name twice is what a `set` refuses to do and a
+    /// `constant` cannot do at all — the second declaration of the module's own
+    /// `TAU` would be refused as a duplicate of the one the first import bound.
+    ///
+    /// A module's functions are not bound to a name, so a member stays
+    /// unreachable — see FINDINGS.md. The `set` and the `constant` below are the
+    /// whole of what an import currently contributes.
+    fn load_module(&mut self, name: &str, source: &str) -> Result<()> {
+        if self.modules.contains_key(name) {
+            return Ok(());
+        }
 
-        let tokens = Lexer::tokenize(&source)?;
+        let tokens = Lexer::tokenize(source)?;
         let ast = redblue_parser::Parser::new(tokens).parse()?;
 
-        // A module's functions are not bound to a name, so a member stays unreachable
-        // — see FINDINGS.md. The `set` below is the whole of what an import
-        // currently contributes.
         for stmt in &ast.statements {
-            if let Statement::Set { name, value } = &stmt.statement {
-                let val = self.evaluate(value)?;
-                self.globals.insert(name.clone(), val);
+            match &stmt.statement {
+                Statement::Set { name, value } => {
+                    let val = self.evaluate(value)?;
+                    self.bind_module_name(name, val)?;
+                }
+                Statement::Constant { name, value } => {
+                    let val = self.evaluate(value)?;
+                    self.bind_constant(name, val)?;
+                }
+                _ => continue,
             }
         }
 
+        self.modules.insert(name.to_string(), ast);
         Ok(())
     }
 
@@ -344,6 +421,25 @@ impl Vm {
         self.globals.get(name).cloned()
     }
 
+    /// Binds `name` to `value` as a constant, refusing a second declaration of
+    /// a name that already holds one.
+    ///
+    /// The value goes into [`Vm::globals`] so that a read resolves through the
+    /// one name-resolution path [`Vm::get_var`] already has, and the name goes
+    /// into [`Vm::constants`] so that a later assignment is refused. A refused
+    /// declaration leaves the first binding in place, so a module that
+    /// declares the same name twice keeps the value it had.
+    fn bind_constant(&mut self, name: &str, value: Value) -> Result<()> {
+        if !self.constants.insert(name.to_string()) {
+            return Err(Error::Runtime(
+                format!("Constant '{name}' is already declared"),
+                self.span(),
+            ));
+        }
+        self.globals.insert(name.to_string(), value);
+        Ok(())
+    }
+
     /// Binds `name` in the innermost live scope that already has it, and in a
     /// global when no local scope does.
     ///
@@ -353,14 +449,51 @@ impl Vm {
     /// assigning to a variable of an enclosing scope — a parameter from inside
     /// a loop body, or a captured name from inside a function that closed over
     /// it — silently created a global of that name instead.
-    fn set_var(&mut self, name: &str, value: Value) {
+    ///
+    /// A write that would land on a global is refused when that global is a
+    /// constant, which is what makes `constant` a constant. A name a live local
+    /// scope already holds is that local's, so it is written there and a
+    /// constant is shadowed rather than overwritten.
+    /// The refusal every write onto a constant shares: `Cannot assign to
+    /// constant 'NAME'`.
+    ///
+    /// Split out because there are two places a write can reach a program-level
+    /// name — an assignment ([`Vm::set_var`]) and a module's own `set` run by
+    /// [`Vm::load_module`] — and a name the program has bound as a constant is
+    /// read-only whichever of them arrives.
+    fn refuse_constant_rebind(&self, name: &str) -> Result<()> {
+        if self.constants.contains(name) {
+            return Err(Error::Runtime(
+                format!("Cannot assign to constant '{name}'"),
+                self.span(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Binds a name an `import` contributes to the program, refusing to write
+    /// onto a constant the program has already bound.
+    ///
+    /// The write lands in [`Vm::globals`] and not through [`Vm::set_var`],
+    /// because a module's names are names of the whole program: the import may
+    /// run inside a function body, and a local of the same name would otherwise
+    /// capture the module's binding for the length of that scope.
+    fn bind_module_name(&mut self, name: &str, value: Value) -> Result<()> {
+        self.refuse_constant_rebind(name)?;
+        self.globals.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    fn set_var(&mut self, name: &str, value: Value) -> Result<()> {
         for scope in self.locals.iter_mut().rev() {
             if scope.contains_key(name) {
                 scope.insert(name.to_string(), value);
-                return;
+                return Ok(());
             }
         }
+        self.refuse_constant_rebind(name)?;
         self.globals.insert(name.to_string(), value);
+        Ok(())
     }
 
     fn declare(&mut self, name: &str) {
@@ -398,7 +531,12 @@ impl Vm {
             }
             Statement::Set { name, value } => {
                 let val = self.evaluate(value)?;
-                self.set_var(name, val);
+                self.set_var(name, val)?;
+                Ok(Value::Nothing)
+            }
+            Statement::Constant { name, value } => {
+                let val = self.evaluate(value)?;
+                self.bind_constant(name, val)?;
                 Ok(Value::Nothing)
             }
             Statement::SetProperty {
@@ -409,7 +547,7 @@ impl Vm {
                 let val = self.evaluate(value)?;
                 if let Some(Value::Record(mut fields)) = self.get_var(object) {
                     fields.insert(property.clone(), val);
-                    self.set_var(object, Value::Record(fields));
+                    self.set_var(object, Value::Record(fields))?;
                 }
                 Ok(Value::Nothing)
             }
@@ -442,7 +580,7 @@ impl Vm {
                         self.charge_iteration(&mut loop_iterations, "for each")?;
                         self.push_scope();
                         self.declare(variable);
-                        self.set_var(variable, item);
+                        self.set_var(variable, item)?;
                         for stmt in body {
                             self.execute_statement(stmt)?;
                         }
@@ -474,7 +612,7 @@ impl Vm {
                         self.charge_iteration(&mut loop_iterations, "for each from")?;
                         self.push_scope();
                         self.declare(variable);
-                        self.set_var(variable, Value::number(i, self.span())?);
+                        self.set_var(variable, Value::number(i, self.span())?)?;
                         for stmt in body {
                             self.execute_statement(stmt)?;
                         }
@@ -529,13 +667,13 @@ impl Vm {
             Statement::Function { name, params, body } => {
                 let function = self.make_function(name, params, body);
                 self.declare(name);
-                self.set_var(name, function);
+                self.set_var(name, function)?;
 
                 Ok(Value::Nothing)
             }
             Statement::Method { name, params, body } => {
                 let method = self.make_function(name, params, body);
-                self.set_var(name, method);
+                self.set_var(name, method)?;
                 Ok(Value::Nothing)
             }
             Statement::Has { name, .. } => Err(Error::Runtime(
@@ -568,7 +706,7 @@ impl Vm {
                         self.push_scope();
                         if let Some(var) = catch_var {
                             self.declare(var);
-                            self.set_var(var, Value::Text("error".to_string()));
+                            self.set_var(var, Value::Text("error".to_string()))?;
                         }
                         for stmt in catch_body {
                             self.execute_statement(stmt)?;
@@ -588,32 +726,20 @@ impl Vm {
             }
             Statement::Import(items) => {
                 for item in items {
-                    let module_path = format!("modules/{}.rb", item.name);
-                    let module_path_dot = format!("./modules/{}", item.name);
-                    let search_paths = vec![
-                        module_path.as_str(),
-                        module_path_dot.as_str(),
-                        item.name.as_str(),
-                    ];
-
-                    let mut loaded = false;
-                    for path in &search_paths {
-                        if Path::new(path).exists() {
-                            self.load_module(path)?;
-                            loaded = true;
-                            break;
-                        }
-                    }
-
-                    if !loaded {
+                    let Some(source) = module_source(&item.name)? else {
                         return Err(Error::Runtime(
                             format!("Cannot find module '{}'", item.name),
                             self.span(),
                         ));
-                    }
+                    };
+                    self.load_module(&item.name, &source)?;
 
                     let target_name = item.alias.as_ref().unwrap_or(&item.name);
-                    self.globals.insert(target_name.clone(), Value::Nothing);
+                    // The name the import itself binds goes through the same
+                    // refusal as the names the module contributes: it is a
+                    // program-level name like they are.
+                    let target_name = target_name.clone();
+                    self.bind_module_name(&target_name, Value::Nothing)?;
                 }
                 Ok(Value::Nothing)
             }
@@ -1367,7 +1493,7 @@ impl Vm {
         let this = self.evaluate(receiver)?;
         self.push_scope();
         self.declare("this");
-        self.set_var("this", this);
+        self.set_var("this", this)?;
         let result = self.call_user_function(method, &function, &args);
         self.pop_scope();
         result
@@ -1471,7 +1597,7 @@ impl Vm {
         );
         let record = Value::Record(fields);
         self.declare(name);
-        self.set_var(name, record);
+        self.set_var(name, record)?;
 
         // A body that is not a field or a method declaration runs in the
         // enclosing scope, in order, and after the type is registered, so a
@@ -1511,7 +1637,7 @@ impl Vm {
         for (index, param) in function.params.iter().enumerate() {
             let value = args.get(index).cloned().unwrap_or(Value::Nothing);
             self.declare(param);
-            self.set_var(param, value);
+            self.set_var(param, value)?;
         }
         self.call_depth += 1;
         let result = self.execute_statements(&function.body);

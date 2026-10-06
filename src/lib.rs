@@ -66,6 +66,22 @@ pub fn run_source(source: &str) -> Result<(), Error> {
     result.map(|_| ())
 }
 
+/// The whole pipeline on `source` — lexer, parser, analyzer, then the VM — and
+/// the value of its last statement.
+///
+/// [`run_source`] is the same pipeline and reports only whether it succeeded.
+/// This returns what the program evaluated to, so a caller can assert on a run
+/// that went through the analyzer rather than around it: a test that skips the
+/// analyzer cannot fail on what the analyzer refuses.
+pub fn run_source_value(source: &str) -> Result<Value, Error> {
+    let tokens = Lexer::tokenize(source)?;
+    let ast = parser::parse(tokens)?;
+    analyzer::analyze(&ast)?;
+
+    let (_vm, result) = vm::run_isolated(&ast);
+    result
+}
+
 pub fn run_repl() {
     let mut repl = repl::Repl::new();
     repl.run();

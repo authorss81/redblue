@@ -1,6 +1,6 @@
 # The Redblue bytecode format (`.rbc`)
 
-**Format version: 2.** This document is the normative description of the file
+**Format version: 3.** This document is the normative description of the file
 `rb compile` writes and `rb dis` reads. The encoder and decoder that implement
 it are `src/bytecode/format.rs`; the instruction set is
 `src/bytecode/opcode.rs`.
@@ -53,20 +53,23 @@ A file that does not begin with the magic is refused with
 
 ### Format version
 
-A `u16`. This build reads and writes `2`. Any other value is refused with
-`unknown bytecode format version <n>: this build reads version 2`.
+A `u16`. This build reads and writes `3`. Any other value is refused with
+`unknown bytecode format version <n>: this build reads version 3`.
 
 #### What each version changed
 
-No byte value and no record layout changed in either version — only what an
-operand means, and one refusal.
+Versions 1 and 2 changed no byte value and no record layout — only what an
+operand means, and one refusal. Version 3 added an instruction, at a byte value
+no earlier version used, so the numbers written into a file still mean what they
+meant.
 
 | Version | Change |
 |---|---|
 | 1 | The original format. |
 | 2 | `DEF_OBJECT`'s secondary operand became the constant index of the object it extends — `NO_CONST` when it extends nothing — where version 1 wrote a flag that discarded the parent's name. `DEF_FIELD` became the consumer of the value pushed immediately before it, so a field's `default` is compiled instead of dropped. The decoder refuses a constant pool that reaches the reserved index `NO_CONST`. |
+| 3 | Added `DECLARE_CONST`, which `constant NAME to <expr>` compiles to. Versions 1 and 2 compiled the same declaration to `STORE`, which does not say the name is read-only, so the file could not be told apart from a `set`. A version-2 file is refused rather than read as a program whose constants could be rebound. |
 
-A version-1 file is refused rather than half-read: the same bytes would mean
+An earlier file is refused rather than half-read: the same bytes would mean
 two different things, and rule 2 above is what makes that a new version rather
 than an edit.
 
@@ -212,6 +215,7 @@ always `0`.
 | 43 | `IMPORT` | module name index | — | imports a module |
 | 44 | `TEST` | block index | — | runs the test body |
 | 45 | `EXPECT` | — | — | pops the expected and the actual value and compares them |
+| 46 | `DECLARE_CONST` | name index | — | pops into a variable as a constant: the name may not be bound again, and no `STORE` writes it |
 
 `NO_BLOCK` is `0xFFFFFFFF`, the operand that says "this handler is not there".
 A `try` with no `catch` and no `finally` writes it in both fields and creates
@@ -268,9 +272,12 @@ cannot collide with a name the program declared.
 ## How each statement compiles
 
 `say` and `print` push their expression and then `SAY` or `PRINT`. `set x to e`
-compiles the expression then `STORE x`. `if` compiles the condition, a
-`JUMP_IF_FALSE`, the then-branch, and — only when there is an `else` — a
-`JUMP` over it.
+compiles the expression then `STORE x`. `constant x to e` compiles the
+expression then `DECLARE_CONST x`, which is `STORE x` with the declaration that
+the name is read-only: a VM that runs this file refuses a second `DECLARE_CONST`
+of the name and a `STORE` that names it, which is what the tree-walking
+interpreter refuses. `if` compiles the condition, a `JUMP_IF_FALSE`, the
+then-branch, and — only when there is an `else` — a `JUMP` over it.
 
 `for each x in e` compiles `e`, `GET_ITER`, then the loop: `STORE x`, the
 body, `JUMP` back to the `STORE`. `for each x from a to b` and
@@ -330,7 +337,7 @@ left, a depth past the limit.
 ## What `rb dis` prints
 
 ```
-; redblue bytecode v2
+; redblue bytecode v3
 ; constants: 2
 ;   [0] 1
 ;   [1] n

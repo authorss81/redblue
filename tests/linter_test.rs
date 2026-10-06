@@ -460,16 +460,13 @@ fn edge_a_name_bound_in_a_nested_scope_only_is_still_reported() {
 
 // --- the corpus ------------------------------------------------------------
 
-/// Every `.rb` file in `examples/` and `tests/` is the language's
+/// Every `.rb` file in `examples/`, `modules/` and `tests/` is the language's
 /// specification-by-example. The linter may only speak about them when it has
 /// something true to say, so the corpus must lint clean.
 fn corpus() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
-    // `modules/` is excluded: a module file is read by the module loader, not
-    // parsed as a program, and `modules/MathUtils.rb` uses `constant`, which no
-    // phase has implemented yet (see phases/phase-016/FINDINGS.md).
-    for dir in ["examples", "tests"] {
+    for dir in ["examples", "modules", "tests"] {
         let Ok(entries) = fs::read_dir(root.join(dir)) else {
             continue;
         };
