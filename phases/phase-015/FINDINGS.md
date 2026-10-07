@@ -1,78 +1,95 @@
 # Phase 015 — FINDINGS
 
-Found while verifying phase-015. None of these are in scope for this phase
-(`must_touch: ["src/"]`), so none were fixed here. Each is anchored to a line
-I actually read.
+Found while verifying phase-015. Each is anchored to a line I actually read.
 
-## F1 — `modules/MathUtils.rb` does not parse, and does not run
+Two of the findings recorded by the parked attempt (F1 and F5 below) no longer
+reproduce on the current tree: later phases gave the language the two features
+they were about. They are rewritten as RESOLVED with the evidence, because a
+finding that no longer holds must not send the next phase looking for a bug that
+is not there.
 
-**Severity: major.** `AGENTS.md` §2 states `modules/*.rb` are the language's
-specification-by-example and "the gate runs them". This one cannot run.
+## F1 — RESOLVED: `modules/MathUtils.rb` parses and runs
 
-`rb run modules/MathUtils.rb`:
+The parked attempt recorded this as a major parser defect (`constant PI to
+3.14159` was not grammar). It is grammar now: `Statement::Constant` is declared
+at `src/parser.rs:115` and the parser builds it. Verified against the built
+binary:
 
 ```
-Error: ParserError: Expected function name
-  --> modules/MathUtils.rb:4:16
-4 | constant PI to 3.14159
-  |                ^
+$ rb run modules/MathUtils.rb ; echo rc=$?
+rc=0
 ```
 
-`modules/MathUtils.rb:4` and `:5` use `constant PI to 3.14159` /
-`constant TAU to 6.28318`. There is no `constant` production in the grammar;
-`set x to <expr>` is the assignment form per `docs/GRAMMAR.md`. The caret sits
-on the numeric literal, i.e. the parser consumed `constant PI to` and then
-found a value where it wanted a function name.
+`Statement::Constant` is handled in `src/formatter.rs:291`, and this phase's
+corpus now includes `modules/`, so the file is covered by both the idempotence
+and the losslessness properties over every corpus file.
 
-Pre-existing, not a formatter bug: `git log --oneline -1 -- modules/MathUtils.rb`
-→ `0eb5f90 v0.1.1 - Build cleanup and warning fixes`. Phase-015 does not touch
-this file. The formatter behaves correctly — it propagates the parse error
-rather than guessing at a rewrite (`formatter_rejects_malformed_input_instead_of_guessing`).
+## F2 — FIXED HERE: `formatter_test.rs` corpus omitted `modules/`
 
-Two candidate fixes, for whoever owns it:
-1. Rewrite lines 4–5 as `set PI to 3.14159` / `set TAU to 6.28318`, or
-2. Add a `constant` statement to the grammar as a language-design change —
-   which needs its own phase per `AGENTS.md` §1 rule 8.
+`tests/formatter_test.rs:13` iterated `["examples", "tests"]` only, while
+`AGENTS.md` §2 designates `modules/*.rb` as specification-by-example. Now
+`["examples", "tests", "modules"]`. The directory read still tolerates a missing
+directory, so this is safe if `modules/` is ever absent.
 
-Also note the file ends `end` with no trailing newline (last byte is `d`),
-which is why `rb format --check` would flag it even once it parses.
-
-## F2 — `formatter_test.rs` corpus omits `modules/`
-
-`tests/formatter_test.rs:13` iterates `["examples", "tests"]` only. Adding
-`"modules"` would extend the corpus-wide idempotence and
-`format_preserves_the_meaning_of_every_corpus_file` properties to the module
-corpus, which `AGENTS.md` §2 designates as specification-by-example.
-
-Blocked on F1: `modules/MathUtils.rb` would fail those property tests for a
-reason unrelated to the formatter. Fix F1, then widen the list. The test
-already skips a missing directory (`tests/formatter_test.rs:15-17`), so the
-change is one string once the file parses.
+Both property tests — `format_is_idempotent_over_the_whole_corpus` and
+`format_preserves_the_meaning_of_every_corpus_file` — now cover every `.rb`
+file under all three directories, and `edge_a_module_and_its_exports_round_trip`
+covers the module statement form directly.
 
 ## F3 — `rb format` does not rewrite the file in place
 
-`src/lib.rs:129` reads the file and `print!`s the formatted result to stdout:
+**Severity: minor.** `src/lib.rs:179`:
 
 ```rust
-"format" => match fs::read_to_string(path) {
-    Ok(source) => match formatter::format(&source) {
-        Ok(formatted) => print!("{}", formatted),
+Ok(formatted) => print!("{}", formatted),
 ```
 
-So `rb format foo.rb` prints; `rb format foo.rb > foo.rb` truncates the file
-first, so the shell idiom destroys it. `--check` is the only in-place-oriented
-mode and it does not write.
+`rb format foo.rb` prints to stdout. `rb format foo.rb > foo.rb` therefore
+truncates the file before the shell ever reads it. `--check` is the only other
+mode and it does not write either.
 
-This bit me during verification and cost a cycle: my first idempotence sweep
-ran `rb format a.rb` expecting in-place rewrite, concluded "check fails after
-format" for 20 files, and it was my harness that was wrong. A user will make
-the same mistake. Options: add `rb format --write`, or make `rb format` write
-in place and require `--stdout` to print. Either is a CLI change, not a
-phase-015 change.
+This bit me during verification of the parked attempt and cost a cycle: an
+idempotence sweep that expected in-place rewrite concluded "check fails after
+format" for 20 files, and the harness was what was wrong. Options: add
+`rb format --write`, or make `rb format` write in place and require `--stdout`.
+Either is a CLI change, not a phase-015 change.
 
 ## F4 — no `rbops/` in the checkout
 
-`ls rbops/` → `No such file or directory`; `.opencode/` is also absent. So
-`./rbops/verify.sh phase-015`, the gate `AGENTS.md` §1 rule 2 makes the only
-authority on whether work is real, could not be run. Noted in `REPORT.md`
-rather than claimed as passing. The other three gates were run directly.
+`ls rbops/` → `No such file or directory`; `.opencode/` is likewise absent. So
+`./rbops/verify.sh phase-015` — the gate `AGENTS.md` §1 rule 2 makes the only
+authority — could not be run from this tree. Stated in `REPORT.md` rather than
+claimed as passing. The other three gates were run directly.
+
+## F5 — RESOLVED: the specification's range loop and relational operators are built
+
+The parked attempt recorded these as unreachable spec drift: `Statement::ForRange`
+was declared but never constructed, and the lexer had no `<` token. Both are
+grammar on the current tree. Verified against the built binary:
+
+```
+$ printf 'for each i from 0 to 10 by 5\n    say i\nend\n' > t.rb
+$ rb run t.rb
+0
+5
+10
+$ printf 'say 1 is less than 2\n' > t.rb ; rb run t.rb
+yes
+$ printf 'say 1 < 2\n' > t.rb ; rb run t.rb
+yes
+```
+
+`TokenKind::From` is at `src/lexer.rs:100`, `BinaryOp::{Less, LessEqual, Greater,
+GreaterEqual}` are declared in `src/parser.rs` and formatted at
+`src/formatter.rs`, and no corpus file uses any of them — so the formatter's
+rendering of them would otherwise have gone unasserted by anything. This phase
+adds the coverage: `edge_a_range_loop_is_formatted_and_keeps_its_bounds_and_step`,
+`edge_a_range_loop_step_is_not_lost_or_invented`,
+`edge_every_relational_operator_round_trips_in_both_spellings`,
+`edge_a_relational_operator_is_not_reordered_around_its_operands`,
+`edge_a_spec_only_form_is_never_reported_as_an_error`.
+
+Whoever adds an operator or a loop form next must extend
+`format_covers_every_statement_form` and
+`format_keeps_grouping_for_unary_and_every_operator_level` in
+`tests/formatter_test.rs`; nothing mechanically enforces the link.
