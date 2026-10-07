@@ -767,3 +767,101 @@ The cap is invisible to the corpus, which runs at the published million and cann
 lower it from inside a program, so these tests added
 `tree_walk_capped`/`bytecode_capped`/`assert_agrees_capped` — the same
 comparison the corpus makes, at a cap a test can reach.
+
+## 17. The `while` iteration cap was off by one in *both* directions, and a nested `while` charged its siblings' turns — fixed
+
+Found in the resumed round, by sweeping the two engines against each other across
+caps and turn counts rather than by reading the round-6 fix in §16. §16's third
+sub-finding — "A cap of N was N turns on one engine and N + 1 on the other" — was
+**fixed by moving the charge to the wrong side of the condition**, and the off-by-one
+it fixed came straight back the other way. This entry records what was wrong, what
+the previous fix got right, and what the real answer is.
+
+### A `while` of exactly N turns was refused at a cap of N
+
+```
+$ printf 'set n to 0\nwhile n < 1000000\n    set n to n + 1\nend\nsay n\n' > target/tmp/exact_cap.rb
+$ cargo run --bin rb -- run target/tmp/exact_cap.rb         # tree:     1000000, exit 0
+$ cargo run --bin rb -- vm target/tmp/exact_cap.rbc         # bytecode: Maximum of 1000000 iterations reached in a 'while' loop, exit 1
+```
+
+The published cap is a million, so this needs no lowered cap to see: a `while` that
+runs exactly a million turns is refused by `rb vm` and run by `rb run`. At any cap:
+
+```
+$ for cap in 1 2 3; do for turns in 1 2 3; do
+    REDBLLUE_MAX_ITERATIONS=$cap ...                          # tree prints $turns when $turns <= $cap
+  done; done
+cap=1 turns=1  tree=[1]       bytecode=[Maximum of 1 iterations ...]
+cap=2 turns=2  tree=[2]       bytecode=[Maximum of 2 iterations ...]
+cap=3 turns=3  tree=[3]       bytecode=[Maximum of 3 iterations ...]
+```
+
+A sequence loop was right at the same boundaries (`for each` over exactly N values
+at a cap of N runs on both), so this was `while`-specific.
+
+**Why.** The tree-walking VM charges at the top of every turn: after the condition
+comes out truthy, before the body. Round 6 moved the bytecode VM's charge to the
+*backward `JUMP`* — the instruction that ends a turn — and seeded a `while`'s entry
+at one turn to make up for the first turn being free. But a turn that ends is not a
+turn that starts: at the backward jump the next condition has not been evaluated, so
+the charge counted a turn the program may never run. For a `while` whose condition
+goes false on its last turn, that charge falls on a turn that does not happen, and a
+cap of N refuses a loop of N turns. It is the same mistake as §16's original one —
+charging a turn before knowing it exists — pointed the other way, and the seed hid
+it for the loops §16's own test used (a `while` that runs until the cap stops it
+never reaches the boundary).
+
+### A `while` that ended on its condition kept its loop entry
+
+Found by the test written for the fix above, and live at every cap:
+
+```
+$ printf 'set a to 0\nwhile a is not 2\n    set a to a + 1\n    set b to 0\n    while b is not 2\n        set b to b + 1\n    end\nend\nsay a\n' > target/tmp/nested.rb
+$ REDBLUE_MAX_ITERATIONS=2 cargo run --bin rb -- run target/tmp/nested.rb    # tree:     2
+$ REDBLUE_MAX_ITERATIONS=2 cargo run --bin rb -- vm target/tmp/nested.rbc    # bytecode: Maximum of 2 iterations reached in a 'while' loop
+```
+
+A `while` left through its own `JUMP_IF_FALSE` and the `loops` entry was never
+dropped, where a sequence loop drops its entry when it runs out of values
+(`store`). So the next turn of the enclosing loop found the same entry, and the
+inner loop's counter was charged once per *sibling* turn: two inner loops of two
+turns each cost four, and a nested `while` hit a cap that was four times the number
+of turns it actually took. The entry also outlived the block that made it, which is
+the same class as §13 (a scope kept past the region that made it).
+
+### The fix
+
+Both are the same correction: **a turn is charged where it begins, and a loop gives
+its entry back where it ends.**
+
+- `JUMP_IF_FALSE` charges the loop whose condition it is when the value is truthy —
+  the tree-walking VM's position exactly. The loop is identified by
+  `BytecodeVm::condition_site`, which matches on the operand against each
+  non-sequence site's `exit` (the target of the jump that leaves that loop) and takes
+  the innermost whose range contains the instruction.
+- `JUMP_IF_FALSE` drops the loop's entry when the value is falsy, which is a `while`
+  leaving the way a sequence loop leaves by running out of values.
+- `jump` no longer charges anything, and `turn_over_to` no longer charges either: a
+  `skip` lands on the instruction that begins the next turn — a sequence loop's
+  `STORE`, a `while`'s condition — and that charges it. §16's seed
+  (`iterations: usize::from(!site.iterator)`) is gone, because with the charge at
+  the top of the turn there is no turn to start the counter on.
+
+`turn_over_to`'s `abrupt_exit = false` on a failed charge goes with it: the cap is
+now reported from the turn's own first instruction, which is not a path that has
+already crossed a block boundary, so there is no exit flag to clear. `jump` is left
+as a plain `set_ip`.
+
+What round 6 got right, and is kept: a `skip` must cost a turn, and on a `while` the
+place that costs it is the condition — which is exactly where the fix puts it.
+
+Pinned by two tests in `tests/bytecode_vm_test.rs`,
+`edge_a_cap_allows_a_loop_exactly_that_many_turns` and
+`edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each`, each asked about
+the boundary from both sides: a cap of exactly the turns taken runs and finishes, and
+one turn short is the cap that stops it, naming itself, on both engines. The first
+runs five loop shapes — `while`, `while` with a `skip`, `repeat`, `for each`, and a
+`while` in a `while`. Both were watched failing against the pre-fix code, and the
+nesting case was watched failing again with only the entry-dropping half of the fix
+put back, so neither half is carried by the other.

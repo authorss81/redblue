@@ -854,9 +854,27 @@ impl BytecodeVm {
         Ok(())
     }
 
+    /// The `while` loop whose condition this `JUMP_IF_FALSE` is, if it is one.
+    ///
+    /// A loop's `exit` is the target of the `JUMP_IF_FALSE` that leaves it, so
+    /// the two match on the operand alone; the range check picks the innermost of
+    /// nested loops, whose `exit` values are distinct because each is one past
+    /// its own backward jump. A sequence loop has no such jump — it leaves by
+    /// running out of values — and is charged at its `STORE` instead.
+    fn condition_site(&self, frame: usize, instruction: Instruction) -> Option<LoopSite> {
+        let ip = self.frames[frame].ip as u32;
+        self.frames[frame]
+            .sites
+            .iter()
+            .filter(|site| !site.iterator && site.exit == instruction.arg)
+            .filter(|site| site.top < ip && ip <= site.back_edge)
+            .max_by_key(|site| site.top)
+            .copied()
+    }
+
     /// Charges one iteration to `iterations`.
     ///
-    /// Called where the loop is about to run its body again, which is the same
+    /// Called where the loop is about to run its body, which is the same
     /// point the tree-walking VM charges: after a sequence has been found to have
     /// a value left, and after a `while`'s condition has come out true.
     fn charge_loop(&mut self, index: usize) -> Result<()> {
@@ -1464,8 +1482,31 @@ impl BytecodeVm {
                 let target = instruction.arg as usize;
                 let value = self.pop()?;
                 if value.is_truthy() {
+                    // A `while`'s condition is where a turn *begins*, so it is
+                    // where a turn is charged — the same point the tree-walking
+                    // VM charges, immediately after its condition comes out
+                    // truthy and before the body runs. Charging anywhere else
+                    // counts turns the program never started: at the backward
+                    // `JUMP` the turn is only over, not known to have another
+                    // turn after it, so a cap of N refused a `while` of N turns
+                    // here that the tree-walking VM ran to its end.
+                    if let Some(site) = self.condition_site(frame, instruction) {
+                        let index = self.loop_entry(frame, site);
+                        self.charge_loop(index)?;
+                    }
                     self.advance(frame);
                 } else {
+                    // A `while` that ends on its condition leaves the loop the way
+                    // a sequence loop leaves by running out of values: its entry is
+                    // given back. Keeping it let the next turn of an *enclosing*
+                    // loop find the same entry and charge a loop that had already
+                    // finished, so a nested `while` cost its cap in the sum of its
+                    // siblings' turns rather than in its own.
+                    if let Some(site) = self.condition_site(frame, instruction) {
+                        if let Some(index) = self.loop_index(frame, site) {
+                            self.leave_loop(frame, index);
+                        }
+                    }
                     self.set_ip(frame, target);
                 }
                 Ok(())
@@ -1542,19 +1583,7 @@ impl BytecodeVm {
 
     /// `JUMP`, which is a `while` loop's turn-over when it goes backwards.
     fn jump(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
-        let target = instruction.arg as usize;
-        if target < self.frames[frame].ip {
-            if let Some(site) = self.frames[frame]
-                .sites
-                .iter()
-                .find(|site| site.top as usize == target && !site.iterator)
-                .copied()
-            {
-                let index = self.loop_entry(frame, site);
-                self.charge_loop(index)?;
-            }
-        }
-        self.set_ip(frame, target);
+        self.set_ip(frame, instruction.arg as usize);
         Ok(())
     }
 
@@ -1730,19 +1759,20 @@ impl BytecodeVm {
             top: site.top,
             back_edge: site.back_edge,
             exit: site.exit,
-            // A `while` draws its entry when it turns over or when an exit leaves
-            // it, which is *after* the turn it is leaving has run — so that turn
-            // is what this counter starts on. Charging it here is what makes the
-            // cap count turns rather than turn-overs: the tree-walking VM charges
-            // at the top of every turn, so a cap of three is three turns on both,
-            // and `break` and `skip` — which reach this through
-            // [`Self::prepare_exit`] rather than through a backward `JUMP` — leave
-            // the same counter the plain path does.
+            // Both loop forms are charged where the tree-walking VM charges: at
+            // the instruction that begins a turn — a sequence loop's `STORE` at
+            // its `top`, which runs once per turn, and a `while`'s condition,
+            // which comes out true once per turn. A turn that runs to its end, a
+            // `break` that leaves the loop and a `skip` that starts the next one
+            // all reach one of those between them, so a cap of three is three
+            // turns on both engines whatever way the loop left them.
             //
-            // A sequence loop is not in this position: `GET_ITER` and `GET_RANGE`
-            // draw its entry *before* the turn, and charge each turn at the
-            // `STORE` on the loop's `top` that draws the value for it.
-            iterations: usize::from(!site.iterator),
+            // A sequence loop's `GET_ITER` and `GET_RANGE` draw its entry before
+            // the first turn; a `while`'s entry is drawn by the charge for that
+            // first turn, since the condition is the first instruction it has.
+            // Both are reached through `loop_entry`, so a loop an abrupt exit
+            // leaves before its first charge has an entry to leave.
+            iterations: 0,
             frame,
             stack_base: self.frames[frame].stack_base,
             variable: self.shadow_of(site, frame),
@@ -1941,23 +1971,12 @@ impl BytecodeVm {
             let entry = &self.loops[index];
             (entry.top, entry.stack_base)
         };
-        // A `while` has no `STORE` at its `top` to draw the next value and charge
-        // the turn with it, and this jump steps over the backward `JUMP` that
-        // charges a turn that ran to its end, so the turn being started is charged
-        // here. Charging nothing left a `skip` on every turn spending no
-        // iterations at all — only the step budget stopped such a program, where
-        // the tree-walking VM stops it with `Maximum of N iterations`, and a
-        // `while` that skips everything is the cheapest way to write one.
-        if !owner.site.iterator {
-            // A failure here is the cap, reported the way [`Self::prepare_exit`]
-            // reports a `finally` that could not run: the region is left by the
-            // failing path, so the exit flag is cleared rather than left standing
-            // for a jump that is not going to happen.
-            if let Err(error) = self.charge_loop(index) {
-                self.abrupt_exit = false;
-                return Err(error);
-            }
-        }
+        // The turn this is starting is charged by the instruction it lands on —
+        // the `STORE` of a sequence loop, and a `while`'s condition — so a
+        // `while` that skips every turn is charged exactly as one that runs every
+        // turn. Nothing is charged here: charging it as well is what made a
+        // `skip` cost two turns, and stopped a `while` of N turns at a cap of N.
+
         // The operand stack goes back to the height this loop began at. A
         // sequence loop keeps the value its variable is drawn from, which sits on
         // the base; a `while` has none, so its base is the height itself.

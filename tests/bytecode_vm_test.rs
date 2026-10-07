@@ -2529,6 +2529,123 @@ fn edge_a_break_in_a_catch_around_a_catch_less_try_leaves_the_loop_and_cleans_up
     );
 }
 
+/// A cap of N allows a loop N turns, and N turns is a loop that ends: a `while`
+/// whose condition goes false on its last turn has finished, not run out of
+/// budget.
+///
+/// The charge is made where the tree-walking VM makes it — after the condition
+/// comes out true, before the body — so the cap counts turns that *began*. A
+/// charge at the backward `JUMP` instead counts a turn before knowing its
+/// condition holds, which is what makes a cap of N refuse a `while` of N turns on
+/// this VM and run it on the other.
+#[test]
+fn edge_a_cap_allows_a_loop_exactly_that_many_turns() {
+    // The body's first statement counts, so what the program prints is how many
+    // turns the cap allowed. `TURNS` is fixed and only the cap moves, so the
+    // boundary is asked about rather than the loop being written to the cap.
+    const TURNS: usize = 5;
+    let looping = |head: &str, statement: &str| {
+        format!("set turns to 0\n{head}\n    set turns to turns + 1\n{statement}end\nsay turns\n")
+    };
+    // The last case is the nesting one: each outer turn starts a fresh inner
+    // loop, so an inner loop that kept its entry past its own last turn would
+    // charge the sum of its siblings' turns rather than its own.
+    let cases: [(&str, String); 5] = [
+        ("while", looping("while turns is not 5", "")),
+        ("while/skip", looping("while turns is not 5", "    skip\n")),
+        ("repeat", looping("repeat 5 times", "")),
+        ("for each", looping("for each i in [1, 2, 3, 4, 5]", "")),
+        (
+            "while/while",
+            concat!(
+                "set turns to 0\n",
+                "while turns is not 5\n",
+                "    set turns to turns + 1\n",
+                "    set inner to 0\n",
+                "    while inner is not 5\n",
+                "        set inner to inner + 1\n",
+                "    end\n",
+                "end\n",
+                "say turns\n",
+            )
+            .to_string(),
+        ),
+    ];
+
+    for (name, source) in &cases {
+        // A cap of exactly the turns the loop runs: the loop finishes.
+        let (tree, _) = assert_agrees_capped(source, TURNS);
+        assert_eq!(
+            tree.output,
+            vec![TURNS.to_string()],
+            "a cap of {TURNS} must be {TURNS} turns of a {name} loop on both VMs, and the \
+             loop must finish rather than report the cap"
+        );
+
+        // One turn less, and the cap is what stops it — on both VMs, naming itself.
+        let (tree, byte) = assert_agrees_capped(source, TURNS - 1);
+        let message = tree
+            .result
+            .as_ref()
+            .expect_err("a cap one turn short must stop a loop that needs one more");
+        assert!(
+            message.contains(&format!("Maximum of {} iterations", TURNS - 1)),
+            "and it must be the cap that stops it, said: {message}"
+        );
+        assert!(
+            byte.result.is_err(),
+            "and the bytecode VM must stop there too, said: {byte:?}"
+        );
+    }
+}
+
+/// A `break` and a `skip` are charged one turn each, on a `while` as much as on a
+/// sequence loop.
+///
+/// The two reach the cap by different instructions — `break` leaves without
+/// starting another turn, `skip` starts the next one without running it — so a
+/// charge placed at either one of those alone gets the other wrong. This asks the
+/// boundary about both: a cap that exactly covers the turns taken runs, and one
+/// turn short is the cap that stops it, on both engines.
+#[test]
+fn edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each() {
+    // The jump is on the last turn, so the loop needs every turn the cap allows
+    // and not one more. `break` ends it there; `skip` starts a turn that finds
+    // the condition false and ends there instead.
+    let jumping = |statement: &str| {
+        format!(
+            "set turns to 0\nwhile turns is not 5\n    set turns to turns + 1\n\
+             if turns is 5 then\n        {statement}\n    end\nend\nsay turns\n"
+        )
+    };
+    let cases = [("break", jumping("break")), ("skip", jumping("skip"))];
+
+    for (name, source) in &cases {
+        let (tree, _) = assert_agrees_capped(source, 5);
+        assert_eq!(
+            tree.output,
+            vec!["5".to_string()],
+            "a cap of 5 must be 5 turns of a `while` whose {name} is on the last one, \
+             on both VMs"
+        );
+
+        // One turn short the loop cannot finish, and a `skip` cannot pretend to:
+        // the turn it starts is a turn, so the cap stops the loop either way.
+        let (tree, byte) = assert_agrees_capped(source, 4);
+        assert!(
+            tree.result
+                .as_ref()
+                .is_err_and(|message| message.contains("Maximum of 4 iterations")),
+            "a cap of 4 must stop a `while` whose {name} is on its fifth turn, said: {:?}",
+            tree.result
+        );
+        assert!(
+            byte.result.is_err(),
+            "and the bytecode VM must stop there too, said: {byte:?}"
+        );
+    }
+}
+
 /// A `try` with no `catch` is not a handler, and the loop it is written in keeps
 /// turning: the failure leaves the region and the program, rather than the region
 /// pretending it succeeded.

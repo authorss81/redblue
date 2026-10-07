@@ -270,6 +270,8 @@ move with it.
 | `tests/test_control_flow.rb` | round 5, +1 block | `edge: a catch leaves the function body it was written in alone`, which the bytecode corpus runs on both VMs |
 | `tests/test_loop_control.rb` | round 5, +2 blocks | the two `skip` shapes, so the differential runs them on both VMs |
 | `tests/loop_control_test.rs` | resumed round, +2 tests | the `skip` half of the definition of done's catchable refusal: `edge_a_refused_skip_is_catchable_with_try_catch_error` and `edge_a_refused_skip_inside_a_loop_leaves_the_loop_running`, each compared across both VMs |
+| `src/bytecode/vm.rs` | resumed round 2, +61 −43 | a `while` is charged where the tree-walking VM charges it: `JUMP_IF_FALSE` charges the loop whose condition it is when the value is truthy and drops that loop's entry when it is falsy, through the new `condition_site`; `jump` and `turn_over_to` charge nothing, and the entry no longer starts at one turn (FINDINGS §17) |
+| `tests/bytecode_vm_test.rs` | resumed round 2, +2 tests | `edge_a_cap_allows_a_loop_exactly_that_many_turns` (five loop shapes, the boundary asked from both sides) and `edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each` |
 
 ### Why `src/bytecode/vm.rs` is in this phase
 
@@ -609,10 +611,120 @@ Nothing under `src/` changed this round, because nothing under `src/` was wrong.
 (`src/vm.rs` and `src/bytecode/vm.rs`, both in the "What changed" table above),
 and the phase diff as a whole touches both.
 
+## Resumed round 2 — the iteration cap, which round 6 fixed on the wrong side
+
+The tree arrived with every gate green, so this round began by sweeping the two
+engines against each other rather than by re-reading the code: every loop form ×
+every exit path (`break`, `skip`, a condition going false) × a range of lowered
+caps, comparing `rb run` with `rb compile && rb vm`. About sixty programs later it
+turned up a disagreement that the corpus cannot see, because the corpus runs at the
+published cap of a million and no corpus program can lower it.
+
+**A `while` that ran exactly N turns was refused at a cap of N** — on the bytecode
+VM only. At the published cap that needs no test harness at all:
+
+```
+$ ./target/debug/rb run target/tmp/exact_cap.rb        # set n to 0 / while n < 1000000 ...
+1000000                                                exit 0
+$ ./target/debug/rb vm target/tmp/exact_cap.rbc
+Error: RuntimeError: Maximum of 1000000 iterations reached in a 'while' loop
+                                                         exit 1
+```
+
+A sequence loop was right at the same boundary, so this was `while`-specific, and
+FINDINGS §17 records it in full. The cause is round 6's own fix: to make a `skip`
+cost a turn, it moved a `while`'s charge to the backward `JUMP` and seeded the
+entry at one turn to pay for a first turn that had been free. A turn that *ends* is
+not a turn that *begins* — at the backward jump the next condition has not been
+evaluated — so the charge fell on a turn that, for a loop whose condition goes false
+on its last turn, never happened. §16's sub-finding ("a cap of N was N turns on one
+engine and N + 1 on the other") had been fixed by moving the charge to the wrong
+side of the condition, and the off-by-one came straight back the other way. It was
+invisible to §16's own test because that test used a `while` that runs until the cap
+stops it, which never reaches the boundary.
+
+The test written for it turned up the second half immediately: **a `while` that ended
+on its condition never dropped its loop entry**, where a sequence loop drops its
+entry by running out of values. So the next turn of the enclosing loop found the
+same entry and charged it again — two inner loops of two turns each cost four, and a
+nested `while` hit a cap four times the number of turns it had taken.
+
+Both are one correction: **a turn is charged where it begins, and a loop gives its
+entry back where it ends.** `JUMP_IF_FALSE` charges the loop whose condition it is
+when the value is truthy — the tree-walking VM's position exactly, found through a
+new `condition_site` that matches the operand against each non-sequence site's
+`exit` and takes the innermost whose range contains the instruction — and drops that
+loop's entry when the value is falsy. `jump` and `turn_over_to` then charge nothing:
+a `skip` lands on the instruction that begins the next turn, and that instruction
+charges it, which is where §16's `skip` fix belongs. The entry no longer starts at
+one turn, because with the charge at the top of a turn there is no turn to start the
+counter on.
+
+| # | Defect | Fix |
+|---|---|---|
+| 1 | **BLOCKER** a `while` of exactly N turns was refused at a cap of N on the bytecode VM — at the published cap, a `while` of a million turns is refused by `rb vm` and run by `rb run` | the charge moves to the condition, where the tree-walking VM makes it |
+| 2 | **MAJOR** a `while` that ended on its condition kept its entry, so each turn of an enclosing loop re-charged it: a nested `while` cost the sum of its siblings' turns | `JUMP_IF_FALSE` gives the entry back when the condition is falsy, the way `store` does for a sequence loop |
+
+Both were watched failing without the fix, and finding 2 was watched failing *again*
+with only finding 1's half put back, so neither is carried by the other.
+
+The rest of the sweep found nothing: nested loops of every form, `break` and `skip`
+in `if`/`unless`/`try`/`catch`/`finally`/`test`/`object`/`module` bodies, closures,
+object methods, the function-body refusal, 16-deep nesting, and the corrected
+`tests/test_lists.rb` cases all agree on the two engines, before and after this
+round.
+
+### Tests added
+
+| Test | Edge class covered | Fails without |
+|---|---|---|
+| `edge_a_cap_allows_a_loop_exactly_that_many_turns` | **boundary / resource_limit**: a cap of N is N turns for `while`, `while`+`skip`, `repeat`, `for each` and a `while` in a `while` — the loop *finishes* at the cap rather than reporting it, and a cap one turn short is the cap that stops it, naming itself, on both engines | both halves: it reports `Maximum of 5 iterations reached in a 'while' loop` from the bytecode VM where the tree printed `5` |
+| `edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each` | **boundary**: the two jumps reach the cap by different instructions, so each is asked about on its own — a cap covering the turns taken runs, one turn short stops | the same, for `break` and for `skip` |
+
+`tests/bytecode_vm_test.rs` is 60 tests, up from 58. `cargo test --all-targets` is
+821, up from 819. `rb test` is unchanged at 332 — both additions are Rust, because
+both are about a cap a program cannot lower from inside itself, which is why the
+corpus never saw them.
+
 ## Gates
 
-Re-run after round 6's fixes and this round's two tests, on the tree as it now
-stands.
+Re-run after this round's fix, on the tree as it now stands.
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass, no diff |
+| `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
+| `cargo test --all-targets` | **821 passed, 0 failed, 0 ignored** (31 binaries) |
+| `./rbops/verify.sh phase-025` | **not run — `rbops/` is not in this checkout** |
+
+`rbops/` is absent from the working directory (`ls` shows `AGENTS.md`, `SPEC.md`,
+`corpus`, `docs`, `examples`, `modules`, `phases`, `src`, `target`, `tests`, and no
+`rbops/`), so the fourth gate exits `No such file or directory` and the manual
+substitute below stands. The pipeline lives outside this checkout and the phase
+prompt forbids inspecting it. What was run instead, by hand, from the same phase
+prompt:
+
+| Check | Result |
+|---|---|
+| `rb test` (every `.rb` under `tests/`) | 332 run, 332 passed, 0 failed |
+| `./target/debug/rb run examples/*.rb` | 6/6 exit 0 |
+| `./target/debug/rb run modules/*.rb` | 2/2 exit 0 (`MathUtils.rb` passes as well) |
+| `tests/loop_bounds_test.rs` | 22 passed, 0 failed |
+| `tests/loop_control_test.rs` | 61 passed, 0 failed |
+| `tests/bytecode_vm_test.rs` (the both-VMs differential) | 60 passed, 0 failed, over a corpus of 411 programs |
+| `tests/object_model_test.rs` | 39 passed, 0 failed |
+| `tests/differential_test.rs` | 81 passed, 0 failed |
+| `tests/for_range_test.rs` | 31 passed, 0 failed |
+| `cargo test --doc` | 1 passed, 0 failed |
+| the reproduction, through the binary | `break` prints `1`, `skip` prints `1` then `3`, `repeat` stops at 3, a `break` in no loop exits 1 with `'break' is only valid inside a loop` |
+
+This round's two tests are the difference between 819 and 821, both in
+`tests/bytecode_vm_test.rs` (58 → 60). `rb test` is unchanged at 332: both
+additions are Rust.
+
+### Round 6's gates, kept for the count
+
+Re-run after round 6's fixes and the previous resumed round's two tests, on the tree
+as it then stood.
 
 | Gate | Result |
 |---|---|
@@ -620,9 +732,6 @@ stands.
 | `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
 | `cargo test --all-targets` | **819 passed, 0 failed, 0 ignored** (31 binaries) |
 | `./rbops/verify.sh phase-025` | **not run — `rbops/` is not in this checkout** |
-
-This round's two tests are the difference between 817 and 819, both in
-`tests/loop_control_test.rs` (59 → 61). `rb test` is unchanged at 332.
 
 `rbops/` is absent from the working directory, so the fourth gate exits
 `No such file or directory` and the manual substitute below stands.
@@ -779,7 +888,15 @@ this phase is unverified on that axis.
   (the `by` form, whose stride the two statements do not consult).
   The merge round keeps that last pair pinned across `main`'s signed-step range
   loop: restoring its plain statement list takes down all four range tests, and
-  `tests/for_range_test.rs` (31 tests) is green either side of that.
+  `tests/for_range_test.rs` (31 tests) is green either side of that. This round adds
+  the cap boundary itself, which the pairs above sat next to without pinning:
+  `edge_a_cap_allows_a_loop_exactly_that_many_turns` asks each loop form what a cap
+  of exactly its own turn count does — it finishes — and what one turn short does,
+  which is the cap that stops it. Round 6's test could not see this because every
+  case in it ran until the cap stopped it, and a loop that never reaches the
+  boundary cannot disagree about it. `edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each`
+  is the same boundary for the two jumps separately, since they reach the cap by
+  different instructions.
 - **out_of_bounds** — N/A. `break` and `skip` are statements that take no
   operand and index nothing, so they have no out-of-range case of their own. The
   nearest thing — the ends of a `for each` — is the empty-list and final-iteration
@@ -870,7 +987,11 @@ this phase is unverified on that axis.
   `tests/loop_bounds_test.rs` (22 tests) passes, including the step-budget tests,
   so the new per-turn path is inside the existing budget. A `break` that runs
   `finally` blocks on the way out costs those bodies one step each, which is
-  charged the same way as any other statement.
+  charged the same way as any other statement. This round adds the cap boundary
+  itself for both engines, and the nesting case with it: a `while` in a `while`
+  under a cap of two must get two turns per loop, not four — the shape that caught
+  the second defect, where a `while` that ended on its condition kept its entry and
+  so was charged once per turn of the loop around it.
 
 ## Invariants touched
 
@@ -947,6 +1068,21 @@ this phase is unverified on that axis.
   engines — and a `while` that skips every turn is stopped by the cap at all,
   rather than by the program's step budget. Nothing changes for a program that was
   inside every one of those limits.
+- **Round 6's last sentence was wrong, and this round says so rather than
+  papering over it.** "A `while` under a lowered iteration cap stops one turn
+  earlier on the bytecode VM, so a cap of N is N turns on both engines" was the
+  claim as recorded, and it did not hold: a `while` of *exactly* N turns was refused
+  at a cap of N on the bytecode VM. It was invisible to round 6's test, which used a
+  `while` that runs until the cap stops it. Fixed here (FINDINGS §17), and the turn
+  count is now pinned at the boundary from both sides for every loop form.
+- This round changes answers only on the bytecode VM, and only for programs at or
+  over a lowered cap: a `while` that finishes at the cap now runs instead of failing,
+  a nested `while` is charged its own turns instead of its siblings', and a `skip`
+  in a `while` costs one turn rather than two. At the published cap of a million the
+  first is the only one a program can reach unaided, and it turns a `while` of a
+  million turns from exit 1 into exit 0 — the answer the tree-walking VM has always
+  given. A program that was comfortably inside every cap is untouched, and
+  `examples/*.rb` and `modules/*.rb` all still exit 0.
 
 ## Known gaps / follow-ups
 
@@ -1010,6 +1146,20 @@ this phase is unverified on that axis.
   local or parameter read after the `try` stopped with
   `RuntimeError: Unknown variable 'x'`; it now prints what the tree-walking VM
   prints. FINDINGS §13 has the program and the three things that hid the defect.
+- ~~Round 6: "a `while` under a lowered iteration cap stops one turn earlier on the
+  bytecode VM, so a cap of N is N turns on both engines"~~ — **the claim was wrong
+  and is fixed in this round.** A `while` of *exactly* N turns was refused at a cap of
+  N on the bytecode VM, and at the published cap that needs no test harness: a
+  `while` of a million turns exited 1 under `rb vm` and 0 under `rb run`. Round 6's
+  fix had moved the charge to the wrong side of the condition to make a `skip` cost a
+  turn, which put the off-by-one it had just removed straight back. Fixing it turned
+  up the second half — a `while` that ended on its condition kept its loop entry, so
+  a nested `while` was charged its siblings' turns as well as its own. Both are one
+  correction now: a turn is charged where it begins and a loop gives its entry back
+  where it ends. FINDINGS §17 has both programs and the reasoning, and the two tests
+  that pin them are asked about the boundary from both sides, which is what round 6's
+  test could not do — every case in it ran until the cap stopped it, and a loop that
+  never reaches the boundary cannot disagree about it.
 - A `finally` is **not** owed when the `catch` that handled the failure itself
   fails — both VMs stop at the catch's failure and never run the `finally`. Found
   by the round-5 review and **left as it is**, because `SPEC.md:464`'s "a
