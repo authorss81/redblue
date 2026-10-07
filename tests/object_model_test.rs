@@ -439,3 +439,187 @@ fn edge_malformed_object_declarations_are_parse_errors() {
         other => panic!("expected a Parser error, got {:?}", other),
     }
 }
+
+/// An `object` written inside another `object`'s body is declared too, so a
+/// body nests a second declaration rather than absorbing it.
+#[test]
+fn object_a_declaration_nested_in_a_body_declares_its_own_type() {
+    eval(
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n    end\n    \
+         expect Inner.i to be 2\nend\n\
+         expect Outer.o to be 1\n",
+    );
+}
+
+/// The type is registered before the statements after its declarations run, so a
+/// declaration nested in a body may name that body as its parent.
+#[test]
+fn object_a_nested_declaration_may_extend_the_body_it_is_written_in() {
+    eval(
+        "object Outer\n    has o default 1\n    object Inner extends Outer\n        has i default 2\n    end\n    \
+         expect Inner.o to be 1\n    expect Inner.i to be 2\nend\n\
+         expect Outer.o to be 1\n",
+    );
+}
+
+/// Three levels: the innermost body inherits through a parent that is itself
+/// still being declared two bodies up.
+#[test]
+fn object_a_nested_declaration_may_extend_two_levels_up() {
+    eval(
+        "object One\n    has n default 1\n    object Two\n        object Three extends One\n            has k default 3\n\
+         end\n        expect Three.n to be 1\n    end\nend\n",
+    );
+}
+
+/// A name an open body has already taken is refused rather than redeclared,
+/// whichever body wrote it — the outer type is registered before the nested
+/// declaration runs, so the inner one finds it there.
+#[test]
+fn edge_object_a_nested_declaration_reusing_the_enclosing_name_is_refused() {
+    assert_runtime_error(
+        "object A\n    has a default 1\n    object A\n        has b default 2\n    end\nend\n",
+        "Object 'A' is already declared",
+    );
+    assert_runtime_error(
+        "object A\n    object B\n        has b default 1\n        object B\n            has c default 2\n        end\n    end\nend\n",
+        "Object 'B' is already declared",
+    );
+}
+
+/// A parent chain that reaches back to the declaration that is walking it is the
+/// cycle it is, however deep the nesting is that set it up.
+#[test]
+fn edge_object_a_nested_declaration_extending_its_own_name_is_a_cycle() {
+    assert_runtime_error(
+        "object A\n    object B extends B\n        has b default 1\n    end\nend\n",
+        "Object 'B' extends 'B', which is already in its own parent chain",
+    );
+}
+
+/// A failure inside a nested body is a failure of the program, so the `try` that
+/// encloses both bodies catches it and neither type is left half-registered.
+#[test]
+fn edge_object_a_failure_inside_a_nested_body_is_caught_outside_both() {
+    eval(
+        "set caught to \"no\"\n\
+         try\n    object Outer\n        has o default 1\n        object Inner\n            has i default 2\n            \
+         set bad to 1 + \"one\"\n        end\n    end\n\
+         catch error\n    set caught to \"yes\"\nend\n\
+         expect caught to be \"yes\"\n",
+    );
+}
+
+/// A nested body that recovers leaves both types declared, so the outer body's
+/// name and the nested one's are both readable afterwards.
+#[test]
+fn edge_object_a_nested_body_that_recovers_leaves_both_types_declared() {
+    eval(
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n        \
+         try\n            set bad to 1 + \"one\"\n        catch error\n            set inner_ok to \"caught\"\n        end\n    end\n    \
+         set outer_ok to \"registered\"\nend\n\
+         expect Outer.o to be 1\n\
+         expect outer_ok to be \"registered\"\n\
+         expect inner_ok to be \"caught\"\n",
+    );
+}
+
+/// A `break` written after a nested declaration inside an `object` body written
+/// in a loop still leaves the loop, and the body registers its type on the way
+/// out.
+#[test]
+fn edge_object_an_object_body_nested_in_a_loop_can_break_out_of_it() {
+    eval(
+        "set n to 0\n\
+         repeat 3 times\n    object Once\n        has v default 1\n        object Inner\n            has w default 2\n        end\n        \
+         set n to n + 1\n        break\n    end\nend\n\
+         expect n to be 1\n",
+    );
+}
+
+/// A declaration inside a body is a declaration, so a failure reporting it names
+/// the nested type rather than the one it is written in.
+#[test]
+fn edge_object_a_nested_declaration_with_an_unknown_parent_is_reported() {
+    assert_runtime_error(
+        "object Outer\n    object Inner extends Missing\n        has i default 1\n    end\nend\n",
+        "Object 'Inner' extends 'Missing', which is not declared",
+    );
+}
+
+// -- a declaration opened by a `has` default ---------------------------------
+//
+// `has x default <expr>` compiles the default as an expression, so the
+// expression can open a declaration of its own — a call, a function body that
+// declares. That declaration is then assembled while the enclosing one is still
+// being assembled, and the two have to be told apart on both the paths that drop
+// a frame: the abrupt exit that registers the type, and the failure that
+// abandons the declaration.
+
+/// A declaration opened by a `has` default, abandoned by a `catch` in the call it
+/// was opened from, takes only its own entry off the stack of declarations being
+/// assembled.
+///
+/// The bytecode VM popped one more than the frame had recorded, which took the
+/// *enclosing* body's entry with it: the outer body then found nothing left to
+/// register and reported `'has a' is only valid inside an object declaration` for
+/// a program the tree-walking VM runs. These assertions are the tree-walking
+/// VM's answers, which the bytecode VM is held to.
+#[test]
+fn edge_object_a_declaration_opened_by_a_has_default_a_failure_abandons_only_its_own() {
+    eval(
+        "to maker()\n    \
+         try\n        object Inner\n            has x default 1 + \"one\"\n        end\n        \
+         set reached to \"no failure\"\n    catch error\n        set reached to \"caught\"\n    end\n    \
+         give back reached\nend\n\
+         object A\n    has a default maker()\nend\n\
+         expect A.a to be \"caught\"\n",
+    );
+}
+
+/// The same shape with nothing failing: the declaration the default opened is
+/// registered, and so is the body that opened it.
+#[test]
+fn edge_object_a_declaration_opened_by_a_has_default_that_succeeds_registers_both() {
+    eval(
+        "to maker()\n    object Inner\n        has x default 5\n    end\n    give back 1\nend\n\
+         object A\n    has a default maker()\nend\n\
+         expect A.a to be 1\n",
+    );
+}
+
+/// A body the program leaves through a failure in the statements *after* its
+/// declarations has still registered its type: both VMs register the type before
+/// running those statements, which is what makes `object B extends A` nested
+/// inside `object A` find `A`.
+///
+/// This is the shape FINDINGS §9 recorded as an open disagreement. It does not
+/// reproduce — `git show HEAD:src/bytecode/vm.rs` disagrees with itself here
+/// rather than with the tree-walking VM — and this test plus the corpus programs
+/// beside it are what keep it that way.
+#[test]
+fn edge_object_an_object_body_left_through_a_failure_has_registered_its_type() {
+    eval(
+        "try\n    object Outer\n        has o default 1\n        set bad to 1 + \"one\"\n    end\n\
+         catch error\n    set caught to \"yes\"\nend\n\
+         set Outer.o to 5\n\
+         expect caught to be \"yes\"\n\
+         expect Outer.o to be 5\n",
+    );
+}
+
+/// The other half of that rule: a failure in a `has` default happens while the
+/// declarations are still being collected, and the tree-walking VM registers
+/// nothing then — so the name is not bound and reading it is the unknown
+/// variable any name read too early gives.
+#[test]
+fn edge_object_an_object_body_whose_declaration_failed_registers_nothing() {
+    eval(
+        "set caught to \"no\"\ntry\n    object Half\n        has h default 1 + \"one\"\n    end\n\
+         catch error\n    set caught to \"yes\"\nend\n\
+         expect caught to be \"yes\"\n\
+         set reported to \"bound\"\n\
+         try\n            set reported to Half.h\n         catch error\n            set reported to \"no Half\"\n        end\n\
+         expect reported to be \"no Half\"\n",
+    );
+}

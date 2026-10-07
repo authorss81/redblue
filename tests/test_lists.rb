@@ -89,9 +89,9 @@ test "lists: three levels of nesting resolve"
     expect deep[1][0][0] to be 4
 end
 
-test "lists: a conditional inside a loop does not disturb the iteration"
-    // `break` and `skip` are parsed but no loop honours them yet (see
-    // FINDINGS.md), so this pins the iteration count itself.
+test "lists: a skip inside a loop leaves its own iteration out"
+    // A `skip` ends the turn it is in, so the value of 2 contributes neither to
+    // the count nor to the sum: three values were seen and they add to 8.
     set total to 0
     set seen to 0
     for each value in [1, 2, 3, 4]
@@ -101,12 +101,14 @@ test "lists: a conditional inside a loop does not disturb the iteration"
         set seen to seen + 1
         set total to total + value
     end
-    expect seen to be 4
-    expect total to be 10
+    expect seen to be 3
+    expect total to be 8
 end
 
-test "lists: break inside a loop does not truncate it"
-    // Companion to the test above: `break` currently runs to completion.
+test "lists: break inside a loop ends it at the value that broke"
+    // Companion to the test above: a `break` ends the loop, so only 1 and 2 are
+    // ever added. Before `break` was implemented this added all four and the
+    // answer was 10.
     set total to 0
     for each value in [1, 2, 3, 4]
         if value is 3 then
@@ -114,7 +116,7 @@ test "lists: break inside a loop does not truncate it"
         end
         set total to total + value
     end
-    expect total to be 10
+    expect total to be 3
 end
 
 test "edge_lists_index_past_the_end_is_a_caught_error"
