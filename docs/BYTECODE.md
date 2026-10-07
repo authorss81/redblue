@@ -1,6 +1,6 @@
 # The Redblue bytecode format (`.rbc`)
 
-**Format version: 3.** This document is the normative description of the file
+**Format version: 4.** This document is the normative description of the file
 `rb compile` writes and `rb dis` reads. The encoder and decoder that implement
 it are `src/bytecode/format.rs`; the instruction set is
 `src/bytecode/opcode.rs`.
@@ -53,21 +53,22 @@ A file that does not begin with the magic is refused with
 
 ### Format version
 
-A `u16`. This build reads and writes `3`. Any other value is refused with
-`unknown bytecode format version <n>: this build reads version 3`.
+A `u16`. This build reads and writes `4`. Any other value is refused with
+`unknown bytecode format version <n>: this build reads version 4`.
 
 #### What each version changed
 
 Versions 1 and 2 changed no byte value and no record layout — only what an
-operand means, and one refusal. Version 3 added an instruction, at a byte value
-no earlier version used, so the numbers written into a file still mean what they
-meant.
+operand means, and one refusal. Versions 3 and 4 each added instructions, at
+byte values no earlier version used, so the numbers written into a file still
+mean what they meant.
 
 | Version | Change |
 |---|---|
 | 1 | The original format. |
 | 2 | `DEF_OBJECT`'s secondary operand became the constant index of the object it extends — `NO_CONST` when it extends nothing — where version 1 wrote a flag that discarded the parent's name. `DEF_FIELD` became the consumer of the value pushed immediately before it, so a field's `default` is compiled instead of dropped. The decoder refuses a constant pool that reaches the reserved index `NO_CONST`. |
 | 3 | Added `DECLARE_CONST`, which `constant NAME to <expr>` compiles to. Versions 1 and 2 compiled the same declaration to `STORE`, which does not say the name is read-only, so the file could not be told apart from a `set`. A version-2 file is refused rather than read as a program whose constants could be rebound. |
+| 4 | `IMPORT`'s secondary operand became the name it binds — the alias the source wrote, or the module's own name when it wrote none — where version 3 wrote the filler `0`. Read as version 4, a version-3 file's `IMPORT` would bind `constants[0]`, which is whichever name happened to be first in the pool rather than the one the source named. Added `MODULE` and `EXPORT`, which a `module NAME … end` declaration compiles to; version 3 compiled such a declaration's body inline and the declaration itself to nothing, so a file written then says nothing about where the module begins or what it publishes. A version-3 file is refused rather than half-read. |
 
 An earlier file is refused rather than half-read: the same bytes would mean
 two different things, and rule 2 above is what makes that a new version rather
@@ -100,9 +101,9 @@ it a real index is refused, so the operand is never ambiguous.
 ### Blocks
 
 A block is one `to … end`, one `object … end`, one `test "…" … end`, one
-handler of a `try`, or the program's own `main`. It is the unit a jump target
-is resolved against: **an instruction may only jump to an instruction of its own
-block.**
+`module … end`, one handler of a `try`, or the program's own `main`. It is the
+unit a jump target is resolved against: **an instruction may only jump to an
+instruction of its own block.**
 
 ```
 kind            1 byte
@@ -124,6 +125,7 @@ child blocks    variable
 | 4 | test |
 | 5 | catch body |
 | 6 | finally body |
+| 7 | module body |
 
 `arity` is the parameter count of a function, method or test block and `0`
 for everything else. `name` is the declaration's name; for a catch body it is
@@ -212,19 +214,23 @@ always `0`.
 | 40 | `DEF_OBJECT` | block index | parent name index, or `NO_CONST` | starts an object body; the block holds its fields and methods |
 | 41 | `DEF_FIELD` | field name index | — | pops the field's initial value and declares it on the object being defined |
 | 42 | `TRY` | catch block index, or `NO_BLOCK` | finally block index, or `NO_BLOCK` | runs what follows with those handlers in place |
-| 43 | `IMPORT` | module name index | — | imports a module |
+| 43 | `IMPORT` | module name index | alias name index | imports a module, binding it the alias; the module's own name when the source wrote none |
 | 44 | `TEST` | block index | — | runs the test body |
 | 45 | `EXPECT` | — | — | pops the expected and the actual value and compares them |
 | 46 | `DECLARE_CONST` | name index | — | pops into a variable as a constant: the name may not be bound again, and no `STORE` writes it |
+| 47 | `MODULE` | module body block index | — | starts a module declaration; the block holds what it publishes and its body, and its name is the module's |
+| 48 | `EXPORT` | published name index | `NO_CONST` when the declaration does not define that name | nothing: data the `MODULE` that entered the block has already read |
 
 `NO_BLOCK` is `0xFFFFFFFF`, the operand that says "this handler is not there".
 A `try` with no `catch` and no `finally` writes it in both fields and creates
 no blocks.
 
 `NO_CONST` is `0xFFFFFFFF` too, and says "this instruction names no constant":
-`DEF_OBJECT` writes it for an object that extends nothing. The two reserved
-values are never compared against each other — `NO_BLOCK` appears only in a
-block-index operand and `NO_CONST` only in a constant-index one.
+`DEF_OBJECT` writes it for an object that extends nothing, and `EXPORT` writes it
+in its second operand for a name the declaration does not define — which a VM
+refuses rather than publishes. The two reserved values are never compared against
+each other — `NO_BLOCK` appears only in a block-index operand and `NO_CONST` only
+in a constant-index one.
 
 `END_TRY_MARKER` is `0xFFFFFFFF` as well, and is the one value of a `NOP`'s
 `arg` that is not the filler: it is the end of a `try`'s protected region,
@@ -237,9 +243,10 @@ The compiler writes exactly one `NOP` per `try`, immediately after that `try`'s
 protected code, carrying `END_TRY_MARKER`. Without it a failure in a statement
 *after* the `try` would be caught by that `try`, and a `finally` would never run
 at all on the path where nothing failed. A `NOP` is one byte with two meanings
-because the table is frozen: byte 46 is the last instruction, so an end-of-try
-byte of its own would have had to renumber an instruction whose byte value is
-part of the format. The operand is what tells the two apart, which is why a
+because the table was frozen when the marker was defined: byte 46 was the last
+instruction, so an end-of-try byte of its own would have had to renumber an
+instruction whose byte value is part of the format. The operand is what tells the
+two apart, which is why a
 filler `NOP` anywhere — including inside protected code — closes nothing, runs
 no `finally`, and does not shorten the region a failure skips. `rb dis` prints
 `end of a protected region` on a marked one.
@@ -325,6 +332,23 @@ order.
 protected statements inline. The handlers are separate blocks so the protected
 code stays a straight run of instructions with no jump patching.
 
+`module Name … end` compiles `MODULE` naming the declaration's body block, whose
+name is the module's. The
+body is a block of its own, so it runs in a scope and a frame of its own: a `set`
+inside a module is the module's name and not a name of the program that declared
+it. The block opens with one `EXPORT` per name the declaration publishes, and the
+rest of the block is the body. The `EXPORT`s come first so a jump inside the body
+still points at the instruction it was compiled for — nothing is inserted after
+the body was compiled. `export all` is written as one `EXPORT` per declared name
+rather than as a flag, so the file says what the declaration publishes without
+the reader having to know the rule; an `export` of a name the module does not
+define carries `NO_CONST`, which is a VM's cue to refuse it rather than publish
+it, in the same words the tree-walking interpreter uses.
+
+`import Name as Alias` compiles `IMPORT` naming the module and the alias, then
+`STORE Alias`. A VM that finds the alias already bound steps over the `STORE`
+rather than running it: an import does not take over a name the program holds.
+
 ## Reading a file that is not one of ours
 
 A decoder must refuse, not guess:
@@ -355,7 +379,7 @@ left, a depth past the limit.
 ## What `rb dis` prints
 
 ```
-; redblue bytecode v3
+; redblue bytecode v4
 ; constants: 2
 ;   [0] 1
 ;   [1] n
@@ -383,14 +407,15 @@ reported in that comment rather than read:
 
 - a constant index outside the pool, including the parent of a `DEF_OBJECT`
 - a block index outside the block's own list, for `DEF_FUNCTION`, `DEF_METHOD`,
-  `DEF_OBJECT`, `TEST` and both halves of a `TRY`
+  `DEF_OBJECT`, `MODULE`, `TEST` and both halves of a `TRY`
 - a jump target past the end of its block; a jump to the block's instruction
   count is reported as `end of block`, because that is the documented exit
 
 An operand that has no value to name says nothing: `DEF_OBJECT`'s `NO_CONST`
-prints as `none` rather than as a four-billion-and-something index, and a
-`TRY`'s absent handler prints nothing at all. Where an instruction names more
-than one thing, the clauses are separated by `;`.
+prints as `none` rather than as a four-billion-and-something index, an `EXPORT`'s
+`NO_CONST` prints as `not defined` rather than as one, and a `TRY`'s absent
+handler prints nothing at all. Where an instruction names more than one thing,
+the clauses are separated by `;`.
 
 The disassembler is a pure function of the chunk: it walks blocks and
 instructions in index order and never sorts or hashes, so `rb dis` prints the

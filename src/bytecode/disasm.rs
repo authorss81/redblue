@@ -129,6 +129,12 @@ fn render_instruction(
             } else {
                 let _ = write!(line, ", {}", instruction.aux);
             }
+        } else if opcode == Opcode::Export && instruction.aux == NO_CONST {
+            // `EXPORT` carries its one operand in `arg` and a refusal marker in
+            // `aux`, so the marker is printed here rather than as a second index
+            // that would read as one — the same treatment `DEF_OBJECT`'s reserved
+            // value gets above.
+            let _ = write!(line, ", not defined");
         }
     }
 
@@ -154,12 +160,30 @@ fn describe(chunk: &Chunk, block: &Block, instruction: &Instruction) -> String {
         clauses.push(named_constant(chunk, instruction.aux, "extends "));
     }
 
+    // An `IMPORT`'s second operand is the alias it binds, which is a name for a
+    // reader exactly as the parent above is: without it the line says what was
+    // imported and not what it was imported *as*.
+    if instruction.opcode == Opcode::Import {
+        clauses.push(named_constant(chunk, instruction.aux, "as "));
+    }
+
     if instruction.opcode.takes_block_index() {
         clauses.extend(named_block(block, instruction.arg, ""));
     }
     if instruction.opcode == Opcode::Try {
         clauses.extend(named_block(block, instruction.arg, "catch "));
         clauses.extend(named_block(block, instruction.aux, "finally "));
+    }
+
+    // An `EXPORT` names what a module declaration publishes, and its second
+    // operand is the reserved index when the declaration does not define that
+    // name — which is the one fact a reader wants from the line, and which
+    // printing as a four-billion-and-something index would bury.
+    if instruction.opcode == Opcode::Export {
+        clauses.push(named_constant(chunk, instruction.arg, ""));
+        if instruction.aux == NO_CONST {
+            clauses.push("which the module does not define".to_string());
+        }
     }
 
     // A `NOP` is the filler, and the one thing it is not is noise: this is the

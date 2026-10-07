@@ -299,6 +299,26 @@ pub fn module_declared_names(body: &[Stmt]) -> Vec<String> {
     names
 }
 
+/// What a module body's last `export` says: the names it lists, and whether it
+/// says `all`. `None` is a body with no `export` at all.
+///
+/// The *last* `export` is what counts, because that is the one written where
+/// the declaration closes — the position `docs/GRAMMAR.md` § 3.1 gives it.
+///
+/// The one rule for reading it, shared by the tree-walking VM (which reports a
+/// bad `export` when the declaration runs) and by the compiler (which has to put
+/// the same names in the file), so the two cannot disagree about which `export`
+/// counts.
+pub fn module_exports(body: &[Stmt]) -> Option<(Vec<String>, bool)> {
+    let mut found = None;
+    for stmt in body {
+        if let Statement::Export { names, all } = &stmt.statement {
+            found = Some((names.clone(), *all));
+        }
+    }
+    found
+}
+
 /// The deepest an expression may nest before the parser gives up with a
 /// spanned [`Error::Parser`].
 ///

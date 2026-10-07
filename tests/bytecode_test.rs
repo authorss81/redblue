@@ -921,14 +921,105 @@ fn edge_the_constant_instruction_has_a_byte_of_its_own() {
         Some(Opcode::DeclareConst),
         "the byte should decode back to the instruction"
     );
-    assert_eq!(
-        Opcode::ALL.len(),
-        Opcode::DeclareConst.to_byte() as usize + 1,
-        "the table is indexed by byte value, so it ends at the last instruction"
+    assert!(
+        Opcode::DeclareConst.to_byte() < Opcode::Module.to_byte(),
+        "an instruction added later takes a byte above DECLARE_CONST rather than renumbering it"
     );
     assert!(
         Opcode::DeclareConst.has_operand() && Opcode::DeclareConst.takes_constant_index(),
         "DECLARE_CONST names the constant it binds through `arg`, like STORE"
+    );
+}
+
+/// The module declaration's two instructions take the two bytes above
+/// `DECLARE_CONST`, and the table still ends at the last instruction.
+///
+/// The byte values are part of the file format: a `.rbc` written by this build
+/// names them, and one written by a later build must still decode. A byte that
+/// is assigned and then given to something else is the one change that cannot be
+/// made, which is what the first assertion here rules out for the whole table.
+#[test]
+fn edge_the_module_instructions_take_bytes_no_earlier_version_used() {
+    assert_eq!(
+        Opcode::Module.to_byte(),
+        47,
+        "MODULE took the first byte above DECLARE_CONST, which was the end of the table"
+    );
+    assert_eq!(
+        Opcode::Export.to_byte(),
+        48,
+        "EXPORT took the byte after MODULE"
+    );
+    assert_eq!(
+        Opcode::ALL.len(),
+        Opcode::Export.to_byte() as usize + 1,
+        "the table is indexed by byte value, so it ends at the last instruction"
+    );
+    for opcode in Opcode::ALL {
+        assert_eq!(
+            opcode.to_byte() as usize,
+            Opcode::ALL
+                .iter()
+                .position(|other| other == opcode)
+                .expect("an opcode is in the table it was found in"),
+            "{opcode:?} must sit at the index its byte names"
+        );
+    }
+    assert!(
+        Opcode::Module.takes_block_index()
+            && !Opcode::Module.has_aux()
+            && !Opcode::Module.takes_constant_index(),
+        "MODULE names its body block and no constant: the module's name is that block's `name`, \
+         as a test's is its test block's"
+    );
+    assert!(
+        !Opcode::Export.takes_constant_index() && !Opcode::Export.has_aux(),
+        "EXPORT's `arg` may be the reserved `NO_CONST`, so the disassembler names it \
+         itself rather than looking it up; its second operand is the refusal marker"
+    );
+}
+
+/// A version-3 file is refused, because an `IMPORT` in one carries no alias.
+///
+/// Version 3 wrote a filler `0` in the second operand of every `IMPORT`, which
+/// this build reads as the alias it binds. Reading a version-3 file as version 4
+/// would bind an import to `constants[0]` — whatever name happened to be first
+/// in the pool — rather than to the name the source wrote.
+#[test]
+fn edge_a_version_3_file_is_refused_because_its_imports_name_no_alias() {
+    let mut bytes = compile_source("import json as J\nsay J.stringify(2)\n")
+        .expect("program should compile")
+        .encode();
+    bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+
+    let error = Chunk::decode(&bytes).expect_err("a version-3 file must not be accepted");
+    let message = error.message();
+    assert!(
+        message.contains("version 3") && message.contains(&FORMAT_VERSION.to_string()),
+        "the error should name both the file's version and this build's, got: {message}"
+    );
+}
+
+/// Every file this build writes says it is version 4, and a version-3 file's
+/// bytes are the same bytes with a different version word.
+#[test]
+fn a_module_declaration_is_readable_only_by_the_version_that_names_it() {
+    let source = "module M\n    to f\n        return 1\n    end\n    export f\nend\n";
+    let chunk = compile_source(source).expect("program should compile");
+    let bytes = chunk.encode();
+    assert_eq!(
+        u16::from_le_bytes([bytes[4], bytes[5]]),
+        4,
+        "an encoded file states the version this build writes"
+    );
+
+    let mut older = bytes.clone();
+    older[4..6].copy_from_slice(&3u16.to_le_bytes());
+    let error = Chunk::decode(&older).expect_err("a version-3 file must not be accepted");
+    assert!(
+        error.message().contains("version 3"),
+        "the refusal names the file's version, got: {}",
+        error.message()
     );
 }
 

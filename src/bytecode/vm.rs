@@ -50,6 +50,7 @@ use crate::value::{
     expect_range_number, finite_number, range_has_next, Captured, CapturedScope, Fields,
     FunctionBody, FunctionValue, Value,
 };
+use crate::vm::{qualified_member, DeclaredModule};
 use crate::vm::{
     resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps,
     resolve_max_steps_from, MAX_CALL_DEPTH, MAX_ITERATIONS, MAX_STEPS,
@@ -261,6 +262,19 @@ struct Frame {
     locals_base: usize,
     /// Whether this frame is running an `object` body.
     object_body: bool,
+    /// The `module ... end` declaration this frame is running the body of, or
+    /// `None` for every other frame.
+    ///
+    /// The frame is what carries the declaration's name, because a module body
+    /// is published when the frame finishes — and a frame that a failure
+    /// discards rather than finishes has to unregister the module rather than
+    /// leave it half-declared, which needs the name here too.
+    module_body: Option<String>,
+    /// The names the module declaration in `module_body` publishes, read out of
+    /// the body block's leading `EXPORT` run when the declaration began. Empty
+    /// for every other frame, and for a module that publishes nothing — which is
+    /// what a body with no `export` at all says.
+    module_exports: Vec<String>,
     /// Whether this frame is a user call, which is what the call-depth limit
     /// counts.
     is_call: bool,
@@ -451,6 +465,29 @@ pub struct BytecodeVm {
     /// [`crate::vm::Vm::load_module`], which answers the second import with a
     /// no-op.
     modules: HashSet<String>,
+    /// The name each imported module is called by, to the module it names.
+    ///
+    /// An `import X as Y` binds `Y`, and a call written `Y.member` has to reach
+    /// the same function `X.member` does — which is a function named
+    /// `X_member`, not `Y_member`. The tree-walking VM keeps the same table; see
+    /// [`crate::vm::Vm`]'s `module_aliases`.
+    module_aliases: HashMap<String, String>,
+    /// Every `module` declaration that has run, by module name.
+    ///
+    /// An entry is what a second declaration of the same name is refused
+    /// against, what `is_module_name` counts, and what an `import` of the name
+    /// finds in place of a file. The tree-walking VM keeps the same table; see
+    /// [`crate::vm::Vm`].
+    declared_modules: HashMap<String, DeclaredModule>,
+    /// How many `module` bodies are running. Above zero a `set` binds in the
+    /// module's own scope rather than becoming a global, which is what makes a
+    /// module declaration a boundary rather than a run of top-level statements.
+    module_depth: usize,
+    /// The chain of modules currently being loaded, outermost first.
+    ///
+    /// A module that reaches one already in the chain is a cycle. See
+    /// [`BytecodeVm::import`].
+    importing: Vec<String>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
     current_span: Span,
     /// The operand stack. Every block is entered with an empty one; the bases
@@ -490,6 +527,10 @@ impl BytecodeVm {
             output: Vec::new(),
             objects: HashMap::new(),
             modules: HashSet::new(),
+            module_aliases: HashMap::new(),
+            declared_modules: HashMap::new(),
+            module_depth: 0,
+            importing: Vec::new(),
             expectation_failure: None,
             current_span: Span::unknown(),
             stack: Vec::new(),
@@ -585,6 +626,8 @@ impl BytecodeVm {
             handler_base: self.handlers.len(),
             locals_base: self.locals.len(),
             object_body: false,
+            module_body: None,
+            module_exports: Vec::new(),
             is_call: false,
             globals_only: false,
             sites,
@@ -758,12 +801,24 @@ impl BytecodeVm {
     /// Binds `name` in the innermost live scope that already has it, and in a
     /// global when no local scope does. This resolves a name exactly as
     /// [`BytecodeVm::get_var`] does, so a read and a write of one name agree.
+    ///
+    /// Inside a `module` body a name no scope holds binds in the module's own
+    /// scope rather than becoming a global, which is the boundary the
+    /// declaration draws — the same rule the tree-walking VM writes. A name an
+    /// enclosing scope already holds is still that scope's, which the loop above
+    /// has already answered.
     fn set_var(&mut self, name: &str, value: Value) {
         for scope in self.locals.iter_mut().rev() {
             if scope.contains_key(name) {
                 scope.insert(name.to_string(), value);
                 return;
             }
+        }
+        if self.module_depth > 0 {
+            if let Some(scope) = self.locals.last_mut() {
+                scope.insert(name.to_string(), value);
+            }
+            return;
         }
         self.globals.insert(name.to_string(), value);
     }
@@ -888,6 +943,14 @@ impl BytecodeVm {
         let Some(frame) = self.frames.pop() else {
             return Ok(());
         };
+        if frame.module_body.is_some() {
+            // Published before the module's own scope is taken away, because a
+            // member is what the module's scope holds. See
+            // `BytecodeVm::finish_module`.
+            self.finish_module(&frame);
+            self.module_depth = self.module_depth.saturating_sub(1);
+            self.importing.pop();
+        }
         self.loops.truncate(frame.loop_base);
         self.handlers.truncate(frame.handler_base);
         self.locals.truncate(frame.locals_base);
@@ -1186,6 +1249,15 @@ impl BytecodeVm {
             }
             Opcode::Try => self.push_handler(instruction, frame),
             Opcode::Import => self.import(instruction, frame),
+            Opcode::Module => self.module(instruction, frame),
+            // The run of `EXPORT`s at the head of a module body is data the
+            // `MODULE` that entered the block read before it started, so running
+            // one does nothing. An `EXPORT` anywhere else is a file the compiler
+            // did not write, and does nothing for the same reason.
+            Opcode::Export => {
+                self.advance(frame);
+                Ok(())
+            }
             Opcode::Test => {
                 let (chunk, path) = self.child_path(frame, instruction.arg)?;
                 let mut new_frame = self.frame_for(&chunk, path);
@@ -1350,7 +1422,12 @@ impl BytecodeVm {
             .find(|site| site.iterator && site.top == ip)
             .copied()
         else {
-            self.refuse_constant_rebind(&name)?;
+            // A write that lands in a scope is not a write to a constant, which
+            // is why this is refused only above the module boundary: the
+            // tree-walking VM refuses it in `set_var` on the same path.
+            if self.module_depth == 0 {
+                self.refuse_constant_rebind(&name)?;
+            }
             let value = self.pop()?;
             self.bind(frame, &name, value);
             self.advance(frame);
@@ -1624,7 +1701,24 @@ impl BytecodeVm {
         };
 
         let Some(object) = self.objects.get(object_name).cloned() else {
-            return self.call_named(&format!("{object_name}_{method}"), &args, frame);
+            // A module function, which a builtin namespace member is too. An
+            // alias is resolved to the module it names first, so `import json
+            // as J` then `J.stringify(..)` reaches the same function
+            // `json.stringify(..)` does — the tree-walking VM resolves the same
+            // way; see [`crate::vm::Vm::call_method`].
+            let module = self
+                .module_aliases
+                .get(object_name)
+                .cloned()
+                .unwrap_or_else(|| object_name.to_string());
+            let qualified = qualified_member(&module, method);
+            if self.get_var(&qualified).is_none() && self.is_module_name(&module) {
+                return Err(Error::Runtime(
+                    format!("Module '{module}' has no function '{method}'"),
+                    self.span(),
+                ));
+            }
+            return self.call_named(&qualified, &args, frame);
         };
         let Some(Value::Function(function)) = object.methods.get(method).cloned() else {
             return Err(Error::Runtime(
@@ -1882,6 +1976,16 @@ impl BytecodeVm {
             let Some(frame) = self.frames.pop() else {
                 break;
             };
+            if let Some(name) = frame.module_body.as_deref() {
+                // A module body that failed publishes nothing, so the module is
+                // not declared either: leaving it registered would answer a later
+                // `module` of the same name with `is already declared` and a
+                // later `import` of it with a module that published nothing. The
+                // tree-walking VM removes it for the same reason.
+                self.declared_modules.remove(name);
+                self.module_depth = self.module_depth.saturating_sub(1);
+                self.importing.pop();
+            }
             self.loops.truncate(frame.loop_base);
             self.handlers.truncate(frame.handler_base);
             self.locals.truncate(frame.locals_base);
@@ -1960,78 +2064,346 @@ impl BytecodeVm {
 
     // -- imports ------------------------------------------------------------
 
-    /// `IMPORT`: loads a module's `set` and `constant` declarations into the
-    /// globals, then the `STORE` the file writes next binds the name.
+    /// `IMPORT`: loads a module's declarations into the globals, then the
+    /// `STORE` the file writes next binds the name.
     ///
     /// A module already loaded is not loaded again — see
-    /// [`BytecodeVm::modules`] — but the `STORE` still binds the name, so a
-    /// second `import` of the same module says the same thing to the program as
-    /// the first did.
+    /// [`BytecodeVm::modules`] — but the name is still bound, so a second
+    /// `import` of the same module says the same thing to the program as the first
+    /// did. A module the program *declared* has nothing to load: what it published
+    /// was bound when the declaration ran, and is copied here onto the alias's own
+    /// `alias_member` names.
     ///
     /// The declarations are compiled and run here rather than evaluated from the
     /// module's syntax tree, because this VM has no evaluator — but the selection
     /// is the tree-walking VM's, so the bindings that appear are the same ones.
     fn import(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let name = self.constant_text(instruction.arg)?;
-        let Some(path) = module_paths(&name)
+        let alias = self.constant_text(instruction.aux)?;
+
+        // A module reaching itself through the import chain is a cycle, and
+        // saying so is the difference between a clean error and a load that
+        // never ends. Scanned over the chain being loaded, which is as deep as
+        // the chain of module files.
+        if self.importing.iter().any(|loading| loading == &name) {
+            return Err(Error::Runtime(
+                format!("Circular import of module '{name}'"),
+                self.span(),
+            ));
+        }
+
+        // A builtin namespace has no file behind it, and refusing the import
+        // because of that was the whole difference between this VM and the
+        // tree-walking one for `import json`.
+        let path = module_paths(&name)
             .into_iter()
-            .find(|path| std::path::Path::new(path).exists())
-        else {
+            .find(|path| std::path::Path::new(path).exists());
+        if path.is_none() && !stdlib::is_module(&name) && !self.declared_modules.contains_key(&name)
+        {
             return Err(Error::Runtime(
                 format!("Cannot find module '{name}'"),
                 self.span(),
             ));
-        };
+        }
 
-        // Recorded before the module runs rather than after, so a module that
-        // reached this import again would find itself loaded instead of running
-        // a second time.
-        if self.modules.insert(name.clone()) {
-            let chunk = Arc::new(self.compile_module(&path)?);
-            let mut module_frame = self.frame_for(&chunk, Vec::new());
-            module_frame.globals_only = true;
-            module_frame.stack_base = self.stack.len();
-            module_frame.locals_base = self.locals.len();
-            self.frames.push(module_frame);
-            self.drive(self.frames.len() - 1)?;
+        if let Some(path) = path {
+            // Skipped when the module is already loaded: running it twice
+            // declares its names twice, and a `constant` cannot be declared at
+            // all a second time. The chain in `self.importing` is what refuses a
+            // module reaching *itself*, so the re-entrance the set used to
+            // prevent is already a cycle by the time it could happen.
+            if !self.modules.contains(&name) {
+                let (compiled, functions) = self.compile_module(&path)?;
+                let chunk = Arc::new(compiled);
+                // Read before the module runs, because the module's own `STORE`
+                // is what overwrites them.
+                let saved: Vec<(String, Option<Value>)> = functions
+                    .iter()
+                    .map(|member| (member.clone(), self.globals.get(member).cloned()))
+                    .collect();
+                self.importing.push(name.clone());
+                let mut module_frame = self.frame_for(&chunk, Vec::new());
+                module_frame.globals_only = true;
+                module_frame.stack_base = self.stack.len();
+                module_frame.locals_base = self.locals.len();
+                self.frames.push(module_frame);
+                let failure = self.drive(self.frames.len() - 1).err();
+                self.importing.pop();
+                if let Some(error) = failure {
+                    // The module failed, so it is not loaded: leaving it in the
+                    // set would answer a later import of the same name with a
+                    // module that was never successfully bound.
+                    self.modules.remove(&name);
+                    return Err(error);
+                }
+                self.publish_module_functions(&name, saved);
+                // Recorded only once the module has compiled *and* run, so a
+                // module that failed either way is not in the set: a name left
+                // there by a compile failure would answer a later import of the
+                // same name with a module that was never bound, binding the alias
+                // to nothing rather than reporting the failure again.
+                self.modules.insert(name.clone());
+            }
+        }
+
+        // A module this program declared has no file behind it, so what it
+        // published is copied here onto the `alias_member` names a call through
+        // the alias resolves to — the tree-walking VM's own copy.
+        if let Some(declared) = self.declared_modules.get(&name) {
+            let members = declared.members.clone();
+            for (member, _, value) in members {
+                self.globals
+                    .insert(qualified_member(&alias, &member), value);
+            }
+        }
+
+        // The alias is a name for the module, so a call written through it
+        // reaches the same function the unaliased name does. The module's own
+        // name names it too, which is what leaves `json.stringify` working after
+        // `import json as J`.
+        self.module_aliases.insert(alias.clone(), name.clone());
+        self.module_aliases
+            .entry(name.clone())
+            .or_insert_with(|| name.clone());
+
+        // The module's *own* name is a name of the program as well, so an
+        // unbound one is bound to `nothing` — which is what makes `say MathUtils`
+        // read a module rather than fail on an unknown variable. The tree-walking
+        // VM binds it under the same guard.
+        if self.get_var(&name).is_none() {
+            self.globals.insert(name.clone(), Value::Nothing);
         }
 
         self.advance(frame);
-        // `IMPORT` is followed by a `STORE` that consumes what the statement
-        // produced. An import produces `nothing` — which is what the tree-walking
-        // VM binds the module's name to — so that is what is pushed for the store
-        // to bind.
-        self.push(Value::Nothing);
+        // `IMPORT` is followed by a `STORE` that binds the name the import
+        // resolved, and an import does not take over a name the program already
+        // holds: a name the program bound is the program's. So a name that is
+        // already bound is left alone and the `STORE` is stepped over rather than
+        // run — writing it back would work for a `set`, but a `constant` refuses
+        // the write, so `constant M to 5` then `import MathUtils as M` would
+        // fault here and not on the tree-walking VM. An unbound name is pushed as
+        // `nothing`, which is what the `STORE` binds.
+        let follows = matches!(
+            self.instruction_at(frame, self.frames[frame].ip).ok().flatten(),
+            Some(next) if next.opcode == Opcode::Store
+        );
+        if self.get_var(&alias).is_none() {
+            self.push(Value::Nothing);
+        } else if follows {
+            self.advance(frame);
+        }
         Ok(())
     }
 
-    /// Compiles a module down to the `set` and `constant` statements its top
-    /// level declares.
+    /// Whether `name` names a module this program can call into: a module file it
+    /// imported, a module it declared, or a builtin namespace.
+    fn is_module_name(&self, name: &str) -> bool {
+        self.modules.contains(name)
+            || self.declared_modules.contains_key(name)
+            || stdlib::is_module(name)
+    }
+
+    /// `MODULE`: runs a `module NAME ... end` declaration's body block.
     ///
-    /// Both, because both are bindings the importing program reads: a module
-    /// that declares `constant PI` and one that declares `set PI` bind the same
-    /// name, and dropping the first leaves the name resolving to whatever else
-    /// was already bound — for `PI` that is the builtin's, so `import` followed
-    /// by `say PI` printed the builtin's value on this VM and the module's on the
-    /// tree-walking one.
-    fn compile_module(&self, path: &str) -> Result<Chunk> {
+    /// The body runs in a scope and a frame of its own, so a `set` inside a
+    /// module binds in the module's scope rather than becoming a global of the
+    /// program that declared it — the boundary `module ... end` exists to draw.
+    /// What the module publishes is bound back as `Name.member` when the body
+    /// finishes; see [`BytecodeVm::finish_module`].
+    ///
+    /// Everything refused here is refused before the body runs, which is where
+    /// the tree-walking VM refuses it: a second declaration of the same name, and
+    /// an `export` of a name the declaration does not define.
+    fn module(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
+        let (chunk, path) = self.child_path(frame, instruction.arg)?;
+        // The block's own name is the module's, as a test block's name is the
+        // test's — so a `MODULE` needs one operand, and a file that names a
+        // block which is not there is reported rather than read.
+        let name = self.block_of(&chunk, &path)?.name.clone();
+        if self.declared_modules.contains_key(&name) {
+            return Err(Error::Runtime(
+                format!("Module '{name}' is already declared"),
+                self.span(),
+            ));
+        }
+
+        let exports = self.module_exports(&chunk, &path, &name)?;
+
+        // Registered before the body runs, so an `import` of this module from
+        // inside its own body is a circular import rather than a second
+        // declaration or a miss.
+        self.declared_modules
+            .insert(name.clone(), DeclaredModule::default());
+        self.importing.push(name.clone());
+
+        self.locals.push(CapturedScope::new());
+        self.module_depth += 1;
+        let mut module_frame = self.frame_for(&chunk, path);
+        module_frame.stack_base = self.stack.len();
+        // The scope pushed above is the frame's, so leaving it is what taking the
+        // module's scope away is — the same arrangement a `catch` body's bound
+        // name uses.
+        module_frame.locals_base -= 1;
+        module_frame.module_body = Some(name);
+        module_frame.module_exports = exports;
+        self.frames.push(module_frame);
+        self.advance(frame);
+        Ok(())
+    }
+
+    /// The names the declaration whose body is `path` publishes, read from the
+    /// run of `EXPORT`s the body block opens with.
+    ///
+    /// An `EXPORT` naming a name the declaration does not define carries the
+    /// reserved `NO_CONST` in its second operand, and is refused here rather than
+    /// published: the tree-walking VM reports the same fault, with the same
+    /// wording, before the body runs.
+    fn module_exports(&self, chunk: &Chunk, path: &[u32], name: &str) -> Result<Vec<String>> {
+        let block = self.block_of(chunk, path)?;
+        let mut exports = Vec::new();
+        for instruction in &block.code {
+            if instruction.opcode != Opcode::Export {
+                break;
+            }
+            if instruction.aux == NO_CONST {
+                let published = self.constant_of(chunk, instruction.arg)?;
+                return Err(Error::Runtime(
+                    format!("Module '{name}' exports '{published}', which it does not define"),
+                    self.span(),
+                ));
+            }
+            exports.push(self.constant_of(chunk, instruction.arg)?);
+        }
+        Ok(exports)
+    }
+
+    /// The text constant at `index` of `chunk`, which a caller already holds the
+    /// chunk for.
+    fn constant_of(&self, chunk: &Chunk, index: u32) -> Result<String> {
+        match chunk.constants.get(index as usize) {
+            Some(Constant::Text(text)) => Ok(text.clone()),
+            Some(other) => Err(Error::Runtime(
+                format!("bytecode expects a name at constant {index}, found {other}"),
+                self.span(),
+            )),
+            None => Err(Error::Runtime(
+                format!(
+                    "bytecode names constant {index}, and the pool holds {}",
+                    chunk.constants.len()
+                ),
+                self.span(),
+            )),
+        }
+    }
+
+    /// Publishes what a finished module body bound.
+    ///
+    /// Read while the module's own scope is still live, so a member that is not
+    /// bound is not published — which is what stops a module offering a function
+    /// whose declaration failed. The tree-walking VM reads the same scope at the
+    /// same point; see [`crate::vm::Vm::declare_module`].
+    fn finish_module(&mut self, frame: &Frame) {
+        let Some(name) = frame.module_body.clone() else {
+            return;
+        };
+        let mut members = Vec::new();
+        for member in &frame.module_exports {
+            let Some(value) = self.declare_member(member) else {
+                continue;
+            };
+            let qualified = qualified_member(&name, member);
+            self.globals.insert(qualified.clone(), value.clone());
+            members.push((member.clone(), qualified, value));
+        }
+        self.declared_modules
+            .insert(name.clone(), DeclaredModule { members });
+        self.module_aliases
+            .entry(name.clone())
+            .or_insert_with(|| name.clone());
+    }
+
+    /// The value a name a module body declares is bound to, or `None` when it
+    /// declares nothing of that name — an `export` of a name the module does not
+    /// define is what notices the absence, not this.
+    fn declare_member(&mut self, name: &str) -> Option<Value> {
+        let index = self
+            .locals
+            .iter()
+            .rposition(|scope| scope.contains_key(name))?;
+        self.locals[index].get(name).cloned()
+    }
+
+    /// Moves a module file's functions onto the `module_function` names a call
+    /// through the module resolves to.
+    ///
+    /// A module declares `to circle_area`, and a `globals_only` frame binds that
+    /// under the bare name `circle_area` — a name the importing program would
+    /// then read as its own. The tree-walking VM publishes those under
+    /// `MathUtils_circle_area` from inside a scope of the module's own; here the
+    /// same move is made afterwards, and whatever the program held under the bare
+    /// name is put back, because an import does not take over a name the program
+    /// already holds.
+    ///
+    /// Only functions are moved. A module's `set` and `constant` are bound under
+    /// their own names on purpose: that is how an importing program reads a
+    /// module's `PI`.
+    ///
+    /// `saved` is each member's value in the importing program from before the
+    /// module ran, taken by the caller because this is the point where what the
+    /// module bound is still readable.
+    fn publish_module_functions(&mut self, name: &str, saved: Vec<(String, Option<Value>)>) {
+        for (member, previous) in saved {
+            let Some(value) = self.globals.remove(&member) else {
+                continue;
+            };
+            self.globals.insert(qualified_member(name, &member), value);
+            if let Some(previous) = previous {
+                self.globals.insert(member, previous);
+            }
+        }
+    }
+
+    /// Compiles a module down to the declarations its top level holds, and the
+    /// names of the functions among them.
+    ///
+    /// The `set` and `constant` statements are compiled because both are bindings
+    /// the importing program reads: a module that declares `constant PI` and one
+    /// that declares `set PI` bind the same name, and dropping the first leaves
+    /// the name resolving to whatever else was already bound — for `PI` that is
+    /// the builtin's, so `import` followed by `say PI` printed the builtin's
+    /// value on this VM and the module's on the tree-walking one.
+    ///
+    /// The `to` functions are compiled for the same reason: a call written
+    /// `MathUtils.circle_area(5)` resolves to `MathUtils_circle_area`, which
+    /// exists on the tree-walking VM and did not here.
+    fn compile_module(&self, path: &str) -> Result<(Chunk, Vec<String>)> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
         let tokens = Lexer::tokenize(&source)?;
         let ast = parser::parse(tokens)?;
+        let body = parser::module_body(&ast);
+        let functions: Vec<String> = body
+            .iter()
+            .filter_map(|stmt| match &stmt.statement {
+                Statement::Function { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
         let program = Program {
-            statements: parser::module_body(&ast)
+            statements: body
                 .iter()
                 .filter(|stmt| {
                     matches!(
                         stmt.statement,
-                        Statement::Set { .. } | Statement::Constant { .. }
+                        Statement::Set { .. }
+                            | Statement::Constant { .. }
+                            | Statement::Function { .. }
                     )
                 })
                 .cloned()
                 .collect(),
         };
-        crate::bytecode::compile_program(&program)
+        Ok((crate::bytecode::compile_program(&program)?, functions))
     }
 }
 

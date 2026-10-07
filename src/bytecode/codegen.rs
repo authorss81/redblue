@@ -430,19 +430,54 @@ impl Compiler {
             Statement::Import(items) => {
                 for item in items {
                     let module = self.text(&item.name);
-                    emit(code, Opcode::Import, module, 0, line);
+                    // The name the import binds is a second operand rather than
+                    // left to the `STORE` that follows: the importer has to know
+                    // *which* name it bound to resolve a call through the alias,
+                    // and the `STORE` is the importer's own binding, not the
+                    // import's. An import with no alias binds its module's own
+                    // name, so the operand is never reserved.
                     let bound = self.text(item.alias.as_ref().unwrap_or(&item.name));
+                    emit(code, Opcode::Import, module, bound, line);
                     emit(code, Opcode::Store, bound, 0, line);
                 }
             }
-            // A module declaration is compiled as its body run inline: the
-            // bytecode compiler has no module declaration opcode yet, so what
-            // is emitted here is the same run the tree-walker performs. See
-            // FINDINGS.md — `Opcode::Module` is the honest encoding and is
-            // not part of this change.
-            Statement::Module { body, .. } => {
-                self.statements(body, code, blocks, depth)?;
+            Statement::Module { name, body, .. } => {
+                // The declaration is a block of its own, run in a scope and a
+                // frame of its own — a `set` inside a module is the module's name,
+                // not a name of the program that declared it.
+                let mut module_body = Block {
+                    name: name.to_string(),
+                    kind: BlockKind::Module,
+                    arity: 0,
+                    params: Vec::new(),
+                    code: Vec::new(),
+                    blocks: Vec::new(),
+                };
+                // What the declaration publishes is emitted *in front of* the body,
+                // so a jump inside the body still points at the instruction it was
+                // compiled for: nothing is inserted after the body was compiled.
+                self.module_exports(body, &mut module_body.code, line);
+                if depth >= MAX_BLOCK_DEPTH {
+                    return Err(Error::Parser(
+                        format!("program nests blocks more than {MAX_BLOCK_DEPTH} levels deep"),
+                        stmt.span,
+                    ));
+                }
+                self.statements(
+                    body,
+                    &mut module_body.code,
+                    &mut module_body.blocks,
+                    depth + 1,
+                )?;
+                let index = blocks.len() as u32;
+                blocks.push(module_body);
+                emit(code, Opcode::Module, index, 0, line);
             }
+            // An `export` outside a module declaration publishes nothing: there is
+            // no module for it to publish into, and the tree-walking VM says so
+            // rather than recording it. Inside one, the names are compiled by
+            // `Compiler::module_exports` into the run of `EXPORT`s the module's
+            // body block opens with, which is where the `MODULE` reads them.
             Statement::Export { .. } => {}
             Statement::Test { name, body } => {
                 let block = self.nested(
@@ -575,6 +610,48 @@ impl Compiler {
         let index = self.constants.len() as u32;
         self.constants.push(constant);
         index
+    }
+
+    /// Emits the run of `EXPORT`s a `module NAME ... end` declaration opens
+    /// with: one per name it publishes.
+    ///
+    /// The names are decided here, from the same two rules the tree-walking VM
+    /// reads them with —
+    /// [`module_exports`](crate::parser::module_exports) for which `export`
+    /// counts and [`module_declared_names`](crate::parser::module_declared_names)
+    /// for what the module defines — so the file says what that VM would have
+    /// said for itself. `export all` is expanded to one `EXPORT` per declared
+    /// name rather than written as a flag: the names are in the file either way,
+    /// and this way a reader of the disassembly sees the list the declaration
+    /// publishes.
+    ///
+    /// An `export` naming a name the module does not define is written with the
+    /// reserved `NO_CONST` in its second operand, which is what a VM refuses
+    /// rather than publishes. The refusal is *not* made here: the tree-walking
+    /// VM reports it when the declaration runs, as a runtime error naming the
+    /// module, so refusing it here would answer a different question at a
+    /// different time.
+    fn module_exports(&mut self, body: &[Stmt], code: &mut Vec<Instruction>, line: u32) {
+        let Some((names, all)) = crate::parser::module_exports(body) else {
+            // No `export` at all: the module publishes nothing, which is not an
+            // error.
+            return;
+        };
+        let declared = crate::parser::module_declared_names(body);
+        // `export all` names nothing, so the list it publishes is the declared
+        // one — which is what the tree-walking VM publishes for it.
+        let names = if all { declared.clone() } else { names };
+        for name in names {
+            let known = declared.iter().any(|declared| declared == &name);
+            let index = self.text(&name);
+            emit(
+                code,
+                Opcode::Export,
+                index,
+                if all || known { 0 } else { NO_CONST },
+                line,
+            );
+        }
     }
 
     /// The name a `CALL_METHOD` carries: the dotted `receiver.method` when the

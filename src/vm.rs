@@ -218,33 +218,24 @@ pub struct Vm {
 /// which is what an `export` decides. They are held here rather than in
 /// [`Vm::modules`] because a declared module is one the program itself
 /// declared, not one read out of a file.
+///
+/// Shared with the bytecode VM, which records a declared module the same way —
+/// see [`crate::bytecode::vm::BytecodeVm::finish_module`].
 #[derive(Debug, Default, Clone)]
-struct DeclaredModule {
+pub(crate) struct DeclaredModule {
     /// The published members of a declared module: each name, the
     /// `module_member` name it is reached by, and its value.
-    members: Vec<(String, String, Value)>,
+    pub(crate) members: Vec<(String, String, Value)>,
 }
 
 /// The name a member of module `module` is reached by: `MathUtils.circle_area`
 /// is `MathUtils_circle_area`, which is the same `module_function` name the
 /// builtin namespaces use, so both kinds are called by the one lookup.
-fn qualified_member(module: &str, member: &str) -> String {
-    format!("{module}_{member}")
-}
-
-/// What a module body's last `export` says: the names it lists, and whether it
-/// says `all`. `None` is a body with no `export` at all.
 ///
-/// The *last* `export` is what counts, because that is the one written where
-/// the declaration closes — the position `docs/GRAMMAR.md` § 3.1 gives it.
-fn module_exports(body: &[Stmt]) -> Option<(Vec<String>, bool)> {
-    let mut found = None;
-    for stmt in body {
-        if let Statement::Export { names, all } = &stmt.statement {
-            found = Some((names.clone(), *all));
-        }
-    }
-    found
+/// Shared with the bytecode VM, which resolves a call the same way — see
+/// [`crate::bytecode::vm::BytecodeVm::call_method`].
+pub(crate) fn qualified_member(module: &str, member: &str) -> String {
+    format!("{module}_{member}")
 }
 
 /// One `object` declaration, after its parent has been merged into it.
@@ -541,7 +532,7 @@ impl Vm {
         // define is a fault in the declaration, and reporting it here leaves
         // the module unregistered rather than half-declared.
         let declared = crate::parser::module_declared_names(body);
-        let exported = match module_exports(body) {
+        let exported = match crate::parser::module_exports(body) {
             // No `export` at all: a module publishes nothing, which is not an
             // error — the declaration says what it offers and offers nothing.
             None => Vec::new(),

@@ -38,11 +38,11 @@ pub enum Opcode {
     /// the path where nothing failed.
     ///
     /// The marker rides on this byte rather than on one of its own because the
-    /// opcode table is frozen: byte 46 is [`Opcode::DeclareConst`] and is the
-    /// end of the table, so an `END_TRY` byte of its own would have had to
-    /// renumber an instruction whose byte is part of the file format. What
-    /// distinguishes the two meanings is the operand, not the byte — see
-    /// [`END_TRY_MARKER`].
+    /// opcode table was frozen when the marker was defined: byte 46,
+    /// [`Opcode::DeclareConst`], was the end of the table, so an `END_TRY` byte of
+    /// its own would have had to renumber an instruction whose byte is part of the
+    /// file format. What distinguishes the two meanings is the operand, not the
+    /// byte — see [`END_TRY_MARKER`].
     Nop = 0,
     /// Pushes `constants[arg]`.
     PushConst,
@@ -145,7 +145,12 @@ pub enum Opcode {
     /// and block `aux` the finally body, either being
     /// [`NO_BLOCK`](super::NO_BLOCK) when the source had none.
     Try,
-    /// Imports the module named `constants[arg]`.
+    /// Imports the module named `constants[arg]`, binding it the name
+    /// `constants[aux]`.
+    ///
+    /// The second operand is the alias the source wrote, or the module's own
+    /// name when it wrote none. It is not reserved: an import always binds a
+    /// name, so there is no encoding of "no alias" to keep clear of.
     Import,
     /// Runs the test body, block `arg`.
     Test,
@@ -159,6 +164,24 @@ pub enum Opcode {
     /// file has no way to say that — a `constant` compiled to a `STORE` there —
     /// which is what version 3 changed.
     DeclareConst,
+    /// Runs the `module NAME ... end` declaration whose body is block `arg`. The
+    /// module's name is that block's `name`, as a test's is its test block's and
+    /// a `catch`'s variable is its catch block's.
+    ///
+    /// The body runs in a scope and a frame of its own, so a `set` inside a
+    /// module is the module's name and not a name of the program that declared
+    /// it. A version-3 file compiled the body's statements inline and the
+    /// declaration to nothing at all, which is what version 4 changed.
+    Module,
+    /// Names what a module declaration publishes: `constants[arg]`, or
+    /// [`NO_CONST`](super::NO_CONST) for a name the declaration does not define,
+    /// which a VM refuses rather than publishes.
+    ///
+    /// A module body block begins with a run of these, one per name the
+    /// declaration publishes, and the rest of the block is the body itself. The
+    /// run is data the [`Opcode::Module`] that entered the block has already
+    /// read: executing one does nothing.
+    Export,
 }
 
 impl Opcode {
@@ -213,6 +236,8 @@ impl Opcode {
         Opcode::Test,
         Opcode::Expect,
         Opcode::DeclareConst,
+        Opcode::Module,
+        Opcode::Export,
     ];
 
     /// The opcode a byte stands for, or `None` when the byte is not assigned.
@@ -276,6 +301,8 @@ impl Opcode {
             Opcode::Test => "TEST",
             Opcode::Expect => "EXPECT",
             Opcode::DeclareConst => "DECLARE_CONST",
+            Opcode::Module => "MODULE",
+            Opcode::Export => "EXPORT",
         }
     }
 
@@ -321,7 +348,8 @@ impl Opcode {
     ///
     /// The opcodes that carry two: a call and a declaration name a target and
     /// count their arguments or parameters, `GetRange` counts the bounds and
-    /// step it was given, and `Try` names two blocks.
+    /// step it was given, `Try` names two blocks, and `Import` names the module
+    /// and the alias it binds it to.
     pub fn has_aux(self) -> bool {
         matches!(
             self,
@@ -332,6 +360,7 @@ impl Opcode {
                 | Opcode::DefMethod
                 | Opcode::DefObject
                 | Opcode::Try
+                | Opcode::Import
         )
     }
 
@@ -339,6 +368,8 @@ impl Opcode {
     ///
     /// The disassembler prints the named value next to the index, so a reader
     /// does not have to count down the pool to see which name a `LOAD` reads.
+    /// `Export` is excluded: its `arg` may be the reserved `NO_CONST`, which is
+    /// not a name to look up, and the disassembler names it on its own.
     pub fn takes_constant_index(self) -> bool {
         matches!(
             self,
@@ -370,6 +401,7 @@ impl Opcode {
                 | Opcode::DefObject
                 | Opcode::Try
                 | Opcode::Test
+                | Opcode::Module
         )
     }
 }

@@ -412,6 +412,54 @@ fn generated_corpus() -> Vec<(String, String)> {
         "set caught to no\ntry\n    say 1 / 0\ncatch error\n    set caught to yes\nend\nsay 2 + 2\nsay caught\n".to_string(),
     );
 
+    // -- module declarations ------------------------------------------------
+    //
+    // A `module ... end` declaration was compiled inline on the bytecode VM,
+    // which has no record of one, so every program below is a case the two VMs
+    // used to answer differently: the tree-walker gave the module its own scope
+    // and published what it exported, and this one ran the body as ordinary
+    // top-level statements.
+    add(
+        "module/declares-and-publishes-all",
+        "module Geometry\n    to area\n        return 3.14159 * 2 * 2\n    end\n    export all\nend\nsay Geometry.area()\n".to_string(),
+    );
+    add(
+        "module/publishes-one-named-member",
+        "module Math\n    to square\n        return n * n\n    end\n    to cube\n        return n * n * n\n    end\n    export square\nend\nsay Math.square(3)\n".to_string(),
+    );
+    add(
+        "module/publishes-nothing-when-nothing-is-exported",
+        "module Quiet\n    to f\n        return 1\n    end\nend\nsay \"ok\"\n".to_string(),
+    );
+    add(
+        "module/the-modules-own-scope-does-not-leak",
+        "module Inner\n    set hidden to 42\n    to f\n        return hidden\n    end\n    export all\nend\nsay Inner.f()\ntry\n    say hidden\ncatch error\n    say \"caught\"\nend\n".to_string(),
+    );
+    add(
+        "module/two-modules-and-a-call-across-them",
+        "module Outer\n    to twice\n        return n * 2\n    end\n    export twice\nend\nmodule Inner\n    to quad\n        return Outer.twice(Outer.twice(n))\n    end\n    export quad\nend\nsay Inner.quad(3)\n".to_string(),
+    );
+    add(
+        "module/an-import-of-a-declared-module-reaches-its-members",
+        "module Counter\n    to bump\n        return n + 1\n    end\n    export bump\nend\nimport Counter as C\nsay C.bump(41)\n".to_string(),
+    );
+    add(
+        "module/an-empty-module-is-accepted",
+        "module Empty\nend\nsay \"ok\"\n".to_string(),
+    );
+    add(
+        "module/an-export-of-a-name-it-does-not-define-is-a-caught-error",
+        "module Bad\n    to f\n        return 1\n    end\n    export nope\nend\ntry\n    say \"unreached\"\ncatch error\n    say \"caught\"\nend\n".to_string(),
+    );
+    add(
+        "module/a-module-declared-twice-is-a-caught-error",
+        "module Twice\n    to f\n        return 1\n    end\n    export f\nend\ntry\n    module Twice\n        to f\n            return 2\n        end\n        export f\n    end\ncatch error\n    say \"caught\"\nend\n".to_string(),
+    );
+    add(
+        "module/a-constant-is-not-refused-by-a-set-inside-the-module",
+        "constant OUTER to 1\nmodule Shadow\n    set OUTER to 2\n    to f\n        return OUTER\n    end\n    export f\nend\nsay Shadow.f()\nsay OUTER\n".to_string(),
+    );
+
     // -- the shapes the compiler and VM agree on, exercised singly --------
     add("shape/say-nothing", "say nothing\n".to_string());
     add(
@@ -2372,4 +2420,308 @@ fn edge_a_finally_runs_exactly_once_on_each_path() {
             "the finally ran the wrong number of times on the {name} path"
         );
     }
+}
+
+/// An `import X as Y` alias of a builtin namespace reaches the same function the
+/// unaliased name does.
+///
+/// A builtin namespace has no file behind it, so the module loader looked for
+/// one, did not find it, and refused the import: `rb run` printed the value and
+/// `rb vm` said `Cannot find module 'json'`. The alias was the second half of the
+/// same gap — `IMPORT` had nowhere to record which name the import bound.
+#[test]
+fn edge_import_alias_of_a_builtin_namespace_reaches_the_same_function() {
+    let source = "import json as J\nsay J.stringify(2)\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["2".to_string()],
+        "an aliased namespace must call through, not be refused for want of a file"
+    );
+}
+
+/// An alias and the module's own name are the same name for one module, so the
+/// unaliased spelling keeps working once an import aliases it.
+///
+/// Pinning both halves matters: resolving the alias alone would leave
+/// `json.stringify` broken, which is the spelling every existing module example
+/// uses.
+#[test]
+fn edge_an_import_alias_leaves_the_modules_own_name_working() {
+    let aliased = "import json as J\nsay json.stringify(2)\n".to_string();
+    assert_agrees(&aliased);
+    assert_eq!(
+        bytecode(&aliased).output,
+        vec!["2".to_string()],
+        "the module's own name must still name it after an aliased import"
+    );
+}
+
+/// An `import X as Y` alias of a module *file* reaches that module's functions.
+///
+/// The module loader compiled a module file down to its `set` and `constant`
+/// statements, so a module's `to` functions were never bound under the
+/// `module_member` name a call through the alias resolves to: the tree-walking
+/// VM printed the area and the bytecode VM said `Unknown function`.
+#[test]
+fn edge_import_alias_of_a_module_file_reaches_its_functions() {
+    let source = "import MathUtils as M\nsay M.circle_area(2)\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["12.56636".to_string()],
+        "a module file's functions must be callable through the import alias"
+    );
+}
+
+/// A member past the end of a module is refused the same way on both VMs.
+///
+/// The refusal is the tree-walking VM's `Module 'M' has no function 'nope'`; a
+/// bytecode VM that has no such check says `Unknown function 'M_nope'`, which is
+/// the same mistake spelled differently — and a program that imports a module
+/// whose contents change must not change from one error to another.
+#[test]
+fn edge_a_missing_module_member_is_refused_the_same_way_on_both_vms() {
+    let source = "import MathUtils as M\nsay M.not_a_function(1)\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).result,
+        Err("RuntimeError: Module 'MathUtils' has no function 'not_a_function'".to_string()),
+        "a member that does not exist must be named as one that does not exist"
+    );
+}
+
+/// A module that reaches itself through an import is a clean error, not a hang.
+///
+/// The loader recorded a module as loaded *before* running it, so a self-import
+/// found it loaded and did nothing: the cycle passed silently on the bytecode VM
+/// while the tree-walking one refused it. The refusal has to be catchable, so a
+/// caught error is the contract — the failure is reachable from the program
+/// rather than fatal.
+///
+/// Run as subprocesses rather than through [`assert_agrees`] because the loader
+/// looks for `<name>.rb` relative to the working directory, and the module that
+/// imports itself has to sit where the run can find it. Running both ways from
+/// that same directory is the comparison.
+#[test]
+fn edge_a_circular_import_is_a_caught_error_not_a_hang() {
+    let dir = scratch_dir("circular");
+    fs::write(
+        dir.join("CircleMod.rb"),
+        "import CircleMod\nconstant X to 1\n",
+    )
+    .expect("module file should be writable");
+    let program =
+        "try\n    import CircleMod\n    say \"body\"\ncatch error\n    say \"caught\"\nend\n";
+    fs::write(dir.join("main.rb"), program).expect("program should be writable");
+
+    let walked = rb_in(&dir, &["run", "main.rb"]);
+    assert_eq!(
+        String::from_utf8_lossy(&walked.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["caught"],
+        "a cycle must be caught by the program, not run past: {walked:?}"
+    );
+
+    let compiled = rb_in(&dir, &["compile", "main.rb"]);
+    assert!(
+        compiled.status.success(),
+        "the program with a circular import must compile: {compiled:?}"
+    );
+    let bytecoded = rb_in(&dir, &["vm", "main.rbc"]);
+    assert_eq!(
+        String::from_utf8_lossy(&bytecoded.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["caught"],
+        "the bytecode VM must refuse the cycle too, not pass it silently: {bytecoded:?}"
+    );
+}
+
+/// Runs `rb` with `dir` as its working directory — which for a module loader is
+/// where a module file has to be.
+fn rb_in(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_rb"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("rb should be runnable")
+}
+
+/// A `module ... end` declaration publishes what it exports, and a call through
+/// the module reaches it.
+///
+/// A module declaration compiled its body as ordinary top-level statements and
+/// the declaration itself to nothing, so this VM had no record of the module: a
+/// call through it said `Unknown function 'Geometry_area'` where the
+/// tree-walking one called the function. The same program also had to stop
+/// disagreeing for the *scope* — a `set` inside the module is the module's name
+/// and not a name of the program that declared it.
+#[test]
+fn a_module_declaration_publishes_what_it_exports_on_both_vms() {
+    let source = "module Geometry\n    to area(r)\n        return 3.14159 * r * r\n    end\n    set scale to 2\n    export all\nend\nsay Geometry.area(2)\nsay Geometry.scale\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["12.56636".to_string()],
+        "the module's function must be published under the module's name"
+    );
+}
+
+/// An `export` naming a function the module does not define is refused, by name,
+/// and before the body runs.
+///
+/// The refusal is the tree-walking VM's wording, because a program that names a
+/// member it does not have must not change from one error to another with the VM
+/// that runs it.
+#[test]
+fn edge_an_export_of_a_name_the_module_does_not_define_is_refused_the_same_way() {
+    let source = "module M\n    to f\n        return 1\n    end\n    export not_a_function\nend\nsay \"unreached\"\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).result,
+        Err(
+            "RuntimeError: Module 'M' exports 'not_a_function', which it does not define"
+                .to_string()
+        ),
+        "the refusal names the module and the member, and nothing runs first"
+    );
+}
+
+/// A module declared twice in one program is refused the second time.
+#[test]
+fn edge_a_module_declared_twice_is_refused_the_same_way_on_both_vms() {
+    let source = "module M\n    to f\n        return 1\n    end\n    export f\nend\nmodule M\n    to f\n        return 2\n    end\n    export f\nend\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).result,
+        Err("RuntimeError: Module 'M' is already declared".to_string()),
+        "a second declaration of the same name is a fault, not a redefinition"
+    );
+}
+
+/// The module's own name is a name of the program: an unbound one is bound to
+/// `nothing` by the import, so a read of it is a read rather than an unknown
+/// variable. The bytecode VM used to leave it unbound and said
+/// `Unknown variable 'M'`.
+#[test]
+fn edge_an_import_of_a_declared_module_binds_both_names() {
+    let source = "module Counter\n    to bump(n)\n        return n + 1\n    end\n    export bump\nend\nimport Counter as C\nsay C.bump(41)\nsay Counter\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["42".to_string(), "nothing".to_string()],
+        "the alias calls through and the module's own name reads as nothing"
+    );
+}
+
+/// A `set` inside a module body is the module's own binding and does not become
+/// a global of the program that declared it.
+#[test]
+fn edge_a_modules_own_scope_does_not_leak_into_the_program() {
+    let source = "module Inner\n    set hidden to 42\n    to f\n        return hidden\n    end\n    export all\nend\nsay Inner.f()\ntry\n    say hidden\ncatch error\n    say \"caught\"\nend\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["42".to_string(), "caught".to_string()],
+        "the module's `set` is the module's name: the function reads it and the program does not"
+    );
+}
+
+/// A `set` inside a module body writes the module's own scope even when the
+/// program has a *constant* of that name, so the write is not the constant's to
+/// refuse. The refusal is raised where the write would land on a global, which
+/// is the rule the tree-walking VM's `set_var` writes.
+#[test]
+fn edge_a_set_inside_a_module_does_not_rebind_a_constant_of_the_program() {
+    let source = "constant OUTER to 1\nmodule Shadow\n    set OUTER to 2\n    to f\n        return OUTER\n    end\n    export f\nend\nsay Shadow.f()\nsay OUTER\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["2".to_string(), "1".to_string()],
+        "the module's write is its own, and the program's constant is untouched"
+    );
+}
+
+/// A module with no `export` at all publishes nothing, and its body still runs.
+#[test]
+fn edge_a_module_with_nothing_exported_binds_nothing() {
+    let source = "module Quiet\n    to f\n        return 1\n    end\nend\ntry\n    say Quiet.f()\ncatch error\n    say \"caught\"\nend\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["caught".to_string()],
+        "a module that publishes nothing answers nothing"
+    );
+}
+
+/// A module that reaches itself through an `import` inside its own body is a
+/// circular import, refused rather than answered with an empty namespace.
+#[test]
+fn edge_a_module_that_imports_itself_is_a_caught_error() {
+    let source = "try\n    module Loop\n        import Loop\n        to f\n            return 1\n        end\n        export f\n    end\ncatch error\n    say \"caught\"\nend\n".to_string();
+    assert_agrees(&source);
+    assert_eq!(
+        bytecode(&source).output,
+        vec!["caught".to_string()],
+        "the declaration itself is the cycle, so it is refused before its body runs"
+    );
+}
+
+/// A version-3 `.rbc` is refused, so an `IMPORT` in it is never read as an alias
+/// it does not carry.
+///
+/// Version 3 wrote a filler `0` in the second operand of every `IMPORT`. Read as
+/// version 4, that `0` is `constants[0]` — whichever name happens to be first in
+/// the pool — so the import would bind the wrong name instead of the one the
+/// source wrote.
+#[test]
+fn edge_a_version_3_file_is_refused_before_its_imports_name_an_alias() {
+    let dir = scratch_dir("version-3");
+    let source = "import json as J\nsay J.stringify(2)\n";
+    fs::write(dir.join("main.rb"), source).expect("program should be writable");
+
+    let compiled = rb_in(&dir, &["compile", "main.rb"]);
+    assert!(
+        compiled.status.success(),
+        "the program should compile: {compiled:?}"
+    );
+    let mut bytes = fs::read(dir.join("main.rbc")).expect("the compiled file should be readable");
+    assert_eq!(
+        u16::from_le_bytes([bytes[4], bytes[5]]),
+        redblue::bytecode::FORMAT_VERSION,
+        "the file states the version this build writes"
+    );
+    // A version-3 file's `IMPORT` had no alias, so the second operand is the
+    // filler. Written here rather than carried in the repo, because the bytes of
+    // an older format are not something this build can produce.
+    bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+    fs::write(dir.join("old.rbc"), &bytes).expect("the rewritten file should be writable");
+
+    let rejected = rb_in(&dir, &["vm", "old.rbc"]);
+    assert!(
+        !rejected.status.success(),
+        "a version-3 file must be refused, not read with a guessed alias"
+    );
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        stderr.contains("version 3"),
+        "the refusal names the file's version, got: {stderr}"
+    );
+
+    // And the same program, compiled and run by this build, still works — the
+    // refusal is about the file's version, not about imports.
+    let run = rb_in(&dir, &["vm", "main.rbc"]);
+    assert!(
+        run.status.success(),
+        "the version this build writes must run: {run:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["2"],
+        "an aliased import still reaches the function"
+    );
 }

@@ -28,6 +28,19 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 /// Changing anything that an older file would decode differently must bump
 /// this.
 ///
+/// Version 4 changed three things a version-3 file reads differently, so a
+/// version-3 file is refused rather than half-understood:
+///
+/// - `IMPORT` carries the name it binds in its second operand, where version 3
+///   wrote a filler `0`. An older file has no alias to say, so the `0` would be
+///   read as `constants[0]` — the first name in the pool, whatever that
+///   happened to be.
+/// - `MODULE` names a `module NAME ... end` declaration's body block and the
+///   module it declares. A version-3 file compiled the body's statements inline,
+///   so a file written that way says nothing about where the module begins.
+/// - `EXPORT` says what a module declaration publishes. A version-3 file has no
+///   `MODULE` to read one for, so the two never meet; they are one change.
+///
 /// Version 3 changed three things a version-2 file reads differently, so a
 /// version-2 file is refused rather than half-understood:
 ///
@@ -50,7 +63,7 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 ///   flag that discarded the parent's name.
 /// - `DefField` consumes the value pushed immediately before it, so a field's
 ///   `default` is compiled instead of being dropped.
-pub const FORMAT_VERSION: u16 = 3;
+pub const FORMAT_VERSION: u16 = 4;
 
 /// The operand that says "there is no block here".
 ///
@@ -150,6 +163,9 @@ pub enum BlockKind {
     Test,
     CatchBody,
     FinallyBody,
+    /// The body of a `module ... end` declaration, whose leading run of
+    /// `EXPORT`s is what the declaration publishes.
+    Module,
 }
 
 impl BlockKind {
@@ -162,6 +178,7 @@ impl BlockKind {
             4 => Some(BlockKind::Test),
             5 => Some(BlockKind::CatchBody),
             6 => Some(BlockKind::FinallyBody),
+            7 => Some(BlockKind::Module),
             _ => None,
         }
     }
@@ -175,16 +192,17 @@ impl BlockKind {
             BlockKind::Test => "test",
             BlockKind::CatchBody => "catch body",
             BlockKind::FinallyBody => "finally body",
+            BlockKind::Module => "module body",
         }
     }
 }
 
 /// A stretch of instructions, and the blocks nested inside it.
 ///
-/// One block is one `to ... end`, one `object ... end`, one `test ... end` or
-/// one handler of a `try`, plus the program's own `main`. Instructions in a
-/// block may only jump to instructions of that same block, so a block is the
-/// unit a jump table is checked against.
+/// One block is one `to ... end`, one `object ... end`, one `test ... end`, one
+/// `module ... end` or one handler of a `try`, plus the program's own `main`.
+/// Instructions in a block may only jump to instructions of that same block, so
+/// a block is the unit a jump table is checked against.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     /// The declaration's name: the function, method, object or test name, and
