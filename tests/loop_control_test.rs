@@ -254,6 +254,86 @@ fn edge_a_refused_break_is_catchable_with_try_catch_error() {
     }
 }
 
+/// The `skip` companion of
+/// [`edge_a_refused_break_is_catchable_with_try_catch_error`]. The refusal is the
+/// same kind of `RuntimeError` and is catchable in the same way — a `skip` is
+/// not a failure only some VMs report, and it must not be a program-stopper
+/// where a `break` is not one. Both engines are compared, because `skip` reaches
+/// the loop lookup by a different path from `break`.
+#[test]
+fn edge_a_refused_skip_is_catchable_with_try_catch_error() {
+    let source = concat!(
+        "set caught to no\n",
+        "set survived to no\n",
+        "try\n",
+        "    skip\n",
+        "catch error\n",
+        "    set caught to yes\n",
+        "end\n",
+        "set survived to yes\n",
+        "say caught\n",
+        "say survived\n",
+    );
+    let expected = vec!["yes".to_string(), "yes".to_string()];
+
+    let printed = say_lines(source).expect("a caught refusal must not fail the program");
+
+    assert_eq!(
+        printed, expected,
+        "the refusal must be caught and the program must carry on"
+    );
+
+    let compiled =
+        bytecode_say_lines(&parse(source)).expect("the bytecode VM must catch a refused skip too");
+
+    assert_eq!(
+        compiled, expected,
+        "the two VMs must answer a refused skip the same way"
+    );
+}
+
+/// The `skip` companion of
+/// [`edge_a_break_in_a_function_body_is_refused_and_the_caller_survives`]: the
+/// placement where the refusal has a loop *near* it and must still be a refusal,
+/// because obeying it would end a turn the `skip` was not written in. Every turn
+/// is counted, so the caller's loop runs to its end on both engines.
+#[test]
+fn edge_a_refused_skip_inside_a_loop_leaves_the_loop_running() {
+    let source = concat!(
+        "to advance()\n",
+        "    skip\n",
+        "end\n",
+        "set n to 0\n",
+        "set caught to no\n",
+        "repeat 3 times\n",
+        "    set n to n + 1\n",
+        "    try\n",
+        "        advance()\n",
+        "    catch error\n",
+        "        set caught to yes\n",
+        "    end\n",
+        "end\n",
+        "say n\n",
+        "say caught\n",
+    );
+    let expected = vec!["3".to_string(), "yes".to_string()];
+
+    let printed = say_lines(source).expect("a refused skip must not end the caller's loop");
+
+    assert_eq!(
+        printed, expected,
+        "every turn must run and the refusal must be caught, not obeyed"
+    );
+
+    let compiled = bytecode_say_lines(&parse(source))
+        .expect("the bytecode VM must refuse the skip and run the loop out");
+
+    assert_eq!(
+        compiled, expected,
+        "the two VMs must answer a refused skip in a call the same way"
+    );
+}
+
 /// A function body is not lexically inside the loop that calls it, so a `break`
 /// there has no loop of its own. It is refused rather than reaching out and
 /// ending the caller's iteration — and the caller's loop survives the refusal.

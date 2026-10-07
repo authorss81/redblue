@@ -269,6 +269,7 @@ move with it.
 | `tests/bytecode_vm_test.rs` | round 5, +34 | a `static CORPUS_WALK` mutex held by the three tests that walk the corpus: `examples/files.rb` writes files by relative path, so two walks at once read each other's residue and reported a disagreement about the filesystem as one about the two VMs (FINDINGS §15) |
 | `tests/test_control_flow.rb` | round 5, +1 block | `edge: a catch leaves the function body it was written in alone`, which the bytecode corpus runs on both VMs |
 | `tests/test_loop_control.rb` | round 5, +2 blocks | the two `skip` shapes, so the differential runs them on both VMs |
+| `tests/loop_control_test.rs` | resumed round, +2 tests | the `skip` half of the definition of done's catchable refusal: `edge_a_refused_skip_is_catchable_with_try_catch_error` and `edge_a_refused_skip_inside_a_loop_leaves_the_loop_running`, each compared across both VMs |
 
 ### Why `src/bytecode/vm.rs` is in this phase
 
@@ -384,7 +385,8 @@ Round 2 adds three more, all from FINDINGS §6:
 
 ## Tests added
 
-`tests/loop_control_test.rs`, 59 tests. The "Fails without" column names what
+`tests/loop_control_test.rs`, 61 tests (59 after round 6, plus the two in the
+resumed round above). The "Fails without" column names what
 each round-1 test fails on when its fix is taken back out — every one of them was
 watched failing, and each of the four findings has at least one. The round-2,
 round-3, round-4, round-5 and round-6 tests are in their own tables below.
@@ -559,33 +561,79 @@ both-VMs differential, so every one of them ran on **both** engines.
 | `edge_a_break_on_the_first_turn_of_a_while_is_one_turn` (`tests/loop_control_test.rs`) | the `break` half of the same accounting on the tree-walking VM | — |
 | `tests/test_control_flow.rb` — 3 `test` blocks | `edge: a finally is owed when there is no catch to handle the failure`, `edge: a try with no catch hands the failure to the one around it` and `edge: a failing finally still leaves the outer try to catch the failure`, so the differential runs all three shapes on both VMs | the `if !has_catch` branch, and the `continue` |
 
+## Resumed round — re-verification, and the one gap the definition of done named
+
+This round was not a review round. The tree arrived with round 6's fixes already
+merged and all three runnable gates already green, so the work was to re-verify
+rather than re-derive: every count in the gates table below was re-run here, and
+every box in the phase's definition of done was checked against the tree rather
+than against the previous report.
+
+Re-running found **no regression and no open red**: the three runnable gates pass
+unchanged, `rb test` runs 332 blocks with 0 failures, all 6 `examples/*.rb` and
+both `modules/*.rb` exit 0, and the reproduction through the binary answers
+correctly. Five new loop-control shapes — a `skip` in a function called from a
+loop, a loop variable released after a `break`, a `skip` on the final turn of a
+`while` beside a `break`, a `break` and a `skip` in a nested `for each`, and a
+`break` out of a `try` that has only a `finally` — were written and compared on
+both engines, and all five agree.
+
+What the re-verification did find is one place where the phase's own definition
+of done asked for more than the Rust tests carried. The wording is "edge tests
+assert a FAILURE for `break` **and for `skip`** outside any loop — a clean caught
+RuntimeError naming the statement …; **both** must also be catchable with
+`try`/`catch error` inside a loop". The Rust side had the `skip` half of the
+*failure* (`skip_outside_a_loop_is_a_clean_runtime_error`, which asserts the
+message names `skip`) but not the catchable half, so `skip` reached the loop
+lookup through `Statement::Skip` with no Rust test on what happens when the
+lookup comes back empty. `break` had both halves. `tests/test_loop_control.rb`
+carried `loop_control_edge_a_refused_skip_inside_a_loop_leaves_the_loop_running`,
+so the behaviour was pinned on both engines through the differential — but the
+definition of done names the Rust tests, and a reviewer reading
+`tests/loop_control_test.rs` would find the gap. Two tests close it, and both
+compare the tree-walking VM with the bytecode VM, because a `skip` and a `break`
+reach that lookup by different paths and only the disagreement between the two
+engines would show it.
+
+| Test | Edge class covered | Fails without |
+|---|---|---|
+| `edge_a_refused_skip_is_catchable_with_try_catch_error` | **asserts a failure**: the `skip` companion of `edge_a_refused_break_is_catchable_with_try_catch_error` — a `skip` in no loop is caught by `try ... catch error`, the program carries on, and the bytecode VM answers the same. Both halves were checked against wrong expectations and watched fail | — (nothing in `src/` changed; this pins behaviour both engines already had) |
+| `edge_a_refused_skip_inside_a_loop_leaves_the_loop_running` | **asserts a failure**: the `skip` companion of `edge_a_break_in_a_function_body_is_refused_and_the_caller_survives` — a `skip` in a called function has no loop of its own even when a loop is one frame away, so it is refused and caught on all 3 turns rather than obeyed. Both halves were checked against wrong expectations and watched fail | the same |
+
+`tests/loop_control_test.rs` is 61 tests, up from 59. `cargo test --all-targets`
+is 819, up from 817. `rb test` is unchanged at 332 because both additions are
+Rust; the Redblue half of this shape already existed.
+
+Nothing under `src/` changed this round, because nothing under `src/` was wrong.
+`must_touch: ["src/"]` is satisfied by the merged work this round inherited
+(`src/vm.rs` and `src/bytecode/vm.rs`, both in the "What changed" table above),
+and the phase diff as a whole touches both.
+
 ## Gates
 
-Re-run after round 6's fixes, on the tree as it now stands.
+Re-run after round 6's fixes and this round's two tests, on the tree as it now
+stands.
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
-| `cargo test --all-targets` | **817 passed, 0 failed, 0 ignored** (31 binaries) |
+| `cargo test --all-targets` | **819 passed, 0 failed, 0 ignored** (31 binaries) |
 | `./rbops/verify.sh phase-025` | **not run — `rbops/` is not in this checkout** |
 
-Round 6's eight tests are the difference between 809 and 817 — six in
-`tests/bytecode_vm_test.rs` and two in `tests/loop_control_test.rs` — and its three
-`test` blocks are the difference between 329 and 332. The other four artifacts are
-corpus programs inside the existing both-VMs test, which counts programs rather
-than tests (407 → 411).
+This round's two tests are the difference between 817 and 819, both in
+`tests/loop_control_test.rs` (59 → 61). `rb test` is unchanged at 332.
 
-`rbops/` is still absent from the working directory, so the fourth gate exits
+`rbops/` is absent from the working directory, so the fourth gate exits
 `No such file or directory` and the manual substitute below stands.
 
 | Check | Result |
 |---|---|
 | `rb test` (every `.rb` under `tests/`) | 332 run, 332 passed, 0 failed |
 | `./target/debug/rb run examples/*.rb` | 6/6 exit 0 |
-| `./target/debug/rb run modules/*.rb` | 2/2 exit 0 |
+| `./target/debug/rb run modules/*.rb` | 2/2 exit 0 (`MathUtils.rb` passes as well) |
 | `tests/loop_bounds_test.rs` | 22 passed, 0 failed |
-| `tests/loop_control_test.rs` | 59 passed, 0 failed |
+| `tests/loop_control_test.rs` | 61 passed, 0 failed |
 | `tests/object_model_test.rs` | 39 passed, 0 failed |
 | `tests/differential_test.rs` | 81 passed, 0 failed |
 | `tests/bytecode_vm_test.rs` (the both-VMs differential) | 58 passed, 0 failed, over a corpus of 411 programs |
@@ -787,14 +835,22 @@ this phase is unverified on that axis.
   key handling is `tests/record_order_test.rs`, untouched by this change.
 - **malformed_input** — covered by the structural form: there is no operand that
   can be malformed, and the one invalid *placement* — a `break` in a block that
-  is not a loop — is asserted in four shapes:
-  `break_outside_a_loop_is_a_clean_runtime_error`,
+  is not a loop — is asserted in four shapes for `break` and, since the resumed
+  round, in four for `skip` as well:
+  `break_outside_a_loop_is_a_clean_runtime_error` and
+  `skip_outside_a_loop_is_a_clean_runtime_error` (the message names the
+  statement), `edge_a_refused_break_is_catchable_with_try_catch_error` and
+  `edge_a_refused_skip_is_catchable_with_try_catch_error` (the refusal is
+  catchable and the program carries on, on both engines),
   `edge_break_in_an_object_body_is_refused` (an `object` body runs once, at
   declaration, and is not a loop),
-  `edge_a_break_in_a_function_body_is_refused_and_the_caller_survives` and, from
+  `edge_a_break_in_a_function_body_is_refused_and_the_caller_survives` and
+  `edge_a_refused_skip_inside_a_loop_leaves_the_loop_running` (a called body has
+  no loop of its own even when one frame away, so both statements are refused and
+  the caller's loop runs out, on both engines), and, from
   round 2, `edge_a_break_in_a_block_in_a_function_body_is_still_refused` (a block
   of the function's own, which is the case the frame model made ambiguous). All
-  four are `Error::Runtime`, never a panic and never a silent no-op. Round 3 adds
+  are `Error::Runtime`, never a panic and never a silent no-op. Round 3 adds
   the operand question the corrected grammar settles:
   `edge_neither_break_nor_skip_takes_an_operand` asserts that `skip 1` and
   `break 1` are a jump followed by a separate statement, and
