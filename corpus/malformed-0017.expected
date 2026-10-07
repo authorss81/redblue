@@ -1,0 +1,4 @@
+#label ParserError
+#position 1:10
+#value nothing
+#message Expected variable name

@@ -1,0 +1,5 @@
+#label RuntimeError
+#position 3:1
+#value nothing
+#message Cannot access property on non-object
+before

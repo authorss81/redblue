@@ -1,0 +1,4 @@
+#label ParserError
+#position 2:8
+#value nothing
+#message Expected field name after 'has'

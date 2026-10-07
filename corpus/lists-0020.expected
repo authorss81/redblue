@@ -1,0 +1,4 @@
+#label RuntimeError
+#position 2:1
+#value nothing
+#message Index 0 is out of bounds: length is 0, the list is empty, so it has no valid index

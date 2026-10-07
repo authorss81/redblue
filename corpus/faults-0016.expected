@@ -1,0 +1,7 @@
+#label RuntimeError
+#position 4:1
+#value nothing
+#message Cannot add non-numbers
+a
+b
+c

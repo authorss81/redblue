@@ -1,0 +1,4 @@
+#label ParserError
+#position 1:13
+#value nothing
+#message Expected RightBracket but got Newline

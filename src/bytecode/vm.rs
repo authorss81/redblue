@@ -262,6 +262,11 @@ struct Frame {
     locals_base: usize,
     /// Whether this frame is running an `object` body.
     object_body: bool,
+    /// How many `object` declarations were being assembled when this frame
+    /// started. A frame that opened a declaration holds one more than its
+    /// caller did, and a frame that is *discarded* by a `catch` gives its
+    /// declarations back — see [`BytecodeVm::pending_objects`].
+    pending_base: usize,
     /// The `module ... end` declaration this frame is running the body of, or
     /// `None` for every other frame.
     ///
@@ -499,9 +504,15 @@ pub struct BytecodeVm {
     loops: Vec<Loop>,
     /// The `try` handlers currently installed, innermost last.
     handlers: Vec<Handler>,
-    /// The `object` declaration the top frame is assembling, if it is an object
-    /// body.
-    pending_object: Option<ObjectPending>,
+    /// The `object` declarations being assembled, outermost first.
+    ///
+    /// A **stack**, not a slot: a `has` field's `default` is compiled as an
+    /// ordinary expression, so it may call a function that declares an object of
+    /// its own, and that declaration is still open when the enclosing one
+    /// declares its next field. One slot let the inner declaration overwrite the
+    /// outer one, so the outer body's `DefField` wrote into the inner type and
+    /// the outer body then finished a declaration that was gone.
+    pending_objects: Vec<ObjectPending>,
     /// What the last frame to finish produced.
     outcome: Value,
     call_depth: usize,
@@ -509,6 +520,16 @@ pub struct BytecodeVm {
     steps: usize,
     max_steps: usize,
     max_iterations: usize,
+    /// Whether [`BytecodeVm::run`] prints what the program said.
+    ///
+    /// On by default, because `rb vm` is the only way most callers run a `.rbc`
+    /// and a program that printed nothing is indistinguishable from one that was
+    /// never run. A caller that runs a program as a *library* — a differential
+    /// harness comparing two engines — turns it off, because the lines it wants
+    /// are the ones [`BytecodeVm::take_output`] hands back and a test run that
+    /// interleaved a program's own output with the failure report is a test run
+    /// nobody can read.
+    echo: bool,
 }
 
 impl Default for BytecodeVm {
@@ -537,13 +558,14 @@ impl BytecodeVm {
             frames: Vec::new(),
             loops: Vec::new(),
             handlers: Vec::new(),
-            pending_object: None,
+            pending_objects: Vec::new(),
             outcome: Value::Nothing,
             call_depth: 0,
             max_call_depth: resolve_max_call_depth(),
             steps: 0,
             max_steps: resolve_max_steps(),
             max_iterations: resolve_max_iterations(),
+            echo: true,
         }
     }
 
@@ -572,6 +594,11 @@ impl BytecodeVm {
         vm
     }
 
+    /// Whether [`BytecodeVm::run`] prints what the program said. On by default.
+    pub fn set_echo(&mut self, echo: bool) {
+        self.echo = echo;
+    }
+
     /// Takes the structured failure from the most recent failed `expect`, so a
     /// caller can report expected and actual values rather than only a message.
     pub fn take_expectation_failure(
@@ -593,11 +620,15 @@ impl BytecodeVm {
         self.stack.clear();
         self.locals.truncate(1);
         self.outcome = Value::Nothing;
+        // Nothing is being assembled by a run that has not started yet: a VM run
+        // again after a failure carries no half-declared `object` into the next
+        // program.
+        self.pending_objects.clear();
 
         let chunk = Arc::new(chunk.clone());
         self.frames.push(self.frame_for(&chunk, Vec::new()));
         let result = self.drive(0);
-        if result.is_ok() {
+        if result.is_ok() && self.echo {
             for line in &self.output {
                 println!("{}", line);
             }
@@ -626,6 +657,7 @@ impl BytecodeVm {
             handler_base: self.handlers.len(),
             locals_base: self.locals.len(),
             object_body: false,
+            pending_base: self.pending_objects.len(),
             module_body: None,
             module_exports: Vec::new(),
             is_call: false,
@@ -961,7 +993,15 @@ impl BytecodeVm {
             // An `object` body does not return a value: it registers the type and
             // leaves the record the type resolved to, which the `STORE` the file
             // writes next binds to the type's name.
-            let fields = self.finish_object()?;
+            let name = self
+                .block_of(&frame.chunk, &frame.path)
+                .map(|block| block.name.clone())
+                .unwrap_or_default();
+            let fields = self.finish_object(&name)?;
+            // Whatever the declaration did or did not take with it, a body that
+            // has finished leaves the stack of declarations where its caller
+            // found it.
+            self.pending_objects.truncate(frame.pending_base);
             if !self.frames.is_empty() {
                 self.stack.push(Value::Record(fields));
             }
@@ -973,6 +1013,14 @@ impl BytecodeVm {
         }
         self.stack.truncate(frame.stack_base);
         if !frame.is_call {
+            // The outermost frame *is* the program, and a program's value is the
+            // value of its last statement: `1 + 2` is worth 3. Every other
+            // non-call frame is a block entered as a statement — a `test` body, a
+            // `try` handler, an `object` body, a module — and those consume what
+            // they produced, which is what `is_call` says.
+            if self.frames.is_empty() {
+                self.outcome = value;
+            }
             return Ok(());
         }
         if self.frames.is_empty() {
@@ -995,11 +1043,20 @@ impl BytecodeVm {
     /// The chain is walked once, here, with every name it visits collected, so
     /// `object A extends A` and a two-object cycle are reported instead of being
     /// walked again. A parent that is not declared is the same failure.
-    fn finish_object(&mut self) -> Result<Fields> {
-        let pending = self
-            .pending_object
-            .take()
-            .expect("an object declaration being assembled");
+    ///
+    /// The declaration being finished is the innermost one, and it is **taken**
+    /// off [`Self::pending_objects`]. A body that finishes with nothing of its
+    /// own left on the stack is a program this VM cannot make sense of — the
+    /// declaration it opened is gone — and that is a failure naming the object,
+    /// not a panic: a `panic!` here is reachable from Redblue source, and a
+    /// reachable panic is a crash rather than a diagnostic.
+    fn finish_object(&mut self, name: &str) -> Result<Fields> {
+        let Some(pending) = self.pending_objects.pop() else {
+            return Err(Error::Runtime(
+                format!("Object '{name}' lost its declaration before its body finished"),
+                self.span(),
+            ));
+        };
         let pending_parent = pending.parent.clone();
         let mut fields = pending.fields;
         let mut methods = pending.methods;
@@ -1031,7 +1088,12 @@ impl BytecodeVm {
             chain.push((current, object));
         }
 
-        for (_, object) in chain.iter().rev() {
+        // `chain` is nearest parent first, and the first declaration of a name in
+        // that walk wins: the child's own entries stay ahead of every inherited
+        // one. Walking it backwards gave the *most distant* ancestor the name,
+        // which is the opposite of what this function's own documentation says
+        // and of what `declare_object` does.
+        for (_, object) in chain.iter() {
             for (field, value) in &object.fields {
                 fields.entry(field.clone()).or_insert_with(|| value.clone());
             }
@@ -1237,7 +1299,7 @@ impl BytecodeVm {
             Opcode::DefField => {
                 let value = self.pop()?;
                 let name = self.constant_text(instruction.arg)?;
-                let Some(pending) = self.pending_object.as_mut() else {
+                let Some(pending) = self.pending_objects.last_mut() else {
                     return Err(Error::Runtime(
                         format!("'has {name}' is only valid inside an object declaration"),
                         self.span(),
@@ -1599,6 +1661,11 @@ impl BytecodeVm {
             fields.insert(field.to_string(), value);
             self.bind(frame, object, Value::Record(fields));
         }
+        // The receiver the `LOAD` before it pushed is consumed too:
+        // `docs/BYTECODE.md:182` specifies `SET_PROPERTY` as popping "a value and
+        // an object". Leaving the receiver behind leaked one operand-stack slot
+        // per field write, for the life of the program.
+        self.pop()?;
         self.advance(frame);
         Ok(())
     }
@@ -1828,7 +1895,7 @@ impl BytecodeVm {
         let block = self.block_of(&chunk, &path)?.clone();
         let method = self.make_function(&chunk, &path, &block);
         let name = block.name.clone();
-        if let Some(pending) = self.pending_object.as_mut() {
+        if let Some(pending) = self.pending_objects.last_mut() {
             pending.methods.insert(name, method);
         } else {
             self.set_var(&name, method);
@@ -1855,8 +1922,9 @@ impl BytecodeVm {
         let (chunk, path) = self.child_path(frame, instruction.arg)?;
         let mut new_frame = self.frame_for(&chunk, path);
         new_frame.object_body = true;
+        new_frame.pending_base = self.pending_objects.len();
         new_frame.stack_base = self.stack.len();
-        self.pending_object = Some(ObjectPending {
+        self.pending_objects.push(ObjectPending {
             name,
             parent,
             fields: Fields::new(),
@@ -1989,6 +2057,11 @@ impl BytecodeVm {
             self.loops.truncate(frame.loop_base);
             self.handlers.truncate(frame.handler_base);
             self.locals.truncate(frame.locals_base);
+            // An `object` body a `catch` discards never registers its type, so
+            // its declaration goes with it. Leaving it on the stack would let the
+            // next declaration's `DefField` write its fields into a type that is
+            // not being declared any more.
+            self.pending_objects.truncate(frame.pending_base);
             if frame.is_call {
                 self.call_depth = self.call_depth.saturating_sub(1);
             }

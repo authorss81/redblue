@@ -1,0 +1,4 @@
+#label ParserError
+#position 1:1
+#value nothing
+#message Unexpected token Catch

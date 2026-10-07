@@ -1,0 +1,4 @@
+#label RuntimeError
+#position 1:1
+#value nothing
+#message Division by zero

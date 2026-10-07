@@ -1,0 +1,4 @@
+#label AnalyzerError
+#position 1:1
+#value nothing
+#message Unknown parent object 'Nothing'\nUnknown variable 'at'\nUnknown variable 'all'

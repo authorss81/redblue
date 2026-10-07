@@ -1,0 +1,4 @@
+#label ParserError
+#position 8:1
+#value nothing
+#message Expected End but got Eof

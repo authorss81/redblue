@@ -99,7 +99,11 @@ impl Compiler {
 
         let mut code = Vec::new();
         let mut blocks = Vec::new();
-        self.statements(decl.body, &mut code, &mut blocks, depth)?;
+        let reads_value = matches!(
+            decl.kind,
+            BlockKind::Main | BlockKind::Function | BlockKind::Method
+        );
+        self.statements(decl.body, &mut code, &mut blocks, depth, reads_value)?;
 
         Ok(Block {
             name: decl.name.to_string(),
@@ -125,24 +129,31 @@ impl Compiler {
 
     /// Compiles `body` into `code`.
     ///
-    /// `is_last` says whether `body` is the whole of the block it goes in. It is
-    /// only read by a bare expression statement, and it is what makes a block's
-    /// value the one its last statement produced — which is what a call returns.
+    /// `reads_value` says whether the block this body goes into has its value
+    /// read by anybody. A call's is — it is what the call returns — and so is
+    /// the program's own. An `if` branch, a loop body, a `catch` body, an
+    /// `object` body and a `module` body are statements, and a statement
+    /// consumes whatever it produced, so those compile with `reads_value` false.
+    ///
+    /// Before this was threaded, a branch's last statement left a value behind
+    /// for its enclosing block, which then left it behind in turn. Nothing
+    /// noticed, because the frame that finally discarded the stack also
+    /// discarded the answer to what a program was worth.
     fn statements(
         &mut self,
         body: &[Stmt],
         code: &mut Vec<Instruction>,
         blocks: &mut Vec<Block>,
         depth: usize,
+        reads_value: bool,
     ) -> Result<()> {
-        let last = body.len().saturating_sub(1);
-        for (index, stmt) in body.iter().enumerate() {
-            self.statement(stmt, code, blocks, depth, index == last)?;
+        for stmt in body {
+            self.statement(stmt, code, blocks, depth, reads_value)?;
         }
         Ok(())
     }
 
-    /// `last` says `stmt` is the final statement of its block; see
+    /// `reads_value` says whether the block `stmt` is in has its value read; see
     /// [`Compiler::statements`].
     fn statement(
         &mut self,
@@ -150,7 +161,7 @@ impl Compiler {
         code: &mut Vec<Instruction>,
         blocks: &mut Vec<Block>,
         depth: usize,
-        last: bool,
+        reads_value: bool,
     ) -> Result<()> {
         let line = stmt.span.line as u32;
 
@@ -165,10 +176,9 @@ impl Compiler {
             }
             Statement::Expr(expr) => {
                 self.expr(expr, code, line)?;
-                // The value of a block is the value of its last statement, so a
-                // trailing expression leaves what it produced for the block's
-                // caller. Anywhere else the value is discarded, and `POP` is how
-                // the file says so.
+                // A block whose value nobody reads is a statement, and a
+                // statement consumes what it produced; `POP` is how the file
+                // says so.
                 //
                 // An `expect` is the one expression that pushes nothing — it pops
                 // both of its operands to compare them, and the tree-walking VM
@@ -176,7 +186,7 @@ impl Compiler {
                 // one would therefore underflow rather than discard, and the
                 // operand stack is already where a discarded value would leave
                 // it.
-                if !last && !matches!(expr, Expr::Expect { .. }) {
+                if !reads_value && !matches!(expr, Expr::Expect { .. }) {
                     emit(code, Opcode::Pop, 0, 0, line);
                 }
             }
@@ -215,14 +225,14 @@ impl Compiler {
                 // The `end` of an `if` with no `else` is where a false
                 // condition lands, so there is one jump either way.
                 let to_else = jump(code, Opcode::JumpIfFalse, line);
-                self.statements(then_branch, code, blocks, depth)?;
+                self.statements(then_branch, code, blocks, depth, false)?;
                 if else_branch.is_empty() {
                     patch_here(code, to_else);
                 } else {
                     let to_end = jump(code, Opcode::Jump, line);
                     let else_start = code.len() as u32;
                     patch(code, to_else, else_start);
-                    self.statements(else_branch, code, blocks, depth)?;
+                    self.statements(else_branch, code, blocks, depth, false)?;
                     patch_here(code, to_end);
                 }
             }
@@ -233,7 +243,7 @@ impl Compiler {
                 // `end` of a one-branch block is that jump's landing pad.
                 emit(code, Opcode::Not, 0, 0, line);
                 let to_end = jump(code, Opcode::JumpIfFalse, line);
-                self.statements(body, code, blocks, depth)?;
+                self.statements(body, code, blocks, depth, false)?;
                 patch_here(code, to_end);
             }
             Statement::ForEach {
@@ -246,7 +256,7 @@ impl Compiler {
                 let top = code.len() as u32;
                 let variable = self.text(variable);
                 emit(code, Opcode::Store, variable, 0, line);
-                self.statements(body, code, blocks, depth)?;
+                self.statements(body, code, blocks, depth, false)?;
                 emit(code, Opcode::Jump, top, 0, line);
             }
             Statement::ForRange {
@@ -269,7 +279,7 @@ impl Compiler {
                 let top = code.len() as u32;
                 let variable = self.text(variable);
                 emit(code, Opcode::Store, variable, 0, line);
-                self.statements(body, code, blocks, depth)?;
+                self.statements(body, code, blocks, depth, false)?;
                 emit(code, Opcode::Jump, top, 0, line);
             }
             Statement::Repeat { count, body } => {
@@ -278,14 +288,14 @@ impl Compiler {
                 let top = code.len() as u32;
                 let counter = self.text(REPEAT_COUNTER);
                 emit(code, Opcode::Store, counter, 0, line);
-                self.statements(body, code, blocks, depth)?;
+                self.statements(body, code, blocks, depth, false)?;
                 emit(code, Opcode::Jump, top, 0, line);
             }
             Statement::While { condition, body } => {
                 let top = code.len() as u32;
                 self.expr(condition, code, line)?;
                 let to_end = jump(code, Opcode::JumpIfFalse, line);
-                self.statements(body, code, blocks, depth)?;
+                self.statements(body, code, blocks, depth, false)?;
                 emit(code, Opcode::Jump, top, 0, line);
                 patch_here(code, to_end);
             }
@@ -354,13 +364,35 @@ impl Compiler {
                 extends,
                 body,
             } => {
+                // An object body compiles as two halves, and the split is the
+                // tree-walking VM's: `has` and `to can` go into the block that
+                // assembles the type, and everything else compiles into the
+                // *enclosing* block, after the `STORE` that binds the name.
+                //
+                // Running the rest inside the declaration's own block is what
+                // the file used to do, and it is why `object Inner` written
+                // inside `Outer`'s body reached for a declaration that was
+                // gone: the bytecode VM keeps one pending object, so the inner
+                // `DEF_OBJECT` overwrote the outer one's. With the split, the
+                // inner declaration runs after the enclosing type is registered
+                // and bound, which is the order `declare_object` uses — so
+                // `object Child extends Base` written inside `Base`'s body
+                // works, and a body whose only statements are `has` and
+                // `to can` compiles to the same bytes as before.
+                let (declarations, rest): (Vec<Stmt>, Vec<Stmt>) =
+                    body.iter().cloned().partition(|stmt| {
+                        matches!(
+                            stmt.statement,
+                            Statement::Has { .. } | Statement::Method { .. }
+                        )
+                    });
                 let block = self.nested(
                     Decl {
                         kind: BlockKind::Object,
                         name,
                         arity: 0,
                         params: &[],
-                        body,
+                        body: &declarations,
                         span: stmt.span,
                     },
                     depth,
@@ -376,6 +408,7 @@ impl Compiler {
                 emit(code, Opcode::DefObject, block, parent, line);
                 let name = self.text(name);
                 emit(code, Opcode::Store, name, 0, line);
+                self.statements(&rest, code, blocks, depth, false)?;
             }
             Statement::Try {
                 body,
@@ -419,7 +452,7 @@ impl Compiler {
                     )?
                 };
                 emit(code, Opcode::Try, catch, finally, line);
-                self.statements(body, code, blocks, depth)?;
+                self.statements(body, code, blocks, depth, false)?;
                 // The marked `NOP` closes the protected region: it is where the
                 // handlers are popped and the `finally` runs, whether or not the
                 // protected code failed. See `Opcode::Nop` and
@@ -468,6 +501,7 @@ impl Compiler {
                     &mut module_body.code,
                     &mut module_body.blocks,
                     depth + 1,
+                    false,
                 )?;
                 let index = blocks.len() as u32;
                 blocks.push(module_body);

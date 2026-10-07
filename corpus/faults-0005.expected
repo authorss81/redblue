@@ -1,0 +1,5 @@
+#label RuntimeError
+#position 2:1
+#value nothing
+#message Unknown function 'no_such_function'
+before

@@ -1,0 +1,4 @@
+#label LexerError
+#position 1:5
+#value nothing
+#message Unterminated string

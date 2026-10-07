@@ -1,0 +1,4 @@
+#label ParserError
+#position 1:14
+#value nothing
+#message Unexpected token Newline

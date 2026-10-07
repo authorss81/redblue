@@ -1,0 +1,4 @@
+#label ParserError
+#position 1:9
+#value nothing
+#message Unexpected token RightBrace
