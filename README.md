@@ -119,6 +119,29 @@ say content
 
 ## Standard Library
 
+The full list, with what each function does, is [SPEC.md](SPEC.md) §Standard
+Library. Every module name below is callable as `module.function(..)`.
+
+### Text
+```redblue
+text.uppercase(text)     // Text as uppercase
+text.lowercase(text)     // Text as lowercase
+text.trim(text)          // Text without leading/trailing space
+text.split(text, sep)    // Split text into a list by a separator
+text.join(list, sep)     // Join a list into text with a separator
+text.length(text)        // Length of text
+```
+
+### Math
+```redblue
+math.abs(n)             // Absolute value
+math.floor(n)           // Round down
+math.ceil(n)            // Round up
+math.round(n)           // Round to the nearest whole number
+math.sqrt(n)            // Square root
+math.random(min, max)   // A number in a range
+```
+
 ### Files
 ```redblue
 files.read(path)      // Read file as text
@@ -127,6 +150,11 @@ files.append(path, content)
 files.exists(path)   // Check if file exists
 files.lines(path)    // Read as list of lines
 files.delete(path)
+```
+
+### List
+```redblue
+list.length(list)     // Number of elements
 ```
 
 ### Time
@@ -145,10 +173,24 @@ network.post(url, body)
 
 ### Formats
 ```redblue
-json.parse(text)     // Parse JSON to record
+formats.parse_json(text)     // Parse JSON to record
+formats.to_json(value)       // Convert value to JSON text
+formats.parse_csv(text)      // Parse CSV to list of lists
+
+json.parse(text)     // Parse JSON to record — the same function
 json.stringify(value)
-csv.parse(text)     // Parse CSV to list of lists
+csv.parse(text)     // Parse CSV to list of lists — the same function
 ```
+
+### Console
+```redblue
+console.log(text)    // Print with newline
+console.error(text)  // Print an error with newline
+console.clear()      // Clear the screen
+```
+
+Every text, math and list function above is also a bare builtin of the same
+name, so `uppercase("hi")` and `text.uppercase("hi")` reach one function.
 
 ## Project Structure
 

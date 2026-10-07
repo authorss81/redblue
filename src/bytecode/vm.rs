@@ -1659,6 +1659,19 @@ impl BytecodeVm {
                 self.advance(frame);
                 Ok(())
             }
+            // A module function: `text.uppercase` is the builtin `uppercase`
+            // reached through the module the documents spell it with.
+            Some(Value::Builtin(_)) => {
+                let Some(result) = stdlib::call_module_function(self.span(), name, args) else {
+                    return Err(Error::Runtime(
+                        format!("Unknown function '{}'", name),
+                        self.span(),
+                    ));
+                };
+                self.push(result?);
+                self.advance(frame);
+                Ok(())
+            }
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),

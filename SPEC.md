@@ -811,26 +811,42 @@ end
 ```redblue
 say "Hello"           // Print with newline
 print "Hello"         // Print without newline
-ask "Your name?"      // Get user input
+console.log("Hello")  // The same as say
+console.error("no")   // Print an error with newline
+console.clear()       // Clear the screen
 ```
+
+Reading from the terminal is not documented as a call: `ask` is a reserved word
+and no statement parses it, so there is no spelling of it to write down.
 
 ### text
 
 ```redblue
 set upper to text.uppercase("hello")  // "HELLO"
 set lower to text.lowercase("HELLO")  // "hello"
-set parts to text.split("a,b,c", by ",")  // ["a", "b", "c"]
-set joined to text.join(["a", "b", "c"], by ",")  // "a,b,c"
+set trimmed to text.trim("  spaced  ")  // "spaced"
+set parts to text.split("a,b,c", ",")  // ["a", "b", "c"]
+set joined to text.join(["a", "b", "c"], ",")  // "a,b,c"
+set size to text.length("hello")  // 5
 ```
+
+The separator is an ordinary second argument. `by` is the step of a range loop
+and nothing else, so `text.split("a,b,c", by ",")` does not parse.
 
 ### math
 
 ```redblue
-set pi to math.PI
 set sqrt2 to math.sqrt(2)
-set rand to math.random(1, 100)
+set magnitude to math.abs(-7)  // 7
+set down to math.floor(1.7)  // 1
+set up to math.ceil(1.2)  // 2
 set rounded to math.round(3.7)  // 4
+set rand to math.random(1, 100)
 ```
+
+`math.PI` is not a member: a constant is a name a program declares with
+`constant`, as §Constants describes, so it is written `constant PI to 3.14159`
+and read as `PI`.
 
 ### files
 
@@ -846,24 +862,35 @@ end
 ### list
 
 ```redblue
-set doubled to list.map([1, 2, 3], to (x) give back x * 2)
-set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)
-set sum to list.reduce([1, 2, 3], 0, to (acc, x) give back acc + x)
+set size to list.length([1, 2, 3])  // 3
 ```
+
+`map`, `filter` and `reduce` take a function as their second argument, and the
+inline function literal they are written with here is not part of the grammar
+yet, so they are not documented as calls until it is.
 
 ### network
 
 ```redblue
-set response to wait network.get("https://api.example.com")
-set response to wait network.post("https://api.example.com", data)
+set response to network.get("https://api.example.com")
+set response to network.post("https://api.example.com", data)
 ```
 
 ### formats
 
 ```redblue
-set obj to formats.parse_json('{"name": "Alice"}')
+set obj to formats.parse_json("{\"name\": \"Alice\"}")
 set json to formats.to_json(obj)
 set csv to formats.parse_csv("name,age\nAlice,30")
+```
+
+Both formats are also modules of their own — `json.parse`, `json.stringify` and
+`csv.parse` are the same three functions under their format's name:
+
+```redblue
+set obj to json.parse("{\"name\": \"Alice\"}")
+set json to json.stringify(obj)
+set csv to csv.parse("name,age\nAlice,30")
 ```
 
 ---

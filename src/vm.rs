@@ -1162,6 +1162,20 @@ impl Vm {
 
         match self.get_var(name) {
             Some(Value::Function(function)) => self.call_user_function(name, &function, args),
+            // A module function: `text.uppercase` is the builtin `uppercase`
+            // reached through the module the documents spell it with, so it
+            // runs the same function, refuses the same arguments, and names
+            // itself the way the program wrote it. A bare builtin name is not
+            // routed here — see FINDINGS.md.
+            Some(Value::Builtin(_)) => {
+                let Some(result) = stdlib::call_module_function(self.span(), name, args) else {
+                    return Err(Error::Runtime(
+                        format!("Unknown function '{}'", name),
+                        self.span(),
+                    ));
+                };
+                result
+            }
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),
