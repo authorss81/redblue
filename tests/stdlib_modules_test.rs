@@ -480,6 +480,11 @@ fn files_paths_are_relative_to_the_working_directory_and_not_confined() {
 }
 
 /// The `files` functions refuse a non-text argument instead of coercing it.
+///
+/// A call with an argument too few is refused by the *count* rather than by the
+/// type of the argument that is missing, so the two say different things. Both
+/// are refusals, and both name the function, which is what the list below
+/// asserts.
 #[test]
 fn edge_files_argument_of_the_wrong_type_is_an_error() {
     for (source, part) in [
@@ -487,10 +492,10 @@ fn edge_files_argument_of_the_wrong_type_is_an_error() {
         ("files.exists(nothing)", "requires a text path"),
         ("files.lines([1])", "requires a text path"),
         ("files.delete(1)", "requires a text path"),
-        ("files.write(\"p\")", "requires two text arguments"),
+        ("files.write(\"p\")", "takes 2 argument(s), given 1"),
         ("files.write(1, 2)", "requires two text arguments"),
         ("files.append(\"p\", 3)", "requires two text arguments"),
-        ("files.copy(\"a\")", "requires two text arguments"),
+        ("files.copy(\"a\")", "takes 2 argument(s), given 1"),
         ("files.rename(\"a\", 2)", "requires two text arguments"),
     ] {
         assert_runtime_error(source, part);
@@ -962,6 +967,10 @@ fn network_timeouts_are_published_and_bounded() {
 
 /// The network functions refuse an argument that is not a URL, and a URL the
 /// client cannot parse, without opening a socket.
+///
+/// `network.post` with one argument is refused by its count rather than by the
+/// URL it was given, so that entry pins the count and the one after it pins the
+/// type.
 #[test]
 fn edge_network_rejects_an_argument_that_is_not_a_url() {
     for (source, part) in [
@@ -969,7 +978,7 @@ fn edge_network_rejects_an_argument_that_is_not_a_url() {
         ("network.get(nothing)", "requires a URL"),
         (
             "network.post(\"http://example.invalid\")",
-            "requires URL and data",
+            "takes 2 argument(s), given 1",
         ),
         ("network.post(5, 5)", "requires URL and data"),
     ] {

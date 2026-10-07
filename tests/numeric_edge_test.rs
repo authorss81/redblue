@@ -213,18 +213,67 @@ fn edge_an_index_at_the_numeric_limit_is_an_error_not_a_panic() {
     );
 }
 
+/// A range wider than a double is drawable, and the draw is a number.
+///
+/// `1e308 - -1e308` is `infinity`, so `min + r * (max - min)` put a number that
+/// does not exist into every draw from this range and refused all of them — the
+/// one thing this file exists to prevent, and it happened for every value in a
+/// perfectly ordinary range. Interpolating between the two ends scales each of
+/// them by a number in `[0, 1]` before adding, which cannot overflow, so the
+/// range answers. This test was `edge_random_number_refuses_a_range_whose_width_overflows`
+/// and asserted the refusal; the refusal was the defect, so the assertion is
+/// replaced by the stronger property — a finite number, every time, and one that
+/// is really inside the range it was asked for. No entry was removed.
 #[test]
-fn edge_random_number_refuses_a_range_whose_width_overflows() {
-    // `1e308 - -1e308` is `infinity`, so every draw from this range would be a
-    // number that does not exist. The result is refused instead. The draw is
-    // seeded from the clock, but the refusal does not depend on it: a draw of
-    // exactly zero gives `0 * infinity`, which is NaN, also refused.
-    let message = runtime_message("random_number(-1e308, 1e308)");
+fn edge_a_draw_from_a_range_wider_than_a_double_is_still_a_finite_number() {
+    // Many draws, because the old arithmetic failed for all of them and the new
+    // one must not fail for any: a single draw of exactly zero used to give
+    // `0 * infinity`, which is `NaN`, and the seed is the clock.
+    for _ in 0..64 {
+        match eval("random_number(-1e308, 1e308)") {
+            Value::Number(n) => {
+                assert!(
+                    n.is_finite(),
+                    "a draw from -1e308 to 1e308 must be a number, got {}",
+                    n
+                );
+                assert!(
+                    (-1e308..=1e308).contains(&n),
+                    "a draw must be inside the range it was asked for, got {}",
+                    n
+                );
+            }
+            other => panic!(
+                "a range wider than a double should still be drawable, got {:?}",
+                other
+            ),
+        }
+    }
+    // The narrow end of the same range, so the interpolation is not simply
+    // answering one end of it every time.
+    let mut seen_both = false;
+    let mut negative = false;
+    for _ in 0..64 {
+        match eval("random_number(-1e308, 0)") {
+            Value::Number(n) => {
+                assert!(n.is_finite() && (-1e308..=0.0).contains(&n), "got {}", n);
+                negative |= n < 0.0;
+            }
+            other => panic!(
+                "a draw from -1e308 to 0 should be a number, got {:?}",
+                other
+            ),
+        }
+        if negative {
+            seen_both = true;
+            break;
+        }
+    }
     assert!(
-        message.ends_with("is not a finite number"),
-        "a range wider than a double should be refused, got {}",
-        message
+        seen_both,
+        "a draw from -1e308 to 0 must be able to be below zero"
     );
+
     // An ordinary range is untouched.
     match eval("random_number(1, 2)") {
         Value::Number(n) => assert!((1.0..2.0).contains(&n), "got {}", n),

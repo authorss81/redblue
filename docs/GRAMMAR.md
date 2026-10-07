@@ -417,6 +417,15 @@ expression       = assignment_expr
                  | 'might fail' expression            // error propagation
 ```
 
+`might fail` is specified here and **not implemented**: `might` and `fail` both
+lex to one reserved token and no arm of `src/parser.rs` accepts it, so the
+production above describes the language as intended rather than the language that
+exists. `try`/`catch`/`end` is the only spelling of a recoverable failure today.
+The same is true of the `?`-ternary of §5.9, the `takes`/`needs`/`called`
+parameter keywords of §1.3 and §3, and the `async`/`wait` productions of §7 —
+they are in this grammar because this grammar is the specification, and none of
+them parses.
+
 ---
 
 ## 6. Function Literals
@@ -511,10 +520,10 @@ person.introduce()
 ### Try/Catch
 ```redblue
 try
-    set data to might fail files.read("config.txt")
+    set data to files.read("config.txt")
     say data
 catch error
-    say "Failed to read file: {error message}"
+    say "Failed to read the file"
 end
 ```
 

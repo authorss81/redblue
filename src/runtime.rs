@@ -15,6 +15,9 @@
 //! The tree-walker is the reference: what is here is what it already did,
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
+use std::cell::Cell;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
@@ -261,6 +264,32 @@ pub fn unary_op(span: Span, op: &UnaryOp, value: Value) -> Result<Value> {
 /// that a bytecode `CALL` and a tree-walked call cannot drift apart: there is
 /// one implementation and both answer from it.
 pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> {
+    // A call with the wrong number of arguments is refused before it runs, so
+    // `files.read("a", "b")` is an error instead of a read of the first
+    // argument alone, and `files.write("a")` is the same error rather than a
+    // write with no content. The count is compared with `!=` and not with `>` so
+    // that this refusal is the one `stdlib::call_module_function` makes for a
+    // module spelling too: a bare `length()` and a `text.length()` are refused
+    // in the same words, and a program cannot tell which spelling it wrote. The
+    // function is named the way the module spells it, which is how every
+    // message below names it too. A name that is not one of these functions has
+    // no count to check, and is still the unknown function it is.
+    //
+    // Every name `arity` states is checked, not only the ones a module owns, so
+    // a bare builtin with a fixed count is refused as firmly as the module
+    // spelling of the same function.
+    if let Some(expected) = crate::stdlib::arity(name) {
+        if args.len() != expected {
+            return Err(Error::Runtime(
+                format!(
+                    "{} takes {expected} argument(s), given {}",
+                    crate::stdlib::display_name(name),
+                    args.len()
+                ),
+                span,
+            ));
+        }
+    }
     match name {
         "say" => {
             if let Some(arg) = args.first() {
@@ -293,10 +322,12 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             input.pop(); // Remove newline
             Ok(Some(Value::Text(input)))
         }
+        // The old `random` name, unregistered and unreachable as a global. It
+        // drew from the wall clock with an `unwrap()` on it, so it draws from
+        // the generator like every other random built-in does.
         "random" => {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            Ok(Some(Value::Number((now.as_nanos() % 1000) as f64)))
+            let drawn = random_below(span, 1000)?;
+            Ok(Some(Value::Number(drawn as f64)))
         }
         // Files module
         "files_read" => {
@@ -420,7 +451,6 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         // Time module
         "time_now" => {
-            use std::time::{SystemTime, UNIX_EPOCH};
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| Error::Runtime(e.to_string(), span))?;
@@ -442,11 +472,32 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+            // Refused before the `Duration` is built, not by the panic that
+            // building one used to raise: `Duration::from_secs_f64` panics on a
+            // negative duration, on `NaN`, and on a value past the end of a
+            // `u64` of seconds, and a panic in the interpreter thread aborts
+            // the process instead of raising something a `try` can catch.
+            let duration = sleep_duration(seconds).ok_or_else(|| {
+                Error::Runtime(
+                    format!(
+                        "time.sleep cannot sleep for {seconds} seconds: a sleep is a number of \
+                         seconds from 0 to {MAX_SLEEP_SECS}"
+                    ),
+                    span,
+                )
+            })?;
+            std::thread::sleep(duration);
             Ok(Some(Value::Nothing))
         }
         "time_format" => {
-            use std::time::UNIX_EPOCH;
+            // The format is optional, so `arity` states no count for this one;
+            // a third argument is still more than the function documents.
+            if args.len() > 2 {
+                return Err(Error::Runtime(
+                    format!("time.format takes 1 or 2 argument(s), given {}", args.len()),
+                    span,
+                ));
+            }
             let (timestamp, format) = match (args.first(), args.get(1)) {
                 (Some(Value::Number(ts)), Some(Value::Text(fmt))) => (*ts, fmt.clone()),
                 (Some(Value::Number(ts)), None) => (*ts, "%Y-%m-%d %H:%M:%S".to_string()),
@@ -457,13 +508,29 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            let datetime = UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
-            let tm = chrono::DateTime::from_timestamp(
-                datetime.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-                0,
-            )
-            .ok_or_else(|| Error::Runtime("Invalid timestamp".to_string(), span))?;
-            Ok(Some(Value::Text(tm.format(&format).to_string())))
+            // A timestamp is a count of seconds since the epoch, so it is a
+            // whole number from zero. A negative one used to cast to `0` and
+            // answer `1970` as though the program had asked for it, and a huge
+            // one used to cast to `u64::MAX` and overflow the `SystemTime`
+            // addition below — which panics, and a panic in the interpreter
+            // thread aborts the process instead of raising something a `try`
+            // can catch.
+            let seconds = timestamp_seconds(timestamp).ok_or_else(|| {
+                Error::Runtime(
+                    format!(
+                        "time.format cannot format {timestamp} as a timestamp: it must be a \
+                         whole number of seconds from 0"
+                    ),
+                    span,
+                )
+            })?;
+            let datetime = chrono::DateTime::from_timestamp(seconds, 0).ok_or_else(|| {
+                Error::Runtime(
+                    format!("time.format cannot format {timestamp} as a date"),
+                    span,
+                )
+            })?;
+            Ok(Some(Value::Text(datetime.format(&format).to_string())))
         }
         "time_unix" => {
             let text = match args.first() {
@@ -579,14 +646,38 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         // Console module
         "console_log" => {
-            if let Some(arg) = args.first() {
-                println!("{}", arg);
+            match args {
+                [arg] => println!("{}", arg),
+                [] => {
+                    return Err(Error::Runtime(
+                        "console.log requires a value to print".to_string(),
+                        span,
+                    ))
+                }
+                _ => {
+                    return Err(Error::Runtime(
+                        "console.log takes one value to print".to_string(),
+                        span,
+                    ))
+                }
             }
             Ok(Some(Value::Nothing))
         }
         "console_error" => {
-            if let Some(arg) = args.first() {
-                eprintln!("{}", arg);
+            match args {
+                [arg] => eprintln!("{}", arg),
+                [] => {
+                    return Err(Error::Runtime(
+                        "console.error requires a value to print".to_string(),
+                        span,
+                    ))
+                }
+                _ => {
+                    return Err(Error::Runtime(
+                        "console.error takes one value to print".to_string(),
+                        span,
+                    ))
+                }
             }
             Ok(Some(Value::Nothing))
         }
@@ -594,29 +685,97 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             print!("\x1B[2J\x1B[1H");
             Ok(Some(Value::Nothing))
         }
+        // Text module. `join` is answered by `stdlib::builtin_function`, which
+        // is the one place the list itself is joined; this arm is the refusal
+        // that gets there first.
+        //
+        // A list of text, or an error. `text.join([1, yes, [1]], ",")` used to
+        // stringify every element and answer `"1,yes,[1]"`, which makes `join`
+        // the one function of the set that answers for a list it was not given:
+        // `text.uppercase(1)` and `list.length(5)` both refuse, and a wrong
+        // argument that produces plausible output is the worse of the two
+        // failures, because a program with the bug in it goes on running. The
+        // refusal names the element and what it is, which is the one thing the
+        // caller can act on. `Ok(None)` for a list that is fine — the join is
+        // the next thing that happens to it.
+        "join" => {
+            if let Some(Value::List(items)) = args.first() {
+                for (at, item) in items.iter().enumerate() {
+                    if !matches!(item, Value::Text(_)) {
+                        return Err(Error::Runtime(
+                            format!(
+                                "join requires a list of text values, but element {} is {}",
+                                at + 1,
+                                item.type_name()
+                            ),
+                            span,
+                        ));
+                    }
+                }
+            }
+            Ok(None)
+        }
         // Random module
         "random_number" => {
+            // One number draws from `0` to it, two draw from one to the other,
+            // and anything else is refused by name: a wrong argument must not
+            // answer a number that looks like a draw.
             let (min, max) = match (args.first(), args.get(1)) {
-                (Some(Value::Number(min)), Some(Value::Number(max))) => (*min, *max),
-                (Some(Value::Number(max)), None) => (0.0, *max),
-                _ => (0.0, 1.0),
+                (Some(Value::Number(min)), Some(Value::Number(max))) if args.len() == 2 => {
+                    (*min, *max)
+                }
+                (Some(Value::Number(max)), None) if args.len() == 1 => (0.0, *max),
+                _ => {
+                    return Err(Error::Runtime(
+                        "random_number requires one or two numbers".to_string(),
+                        span,
+                    ))
+                }
             };
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            let r = (now.as_nanos() % 1000000) as f64 / 1000000.0;
-            // `max - min` overflows for a range as ordinary as
-            // `-1e308` to `1e308`, which is a number that does not exist.
-            Value::number(min + r * (max - min), span).map(Some)
+            let r = random_unit(span)?;
+            // `min + r * (max - min)` overflows for a range as ordinary as
+            // `-1e308` to `1e308`, because `max - min` is `infinity` — so a
+            // perfectly drawable range could only ever fail, and
+            // `Value::number`'s refusal names no function at all. Scaling each
+            // end by a number in `[0, 1]` before adding cannot overflow on its
+            // own, which leaves only the addition itself, and that is checked
+            // and refused by the name of the function that was asked.
+            let drawn = min * (1.0 - r) + max * r;
+            if !drawn.is_finite() {
+                return Err(Error::Runtime(
+                    format!(
+                        "random_number cannot draw from that range: the draw is {}",
+                        crate::value::non_finite_name(drawn)
+                    ),
+                    span,
+                ));
+            }
+            Ok(Some(Value::Number(drawn)))
+        }
+        "random_seed" => {
+            // The generator is a stream, not a function of the clock, so a seed
+            // is what makes a run repeatable: two programs that seed alike draw
+            // alike, which is what lets a test assert a draw and what makes a
+            // bug that depends on randomness reproducible.
+            let seed = match args.first() {
+                Some(Value::Number(n)) => *n,
+                _ => {
+                    return Err(Error::Runtime(
+                        "random_seed requires a number".to_string(),
+                        span,
+                    ))
+                }
+            };
+            RANDOM.with(|state| state.set(Random::seeded(seed_state(seed))));
+            Ok(Some(Value::Nothing))
         }
         "random_choice" => {
             if let Some(Value::List(items)) = args.first() {
                 if items.is_empty() {
                     return Ok(Some(Value::Nothing));
                 }
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                let idx = (now.as_nanos() as usize) % items.len();
-                Ok(Some(items[idx].clone()))
+                let index = random_below(span, items.len() as u64)? as usize;
+                Ok(Some(items[index].clone()))
             } else {
                 Err(Error::Runtime(
                     "random_choice requires a list".to_string(),
@@ -626,12 +785,12 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         "random_shuffle" => {
             if let Some(Value::List(mut items)) = args.first().cloned() {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                let seed = now.as_nanos() as usize;
-
+                // Fisher-Yates from the end, one draw per step. The old code
+                // took a single draw and reused it for every step, so the
+                // permutation depended on the *length* of the list and not on
+                // its contents: `[1, 2]` always came back the other way round.
                 for i in (1..items.len()).rev() {
-                    let j = seed % (i + 1);
+                    let j = random_below(span, (i + 1) as u64)? as usize;
                     items.swap(i, j);
                 }
                 Ok(Some(Value::List(items)))
@@ -643,12 +802,242 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             }
         }
         // Type conversion
-        "type_of" => {
-            let type_name = args.first().map(|v| v.type_name()).unwrap_or("nothing");
-            Ok(Some(Value::Text(type_name.to_string())))
-        }
+        "type_of" => match args {
+            [value] => Ok(Some(Value::Text(value.type_name().to_string()))),
+            // The count is stated in `stdlib::arity` and refused by the gate at
+            // the top of this function, so neither arm is reached through a call
+            // today. They are here because the old
+            // `args.first().map(..).unwrap_or("nothing")` answered `type_of()`
+            // with the very type name `type_of(nothing)` gives, so a call that
+            // forgot its argument was indistinguishable from a correct one — the
+            // same failure as a `join` that stringified its list.
+            given => Err(Error::Runtime(
+                format!("type_of takes 1 argument(s), given {}", given.len()),
+                span,
+            )),
+        },
         _ => Ok(None),
     }
+}
+
+/// The longest `time.sleep` accepts, in seconds: one year.
+///
+/// `Duration` holds whole seconds in a `u64`, so a value past the end of one
+/// cannot become a duration at all — `Duration::from_secs_f64` *panics* on it,
+/// and on a negative one and on `NaN`. A panic in the interpreter thread aborts
+/// the process rather than raising something a `try` can catch, so all three are
+/// refused instead. One year is inside what a duration can hold and outside what
+/// a wait can mean: a program that asks to sleep longer is not going to see it
+/// end either way, and saying so beats stopping the machine for the century.
+pub const MAX_SLEEP_SECS: f64 = 365.0 * 24.0 * 60.0 * 60.0;
+
+/// The `Duration` a sleep of `seconds` means, or `None` when it does not mean
+/// one.
+///
+/// Built from whole seconds and a nanosecond remainder rather than through
+/// `Duration::from_secs_f64`, which panics on everything [`sleep_duration`] is
+/// asked to refuse. Both parts are inside their range once `seconds` is inside
+/// `[0, MAX_SLEEP_SECS]`, so neither cast saturates.
+fn sleep_duration(seconds: f64) -> Option<Duration> {
+    if !seconds.is_finite() || !(0.0..=MAX_SLEEP_SECS).contains(&seconds) {
+        return None;
+    }
+    let mut whole = seconds.trunc();
+    let mut nanos = ((seconds - whole) * 1_000_000_000.0).round();
+    // A remainder that rounds up to a whole second is carried into the seconds,
+    // which keeps both halves inside the range `Duration::new` takes.
+    if nanos >= 1_000_000_000.0 {
+        whole += 1.0;
+        nanos = 0.0;
+    }
+    Some(Duration::new(whole as u64, nanos as u32))
+}
+
+/// The whole seconds a timestamp names, or `None` when the number does not name
+/// one.
+///
+/// A timestamp is a count of seconds since the epoch, so it has to be a whole
+/// number from zero. Both ends of that were open: `timestamp as u64` saturates,
+/// so a negative timestamp became `0` and answered `1970` as though the program
+/// had asked for the epoch, and a large one became `u64::MAX` and overflowed the
+/// `SystemTime` it was added to.
+fn timestamp_seconds(timestamp: f64) -> Option<i64> {
+    if !timestamp.is_finite()
+        || timestamp < 0.0
+        || timestamp.fract() != 0.0
+        || timestamp >= i64::MAX as f64
+    {
+        return None;
+    }
+    Some(timestamp as i64)
+}
+
+/// The generator `math.random`, `random_choice` and `random_shuffle` draw from,
+/// one per thread — so two VMs in one process do not share a stream, and a
+/// program run on the interpreter thread starts from the state its own thread
+/// left behind.
+///
+/// A generator rather than the wall clock, because the clock was the draw: two
+/// calls inside one microsecond answered the *same* number, `as_nanos() % n` is
+/// not uniform over the residues it can take, and a machine whose clock is set
+/// before 1970 aborted the process at `duration_since(UNIX_EPOCH).unwrap()`.
+/// The state advances on every draw and `math.seed` makes a run repeatable.
+///
+/// `SplitMix64`, from Steele, Lea and Flood: three lines, no dependency, and it
+/// has no weak state — a plain `xorshift` is stuck forever if it is ever handed a
+/// zero, which is exactly the value a seed of `0` would give.
+#[derive(Clone, Copy)]
+struct Random {
+    state: u64,
+    /// Whether a seed has been set. The clock seeds the generator the first time
+    /// a draw is needed, and not before, so a program that seeds and never draws
+    /// is not affected by the clock at all.
+    seeded: bool,
+}
+
+impl Random {
+    /// The odd increment of the sequence, and the two multipliers that mix it —
+    /// the constants of `SplitMix64`, chosen so that every state advances and
+    /// the bits of the result do not depend on the seed in a visible way.
+    const STEP: u64 = 0xBF58_476D_1CE4_E5B9;
+    const MIX_A: u64 = 0x94D0_49BB_1331_11EB;
+    const MIX_B: u64 = 0xBF58_476D_1CE4_E5B9;
+
+    fn unseeded() -> Self {
+        Random {
+            state: 0,
+            seeded: false,
+        }
+    }
+
+    fn seeded(state: u64) -> Self {
+        Random {
+            state,
+            seeded: true,
+        }
+    }
+
+    /// The next word of the sequence.
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(Self::STEP);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(Self::MIX_A);
+        z = (z ^ (z >> 27)).wrapping_mul(Self::MIX_B);
+        z ^ (z >> 31)
+    }
+
+    /// A draw in `0..bound`, and `0` for a bound of zero.
+    ///
+    /// The low `2^k` bits, where `2^k` is the smallest power of two at or above
+    /// the bound, are used: they are the ones `SplitMix64` mixes least, and
+    /// taking a modulo of the whole word instead would make the low residues of a
+    /// range one draw more likely than the high ones — a visible skew on a list
+    /// of two.
+    ///
+    /// `2^k` need not be a multiple of the bound, so one value in it is
+    /// over-represented; taking it again rather than letting it stand keeps every
+    /// element of the range equally likely. Fewer than half of the values in
+    /// `2^k` are above the bound, so this settles in a draw or two.
+    ///
+    /// A `loop` and not a call to itself. The rejection rate is under a half, so
+    /// a hundred draws deep is a streak of a hundred consecutive heads — rare, and
+    /// not something a test can provoke on purpose — but *every* draw of
+    /// `math.random`, `random_choice` and `random_shuffle` reaches this function,
+    /// and the recursion put one stack frame per rejected draw on the
+    /// interpreter thread. A stack that runs out aborts the process instead of
+    /// raising something a `try` can catch, so the retry costs no stack at all.
+    fn below(&mut self, bound: u64) -> u64 {
+        if bound == 0 {
+            return 0;
+        }
+        let mask = low_bits(u64::BITS - (bound - 1).leading_zeros());
+        loop {
+            let draw = self.next_u64() & mask;
+            if draw < bound {
+                return draw;
+            }
+        }
+    }
+}
+
+/// A mask over the low `bits` bits of a word — `0b0111` for three — and over all
+/// 64 of them for a count that does not fit.
+///
+/// Written out rather than as `(1 << bits) - 1` because a bound with its top bit
+/// set needs 64 of them, and shifting a `u64` left by 64 panics.
+fn low_bits(bits: u32) -> u64 {
+    if bits >= u64::BITS {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    }
+}
+
+thread_local! {
+    static RANDOM: Cell<Random> = Cell::new(Random::unseeded());
+}
+
+/// The state `math.seed` sets for the generator.
+///
+/// The magnitude of the number when it is whole, and its fraction scaled up when
+/// it is not — so `math.seed(1)` and `math.seed(1.5)` are both seeds rather than
+/// one of them being a silent zero. The casts saturate, so a seed too large for
+/// a `u64` is the largest one rather than a panic.
+fn seed_state(seed: f64) -> u64 {
+    let magnitude = seed.abs();
+    if !magnitude.is_finite() {
+        return 0;
+    }
+    if magnitude.fract() == 0.0 {
+        magnitude as u64
+    } else {
+        (magnitude.fract() * crate::value::MAX_EXACT_INT) as u64
+    }
+}
+
+/// One draw from this thread's generator, seeding it from the clock the first
+/// time it is needed.
+///
+/// A clock that cannot say how long it has been — a machine whose time is set
+/// before the epoch — is a `Runtime` error rather than a panic. The old code
+/// `unwrap()`ed that `duration_since`, and a panic in the interpreter thread
+/// aborts the process instead of raising something a `try` can catch. The state
+/// is only stored once the draw has been taken from it, so a failure here leaves
+/// the generator unseeded and the next call tries again.
+fn with_random(span: Span, draw: impl FnOnce(&mut Random) -> u64) -> Result<u64> {
+    RANDOM.with(|cell| {
+        let mut generator = cell.get();
+        if !generator.seeded {
+            generator.state = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| {
+                    Error::Runtime(
+                        format!("Cannot read the clock to draw a random number: {e}"),
+                        span,
+                    )
+                })?
+                .as_nanos() as u64;
+            generator.seeded = true;
+        }
+        let drawn = draw(&mut generator);
+        cell.set(generator);
+        Ok(drawn)
+    })
+}
+
+/// A draw in `0.0..1.0`, from the top 53 bits of one word of the sequence.
+///
+/// 53 bits because that is what an `f64` holds exactly: a draw built from more
+/// of them has neighbours no double can tell apart, so the low end of the range
+/// would come out twice as often as the high end. The old draw used 20.
+fn random_unit(span: Span) -> Result<f64> {
+    let drawn = with_random(span, |generator| generator.next_u64() >> 11)?;
+    Ok(drawn as f64 / (1u64 << 53) as f64)
+}
+
+/// A draw in `0..bound`, from this thread's generator.
+fn random_below(span: Span, bound: u64) -> Result<u64> {
+    with_random(span, |generator| generator.below(bound))
 }
 
 /// The whole-request timeout for `network.get` and `network.post`: connect,
@@ -668,8 +1057,8 @@ pub const NETWORK_CONNECT_TIMEOUT_SECS: u64 = 5;
 /// to abort the process.
 fn network_client(span: Span) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(NETWORK_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(NETWORK_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(NETWORK_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(NETWORK_CONNECT_TIMEOUT_SECS))
         .build()
         .map_err(|e| Error::Runtime(format!("Cannot create the HTTP client: {}", e), span))
 }
@@ -1041,6 +1430,7 @@ fn json_stringify(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     /// JSON has no literal for a number that is not finite. A host program
     /// embedding Redblue can still build one through the public `Value`, so the
@@ -1067,5 +1457,96 @@ mod tests {
         }
         assert_eq!(json_stringify(&Value::Number(42.0)), "42");
         assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
+    }
+
+    /// The mask `Random::below` builds has to reach every value of the range and
+    /// as few again as it can: reach too few and the draw is refused forever,
+    /// reach too many and the low residues come out twice as often as the high
+    /// ones.
+    #[test]
+    fn edge_the_mask_a_draw_is_taken_from_reaches_the_whole_range() {
+        for bound in [
+            1u64,
+            2,
+            3,
+            4,
+            5,
+            7,
+            8,
+            9,
+            255,
+            256,
+            257,
+            1 << 32,
+            (1 << 63) - 1,
+            1 << 63,
+            u64::MAX,
+        ] {
+            let bits = u64::BITS - (bound - 1).leading_zeros();
+            let mask = low_bits(bits);
+            let reach = mask as u128 + 1;
+            assert!(
+                reach >= bound as u128,
+                "the mask for {bound} reaches only {reach} values"
+            );
+            assert!(
+                reach - bound as u128 <= bound as u128,
+                "{reach} values for a range of {bound} refuses at least half of them, \
+                 so a draw would take more than two tries on average"
+            );
+        }
+        assert_eq!(low_bits(0), 0, "no bits is no values");
+        assert_eq!(low_bits(64), u64::MAX, "64 bits is every value");
+    }
+
+    /// `below` answers a value of the range from every seed, at every boundary
+    /// — a bound of one and of two in particular, where a generator that mixed
+    /// the low bits badly would show.
+    #[test]
+    fn edge_a_bounded_draw_answers_a_value_of_the_range_at_every_boundary() {
+        let mut generator = Random::seeded(1);
+        assert_eq!(generator.below(0), 0, "nothing to draw from nothing");
+        for bound in [1u64, 2, 3, 4, 5, 8, 17, 1 << 40] {
+            for seed in [0u64, 1, 2, u64::MAX] {
+                let mut generator = Random::seeded(seed);
+                for _ in 0..1_000 {
+                    assert!(
+                        generator.below(bound) < bound,
+                        "seed {seed} drew outside 0..{bound}"
+                    );
+                }
+            }
+        }
+        // Both halves of a range of two are reachable from one seed: a generator
+        // that only ever set the low bit would answer `1` for all of them.
+        let mut generator = Random::seeded(1);
+        assert!(
+            (0..100).any(|_| generator.below(2) == 0) && (0..100).any(|_| generator.below(2) == 1),
+            "a range of two must be reachable on both sides"
+        );
+    }
+
+    /// The sequence advances on every draw and does not depend on the seed being
+    /// non-zero — a plain `xorshift` seeded with `0` is stuck forever, which is
+    /// exactly the value `math.seed(0)` gives.
+    #[test]
+    fn edge_the_sequence_advances_from_every_seed() {
+        for seed in [0u64, 1, 2, 42, u64::MAX] {
+            let mut generator = Random::seeded(seed);
+            let words: Vec<u64> = (0..1_000).map(|_| generator.next_u64()).collect();
+            assert!(
+                words.windows(2).all(|pair| pair[0] != pair[1]),
+                "seed {seed} drew the same word twice in a row"
+            );
+            assert!(
+                words.iter().collect::<HashSet<_>>().len() > 990,
+                "seed {seed} repeated inside a thousand words"
+            );
+        }
+        assert_ne!(
+            Random::seeded(1).next_u64(),
+            Random::seeded(2).next_u64(),
+            "one word should not be the same for every seed"
+        );
     }
 }

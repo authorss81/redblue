@@ -72,12 +72,23 @@ Redblue has 32 keywords:
 | Control | if, then, else, end, when, unless |
 | Loops | for, each, in, from, times, while, repeat, until |
 | Jumps | break, skip, return, give back |
-| Functions | to, takes, needs, might fail |
+| Functions | to |
 | Types | number, text, yes/no, list, record, object |
 | Modules | module, import, export, as |
 | Logic | and, or, not |
 | Errors | try, catch, finally, error |
 | Objects | has, can, this, that, new, extends |
+
+The table above lists the keywords a statement is written with. Some other words
+are reserved and reserved only: `might fail`, `when`, `can`, `that`, `new`, `ask`,
+`wait`, `async`, `parallel` and `done` are all keywords the lexer produces and no
+arm of the parser matches, so `might fail files.read(..)` and `when 1 then` are
+both a `ParserError` and not a spelling of anything today. `takes` and `needs`
+are not even keywords — a parameter list is written `(parameters)`. A reserved
+word with no statement behind it stays reserved, so it cannot be used as an
+identifier either; what is reserved and unimplemented is reserved *and* not
+implemented, and the two are recorded separately. A recoverable failure is
+`try`/`catch`/`end`, which §Error Handling describes.
 
 ### Literals
 
@@ -592,6 +603,10 @@ the name `Person` to a record of the fields the declaration resolves to, so
 `type_of(Person)` is `"record"` and `Person` is the value a method sees as
 `this`.
 
+`type_of` takes exactly one value. A call with none is an error and not the
+answer `"nothing"`, which is what `type_of(nothing)` says: a program that forgot
+its argument cannot be told apart from one that meant it.
+
 Lookup order, for both fields and methods, is **nearest declaration first**: the
 child's own `has` fields and `to can` methods, then the parent's, then the
 grandparent's, and so on. The first declaration of a name in that order wins
@@ -630,11 +645,18 @@ object Circle
     has radius
     has color default "white"
     
+    constant PI to 3.14159
+    
     to area()
-        give back math.PI * this.radius * this.radius
+        give back PI * this.radius * this.radius
     end
 end
 ```
+
+A module has functions and not members, so `math.PI` is not a spelling: a
+module name followed by `.` is a call of that module's function. A constant is
+a name the program declares with `constant` and reads as itself, as §Constants
+and §Standard Library's `math` both describe.
 
 ---
 
@@ -715,54 +737,61 @@ compiled file says the name is read-only. See `docs/BYTECODE.md`.
 
 ## Error Handling
 
+A recoverable failure is `try`/`catch`/`end`. `might fail` is **not** the other
+spelling of it: `might` and `fail` both lex to one reserved token that no
+statement parses, and `catch error of SomeType` and `give back error "..."` are
+not in the grammar either, so none of them is written in an example here. What a
+`catch` binds is the name the `catch` itself names, and it is a signal that
+something failed rather than the failure's message.
+
 ### Try-Catch
 
 ```redblue
 try
-    set data to might fail files.read("config.rb")
-    process data
+    set data to files.read("config.rb")
+    say data
 catch error
-    say "Error: {error message}"
+    say "config.rb could not be read"
 end
 ```
 
-### Multiple Catch Blocks
+### One catch
 
 ```redblue
 try
-    set result to might fail risky_operation()
-catch error of FileError
-    handle_file_error(error)
-catch error of NetworkError
-    handle_network_error(error)
+    set result to risky_operation()
+    say result
 catch error
-    handle_generic_error(error)
+    say "risky_operation() failed"
 end
 ```
+
+A `try` takes one `catch`. Several catches, each narrowed to an error type, are
+not part of the grammar: a second `catch` is a `ParserError`, not a second arm.
+Branch on what the body found instead.
 
 ### Finally
 
 ```redblue
 try
-    set file to might fail files.open("data.rb")
-    process file
+    set data to files.read("data.rb")
+    say data
+catch error
+    say "data.rb could not be read"
 finally
-    if file is not nothing
-        might fail files.close(file)
-    end
+    say "finished either way"
 end
 ```
 
-### Raising Errors
+### Where a failure comes from
 
-```redblue
-to might fail divide(a, b)
-    if b is equal to 0
-        give back error "Cannot divide by zero"
-    end
-    give back a / b
-end
-```
+A failure is raised by the operation that fails, not by the code that calls it:
+`files.read("no-such-file")`, `1 / 0` and `xs[9]` are failures in their own
+right, and a `try` around any of them catches them. A function does not declare
+that it can fail and cannot raise one of its own — `give back error "..."` is not
+in the grammar — so a function reports a problem the only way the language gives
+it: by handing back `nothing`, which is what `property(..)` does for a field a
+record does not have.
 
 ---
 
@@ -811,59 +840,142 @@ end
 ```redblue
 say "Hello"           // Print with newline
 print "Hello"         // Print without newline
-ask "Your name?"      // Get user input
+console.log("Hello")  // The same as say
+console.error("no")   // Print an error with newline
+console.clear()       // Clear the screen
 ```
+
+Reading from the terminal is not documented as a call: `ask` is a reserved word
+and no statement parses it, so there is no spelling of it to write down.
+`console.log` and `console.error` take one value to print and `console.clear`
+takes none, so `console.log()` is an error rather than a blank line.
 
 ### text
 
 ```redblue
 set upper to text.uppercase("hello")  // "HELLO"
 set lower to text.lowercase("HELLO")  // "hello"
-set parts to text.split("a,b,c", by ",")  // ["a", "b", "c"]
-set joined to text.join(["a", "b", "c"], by ",")  // "a,b,c"
+set trimmed to text.trim("  spaced  ")  // "spaced"
+set parts to text.split("a,b,c", ",")  // ["a", "b", "c"]
+set joined to text.join(["a", "b", "c"], ",")  // "a,b,c"
+set size to text.length("hello")  // 5
 ```
+
+The separator is an ordinary second argument. `by` is the step of a range loop
+and nothing else, so `text.split("a,b,c", by ",")` does not parse.
+
+`text.join` takes a list of *text*. A number, a `yes/no` or a nested list in it
+is refused by name and by position — `text.join(["a", 1], ",")` says element 2 is
+a number — rather than printed, so `text.join` refuses the same wrong argument
+`text.uppercase(1)` does. A list of text is joined whatever it holds.
+
+`text.length` counts the bytes of the text, as the bare `length` does, so
+`text.length("🎉")` is 4 and `text.length("世界")` is 6. A count of characters
+is not the number this answers.
 
 ### math
 
 ```redblue
-set pi to math.PI
 set sqrt2 to math.sqrt(2)
-set rand to math.random(1, 100)
+set magnitude to math.abs(-7)  // 7
+set down to math.floor(1.7)  // 1
+set up to math.ceil(1.2)  // 2
 set rounded to math.round(3.7)  // 4
+set rand to math.random(1, 100)
+set first to math.random(10)
+math.seed(7)
+set repeatable to math.random(1000)  // the same on every run from this seed
 ```
+
+`math.random` takes one number to draw from zero, or two to draw from the first
+to the second; anything else is an error rather than a number. `math.seed` takes
+one number and makes every draw after it repeatable, which is what lets a
+program assert a random result.
+
+The two ends need not be close together. A range as wide as `-1e308` to `1e308`
+is drawn by scaling each end into `[0, 1]` and adding, so its width — which is
+`infinity` — is never computed at all, and the answer is a number inside the
+range rather than a refusal. No draw is ever `infinity` or `NaN`.
+
+`math.PI` is not a member: a constant is a name a program declares with
+`constant`, as §Constants describes, so it is written `constant PI to 3.14159`
+and read as `PI`.
+
+### time
+
+```redblue
+set now to time.now()
+time.sleep(1)
+set stamp to time.format(1700000000, "%Y-%m-%d %H:%M:%S")
+set short to time.format(1700000000)
+set unix to time.unix("2023-11-14 22:13:20")
+```
+
+`time.now()` answers a record of `seconds` and `nanoseconds`. `time.format`'s
+format is optional, so a timestamp alone is an ordinary call; the default is
+`%Y-%m-%d %H:%M:%S`. Any other count of arguments is refused by name.
+
+A timestamp is a whole number of seconds from zero. `time.format(-1)` and
+`time.format(1.5)` are errors rather than the epoch and a half second past it,
+and so is a timestamp past the last date a calendar holds.
+
+`time.sleep` takes a number of seconds from zero up to a year, fractions
+included. A negative value, or one too large for the `Duration` it is built from,
+is refused: a sleep that cannot be represented is an error, not a process that
+stops.
 
 ### files
 
 ```redblue
 set content to files.read("data.rb")
-might fail files.write("output.rb", content)
-might fail files.append("log.rb", "new line")
-if files.exists("config.rb")
-    // ...
+try
+    files.write("output.rb", content)
+    files.append("log.rb", "new line")
+catch error
+    say error
+end
+if files.exists("config.rb") then
+    say "there is a config"
 end
 ```
+
+`try`/`catch`/`end` is the spelling of a recoverable failure today: `might fail`
+is a reserved word that no statement parses, so it is not written in an example
+here either. A file function takes the arguments it documents and no more —
+`files.read("a", "b")` is an error, not a read of `"a"`.
 
 ### list
 
 ```redblue
-set doubled to list.map([1, 2, 3], to (x) give back x * 2)
-set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)
-set sum to list.reduce([1, 2, 3], 0, to (acc, x) give back acc + x)
+set size to list.length([1, 2, 3])  // 3
 ```
+
+`map`, `filter` and `reduce` take a function as their second argument, and the
+inline function literal they are written with here is not part of the grammar
+yet, so they are not documented as calls until it is.
 
 ### network
 
 ```redblue
-set response to wait network.get("https://api.example.com")
-set response to wait network.post("https://api.example.com", data)
+set response to network.get("https://api.example.com")
+set response to network.post("https://api.example.com", data)
 ```
 
 ### formats
 
 ```redblue
-set obj to formats.parse_json('{"name": "Alice"}')
+set obj to formats.parse_json("{\"name\": \"Alice\"}")
 set json to formats.to_json(obj)
 set csv to formats.parse_csv("name,age\nAlice,30")
+```
+
+Both formats are also modules of their own — `json.parse`, `json.stringify` and
+`csv.parse` are the same three functions under their format's name:
+
+```redblue
+set obj to json.parse("{\"name\": \"Alice\"}")
+set json to json.stringify(obj)
+set csv to csv.parse("name,age\nAlice,30")
 ```
 
 ---
@@ -891,8 +1003,7 @@ See [GRAMMAR.md](GRAMMAR.md) for the complete EBNF grammar specification.
 | break/skip | Loop control |
 | return/give back | Function return |
 | to | Function declaration |
-| takes/needs | Parameter specification |
-| might fail | Error-prone operation |
+| takes/needs | Reserved; a parameter list is written `(parameters)` |
 | number/text/yes/no | Primitive types |
 | list/record/object | Complex types |
 | module/import/export | Module system |

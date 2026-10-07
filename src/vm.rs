@@ -1162,6 +1162,20 @@ impl Vm {
 
         match self.get_var(name) {
             Some(Value::Function(function)) => self.call_user_function(name, &function, args),
+            // A module function: `text.uppercase` is the builtin `uppercase`
+            // reached through the module the documents spell it with, so it
+            // runs the same function, refuses the same arguments, and names
+            // itself the way the program wrote it. A bare builtin name is not
+            // routed here — see FINDINGS.md.
+            Some(Value::Builtin(_)) => {
+                let Some(result) = stdlib::call_module_function(self.span(), name, args) else {
+                    return Err(Error::Runtime(
+                        format!("Unknown function '{}'", name),
+                        self.span(),
+                    ));
+                };
+                result
+            }
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),
@@ -1214,9 +1228,19 @@ impl Vm {
                     .cloned()
                     .unwrap_or_else(|| name.clone());
                 let qualified = qualified_member(&module, method);
-                if self.get_var(&qualified).is_none() && self.is_module_name(&module) {
+                if self.get_var(&qualified).is_none() {
                     return Err(Error::Runtime(
-                        format!("Module '{module}' has no function '{method}'"),
+                        if self.is_module_name(&module) {
+                            format!("Module '{module}' has no function '{method}'")
+                        } else {
+                            // The name the program wrote, not the `module_member`
+                            // it was looked up as. `x_foo` is an encoding of
+                            // `x.foo` that nothing in the language writes, so a
+                            // reader of the message cannot find their own call in
+                            // it — and a name with an underscore in it is
+                            // otherwise indistinguishable from a real binding.
+                            format!("Unknown function '{module}.{method}'")
+                        },
                         self.span(),
                     ));
                 }

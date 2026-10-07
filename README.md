@@ -119,6 +119,31 @@ say content
 
 ## Standard Library
 
+The full list, with what each function does, is [SPEC.md](SPEC.md) §Standard
+Library. Every module name below is callable as `module.function(..)`.
+
+### Text
+```redblue
+text.uppercase(text)     // Text as uppercase
+text.lowercase(text)     // Text as lowercase
+text.trim(text)          // Text without leading/trailing space
+text.split(text, sep)    // Split text into a list by a separator
+text.join(list, sep)     // Join a list into text with a separator
+text.length(text)        // Length of text
+```
+
+### Math
+```redblue
+math.abs(n)             // Absolute value
+math.floor(n)           // Round down
+math.ceil(n)            // Round up
+math.round(n)           // Round to the nearest whole number
+math.sqrt(n)            // Square root
+math.random(max)        // A number from zero to max
+math.random(min, max)   // A number in a range
+math.seed(n)            // Seed the random generator, so a run repeats
+```
+
 ### Files
 ```redblue
 files.read(path)      // Read file as text
@@ -129,10 +154,16 @@ files.lines(path)    // Read as list of lines
 files.delete(path)
 ```
 
+### List
+```redblue
+list.length(list)     // Number of elements
+```
+
 ### Time
 ```redblue
 time.now()           // Get current timestamp
 time.sleep(seconds) // Sleep for N seconds
+time.format(ts)      // Format a Unix timestamp, default format
 time.format(ts, format)
 time.unix("YYYY-MM-DD HH:MM:SS")
 ```
@@ -145,10 +176,33 @@ network.post(url, body)
 
 ### Formats
 ```redblue
-json.parse(text)     // Parse JSON to record
+formats.parse_json(text)     // Parse JSON to record
+formats.to_json(value)       // Convert value to JSON text
+formats.parse_csv(text)      // Parse CSV to list of lists
+
+json.parse(text)     // Parse JSON to record — the same function
 json.stringify(value)
-csv.parse(text)     // Parse CSV to list of lists
+csv.parse(text)     // Parse CSV to list of lists — the same function
 ```
+
+### Console
+```redblue
+console.log(text)    // Print with newline
+console.error(text)  // Print an error with newline
+console.clear()      // Clear the screen
+```
+
+Every text, math and list function above is called through its module. A bare
+`uppercase("hi")` is not a second spelling of it: it is reported as an unknown
+function, because a module name is the only way these are reached today.
+
+`math.random` takes one number to draw from zero or two to draw between them,
+and `time.format`'s format is optional — the two spellings are the whole of what
+each function accepts, and any other count is refused by name. `time.sleep` takes
+a number of seconds from zero up to a year, fractions included; anything outside
+that range is refused rather than allowed to overflow the `Duration` it is built
+from. `text.join` takes a list of *text*; a number or a nested list in it is
+refused, naming the element, rather than printed.
 
 ## Project Structure
 

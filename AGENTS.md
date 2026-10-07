@@ -143,6 +143,11 @@ Detects: unused variables, style issues
 
 ### Standard Library (Implemented)
 
+Every function below is called through its module — `math.abs(x)`,
+`text.uppercase("t")`, `text.split(t, ",")`. The bare name is not a second
+spelling of it: `say abs(-1)` and `say uppercase("t")` are an
+`Unknown function` error.
+
 #### Files Module
 ```redblue
 files.read("path")     // Read entire file as text
@@ -158,7 +163,8 @@ files.rename("from", "to") // Rename/move file
 #### Time Module
 ```redblue
 time.now()             // Get current time as record
-time.sleep(seconds)    // Sleep for given seconds
+time.sleep(seconds)    // Sleep for given seconds, 0 to one year
+time.format(timestamp)  // Format Unix timestamp, default format
 time.format(timestamp, "format")  // Format Unix timestamp
 time.unix("YYYY-MM-DD HH:MM:SS")  // Parse date string to Unix timestamp
 ```
@@ -187,20 +193,37 @@ net.get("https://api.example.com")   // Using alias
 
 #### Math Functions
 ```redblue
-PI, E                    // Constants
-abs(x), floor(x), ceil(x)
-round(x), sqrt(x), pow(x, y)
-sin(x), cos(x), tan(x)
-log(x), exp(x)
+math.abs(x), math.floor(x), math.ceil(x)
+math.round(x), math.sqrt(x)
+math.random(max)             // Draw from zero to max
+math.random(min, max)        // Draw from min to max
+math.seed(n)                 // Seed the generator, so a run repeats
 ```
+
+`PI` and `E` are in the globals map but the analyzer never learns they are
+bound, so `say PI` is an `Unknown variable`. A constant is written
+`constant PI to 3.14159` — see SPEC.md §Constants. `pow`, `sin`, `cos`, `tan`,
+`log` and `exp` are registered as builtins and answered by nothing:
+`say pow(2, 3)` is an `Unknown function`. They are not listed above because
+listing them made a promise the code does not keep; see
+`phases/phase-032/FINDINGS.md` §2 and §8.
 
 #### Text Functions
 ```redblue
-uppercase("text"), lowercase("text"), trim("text")
-split("text", by), join(list, by)
-contains("text", sub), starts_with("text", prefix)
-replace("text", from, to)
+text.uppercase("text"), text.lowercase("text"), text.trim("text")
+text.split("text", separator)      // separator is an argument, not `by`
+text.join(list, separator)         // list is a list of text
+text.length("text"), list.length(list)
 ```
+
+`text.join` refuses an element that is not text, naming the element and its
+type, rather than printing it. `text.length` counts bytes, so `text.length("🎉")`
+is 4.
+
+`contains`, `starts_with`, `ends_with` and `replace` are registered as builtins
+and answered by nothing: `say replace("a", "a", "b")` is an `Unknown function`.
+They are not listed above for the same reason `pow` is not; see
+`phases/phase-032/FINDINGS.md` §2.
 
 ## Resources
 

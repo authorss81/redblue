@@ -14,10 +14,27 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
 use redblue::bytecode::vm::BytecodeVm;
 use redblue::bytecode::{compile_source, Instruction, Opcode};
 use redblue::{run_isolated, Error};
+
+/// The two tests that walk the whole corpus hold this while they do.
+///
+/// A corpus program runs in the working directory of the test process, and
+/// `examples/files.rb` writes, renames and deletes `output.txt` there — so two
+/// corpus walks running side by side interleave over one file, and the second
+/// one to reach it fails to read a file the first one deleted. One lock, taken
+/// for the length of each walk, keeps them apart: no program is skipped, no
+/// assertion is loosened, and the comparison each test makes is unchanged.
+static CORPUS_WALK: Mutex<()> = Mutex::new(());
+
+fn corpus_walk() -> MutexGuard<'static, ()> {
+    CORPUS_WALK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1613,6 +1630,7 @@ fn edge_rb_vm_refuses_a_source_file() {
 /// `modules/`, `tests/` and the generated set.
 #[test]
 fn a_corpus_of_programs_runs_identically_on_both_vms() {
+    let _walking = corpus_walk();
     let programs = corpus();
     assert!(
         programs.len() >= MINIMUM_CORPUS,
@@ -1645,6 +1663,7 @@ fn a_corpus_of_programs_runs_identically_on_both_vms() {
 /// comparison so a failure names errors rather than printouts.
 #[test]
 fn edge_the_two_vms_report_the_same_failure_for_every_corpus_program() {
+    let _walking = corpus_walk();
     let programs = corpus();
     let mut disagreements = Vec::new();
     for (name, source) in &programs {
@@ -1782,6 +1801,7 @@ fn edge_deeply_nested_data_does_not_overflow_the_bytecode_vm() {
 /// actually carried, not only on the compiler's in-memory value.
 #[test]
 fn edge_a_decoded_chunk_runs_identically_to_the_compiled_one() {
+    let _walking = corpus_walk();
     let mut ran = 0;
     for (name, source) in corpus() {
         // A program the frontend refuses never reaches a VM, so there is
