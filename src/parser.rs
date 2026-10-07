@@ -422,6 +422,14 @@ impl Parser {
 
     /// Whether the upcoming statement opens a `... end` block, and so parses its
     /// body by calling back into [`Parser::parse_statement`].
+    ///
+    /// `module` is one of them, for the same reason `if` is: [`Parser::parse_module`]
+    /// parses its body by calling back into [`Parser::parse_statement`], which is
+    /// one more level of parser recursion per nesting. Counting it here and not in
+    /// [`opens_block_at_statement_start`] left nested `module` declarations with no
+    /// budget at all, so a file of them recursed until the stack overflowed and
+    /// aborted the process — rather than being the
+    /// `Blocks nest more than 64 levels deep` every other block form gets.
     fn opens_block(&self) -> bool {
         matches!(
             self.current().map(|token| &token.kind),
@@ -434,6 +442,7 @@ impl Parser {
                 | Some(TokenKind::Object)
                 | Some(TokenKind::Try)
                 | Some(TokenKind::Test)
+                | Some(TokenKind::Module)
         )
     }
 
@@ -1983,6 +1992,75 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
     parser.parse()
 }
 
+/// Whether `kind` is a token that opens a `... end` block wherever it can begin a
+/// statement.
+///
+/// [`Parser::opens_block`] asks the same question of the token about to be read,
+/// but only after [`Parser::parse_statement_inner`] has decided what that
+/// statement is — `to` opens a function body there and is a range bound in
+/// `for each i from 1 to 10`. Counting from the token stream alone has no such
+/// context, so it is only right where a statement can begin; see
+/// [`open_block_depth`]. Both tables answer the same question for every other
+/// block form, `module` included: it is a block wherever it can begin a
+/// statement.
+fn opens_block_at_statement_start(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::If
+            | TokenKind::Unless
+            | TokenKind::For
+            | TokenKind::Repeat
+            | TokenKind::While
+            | TokenKind::To
+            | TokenKind::Object
+            | TokenKind::Try
+            | TokenKind::Test
+            | TokenKind::Module
+    )
+}
+
+/// How many `... end` blocks `tokens` leaves open: positive while the program is
+/// unfinished, zero once every block is closed, and negative only for source
+/// that closes a block it never opened.
+///
+/// This is what tells a REPL whether to read another line. It is counted from
+/// the token stream rather than from the text, so `say "end"` closes nothing and
+/// a block keyword inside a string is not an opener — matching the last word of
+/// a line instead got both wrong, and a stray `end` swallowed every line after
+/// it.
+///
+/// An opener counts only where a statement can begin. That is what keeps the two
+/// `to`s that are not function declarations out of the count: the range bound in
+/// `for each i from 1 to 10` and the alias in `import MathUtils to M` are both
+/// mid-statement, so neither reads as a body waiting for an `end`.
+pub fn open_block_depth(tokens: &[Token]) -> i32 {
+    let mut depth = 0;
+    let mut at_statement_start = true;
+
+    for token in tokens {
+        match &token.kind {
+            TokenKind::Newline => at_statement_start = true,
+            TokenKind::End => {
+                depth -= 1;
+                at_statement_start = false;
+            }
+            // A branch of a block already counted rather than a statement of its
+            // own, so the statement-start rule still holds after it: `else if x
+            // then` opens one more block.
+            TokenKind::Else | TokenKind::Catch | TokenKind::Finally => {
+                at_statement_start = true;
+            }
+            kind if at_statement_start && opens_block_at_statement_start(kind) => {
+                depth += 1;
+                at_statement_start = false;
+            }
+            _ => at_statement_start = false,
+        }
+    }
+
+    depth
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2000,5 +2078,216 @@ mod tests {
         let tokens = Lexer::tokenize("set x to 10").unwrap();
         let program = parse(tokens).unwrap();
         assert_eq!(program.statements.len(), 1);
+    }
+
+    fn depth_of(source: &str) -> i32 {
+        let tokens = Lexer::tokenize(source).expect("the source should lex");
+        open_block_depth(&tokens)
+    }
+
+    /// Every block form `docs/GRAMMAR.md` § 3.1 lists leaves a block open, and
+    /// `end` closes it. A detector that answers for none of these would let a
+    /// REPL run half of every block the user typed.
+    #[test]
+    fn open_block_depth_counts_every_block_form() {
+        let openers = [
+            "if x is greater than 0 then",
+            "unless x is nothing then",
+            "for each i from 1 to 10",
+            "for each i in [1, 2]",
+            "repeat 3 times",
+            "while x is less than 10",
+            "to greet(name)",
+            "object Person",
+            "try",
+            "test \"a name\"",
+            "module Math",
+        ];
+
+        for opener in openers {
+            assert_eq!(depth_of(opener), 1, "{:?} opens exactly one block", opener);
+            assert_eq!(
+                depth_of(&format!("{opener}\nend")),
+                0,
+                "{:?} is closed by one 'end'",
+                opener
+            );
+        }
+    }
+
+    /// An opener is counted only where a statement can begin, so the `to` that
+    /// is a range bound and the `to` that is an import alias are not function
+    /// declarations waiting for an `end`.
+    #[test]
+    fn open_block_depth_ignores_a_to_that_is_not_a_declaration() {
+        assert_eq!(
+            depth_of("for each i from 1 to 10"),
+            1,
+            "the range bound's 'to' is not a second block"
+        );
+        assert_eq!(
+            depth_of("import MathUtils to M"),
+            0,
+            "an alias is not a function body"
+        );
+        assert_eq!(
+            depth_of("import files, network to N"),
+            0,
+            "nor is one after a comma"
+        );
+        assert_eq!(depth_of("set x to 10"), 0);
+    }
+
+    /// Block keywords are counted from tokens, so one inside a string is text.
+    /// Matching the text instead closed a block on `say "end"` and opened one on
+    /// a string that happened to end in a keyword.
+    #[test]
+    fn open_block_depth_reads_tokens_not_text() {
+        assert_eq!(depth_of(r#"say "end""#), 0, "a quoted 'end' closes nothing");
+        assert_eq!(
+            depth_of(r#"say "repeat 3 times""#),
+            0,
+            "a quoted opener opens nothing"
+        );
+        assert_eq!(
+            depth_of("say 1\nend\nsay 2"),
+            -1,
+            "a stray 'end' closes nothing either"
+        );
+    }
+
+    /// `else`, `catch` and `finally` are branches of a block already counted, so
+    /// the block after one of them is still counted — `else if ... then` opens a
+    /// second block needing a second `end`.
+    #[test]
+    fn open_block_depth_counts_the_block_inside_an_else_if() {
+        assert_eq!(depth_of("if x then\nelse if y then"), 2);
+        assert_eq!(depth_of("if x then\nelse if y then\nend"), 1);
+        assert_eq!(depth_of("if x then\nelse if y then\nend\nend"), 0);
+    }
+
+    #[test]
+    fn open_block_depth_counts_nested_blocks() {
+        assert_eq!(
+            depth_of("repeat 3 times\n  if x then\n    say \"a\"\n  end"),
+            1,
+            "the inner block is closed and the outer one is not"
+        );
+        assert_eq!(depth_of("repeat 3 times\nend\nsay \"a\"\nend"), -1);
+    }
+
+    /// A one-line block is already finished when the line ends, which is what
+    /// keeps a REPL from asking for a second line it was never given.
+    #[test]
+    fn edge_a_block_whole_on_one_line_is_already_closed() {
+        for source in [
+            r#"if x then say "a" end"#,
+            "to greet(name)\nsay name\nend",
+            r#"repeat 2 times say "a" end"#,
+        ] {
+            assert_eq!(
+                depth_of(source),
+                0,
+                "{:?} needs no continuation line",
+                source
+            );
+        }
+    }
+
+    #[test]
+    fn edge_source_with_no_block_at_all_is_zero() {
+        for source in ["", "   ", "say \"hi\"", "2 + 3", "set x to 1"] {
+            assert_eq!(depth_of(source), 0, "{:?} has no block", source);
+        }
+    }
+
+    /// A block body is parsed by recursing back into `parse_statement`, so the
+    /// parser's own budget is what stops a deeply nested block from taking the
+    /// stack with it. `module` is one of those blocks — [`Parser::parse_module`]
+    /// reads its body the same way `if` does — and it was missing from
+    /// [`Parser::opens_block`], so nested modules spent no budget at all: a file
+    /// of them recursed until the process aborted on a stack overflow rather
+    /// than reporting anything.
+    #[test]
+    fn edge_blocks_deeper_than_the_budget_are_reported_whatever_their_form() {
+        // A literal rather than `MAX_BLOCK_DEPTH + 1`, so that *raising* the
+        // budget fails this test instead of quietly moving the target out of
+        // reach. The budget is pinned behaviour; changing it is deliberate.
+        let past_budget = 70;
+        assert!(
+            past_budget > MAX_BLOCK_DEPTH,
+            "depth {} is no longer past MAX_BLOCK_DEPTH ({}); re-anchor this test \
+             if the parser's budget changes",
+            past_budget,
+            MAX_BLOCK_DEPTH
+        );
+
+        for opener in [
+            "if 1 is 1 then",
+            "unless 1 is nothing then",
+            "for each i from 1 to 10",
+            "repeat 3 times",
+            "while 1 is less than 2",
+            "to greet(name)",
+            "object Person",
+            "try",
+            "test \"a name\"",
+            "module Math",
+        ] {
+            let mut source = String::new();
+            for index in 0..past_budget {
+                source.push_str(&opener.replace("Math", &format!("Math{index}")));
+                source.push('\n');
+            }
+            source.push_str("say 1\n");
+            for _ in 0..past_budget {
+                source.push_str("end\n");
+            }
+
+            let tokens = Lexer::tokenize(&source).expect("the source should lex");
+            let error = Parser::new(tokens).parse().err().unwrap_or_else(|| {
+                panic!(
+                    "{past_budget} nested {opener:?} blocks is past the budget of \
+                         {MAX_BLOCK_DEPTH}, so it must be reported rather than parsed \
+                         all the way down"
+                )
+            });
+            assert!(
+                error.to_string().contains("Blocks nest more than"),
+                "{opener:?} past the budget must name the block budget, got: {error}"
+            );
+        }
+    }
+
+    /// The two tables that answer "does this open a block" have to agree about
+    /// every form that opens one at a statement start, or one of them is a
+    /// divergence waiting to happen — this is exactly how `module` ended up in
+    /// one table and not the other, and a block form with no budget is a stack
+    /// overflow rather than a diagnostic.
+    #[test]
+    fn edge_every_statement_start_opener_is_a_block_to_the_parser_too() {
+        for kind in [
+            TokenKind::If,
+            TokenKind::Unless,
+            TokenKind::For,
+            TokenKind::Repeat,
+            TokenKind::While,
+            TokenKind::To,
+            TokenKind::Object,
+            TokenKind::Try,
+            TokenKind::Test,
+            TokenKind::Module,
+        ] {
+            assert!(
+                opens_block_at_statement_start(&kind),
+                "{kind:?} opens a block where a statement begins"
+            );
+            let parser = Parser::new(vec![Token::new(kind.clone(), 1, 1)]);
+            assert!(
+                parser.opens_block(),
+                "{kind:?} opens a block to the parser as well, or its body is \
+                 parsed without any budget"
+            );
+        }
     }
 }

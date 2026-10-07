@@ -208,6 +208,11 @@ fn nested_blocks(open: &str, depth: usize) -> String {
 fn edge_deeply_nested_blocks_are_a_clean_error_not_a_stack_overflow() {
     // A block body is parsed by recursing back into `parse_statement`, so
     // 5000 nested `if`s used to abort the process outright.
+    //
+    // `module` is one of these forms for the same reason: `parse_module` reads
+    // its body by recursing too. It was missing here *and* missing from
+    // `Parser::opens_block`, so nested modules spent no budget at all and a
+    // file of them overflowed the stack instead of reporting anything.
     for open in [
         "if true then",
         "while true",
@@ -215,6 +220,8 @@ fn edge_deeply_nested_blocks_are_a_clean_error_not_a_stack_overflow() {
         "object Deep",
         "try",
         "test \"deep\"",
+        "module Deep",
+        "to deep()",
     ] {
         let source = nested_blocks(open, MAX_BLOCK_DEPTH + 1);
         match lex_and_parse(&source) {

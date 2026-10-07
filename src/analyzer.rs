@@ -32,6 +32,27 @@ impl Analyzer {
         }
     }
 
+    /// An analyzer whose program scope already holds `names`.
+    ///
+    /// This is the entry point for a host that runs one program at a time and
+    /// keeps the bindings between them — a REPL reading a line at a time. The
+    /// VM is reused across those lines, so the *value* a line bound survives, but
+    /// an analyzer that starts empty every time does not know the name exists and
+    /// rejects the very next line: `set x to 1` then `say x` was
+    /// `Unknown variable 'x'`, and no line could read anything an earlier line
+    /// had bound — a variable, a `to`, an `import`ed module.
+    ///
+    /// The names go in the program scope ([`Analyzer::declare_in_program_scope`])
+    /// because that is where a `set` a session made lands, so a later line's read
+    /// and write of the name resolve the same way they would inside one program.
+    pub fn with_bound_names(names: &[String]) -> Self {
+        let mut analyzer = Self::new();
+        for name in names {
+            analyzer.declare_in_program_scope(name);
+        }
+        analyzer
+    }
+
     pub fn analyze(&mut self, program: &Program) -> Result<()> {
         collect_later_names(&program.statements, &mut self.later);
 
@@ -543,4 +564,87 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
 pub fn analyze(program: &Program) -> Result<()> {
     let mut analyzer = Analyzer::new();
     analyzer.analyze(program)
+}
+
+/// Analyzes `program` as the next line of a session that has already bound
+/// `names`.
+///
+/// The REPL runs each line as a program of its own, so this is how the lines
+/// before it stay readable to it. See [`Analyzer::with_bound_names`].
+pub fn analyze_with_bound_names(program: &Program, names: &[String]) -> Result<()> {
+    Analyzer::with_bound_names(names).analyze(program)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{analyze, analyze_with_bound_names};
+    use crate::lexer::Lexer;
+    use crate::parser::{parse, Program};
+
+    fn program(source: &str) -> Program {
+        parse(Lexer::tokenize(source).expect("the source should lex"))
+            .expect("the source should parse")
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    /// The entry point a REPL depends on: a name an earlier line bound is
+    /// readable on this one. Without it every session rejected its own bindings
+    /// on the next line — `set x to 1` then `say x` was `Unknown variable 'x'`.
+    #[test]
+    fn a_bound_name_is_readable_by_the_next_program() {
+        let outcome = analyze_with_bound_names(&program("say x"), &names(&["x"]));
+
+        assert!(
+            outcome.is_ok(),
+            "a name the session already bound is readable: {:?}",
+            outcome
+        );
+    }
+
+    /// Seeding a scope must not make the analyzer accept everything: a name the
+    /// session never bound is still unknown, or the check would be off rather
+    /// than carried across lines.
+    #[test]
+    fn edge_a_name_the_session_never_bound_is_still_unknown() {
+        let outcome = analyze_with_bound_names(&program("say other"), &names(&["x"]));
+
+        assert!(
+            outcome.is_err(),
+            "seeding the session's names does not turn the analyzer off"
+        );
+    }
+
+    /// The seed lives in the program scope, which is where a `set` writes, so
+    /// rebinding a name the session bound is the plain reassignment it would be
+    /// inside one program — not a shadowing that a later read cannot see.
+    #[test]
+    fn edge_a_name_the_session_bound_can_be_assigned_again() {
+        let outcome = analyze_with_bound_names(&program("set x to 2\nsay x"), &names(&["x"]));
+
+        assert!(
+            outcome.is_ok(),
+            "reassigning a session name is not an error: {:?}",
+            outcome
+        );
+    }
+
+    /// The whole point is that the two lines pass the analyzer *separately*,
+    /// exactly as the REPL runs them.
+    #[test]
+    fn two_programs_of_one_session_both_pass() {
+        let first = program("set x to 1");
+        let second = program("say x");
+
+        assert!(
+            analyze(&first).is_ok(),
+            "the line that binds the name is a whole program"
+        );
+        assert!(
+            analyze_with_bound_names(&second, &names(&["x"])).is_ok(),
+            "and the line that reads it is the next one"
+        );
+    }
 }
