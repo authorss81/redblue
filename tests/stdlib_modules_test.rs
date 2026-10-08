@@ -114,7 +114,7 @@ fn redblue_text(value: &str) -> String {
 
 /// A list of text cells, for comparing what `csv.parse` produced.
 fn cells(fields: &[&str]) -> Value {
-    Value::List(
+    Value::list(
         fields
             .iter()
             .map(|f| Value::Text((*f).to_string()))
@@ -124,7 +124,7 @@ fn cells(fields: &[&str]) -> Value {
 
 /// Rows of cells, for comparing what `csv.parse` produced.
 fn rows(expected: &[&[&str]]) -> Value {
-    Value::List(expected.iter().map(|r| cells(r)).collect())
+    Value::list(expected.iter().map(|r| cells(r)).collect())
 }
 
 // ---------------------------------------------------------------- files
@@ -167,7 +167,7 @@ fn edge_empty_file_reads_as_empty_text() {
     );
     assert_eq!(
         eval(&format!("files.lines({})", dir.literal("empty.txt"))),
-        Value::List(Vec::new()),
+        Value::list(Vec::new()),
         "an empty file has no lines"
     );
     assert_eq!(
@@ -239,7 +239,7 @@ fn files_lines_splits_lines_and_keeps_blank_ones() {
     dir.write_file("lines.txt", "a\n\nb\n");
     assert_eq!(
         eval(&format!("files.lines({})", dir.literal("lines.txt"))),
-        Value::List(vec![
+        Value::list(vec![
             Value::Text("a".to_string()),
             Value::Text(String::new()),
             Value::Text("b".to_string()),
@@ -250,7 +250,7 @@ fn files_lines_splits_lines_and_keeps_blank_ones() {
     dir.write_file("crlf.txt", "a\r\nb\r\n");
     assert_eq!(
         eval(&format!("files.lines({})", dir.literal("crlf.txt"))),
-        Value::List(vec![
+        Value::list(vec![
             Value::Text("a".to_string()),
             Value::Text("b".to_string())
         ]),
@@ -583,7 +583,7 @@ fn edge_csv_ragged_rows_keep_their_own_cells() {
 fn edge_csv_empty_text_and_a_blank_line() {
     assert_eq!(
         eval("csv.parse(\"\")"),
-        Value::List(Vec::new()),
+        Value::list(Vec::new()),
         "empty text is no rows"
     );
     assert_eq!(
@@ -684,7 +684,7 @@ fn json_record_keys_are_escaped_when_written() {
     let parsed = eval("json.parse(\"{\\\"a\\\\\\\"b\\\": 1, \\\"line\\\\nbreak\\\": 2}\")");
     assert_eq!(
         parsed,
-        Value::Record(
+        Value::record(
             [
                 ("a\"b".to_string(), Value::Number(1.0)),
                 ("line\nbreak".to_string(), Value::Number(2.0)),
@@ -749,7 +749,7 @@ fn json_stringify_keeps_field_order() {
 fn edge_json_singleton_and_scalar_values() {
     assert_eq!(
         eval("json.parse(\"[7]\")"),
-        Value::List(vec![Value::Number(7.0)]),
+        Value::list(vec![Value::Number(7.0)]),
         "a one-element array is a one-element list"
     );
     assert_eq!(eval("json.parse(\"null\")"), Value::Nothing);

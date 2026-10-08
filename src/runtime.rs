@@ -253,6 +253,54 @@ pub fn unary_op(span: Span, op: &UnaryOp, value: Value) -> Result<Value> {
     }
 }
 
+/// `append(name, value)` with the name lookup folded in: given the binding a
+/// read of `name` resolves to, this grows it and returns.
+///
+/// `current` is `None` for a name no scope holds, and a `&mut` for one that is.
+/// Taking the binding by reference rather than by value is the whole of what
+/// makes the append a step: a value read *out* of a scope carries a second
+/// handle on the storage, and `make_mut` answers a second handle with a copy.
+/// Growing through the binding itself is the only way to see that the caller is
+/// the one holding it.
+///
+/// A name that holds something other than a list is refused rather than bound
+/// over: `append` grows a list, and replacing a number with a list would make it
+/// a `set` that says nothing about what it did.
+pub fn append_through(
+    span: Span,
+    name: &str,
+    current: Option<&mut Value>,
+    value: Value,
+) -> Result<()> {
+    let Some(list) = current else {
+        return Err(Error::Runtime(
+            format!("Cannot append to '{name}': no name '{name}' is bound to a list"),
+            span,
+        ));
+    };
+    if !list.append(value) {
+        return Err(Error::Runtime(
+            format!(
+                "Cannot append to '{name}': it holds a {}, not a list",
+                list.type_name()
+            ),
+            span,
+        ));
+    }
+    Ok(())
+}
+
+/// The name `append` grows, and the refusal for a call that did not give one.
+pub fn append_target<'a>(span: Span, args: &'a [Value]) -> Result<&'a str> {
+    match (args.first(), args.len()) {
+        (Some(Value::Text(name)), 2) => Ok(name),
+        _ => Err(Error::Runtime(
+            "append requires a name and a value, as in append(\"xs\", 1)".to_string(),
+            span,
+        )),
+    }
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -376,7 +424,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 .lines()
                 .map(|l| Value::Text(l.to_string()))
                 .collect();
-            Ok(Some(Value::List(lines)))
+            Ok(Some(Value::list(lines)))
         }
         "files_delete" => {
             let path = match args.first() {
@@ -432,7 +480,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ("seconds".to_string(), Value::Number(secs as f64)),
                 ("nanoseconds".to_string(), Value::Number(nanos as f64)),
             ]);
-            Ok(Some(Value::Record(record)))
+            Ok(Some(Value::record(record)))
         }
         "time_sleep" => {
             let seconds = match args.first() {
@@ -632,18 +680,19 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             }
         }
         "random_shuffle" => {
-            if let Some(Value::List(mut items)) = args.first().cloned() {
+            if let Some(Value::List(items)) = args.first().cloned() {
+                let mut shuffled = (*items).clone();
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|e| Error::Runtime(e.to_string(), span))?;
                 let seed = now.as_nanos() as usize;
 
-                for i in (1..items.len()).rev() {
+                for i in (1..shuffled.len()).rev() {
                     let j = seed % (i + 1);
-                    items.swap(i, j);
+                    shuffled.swap(i, j);
                 }
-                Ok(Some(Value::List(items)))
+                Ok(Some(Value::list(shuffled)))
             } else {
                 Err(Error::Runtime(
                     "random_shuffle requires a list".to_string(),
@@ -703,7 +752,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 }
             };
             let mut pushed = items.clone();
-            pushed.push(value.clone());
+            crate::value::Shared::make_mut(&mut pushed).push(value.clone());
             Ok(Some(Value::List(pushed)))
         }
         // `bytes.from_text` and `bytes.write` are the whole of a binary file
@@ -722,7 +771,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            Ok(Some(Value::List(
+            Ok(Some(Value::list(
                 text.as_bytes()
                     .iter()
                     .map(|byte| Value::Number(*byte as f64))
@@ -740,7 +789,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 }
             };
             let mut out = Vec::with_capacity(bytes.len());
-            for byte in bytes {
+            for byte in bytes.iter() {
                 let Value::Number(value) = byte else {
                     return Err(Error::Runtime(
                         format!(
@@ -780,7 +829,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 }
             };
             let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-            for byte in bytes {
+            for byte in bytes.iter() {
                 let Value::Number(value) = byte else {
                     return Err(Error::Runtime(
                         format!(
@@ -808,7 +857,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 )),
             }
         }
-        "sys_argv" => Ok(Some(Value::List(
+        "sys_argv" => Ok(Some(Value::list(
             program_args()
                 .iter()
                 .map(|argument| Value::Text(argument.clone()))
@@ -1009,7 +1058,7 @@ fn parse_csv(text: &str, span: Span) -> Result<Value> {
                     if c == '\r' && chars.get(index + 1) == Some(&'\n') {
                         index += 1;
                     }
-                    rows.push(Value::List(std::mem::take(&mut row)));
+                    rows.push(Value::list(std::mem::take(&mut row)));
                 }
             }
             _ => {
@@ -1029,7 +1078,7 @@ fn parse_csv(text: &str, span: Span) -> Result<Value> {
     if at_field_start && row.is_empty() {
         // The text ended on a row separator, so there is no trailing empty row
         // — and empty text has no rows at all.
-        return Ok(Value::List(rows));
+        return Ok(Value::list(rows));
     }
     let cell = if was_quoted {
         field.clone()
@@ -1037,8 +1086,8 @@ fn parse_csv(text: &str, span: Span) -> Result<Value> {
         field.trim().to_string()
     };
     row.push(Value::Text(cell));
-    rows.push(Value::List(row));
-    Ok(Value::List(rows))
+    rows.push(Value::list(row));
+    Ok(Value::list(rows))
 }
 
 fn parse_json_object(json: &str, span: Span) -> Result<Value> {
@@ -1049,7 +1098,7 @@ fn parse_json_object(json: &str, span: Span) -> Result<Value> {
     let mut map = crate::value::Fields::new();
     let content = &json[1..json.len() - 1];
     if content.trim().is_empty() {
-        return Ok(Value::Record(map));
+        return Ok(Value::record(map));
     }
     for pair in split_json_pairs(content) {
         let parts: Vec<&str> = pair.splitn(2, ':').collect();
@@ -1068,7 +1117,7 @@ fn parse_json_object(json: &str, span: Span) -> Result<Value> {
         let value = parse_json(parts[1].trim(), span)?;
         map.insert(key, value);
     }
-    Ok(Value::Record(map))
+    Ok(Value::record(map))
 }
 
 fn parse_json_array(json: &str, span: Span) -> Result<Value> {
@@ -1078,13 +1127,13 @@ fn parse_json_array(json: &str, span: Span) -> Result<Value> {
     }
     let content = &json[1..json.len() - 1];
     if content.trim().is_empty() {
-        return Ok(Value::List(Vec::new()));
+        return Ok(Value::list(Vec::new()));
     }
     let mut items = Vec::new();
     for item in split_json_elements(content) {
         items.push(parse_json(item, span)?);
     }
-    Ok(Value::List(items))
+    Ok(Value::list(items))
 }
 
 fn parse_json_string(json: &str, span: Span) -> Result<String> {

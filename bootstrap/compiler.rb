@@ -45,6 +45,17 @@ constant NO_CONST to 4294967295
 constant STATEMENT_MARKER to 4294967294
 constant END_TRY_MARKER to 4294967295
 
+// The five lists the code generator accumulates into, and the reason they are
+// names rather than a record threaded through every call is in the code
+// generation section below. They are bound here, at the top level, so that every
+// function below reaches the same five lists by name: a Redblue binding is
+// program-wide, and `append` grows the list a name holds.
+set G_POOL to []
+set G_INTERN to []
+set G_CODE to []
+set G_JUMPS to []
+set G_BLOCKS to []
+
 // ---------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------
@@ -623,8 +634,8 @@ to keyword_of(word)
     set keyword_of_kinds to 0
     set keyword_of_kind to 0
     set keyword_of_i to 0
-    set keyword_of_words to ["set", "constant", "to", "is", "are", "if", "then", "else", "end", "when", "unless", "for", "each", "in", "from", "times", "while", "repeat", "until", "break", "skip", "return", "give", "back", "might", "fail", "say", "print", "ask", "try", "catch", "finally", "and", "or", "not", "mod", "yes", "no", "nothing", "module", "import", "export", "as", "test", "expect", "object", "has", "can", "this", "that", "new", "extends", "async", "wait", "parallel", "stop"]
-    set keyword_of_kinds to ["set", "constant", "to", "is", "are", "if", "then", "else", "end", "when", "unless", "for", "each", "in", "from", "times", "while", "repeat", "until", "break", "skip", "return", "giveback", "giveback", "mightfail", "mightfail", "say", "print", "ask", "try", "catch", "finally", "and", "or", "not", "mod", "yes", "no", "nothing", "module", "import", "export", "as", "test", "expect", "object", "has", "can", "this", "that", "new", "extends", "async", "wait", "parallel", "stop"]
+    set keyword_of_words to ["set", "constant", "to", "is", "are", "if", "then", "else", "end", "when", "unless", "for", "each", "in", "from", "times", "while", "repeat", "until", "break", "skip", "return", "give", "back", "might", "fail", "say", "print", "ask", "try", "catch", "finally", "and", "or", "not", "mod", "yes", "no", "nothing", "module", "import", "export", "as", "test", "expect", "object", "has", "can", "this", "that", "new", "extends", "async", "wait", "parallel"]
+    set keyword_of_kinds to ["set", "constant", "to", "is", "are", "if", "then", "else", "end", "when", "unless", "for", "each", "in", "from", "times", "while", "repeat", "until", "break", "skip", "return", "giveback", "giveback", "mightfail", "mightfail", "say", "print", "ask", "try", "catch", "finally", "and", "or", "not", "mod", "yes", "no", "nothing", "module", "import", "export", "as", "test", "expect", "object", "has", "can", "this", "that", "new", "extends", "async", "wait", "parallel"]
     set keyword_of_kind to "id"
     set keyword_of_i to 0
     while keyword_of_i < length(keyword_of_words)
@@ -2066,97 +2077,148 @@ to parse_record_fields(tokens, pos, depth, fields)
     end
     give back parse_record_fields_out
 end
-
 // ---------------------------------------------------------------------------
 // Code generation
 //
-// `src/bytecode/codegen.rs` is the specification. `ctx` carries the constant
-// pool (`p`), the intern table (`i`), the current block's instructions (`c`),
-// its pending jump patches (`j`) and its nested blocks (`b`).
+// `src/bytecode/codegen.rs` is the specification. It carries a `Ctx` through
+// every call, and this file cannot: a Redblue binding is copied when it is
+// read, so a `ctx` threaded through a call would copy the whole instruction
+// list on every instruction emitted, and a program of n instructions would cost
+// n^2 copies of the run so far. It was the reason a self-compilation did not
+// finish (`phases/phase-022/FINDINGS.md` measures n^1.94 and extrapolates to
+// roughly 24 minutes for this file alone).
+//
+// So the five lists `ctx` carried are names here, and `append` grows them:
+//
+//   G_POOL     the constant pool, in order of first use
+//   G_INTERN   the intern table: every name once, with its pool index
+//   G_CODE     the instructions of the block being compiled
+//   G_JUMPS    the patches that block's jumps still need
+//   G_BLOCKS   the nested blocks that block has compiled
+//
+// `G_POOL` and `G_INTERN` belong to the whole program and are never saved. The
+// other three belong to the block being compiled, so `compile_block` saves them
+// and puts them back: a nested block is compiled *into* its parent's run while
+// it is being built, and its own instructions are what the block record keeps.
 // ---------------------------------------------------------------------------
 
 to compile_program(program)
-    set compile_program_ctx to 0
-    set compile_program_r to 0
-    set compile_program_ctx to {p: [], i: [], c: [], j: [], b: []}
-    set compile_program_r to compile_block(program, 0, [109, 97, 105, 110], 0, [], 0, compile_program_ctx, yes, "statements")
-    give back {p: compile_program_r[1].p, main: compile_program_r[0]}
+    set compile_program_main to 0
+    // The block is built first and the pool read after it: a record literal
+    // reads its fields where it is written, and the pool is empty until the
+    // block has been compiled into it.
+    set compile_program_main to compile_block(program, 0, [109, 97, 105, 110], 0, [], 0, 0, 0, [], yes, "statements")
+    give back {p: G_POOL, main: compile_program_main}
 end
 
 // `Compiler::block`: one declaration compiled into a block of its own.
-to compile_block(body, kind, name, arity, params, depth, ctx, reads_value, body_kind)
+//
+// A block is compiled *in the middle of* its enclosing run, the way `src/
+// bytecode/codegen.rs` compiles it in the middle of the enclosing `Ctx`, and the
+// run it was interrupting is cut back to what it was at the end. So the three
+// block-scoped names work like this:
+//
+//   G_BLOCKS  is swapped for an empty list and put back, because a block's
+//             children are its own and the enclosing block's stay its own.
+//   G_CODE    and G_JUMPS are not swapped but *cut*: the block's instructions
+//             are appended to the enclosing run and taken back out again by
+//             `take_from`, which returns both the block's half and the
+//             enclosing run without it.
+//
+// The copy `take_from` makes is the price of that shape, and it is paid once per
+// block rather than once per instruction, which is the whole difference between
+// a self-compilation that finishes and one that does not.
+//
+// Where the enclosing run is — its two start offsets and its children — is
+// *passed in*, and that is not style. A `set` inside a function writes a
+// program-wide name, so a name this block saved for itself would be the name its
+// own nested block had already saved over: the inner block's offsets would be
+// read as the outer block's, and the outer block's code would lose its first
+// instructions. A parameter is the only binding in Redblue that belongs to one
+// call, so the enclosing state arrives as one.
+to compile_block(body, kind, name, arity, params, depth, code_start, jumps_start, outer_blocks, reads_value, body_kind)
     if depth > 64 then
         refuse(0, "program nests blocks more than 64 levels deep")
     end
-    set compile_block_inner to {p: ctx.p, i: ctx.i, c: [], j: [], b: []}
-    set compile_block_inner to compile_statements(body, compile_block_inner, depth, reads_value, body_kind)
-    set compile_block_block to {k: kind, n: name, a: arity, ps: params, code: apply_patches(compile_block_inner.c, compile_block_inner.j), b: compile_block_inner.b}
-    give back [compile_block_block, compile_block_inner]
+    set G_BLOCKS to []
+    compile_statements(body, depth, reads_value, body_kind)
+    set compile_block_code to take_from(G_CODE, code_start)
+    set compile_block_jumps to take_from(G_JUMPS, jumps_start)
+    set compile_block_own_blocks to G_BLOCKS
+    set G_CODE to compile_block_code[1]
+    set G_JUMPS to compile_block_jumps[1]
+    set G_BLOCKS to outer_blocks
+    give back {k: kind, n: name, a: arity, ps: params, code: apply_patches(compile_block_code[0], compile_block_jumps[0], code_start), b: compile_block_own_blocks}
+end
+
+// `xs` from `start` on, and `xs` without them: what a block being compiled in
+// the middle of an enclosing run needs to be able to say.
+to take_from(xs, start)
+    set take_from_taken to []
+    set take_from_kept to []
+    set take_from_i to 0
+    while take_from_i < length(xs)
+        if take_from_i < start then
+            set take_from_kept to push(take_from_kept, xs[take_from_i])
+        else
+            set take_from_taken to push(take_from_taken, xs[take_from_i])
+        end
+        set take_from_i to take_from_i + 1
+    end
+    give back [take_from_taken, take_from_kept]
 end
 
 // A nested block: compiled first, so its constants enter the pool before the
 // instruction that names it, then appended to this block's own children.
-to nested_block(body, kind, name, arity, params, depth, ctx, reads_value, body_kind)
-    set nested_block_r to 0
-    set nested_block_next to 0
-    set nested_block_r to compile_block(body, kind, name, arity, params, depth, ctx, reads_value, body_kind)
-    set nested_block_next to {p: nested_block_r[1].p, i: nested_block_r[1].i, c: ctx.c, j: ctx.j, b: push(ctx.b, nested_block_r[0])}
-    give back [nested_block_next, length(ctx.b)]
+to nested_block(body, kind, name, arity, params, depth, reads_value, body_kind)
+    append("G_BLOCKS", compile_block(body, kind, name, arity, params, depth, length(G_CODE), length(G_JUMPS), G_BLOCKS, reads_value, body_kind))
+    give back length(G_BLOCKS) - 1
 end
 
-// Carries a block's pool and intern table forward, leaving this block's own
-// instruction list and children alone.
-to with_state(ctx, other)
-    give back {p: other.p, i: other.i, c: ctx.c, j: ctx.j, b: ctx.b}
-end
-
-to with_children(ctx, children)
-    give back {p: ctx.p, i: ctx.i, c: ctx.c, j: ctx.j, b: children}
-end
-
-to with_patches(ctx, patches)
-    give back {p: ctx.p, i: ctx.i, c: ctx.c, j: patches, b: ctx.b}
-end
-
-to compile_statements(body, ctx, depth, reads_value, body_kind)
+to compile_statements(body, depth, reads_value, body_kind)
     for each each_stmt in body
-        set ctx to compile_statement(each_stmt, ctx, depth, reads_value, body_kind)
+        compile_statement(each_stmt, depth, reads_value, body_kind)
     end
-    give back ctx
 end
 
-to emit(ctx, opcode, arg, aux, line)
-    give back {p: ctx.p, i: ctx.i, c: push(ctx.c, {o: opcode, a: arg, x: aux, l: line}), j: ctx.j, b: ctx.b}
+to emit(opcode, arg, aux, line)
+    append("G_CODE", {o: opcode, a: arg, x: aux, l: line})
 end
 
 // A jump whose target is not known yet: the slot, and what to do with it once
 // the block is complete.
-to emit_jump(ctx, opcode, line)
-    set emit_jump_slot to length(ctx.c)
-    set ctx to emit(ctx, opcode, 0, 0, line)
-    give back with_patches(ctx, push(ctx.j, {slot: emit_jump_slot, at: "here", value: 0}))
+to emit_jump(opcode, line)
+    set emit_jump_slot to length(G_CODE)
+    emit(opcode, 0, 0, line)
+    append("G_JUMPS", {slot: emit_jump_slot, at: "here", value: 0})
 end
 
 // The same, with the slot it recorded: a caller whose patch target is not the
 // end of the block needs to know where the jump is, and cannot keep that in a
 // name across the code it compiles next.
-to emit_jump_at(ctx, opcode, line)
-    set emit_jump_at_slot to length(ctx.c)
-    set ctx to emit(ctx, opcode, 0, 0, line)
-    set ctx to with_patches(ctx, push(ctx.j, {slot: emit_jump_at_slot, at: "here", value: 0}))
-    set emit_jump_at_out to [ctx, emit_jump_at_slot]
-    give back emit_jump_at_out
+to emit_jump_at(opcode, line)
+    set emit_jump_at_slot to length(G_CODE)
+    emit(opcode, 0, 0, line)
+    append("G_JUMPS", {slot: emit_jump_at_slot, at: "here", value: 0})
+    give back emit_jump_at_slot
 end
 
 // A jump that points at an instruction already emitted.
-to patch_at(ctx, slot, offset)
-    give back with_patches(ctx, push(ctx.j, {slot: slot, at: "there", value: offset}))
+to patch_at(slot, offset)
+    append("G_JUMPS", {slot: slot, at: "there", value: offset})
 end
 
 // Points every recorded jump at its target. A jump that landed at the end of the
 // block is resolved here, which is why the file needs no instruction after the
 // last statement for one to land on.
-to apply_patches(code, patches)
+//
+// `start` is where this block's code began in the run it was compiled into, and
+// both halves of a patch are offsets into that run: the slot the jump is at and
+// the offset it points at. They are turned back into positions in the block's own
+// code here, because that is the only code this list is applied to — the block
+// that recorded a patch has already had the enclosing block's instructions cut
+// away from in front of them.
+to apply_patches(code, patches, start)
     set apply_patches_out to 0
     set apply_patches_i to 0
     set apply_patches_arg to 0
@@ -2165,11 +2227,11 @@ to apply_patches(code, patches)
     while apply_patches_i < length(code)
         set apply_patches_arg to code[apply_patches_i].a
         for each each_patch in patches
-            if each_patch.slot is apply_patches_i then
+            if each_patch.slot - start is apply_patches_i then
                 if each_patch.at is "here" then
                     set apply_patches_arg to length(code)
                 else
-                    set apply_patches_arg to each_patch.value
+                    set apply_patches_arg to each_patch.value - start
                 end
             end
         end
@@ -2181,56 +2243,53 @@ end
 
 // The intern table. A name used a hundred times is one entry, so the pool is
 // the same whichever way round the source used them.
-to intern(ctx, raw)
+to intern(raw)
     set intern_found to 0
     set intern_i to 0
     set intern_found to -1
     set intern_i to 0
-    while intern_i < length(ctx.i)
-        if ctx.i[intern_i].k is raw then
+    while intern_i < length(G_INTERN)
+        if G_INTERN[intern_i].k is raw then
             set intern_found to intern_i
         end
         set intern_i to intern_i + 1
     end
-    set intern_result to nothing
+    set intern_result to 0
     if intern_found >= 0 then
-        set intern_result to {ctx: ctx, index: ctx.i[intern_found].n}
-    else
-        set intern_index to length(ctx.p)
-        set intern_pool to push(ctx.p, {t: 3, b: raw})
-        set intern_table to push(ctx.i, {k: raw, n: intern_index})
-        set intern_result to {ctx: {p: intern_pool, i: intern_table, c: ctx.c, j: ctx.j, b: ctx.b}, index: intern_index}
+        set intern_result to G_INTERN[intern_found].n
+    end
+    if intern_found < 0 then
+        set intern_index to length(G_POOL)
+        append("G_POOL", {t: 3, b: raw})
+        append("G_INTERN", {k: raw, n: intern_index})
+        set intern_result to intern_index
     end
     give back intern_result
 end
 
 // `Compiler::text`: intern a name and use it as an operand.
-to emit_name(ctx, opcode, raw, aux, line)
-    set emit_name_r to 0
-    set emit_name_r to intern(ctx, raw)
-    give back emit(emit_name_r.ctx, opcode, emit_name_r.index, aux, line)
+to emit_name(opcode, raw, aux, line)
+    emit(opcode, intern(raw), aux, line)
 end
 
 // A constant that is **not** interned: a literal, appended every time it is
 // written.
-to emit_const(ctx, tag, raw, line)
+to emit_const(tag, raw, line)
     set emit_const_index to 0
-    set emit_const_pool to 0
-    set emit_const_index to length(ctx.p)
-    set emit_const_pool to push(ctx.p, {t: tag, b: raw})
-    give back emit({p: emit_const_pool, i: ctx.i, c: ctx.c, j: ctx.j, b: ctx.b}, 1, emit_const_index, 0, line)
+    set emit_const_index to length(G_POOL)
+    append("G_POOL", {t: tag, b: raw})
+    emit(1, emit_const_index, 0, line)
 end
 
 // `Constant::Nothing`, which is the value a `return` with no value returns.
-to emit_nothing(ctx, line)
+to emit_nothing(line)
     set emit_nothing_index to 0
-    set emit_nothing_pool to 0
-    set emit_nothing_index to length(ctx.p)
-    set emit_nothing_pool to push(ctx.p, {t: 0, b: []})
-    give back emit({p: emit_nothing_pool, i: ctx.i, c: ctx.c, j: ctx.j, b: ctx.b}, 1, emit_nothing_index, 0, line)
+    set emit_nothing_index to length(G_POOL)
+    append("G_POOL", {t: 0, b: []})
+    emit(1, emit_nothing_index, 0, line)
 end
 
-to compile_statement(stmt, ctx, depth, reads_value, body_kind)
+to compile_statement(stmt, depth, reads_value, body_kind)
     set compile_statement_charges to 0
 
     // The marker that begins every statement the tree-walking VM compile_statement_charges a step
@@ -2252,161 +2311,158 @@ to compile_statement(stmt, ctx, depth, reads_value, body_kind)
         end
     end
     if compile_statement_charges is yes then
-        set ctx to emit(ctx, 0, STATEMENT_MARKER, 0, stmt.l)
+        emit(0, STATEMENT_MARKER, 0, stmt.l)
     end
 
     if stmt.s is "say" then
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
-        set ctx to emit(ctx, 5, 0, 0, stmt.l)
+        compile_expr(stmt.e, stmt.l)
+        emit(5, 0, 0, stmt.l)
     end
     if stmt.s is "print" then
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
-        set ctx to emit(ctx, 6, 0, 0, stmt.l)
+        compile_expr(stmt.e, stmt.l)
+        emit(6, 0, 0, stmt.l)
     end
     if stmt.s is "expr" then
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
+        compile_expr(stmt.e, stmt.l)
         // A block nobody reads the value of is a statement, and a statement
         // consumes what it produced. An `expect` is the one expression that
         // pushes nothing — it compares both operands itself — so a `POP` after
         // one would underflow rather than discard.
         if reads_value is no then
             if stmt.e.k is not "expect" then
-                set ctx to emit(ctx, 2, 0, 0, stmt.l)
+                emit(2, 0, 0, stmt.l)
             end
         end
     end
     if stmt.s is "set" then
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
-        set ctx to emit_name(ctx, 4, stmt.n, 0, stmt.l)
+        compile_expr(stmt.e, stmt.l)
+        emit_name(4, stmt.n, 0, stmt.l)
     end
     if stmt.s is "constant" then
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
-        set ctx to emit_name(ctx, 46, stmt.n, 0, stmt.l)
+        compile_expr(stmt.e, stmt.l)
+        emit_name(46, stmt.n, 0, stmt.l)
     end
     if stmt.s is "setproperty" then
-        set ctx to emit_name(ctx, 3, stmt.o, 0, stmt.l)
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
-        set ctx to emit_name(ctx, 8, cat(cat(stmt.o, [46]), stmt.p), 0, stmt.l)
+        emit_name(3, stmt.o, 0, stmt.l)
+        compile_expr(stmt.e, stmt.l)
+        emit_name(8, cat(cat(stmt.o, [46]), stmt.p), 0, stmt.l)
     end
     if stmt.s is "if" then
-        set ctx to compile_expr(stmt.c, ctx, stmt.l)
-        set compile_statement_r to emit_jump_at(ctx, 35, stmt.l)
+        compile_expr(stmt.c, stmt.l)
+        set compile_statement_r to emit_jump_at(35, stmt.l)
         // The slot travels as a parameter into the branch: a name in a variable
         // would not survive the nested parse of that branch, because a name a
         // Redblue function assigns is one program-wide name.
-        set ctx to compile_if_branches(stmt, compile_statement_r[0], depth, compile_statement_r[1])
+        compile_if_branches(stmt, depth, compile_statement_r)
     end
     if stmt.s is "unless" then
-        set ctx to compile_expr(stmt.c, ctx, stmt.l)
+        compile_expr(stmt.c, stmt.l)
         // There is no `JumpIfTrue`, so the condition is negated and the existing
         // jump runs the body exactly when it was false.
-        set ctx to emit(ctx, 28, 0, 0, stmt.l)
-        set compile_statement_r to emit_jump_at(ctx, 35, stmt.l)
-        set ctx to compile_unless_body(stmt, compile_statement_r[0], depth, compile_statement_r[1])
+        emit(28, 0, 0, stmt.l)
+        set compile_statement_r to emit_jump_at(35, stmt.l)
+        compile_unless_body(stmt, depth, compile_statement_r)
     end
     if stmt.s is "foreach" then
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
-        set ctx to emit(ctx, 36, 0, 0, stmt.l)
-        set ctx to emit_name(ctx, 4, stmt.v, 0, stmt.l)
-        set ctx to compile_loop_body(stmt, ctx, depth, length(ctx.c) - 1, stmt.l)
+        compile_expr(stmt.e, stmt.l)
+        emit(36, 0, 0, stmt.l)
+        emit_name(4, stmt.v, 0, stmt.l)
+        compile_loop_body(stmt, depth, length(G_CODE) - 1, stmt.l)
     end
     if stmt.s is "forrange" then
-        set ctx to compile_expr(stmt.a, ctx, stmt.l)
-        set ctx to compile_expr(stmt.b, ctx, stmt.l)
+        compile_expr(stmt.a, stmt.l)
+        compile_expr(stmt.b, stmt.l)
         // Only the bounds the range actually has are compiled. A `for each i
         // from 1 to 3` leaves `step` unset, and stage 1 pushes no step for it
         // and emits no `POP` to undo one: `GET_RANGE`'s arity is the only thing
         // that says how many bounds were pushed.
         if stmt.has_step is yes then
-            set ctx to compile_expr(stmt.step, ctx, stmt.l)
+            compile_expr(stmt.step, stmt.l)
         end
-        set ctx to emit(ctx, 37, 0, range_arity(stmt.has_step), stmt.l)
-        set ctx to emit_name(ctx, 4, stmt.v, 0, stmt.l)
-        set ctx to compile_loop_body(stmt, ctx, depth, length(ctx.c) - 1, stmt.l)
+        emit(37, 0, range_arity(stmt.has_step), stmt.l)
+        emit_name(4, stmt.v, 0, stmt.l)
+        compile_loop_body(stmt, depth, length(G_CODE) - 1, stmt.l)
     end
     if stmt.s is "repeat" then
-        set ctx to compile_expr(stmt.e, ctx, stmt.l)
-        set ctx to emit(ctx, 37, 0, 1, stmt.l)
-        set ctx to emit_name(ctx, 4, [36, 99, 111, 117, 110, 116, 101, 114], 0, stmt.l)
-        set ctx to compile_loop_body(stmt, ctx, depth, length(ctx.c) - 1, stmt.l)
+        compile_expr(stmt.e, stmt.l)
+        emit(37, 0, 1, stmt.l)
+        emit_name(4, [36, 99, 111, 117, 110, 116, 101, 114], 0, stmt.l)
+        compile_loop_body(stmt, depth, length(G_CODE) - 1, stmt.l)
     end
     if stmt.s is "while" then
-        set ctx to compile_while(stmt, ctx, depth, length(ctx.c))
+        compile_while(stmt, depth, length(G_CODE))
     end
     if stmt.s is "break" then
-        set ctx to emit(ctx, 32, 0, 0, stmt.l)
+        emit(32, 0, 0, stmt.l)
     end
     if stmt.s is "skip" then
-        set ctx to emit(ctx, 33, 0, 0, stmt.l)
+        emit(33, 0, 0, stmt.l)
     end
     if stmt.s is "return" then
         if stmt.e is nothing then
-            set ctx to emit_nothing(ctx, stmt.l)
+            emit_nothing(stmt.l)
         else
-            set ctx to compile_expr(stmt.e, ctx, stmt.l)
+            compile_expr(stmt.e, stmt.l)
         end
-        set ctx to emit(ctx, 31, 0, 0, stmt.l)
+        emit(31, 0, 0, stmt.l)
     end
     if stmt.s is "function" then
-        set compile_statement_r to nested_block(stmt.t, 1, stmt.n, length(stmt.ps), stmt.ps, depth, ctx, yes, "statements")
-        set ctx to compile_statement_r[0]
-        set ctx to emit(ctx, 38, compile_statement_r[1], length(stmt.ps), stmt.l)
-        set ctx to emit_name(ctx, 4, stmt.n, 0, stmt.l)
+        set compile_statement_r to nested_block(stmt.t, 1, stmt.n, length(stmt.ps), stmt.ps, depth, yes, "statements")
+        emit(38, compile_statement_r, length(stmt.ps), stmt.l)
+        emit_name(4, stmt.n, 0, stmt.l)
     end
     if stmt.s is "method" then
-        set compile_statement_r to nested_block(stmt.t, 2, stmt.n, length(stmt.ps), stmt.ps, depth, ctx, yes, "statements")
-        set ctx to compile_statement_r[0]
-        set ctx to emit(ctx, 39, compile_statement_r[1], length(stmt.ps), stmt.l)
+        set compile_statement_r to nested_block(stmt.t, 2, stmt.n, length(stmt.ps), stmt.ps, depth, yes, "statements")
+        emit(39, compile_statement_r, length(stmt.ps), stmt.l)
     end
     if stmt.s is "has" then
         if stmt.d is nothing then
-            set ctx to emit_nothing(ctx, stmt.l)
+            emit_nothing(stmt.l)
         else
-            set ctx to compile_expr(stmt.d, ctx, stmt.l)
+            compile_expr(stmt.d, stmt.l)
         end
-        set ctx to emit_name(ctx, 41, stmt.n, 0, stmt.l)
+        emit_name(41, stmt.n, 0, stmt.l)
     end
     if stmt.s is "object" then
-        set ctx to compile_object(stmt, ctx, depth)
+        compile_object(stmt, depth)
     end
     if stmt.s is "try" then
-        set ctx to compile_try(stmt, ctx, depth, stmt.l)
+        compile_try(stmt, depth, stmt.l)
     end
     if stmt.s is "import" then
         for each each_item in stmt.items
-            set compile_statement_module_name to intern(ctx, each_item.n)
-            set ctx to compile_statement_module_name.ctx
+            set compile_statement_module_name to intern(each_item.n)
             if length(each_item.a) is 0 then
                 // An import with no alias binds its module's own name, so the
                 // operand is never the reserved one.
-                set ctx to emit(ctx, 43, compile_statement_module_name.index, compile_statement_module_name.index, stmt.l)
-                set ctx to emit_name(ctx, 4, each_item.n, 0, stmt.l)
+                emit(43, compile_statement_module_name, compile_statement_module_name, stmt.l)
+                emit_name(4, each_item.n, 0, stmt.l)
             else
-                set compile_statement_bound to intern(ctx, each_item.a)
-                set ctx to emit(ctx, 43, compile_statement_module_name.index, compile_statement_bound.index, stmt.l)
-                set ctx to emit_name(ctx, 4, each_item.a, 0, stmt.l)
+                set compile_statement_bound to intern(each_item.a)
+                emit(43, compile_statement_module_name, compile_statement_bound, stmt.l)
+                emit_name(4, each_item.a, 0, stmt.l)
             end
         end
     end
     if stmt.s is "module" then
-        set ctx to compile_module(stmt, ctx, depth)
+        // The enclosing run's offsets and children are passed in rather than
+        // saved in a name, for the reason `compile_block` gives.
+        compile_module(stmt, depth, length(G_CODE), length(G_JUMPS), G_BLOCKS)
     end
     if stmt.s is "test" then
-        set compile_statement_r to nested_block(stmt.t, 4, stmt.n, 0, [], depth, ctx, yes, "statements")
-        set ctx to compile_statement_r[0]
-        set ctx to emit(ctx, 44, compile_statement_r[1], 0, stmt.l)
+        set compile_statement_r to nested_block(stmt.t, 4, stmt.n, 0, [], depth, yes, "statements")
+        emit(44, compile_statement_r, 0, stmt.l)
     end
     // An `export` outside a module declaration publishes nothing, and one inside
     // one was already compiled into the run of `EXPORT`s the module's own block
     // opens with. Neither emits here.
-    give back ctx
-end
+    end
 
 // An object body compiles as two halves, and the split is the tree-walking
 // VM's: `has` and `to can` go into the block that assembles the type, and
 // everything else compiles into the *enclosing* block, after the `STORE` that
 // binds the name.
-to compile_object(stmt, ctx, depth)
+to compile_object(stmt, depth)
     set compile_object_line to 0
     set compile_object_declarations to 0
     set compile_object_rest to 0
@@ -2424,76 +2480,72 @@ to compile_object(stmt, ctx, depth)
             end
         end
     end
-    set compile_object_r to nested_block(compile_object_declarations, 3, stmt.n, 0, [], depth, ctx, no, "object")
-    set ctx to compile_object_r[0]
+    set compile_object_r to nested_block(compile_object_declarations, 3, stmt.n, 0, [], depth, no, "object")
     // The parent goes in as a name, interned like every other name in the
     // program: a flag saying "this one extends something" would leave the file
     // unable to say what.
     if length(stmt.parent) is 0 then
-        set ctx to emit(ctx, 40, compile_object_r[1], NO_CONST, compile_object_line)
+        emit(40, compile_object_r, NO_CONST, compile_object_line)
     else
-        set compile_object_parent_name to intern(ctx, stmt.parent)
-        set ctx to emit(compile_object_parent_name.ctx, 40, compile_object_r[1], compile_object_parent_name.index, compile_object_line)
+        set compile_object_parent_name to intern(stmt.parent)
+        emit(40, compile_object_r, compile_object_parent_name, compile_object_line)
     end
-    set ctx to emit_name(ctx, 4, stmt.n, 0, compile_object_line)
-    give back compile_statements(compile_object_rest, ctx, depth, no, "statements")
+    emit_name(4, stmt.n, 0, compile_object_line)
+    compile_statements(compile_object_rest, depth, no, "statements")
 end
 
 // `try ... catch ... finally ... end`: the handlers become blocks of their own,
 // so the protected code stays a straight run of instructions with no patching.
-to compile_try(stmt, ctx, depth, line)
-    set compile_try_catch_index to 0
-    set compile_try_r to 0
+to compile_try(stmt, depth, line)
     set compile_try_catch_index to NO_CONST
     if length(stmt.cn) > 0 then
-        set compile_try_r to nested_block(stmt.c, 5, stmt.cn, 0, [], depth, ctx, no, "statements")
-        set ctx to compile_try_r[0]
-        set compile_try_catch_index to compile_try_r[1]
+        set compile_try_catch_index to nested_block(stmt.c, 5, stmt.cn, 0, [], depth, no, "statements")
     else
         if length(stmt.c) > 0 then
-            set compile_try_r to nested_block(stmt.c, 5, [], 0, [], depth, ctx, no, "statements")
-            set ctx to compile_try_r[0]
-            set compile_try_catch_index to compile_try_r[1]
+            set compile_try_catch_index to nested_block(stmt.c, 5, [], 0, [], depth, no, "statements")
         end
     end
     set compile_try_finally_index to NO_CONST
     if length(stmt.f) > 0 then
-        set compile_try_r to nested_block(stmt.f, 6, [], 0, [], depth, ctx, no, "statements")
-        set ctx to compile_try_r[0]
-        set compile_try_finally_index to compile_try_r[1]
+        set compile_try_finally_index to nested_block(stmt.f, 6, [], 0, [], depth, no, "statements")
     end
     // Both the `TRY` and the marked `NOP` below take the line as a *parameter*:
     // the handler bodies are compiled between them, and a nested `try` would
     // overwrite a name held in a variable.
-    set ctx to emit(ctx, 42, compile_try_catch_index, compile_try_finally_index, line)
-    set ctx to compile_statements(stmt.t, ctx, depth, no, "statements")
+    emit(42, compile_try_catch_index, compile_try_finally_index, line)
+    compile_statements(stmt.t, depth, no, "statements")
     // The marked `NOP` closes the protected region: it is where the handlers are
     // popped and the `finally` runs, whether or not the protected code failed.
-    set ctx to emit(ctx, 0, END_TRY_MARKER, 0, line)
-    give back ctx
-end
+    emit(0, END_TRY_MARKER, 0, line)
+    end
 
 // `module NAME ... end`: a block run in a scope of its own, opening with the run
 // of `EXPORT`s that says what it publishes.
-to compile_module(stmt, ctx, depth)
+to compile_module(stmt, depth, code_start, jumps_start, outer_blocks)
     set compile_module_line to 0
     set compile_module_line to stmt.l
     if depth >= 64 then
         refuse(compile_module_line, "program nests blocks more than 64 levels deep")
     end
-    set compile_module_inner to {p: ctx.p, i: ctx.i, c: [], j: [], b: []}
-    set compile_module_inner to compile_exports(stmt.t, compile_module_inner, compile_module_line)
-    set compile_module_inner to compile_statements(stmt.t, compile_module_inner, depth + 1, no, "module")
-    set compile_module_block to {k: 7, n: stmt.n, a: 0, ps: [], code: apply_patches(compile_module_inner.c, compile_module_inner.j), b: compile_module_inner.b}
-    set ctx to with_state(ctx, compile_module_inner)
-    set ctx to with_children(ctx, push(ctx.b, compile_module_block))
-    give back emit(ctx, 47, length(ctx.b) - 1, 0, compile_module_line)
+    // The same cut `compile_block` makes, and for the same reason: a module is a
+    // block of its own, built before the `MODULE` that names it.
+    set G_BLOCKS to []
+    compile_exports(stmt.t, compile_module_line)
+    compile_statements(stmt.t, depth + 1, no, "module")
+    set compile_module_code to take_from(G_CODE, code_start)
+    set compile_module_jumps to take_from(G_JUMPS, jumps_start)
+    set compile_module_own_blocks to G_BLOCKS
+    set G_CODE to compile_module_code[1]
+    set G_JUMPS to compile_module_jumps[1]
+    set G_BLOCKS to outer_blocks
+    append("G_BLOCKS", {k: 7, n: stmt.n, a: 0, ps: [], code: apply_patches(compile_module_code[0], compile_module_jumps[0], code_start), b: compile_module_own_blocks})
+    emit(47, length(G_BLOCKS) - 1, 0, compile_module_line)
 end
 
 // The run of `EXPORT`s a module declaration opens with. The names come from the
 // same two rules stage 1 reads them with: the *last* `export` in the body says
 // what is published, and a module publishes the names its body declares.
-to compile_exports(body, ctx, line)
+to compile_exports(body, line)
     set compile_exports_names to 0
     set compile_exports_all to 0
     set compile_exports_found to 0
@@ -2541,11 +2593,10 @@ to compile_exports(body, ctx, line)
                     set compile_exports_flag to 0
                 end
             end
-            set ctx to emit_name(ctx, 48, each_name, compile_exports_flag, line)
+            emit_name(48, each_name, compile_exports_flag, line)
         end
     end
-    give back ctx
-end
+    end
 
 // How many bounds a `for each i from <a> to <b>` loop passes: the end, plus the
 // step when it has one.
@@ -2558,58 +2609,59 @@ to range_arity(has_step)
 end
 // The body of a loop and the jump back to its head. `top` is the instruction
 // the jump goes back to, passed as a parameter because the body is compiled
-// between finding it and using it.
-to compile_loop_body(stmt, ctx, depth, top, line)
-    set ctx to compile_statements(stmt.t, ctx, depth, no, "statements")
-    set ctx to emit(ctx, 34, top, 0, line)
-    give back ctx
-end
+// between finding it and using it — and recorded as a patch rather than written
+// into the jump, because it is an offset into the run this block is compiled into
+// and only `apply_patches` knows where in the block's own code that run began.
+to compile_loop_body(stmt, depth, top, line)
+    compile_statements(stmt.t, depth, no, "statements")
+    set compile_loop_body_back to length(G_CODE)
+    emit(34, top, 0, line)
+    patch_at(compile_loop_body_back, top)
+    end
 
 // `while` compiles its condition first and jumps back to it, so its head is the
 // length of the code before the condition rather than after it.
-to compile_while(stmt, ctx, depth, top)
-    set ctx to compile_expr(stmt.c, ctx, stmt.l)
-    set compile_while_r to emit_jump_at(ctx, 35, stmt.l)
-    set ctx to compile_statements(stmt.t, compile_while_r[0], depth, no, "statements")
-    set ctx to emit(ctx, 34, top, 0, stmt.l)
-    set ctx to patch_at(ctx, compile_while_r[1], length(ctx.c))
-    give back ctx
-end
+to compile_while(stmt, depth, top)
+    compile_expr(stmt.c, stmt.l)
+    set compile_while_r to emit_jump_at(35, stmt.l)
+    compile_statements(stmt.t, depth, no, "statements")
+    set compile_while_back to length(G_CODE)
+    emit(34, top, 0, stmt.l)
+    patch_at(compile_while_r, length(G_CODE))
+    patch_at(compile_while_back, top)
+    end
 
 // The two branches of an `if`, once its `JumpIfFalse` has been emitted. `slot`
 // is where that jump is, and it is a parameter because the body below it is a
 // nested parse that would otherwise overwrite a name held in a variable.
-to compile_if_branches(stmt, ctx, depth, slot)
-    set ctx to compile_statements(stmt.t, ctx, depth, no, "statements")
+to compile_if_branches(stmt, depth, slot)
+    compile_statements(stmt.t, depth, no, "statements")
     if length(stmt.e) is 0 then
-        set ctx to patch_at(ctx, slot, length(ctx.c))
+        patch_at(slot, length(G_CODE))
     else
-        set compile_if_branches_r to emit_jump_at(ctx, 34, stmt.l)
-        // The patch that sends the false branch past the `else` is recorded on
-        // its own context, which is then the one the `else` is compiled into:
-        // handing `compile_if_branches` own context to the call below would drop
-        // the patch and leave the jump pointing at the end of the block.
-        set compile_if_branches_patched to patch_at(compile_if_branches_r[0], slot, length(compile_if_branches_r[0].c))
-        set ctx to compile_if_else(stmt, compile_if_branches_patched, depth, compile_if_branches_r[1])
+        set compile_if_branches_r to emit_jump_at(34, stmt.l)
+        // The patch that sends the false branch past the `else` is recorded
+        // before the `else` is compiled, and its target is the instruction the
+        // `else` begins at: the one after the jump that skips over it, which is
+        // where the run stands now.
+        patch_at(slot, length(G_CODE))
+        compile_if_else(stmt, depth, compile_if_branches_r)
     end
-    give back ctx
-end
+    end
 
 // The `else` branch of an `if`, and the patch that sends the jump over it to
 // the end of the block. `end_slot` is where that jump is: the branch is
 // compiled between finding it and using it, so it travels as a parameter.
-to compile_if_else(stmt, ctx, depth, end_slot)
-    set ctx to compile_statements(stmt.e, ctx, depth, no, "statements")
-    set ctx to patch_at(ctx, end_slot, length(ctx.c))
-    give back ctx
-end
+to compile_if_else(stmt, depth, end_slot)
+    compile_statements(stmt.e, depth, no, "statements")
+    patch_at(end_slot, length(G_CODE))
+    end
 
 // The body of an `unless`, and the patch that ends it.
-to compile_unless_body(stmt, ctx, depth, slot)
-    set ctx to compile_statements(stmt.t, ctx, depth, no, "statements")
-    set ctx to patch_at(ctx, slot, length(ctx.c))
-    give back ctx
-end
+to compile_unless_body(stmt, depth, slot)
+    compile_statements(stmt.t, depth, no, "statements")
+    patch_at(slot, length(G_CODE))
+    end
 
 // The opcode of a binary operator.
 to binary_opcode(op)
@@ -2660,43 +2712,43 @@ to binary_opcode(op)
     give back binary_opcode_opcode
 end
 
-to compile_expr(expr, ctx, line)
+to compile_expr(expr, line)
     if expr.k is "num" then
-        set ctx to emit_const(ctx, 1, number_bytes(expr.v), line)
+        emit_const(1, number_bytes(expr.v), line)
     end
     if expr.k is "text" then
-        set ctx to emit_const(ctx, 3, expr.b, line)
+        emit_const(3, expr.b, line)
     end
     if expr.k is "yes" then
-        set ctx to emit_const(ctx, 2, [1], line)
+        emit_const(2, [1], line)
     end
     if expr.k is "no" then
-        set ctx to emit_const(ctx, 2, [0], line)
+        emit_const(2, [0], line)
     end
     if expr.k is "nothing" then
-        set ctx to emit_nothing(ctx, line)
+        emit_nothing(line)
     end
     if expr.k is "var" then
-        set ctx to emit_name(ctx, 3, expr.n, 0, line)
+        emit_name(3, expr.n, 0, line)
     end
     if expr.k is "bin" then
-        set ctx to compile_expr(expr.l, ctx, line)
-        set ctx to compile_expr(expr.r, ctx, line)
-        set ctx to emit(ctx, binary_opcode(expr.op), 0, 0, line)
+        compile_expr(expr.l, line)
+        compile_expr(expr.r, line)
+        emit(binary_opcode(expr.op), 0, 0, line)
     end
     if expr.k is "un" then
-        set ctx to compile_expr(expr.e, ctx, line)
+        compile_expr(expr.e, line)
         set compile_expr_opcode to 27
         if expr.op is "not" then
             set compile_expr_opcode to 28
         end
-        set ctx to emit(ctx, compile_expr_opcode, 0, 0, line)
+        emit(compile_expr_opcode, 0, 0, line)
     end
     if expr.k is "call" then
         for each each_arg in expr.args
-            set ctx to compile_expr(each_arg, ctx, line)
+            compile_expr(each_arg, line)
         end
-        set ctx to emit_name(ctx, 29, expr.n, length(expr.args), line)
+        emit_name(29, expr.n, length(expr.args), line)
     end
     if expr.k is "mcall" then
         // A receiver that is a plain name is not loaded: `CALL_METHOD` already
@@ -2704,45 +2756,44 @@ to compile_expr(expr, ctx, line)
         // *name*. Loading it would ask for a binding that need not exist —
         // `json.parse` names a module and `json` is never a variable.
         if expr.o.k is not "var" then
-            set ctx to compile_expr(expr.o, ctx, line)
+            compile_expr(expr.o, line)
         end
         for each each_arg in expr.args
-            set ctx to compile_expr(each_arg, ctx, line)
+            compile_expr(each_arg, line)
         end
         if expr.o.k is "var" then
-            set ctx to emit_name(ctx, 30, cat(cat(expr.o.n, [46]), expr.m), length(expr.args), line)
+            emit_name(30, cat(cat(expr.o.n, [46]), expr.m), length(expr.args), line)
         else
-            set ctx to emit_name(ctx, 30, expr.m, length(expr.args), line)
+            emit_name(30, expr.m, length(expr.args), line)
         end
     end
     if expr.k is "prop" then
-        set ctx to compile_expr(expr.o, ctx, line)
-        set ctx to emit_name(ctx, 7, expr.p, 0, line)
+        compile_expr(expr.o, line)
+        emit_name(7, expr.p, 0, line)
     end
     if expr.k is "index" then
-        set ctx to compile_expr(expr.o, ctx, line)
-        set ctx to compile_expr(expr.i, ctx, line)
-        set ctx to emit(ctx, 9, 0, 0, line)
+        compile_expr(expr.o, line)
+        compile_expr(expr.i, line)
+        emit(9, 0, 0, line)
     end
     if expr.k is "list" then
         for each each_item in expr.items
-            set ctx to compile_expr(each_item, ctx, line)
+            compile_expr(each_item, line)
         end
-        set ctx to emit(ctx, 10, length(expr.items), 0, line)
+        emit(10, length(expr.items), 0, line)
     end
     if expr.k is "record" then
         for each each_field in expr.fields
-            set ctx to emit_name(ctx, 1, each_field.k, 0, line)
-            set ctx to compile_expr(each_field.v, ctx, line)
+            emit_name(1, each_field.k, 0, line)
+            compile_expr(each_field.v, line)
         end
-        set ctx to emit(ctx, 11, length(expr.fields), 0, line)
+        emit(11, length(expr.fields), 0, line)
     end
     if expr.k is "expect" then
-        set ctx to compile_expr(expr.a, ctx, line)
-        set ctx to compile_expr(expr.b, ctx, line)
-        set ctx to emit(ctx, 45, 0, 0, line)
+        compile_expr(expr.a, line)
+        compile_expr(expr.b, line)
+        emit(45, 0, 0, line)
     end
-    give back ctx
-end
+    end
 
 main()

@@ -62,6 +62,7 @@ pub fn builtins() -> HashMap<String, Value> {
     // List functions
     globals.insert("length".to_string(), Value::Builtin("length".to_string()));
     globals.insert("push".to_string(), Value::Builtin("push".to_string()));
+    globals.insert("append".to_string(), Value::Builtin("append".to_string()));
     globals.insert("pop".to_string(), Value::Builtin("pop".to_string()));
     globals.insert("shift".to_string(), Value::Builtin("shift".to_string()));
     globals.insert("map".to_string(), Value::Builtin("map".to_string()));
