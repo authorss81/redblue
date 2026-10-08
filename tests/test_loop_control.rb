@@ -782,3 +782,70 @@ test "loop_control_edge_a_finally_around_a_module_declaration_runs_after_its_sco
     end
     expect log to be "tf"
 end
+
+
+test "loop control: a break ends a range loop at the value that broke"
+    // `for each i from a to b [by s]` is in the grammar and in the parser, so this
+    // is the loop form a program writes rather than one built by hand.
+    set total to 0
+    set turns to 0
+    for each i from 1 to 5
+        if i is 3 then
+            break
+        end
+        set total to total + i
+        set turns to turns + 1
+    end
+    // The turn that broke the loop does not reach the statements after the
+    // `break`, so 3 is neither added nor counted.
+    expect total to be 3
+    expect turns to be 2
+end
+
+test "loop control: a skip advances a range loop to its next value"
+    set total to 0
+    set turns to 0
+    for each i from 0 to 6 by 2
+        if i is 2 then
+            skip
+        end
+        set total to total + i
+        set turns to turns + 1
+    end
+    // 0 is a value the stride visits and is not skipped, 2 is, and 4 and 6 run.
+    expect total to be 10
+    expect turns to be 3
+end
+
+test "loop_control_edge_a_break_in_a_nested_range_loop_leaves_only_the_inner_one"
+    set outer to 0
+    set inner to 0
+    for each i from 1 to 3
+        for each j from 1 to 3
+            if j is 2 then
+                break
+            end
+            set inner to inner + 1
+        end
+        set outer to outer + 1
+    end
+    // The inner loop broke on its second value, so each of the three outer turns
+    // counted exactly one inner turn, and the outer loop still reached its last.
+    expect outer to be 3
+    expect inner to be 3
+end
+
+test "loop_control_edge_a_range_loop_that_runs_no_turns_is_unaffected_by_both"
+    set turned to 0
+    for each i from 5 to 1
+        set turned to turned + 1
+        break
+    end
+    for each j from 1 to 3
+        if j is 2 then
+            skip
+        end
+        set turned to turned + 1
+    end
+    expect turned to be 2
+end

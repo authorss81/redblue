@@ -2477,3 +2477,363 @@ fn edge_a_jump_raised_in_a_cleanup_is_charged_one_turn() {
         "the bytecode VM stopped somewhere else\n{breaking}"
     );
 }
+
+/// The range loop, written the way a program writes it.
+///
+/// Round 3 recorded as FINDINGS §10 that `for each i from a to b [by s]` could
+/// not be parsed, and delivered the coverage the review asked for through
+/// `range_loop` above, which builds the `Statement::ForRange` by hand. The merge
+/// that adopted this phase's work kept `main`'s parser, which has the `from a to
+/// b [by s]` production, so §10 no longer reproduces and the AST-built helper
+/// tests a shape a user cannot write. These six tests ask the same questions
+/// from source, on both engines.
+///
+/// ```text
+/// $ printf 'for each i from 1 to 3\n    say i\nend\n' > target/tmp/range.rb
+/// $ rb run target/tmp/range.rb
+/// 1
+/// 2
+/// 3
+/// ```
+///
+/// Both VMs are asked and both answers are asserted exactly, so a golden the two
+/// engines agree on wrongly fails here.
+#[test]
+fn edge_break_and_skip_in_a_range_loop_written_as_source() {
+    let cases: [(&str, &str, Vec<&str>); 6] = [
+        (
+            "break in the middle",
+            "for each i from 1 to 5\n    if i is 3 then\n        break\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["1", "2", "after"],
+        ),
+        (
+            "skip in the middle",
+            "for each i from 1 to 5\n    if i is 2 then\n        skip\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["1", "3", "4", "5", "after"],
+        ),
+        (
+            "break as the first value",
+            "for each i from 1 to 5\n    if i is 1 then\n        break\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["after"],
+        ),
+        (
+            "skip as the first value",
+            "for each i from 1 to 3\n    if i is 1 then\n        skip\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["2", "3", "after"],
+        ),
+        (
+            // A range of one has exactly one turn, so a `break` and a `skip` on
+            // that value are the same statement here — and neither may take the
+            // program past it.
+            "break as the only value of a range of one",
+            "for each i from 1 to 1\n    break\nend\nsay \"after\"\n",
+            vec!["after"],
+        ),
+        (
+            "skip as the only value of a range of one",
+            "for each i from 1 to 1\n    skip\n    say i\nend\nsay \"after\"\n",
+            vec!["after"],
+        ),
+    ];
+
+    for (name, source, wanted) in cases {
+        let expected: Vec<String> = wanted.iter().map(|line| line.to_string()).collect();
+        let program = parse(source);
+        assert_eq!(
+            say_lines_of(&program)
+                .unwrap_or_else(|e| panic!("{name} on the tree-walking VM: {e:?}")),
+            expected,
+            "the tree-walking VM answered {name} wrongly\n{source}"
+        );
+        assert_eq!(
+            bytecode_say_lines(&program)
+                .unwrap_or_else(|e| panic!("{name} on the bytecode VM: {e:?}")),
+            expected,
+            "the bytecode VM answered {name} wrongly\n{source}"
+        );
+    }
+}
+
+/// The `by` form, from source, on both statements and both engines.
+///
+/// A step of 1 and an omitted step are the same loop, so the stepped cases run
+/// against both an ascending and a descending range: a `break` or a `skip` on a
+/// value the stride never visits cannot happen, and one on a value it does
+/// visits has to land the same way on both engines.
+#[test]
+fn edge_break_and_skip_in_a_stepped_range_loop_written_as_source() {
+    let cases: [(&str, &str, Vec<&str>); 4] = [
+        (
+            "break at 7 of a descending range",
+            "for each i from 10 to 1 by -3\n    if i is 7 then\n        break\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["10", "after"],
+        ),
+        (
+            "skip at 7 of a descending range",
+            "for each i from 10 to 1 by -3\n    if i is 7 then\n        skip\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["10", "4", "1", "after"],
+        ),
+        (
+            "break at 4 of an ascending range",
+            "for each i from 0 to 10 by 2\n    if i is 4 then\n        break\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["0", "2", "after"],
+        ),
+        (
+            "skip at 4 of an ascending range",
+            "for each i from 0 to 10 by 2\n    if i is 4 then\n        skip\n    end\n    say i\nend\nsay \"after\"\n",
+            vec!["0", "2", "6", "8", "10", "after"],
+        ),
+    ];
+
+    for (name, source, wanted) in cases {
+        let expected: Vec<String> = wanted.iter().map(|line| line.to_string()).collect();
+        let program = parse(source);
+        assert_eq!(
+            say_lines_of(&program)
+                .unwrap_or_else(|e| panic!("{name} on the tree-walking VM: {e:?}")),
+            expected,
+            "the tree-walking VM answered {name} wrongly\n{source}"
+        );
+        assert_eq!(
+            bytecode_say_lines(&program)
+                .unwrap_or_else(|e| panic!("{name} on the bytecode VM: {e:?}")),
+            expected,
+            "the bytecode VM answered {name} wrongly\n{source}"
+        );
+    }
+}
+
+/// The two ends of a range: the first value and the last value the stride lands
+/// on.
+///
+/// Both are boundary cases for the same reason `edge_skip_on_the_final_iteration_
+/// of_a_for_each` is one for a list — a loop that ends because its values ran
+/// out has to end the same way whether the turn that broke it was the last one
+/// it had or the first.
+#[test]
+fn edge_skip_on_the_final_value_of_a_range_loop_and_break_on_its_first() {
+    let source = concat!(
+        "set saw_first to 0\n",
+        "set stopped_at to 0\n",
+        "for each i from 1 to 3\n",
+        "    if i is 1 then\n",
+        "        set saw_first to i\n",
+        "    end\n",
+        "    if i is 3 then\n",
+        "        skip\n",
+        "    end\n",
+        "    say i\n",
+        "end\n",
+        "for each j from 1 to 3\n",
+        "    set stopped_at to j\n",
+        "    break\n",
+        "end\n",
+        "say saw_first\n",
+        "say stopped_at\n",
+    );
+
+    // The first loop skips its last value, so only 1 and 2 print. The second
+    // breaks on its first, so `stopped_at` is 1 and 3 never happens.
+    let expected = vec![
+        "1".to_string(),
+        "2".to_string(),
+        "1".to_string(),
+        "1".to_string(),
+    ];
+    let program = parse(source);
+    assert_eq!(
+        say_lines_of(&program).expect("skipping the last value of a range is not a failure"),
+        expected,
+        "the tree-walking VM answered wrongly\n{source}"
+    );
+    assert_eq!(
+        bytecode_say_lines(&program).expect("the bytecode VM should agree"),
+        expected,
+        "the bytecode VM answered wrongly\n{source}"
+    );
+}
+
+/// A `break` leaves the innermost loop, whichever form it is written in.
+#[test]
+fn edge_a_break_in_a_nested_range_loop_leaves_only_the_inner_one() {
+    let breaking = concat!(
+        "for each i from 1 to 3\n",
+        "    for each j from 1 to 3\n",
+        "        if j is 2 then\n",
+        "            break\n",
+        "        end\n",
+        "        say j\n",
+        "    end\n",
+        "    say i\n",
+        "end\n",
+    );
+    let skipping = concat!(
+        "for each i from 1 to 3\n",
+        "    for each j from 1 to 3\n",
+        "        if j is 2 then\n",
+        "            skip\n",
+        "        end\n",
+        "        say j\n",
+        "    end\n",
+        "    say i\n",
+        "end\n",
+    );
+    // The inner loop breaks on its second value, so each outer turn prints one
+    // `j` and then its own `i`, and the outer loop still reaches its last value.
+    let broke: Vec<String> = ["1", "1", "1", "2", "1", "3"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // The inner loop skips its second value, so the outer loop's turn runs the
+    // inner body three times rather than two — the shape that shows only the
+    // inner loop moved.
+    let skipped: Vec<String> = ["1", "3", "1", "1", "3", "2", "1", "3", "3"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let program = parse(breaking);
+    assert_eq!(
+        say_lines_of(&program).expect("the inner break should leave the inner loop"),
+        broke,
+        "the outer loop stopped too\n{breaking}"
+    );
+    assert_eq!(
+        bytecode_say_lines(&program).expect("the bytecode VM should agree"),
+        broke,
+        "the bytecode VM stopped the outer loop too\n{breaking}"
+    );
+
+    let program = parse(skipping);
+    assert_eq!(
+        say_lines_of(&program).expect("the inner skip should advance the inner loop"),
+        skipped,
+        "the inner loop kept the skipped value\n{skipping}"
+    );
+    assert_eq!(
+        bytecode_say_lines(&program).expect("the bytecode VM should agree"),
+        skipped,
+        "the inner loop kept the skipped value\n{skipping}"
+    );
+}
+
+/// A range loop's variable is released however the loop ends, so naming it
+/// after the loop is a `RuntimeError` naming it — not a `Nothing`, and not the
+/// last value the loop had.
+///
+/// This asserts a failure is produced. Each program prints as it goes, so the
+/// lines before the failure prove the loop really turned, and both engines are
+/// asked for the message rather than only for `is_err`.
+#[test]
+fn edge_the_range_loop_variable_is_out_of_scope_after_a_break() {
+    let sources = [
+        concat!(
+            "for each i from 1 to 5\n",
+            "    say i\n",
+            "    if i is 3 then\n",
+            "        break\n",
+            "    end\n",
+            "end\n",
+            "say i\n",
+        ),
+        concat!(
+            "for each i from 1 to 5 by 2\n",
+            "    say i\n",
+            "    if i is 3 then\n",
+            "        skip\n",
+            "    end\n",
+            "end\n",
+            "say i\n",
+        ),
+    ];
+
+    for source in sources {
+        let program = parse(source);
+        let mut vm = Vm::new();
+        let failure = vm
+            .run(&program)
+            .expect_err("the loop variable should be released by the loop");
+        let printed = vm.take_output();
+        assert!(
+            !printed.is_empty(),
+            "the loop should have turned before it failed\n{source}"
+        );
+        let message = runtime_message(&failure);
+        assert!(
+            message.contains("'i'"),
+            "the refusal should name the loop variable, got {message:?}\n{source}"
+        );
+
+        let chunk = redblue::bytecode::compile_program(&program)
+            .expect("the bytecode VM should compile what the analyser accepted");
+        let mut byte_vm = redblue::bytecode::vm::BytecodeVm::new();
+        let failure = byte_vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse the released variable too");
+        assert_eq!(
+            runtime_message(&failure),
+            message,
+            "the two engines refused the same name differently\n{source}"
+        );
+    }
+}
+
+/// A `break` written in a `catch` inside a range loop leaves the loop, and the
+/// failure the `catch` handled is still reported when no jump is raised.
+///
+/// The second half is the guard: without it, a `finally` that drops the failure
+/// and a jump that replaces it could both pass by reporting nothing.
+#[test]
+fn edge_a_break_in_a_catch_inside_a_range_loop_leaves_the_loop() {
+    let breaking = concat!(
+        "for each i from 1 to 3\n",
+        "    try\n",
+        "        set bad to 1 + \"one\"\n",
+        "    catch error\n",
+        "        say \"caught\"\n",
+        "        break\n",
+        "    end\n",
+        "    say i\n",
+        "end\n",
+        "say \"after\"\n",
+    );
+    let caught = concat!(
+        "for each i from 1 to 3\n",
+        "    try\n",
+        "        set bad to 1 + \"one\"\n",
+        "    catch error\n",
+        "        say \"caught\"\n",
+        "    end\n",
+        "    say i\n",
+        "end\n",
+        "say \"after\"\n",
+    );
+    let expected = vec!["caught".to_string(), "after".to_string()];
+
+    let program = parse(breaking);
+    assert_eq!(
+        say_lines_of(&program).expect("a break in a catch leaves the loop, it does not fail"),
+        expected,
+        "the loop ran past the break\n{breaking}"
+    );
+    assert_eq!(
+        bytecode_say_lines(&program).expect("the bytecode VM should agree"),
+        expected,
+        "the bytecode VM ran past the break\n{breaking}"
+    );
+
+    let program = parse(caught);
+    assert_eq!(
+        say_lines_of(&program).expect("the same program without a break"),
+        vec![
+            "caught".to_string(),
+            "1".to_string(),
+            "caught".to_string(),
+            "2".to_string(),
+            "caught".to_string(),
+            "3".to_string(),
+            "after".to_string(),
+        ],
+        "the loop did not run every value\n{caught}"
+    );
+}

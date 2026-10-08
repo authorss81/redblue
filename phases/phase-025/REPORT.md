@@ -276,6 +276,10 @@ move with it.
 | `tests/loop_control_test.rs` | resumed round, +2 tests | the `skip` half of the definition of done's catchable refusal: `edge_a_refused_skip_is_catchable_with_try_catch_error` and `edge_a_refused_skip_inside_a_loop_leaves_the_loop_running`, each compared across both VMs |
 | `src/bytecode/vm.rs` | resumed round 2, +61 −43 | a `while` is charged where the tree-walking VM charges it: `JUMP_IF_FALSE` charges the loop whose condition it is when the value is truthy and drops that loop's entry when it is falsy, through the new `condition_site`; `jump` and `turn_over_to` charge nothing, and the entry no longer starts at one turn (FINDINGS §17) |
 | `tests/bytecode_vm_test.rs` | resumed round 2, +2 tests | `edge_a_cap_allows_a_loop_exactly_that_many_turns` (five loop shapes, the boundary asked from both sides) and `edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each` |
+| `tests/loop_control_test.rs` | resumed round 4, +6 tests | the range loop asked from **source** rather than through the `range_loop` AST helper: `break`/`skip` in the middle and on the first value, the stepped form both ways round, both ends of a range in one program, a nested range loop, the released loop variable, and a `break` in a `catch` inside a range loop — all on **both** VMs with the exact lines |
+| `tests/test_loop_control.rb` | resumed round 4, +4 blocks | the same six shapes in Redblue, so `rb test` and the differential's file walk run them |
+| `phases/phase-025/FINDINGS.md`, `REPORT.md` | resumed round 4 | FINDINGS §10 struck: `for each i from a to b [by s]` parses on this tree, so the claim it made for five rounds was stale |
+| — | resumed round 4 | **no `src/` change.** The 90-program two-engine sweep found no disagreement and no stale claim about `src/`; §10 was about the parser having *too little*, and the merge that adopted this phase's work gave it the production. `must_touch: ["src/"]` is satisfied by the merged work this phase inherited and by the phase diff as a whole (`src/vm.rs`, `src/bytecode/vm.rs`), both in the table above. |
 
 ### Why `src/bytecode/vm.rs` is in this phase
 
@@ -791,14 +795,107 @@ hand.
 `tests/loop_control_test.rs` is 64 tests, up from 61. `cargo test --all-targets` is
 824, up from 821. `rb test` is 334, up from 332.
 
+## Resumed round 4 — the range loop, from source
+
+This round started from a green tree (824 Rust tests, 334 `rb test` blocks, every
+example and module exiting 0) and spent its first action re-verifying it: `cargo
+fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test
+--all-targets` were all run before anything was changed, and `cargo test` reported
+824 passed / 0 failed. It then swept the two engines against each other — 90
+programs crossing every loop form with every block that can appear inside one
+(`if`, `unless`, a `try` with only a `finally`, a `try`/`catch`/`finally`, a `test`
+body, an `object` body, a `catch` inside a `catch`, a nested loop in each of
+those), each with a `break` and then a `skip`, comparing `rb run` with `rb
+compile && rb vm` on output *and* exit code. **No disagreement**, so nothing under
+`src/` was wrong and nothing under `src/` was changed.
+
+What the sweep did turn up was a stale claim, and it is worth more than a fix.
+
+**FINDINGS §10 said `for each i from a to b [by s]` "is documented and cannot be
+parsed", so `Statement::ForRange` was unreachable from source, so the corpus's
+range entries were comparing two parse errors and so the round-3 review's request
+for a range-loop break/skip test "cannot be written".** None of that reproduces.
+The merge that adopted this phase's work kept `main`'s `parse_for`, which has the
+`from a to b [by s]` production at `src/parser.rs:838`:
+
+```
+$ printf 'for each i from 1 to 3\n    say i\nend\n' > target/tmp/range.rb
+$ ./target/debug/rb run target/tmp/range.rb
+1
+2
+3
+exit=0
+```
+
+`SPEC.md` and `docs/GRAMMAR.md` were right all along and the parser caught up.
+Round 3 wrote the finding against the branch it was working on; the phase merged
+afterwards and the finding was carried forward unverified, in FINDINGS and in
+"Known gaps" below, for five rounds. FINDINGS §10 now records the correction with
+the command that shows it, and the stale sentence in "Known gaps" is struck.
+
+The consequence for coverage is the part that mattered. Round 3 delivered the
+break/skip range coverage through `range_loop` (`tests/loop_control_test.rs`),
+which builds the `Statement::ForRange` by hand the way `tests/numeric_edge_test.rs`
+does — a statement the parser never laid out, reached around the front of the
+parser rather than through it. That helper and its five tests are **kept**: a body
+built by hand and a body `parse_for` produced are different inputs and the two
+are worth having. What was missing is the source form, and ten tests now ask it.
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **MAJOR** a whole loop form had **no break/skip test written the way a program writes it**, on either engine. Round 3's `range_loop` helper exists because §10 said the form could not be parsed, and §10 no longer holds, so the parser's own `ForRange` — the one the bytecode compiler is handed for real programs — was reached by none of this phase's 70 loop-control tests. | Six Rust tests and four Redblue `test` blocks, all written as source. No `src/` change was needed: `src/vm.rs` already routes this loop form through `run_iteration` and both engines already answered correctly, which is what the tests now pin. |
+
+Each was watched failing without the fix, by putting the no-op back in `src/vm.rs`
+(`Statement::Break` and `Statement::Skip` raising the signal and then clearing
+`self.loop_control`, so `raise_loop_control` stays referenced and the build is
+clean): **48 of 70** `tests/loop_control_test.rs` tests fail with it in place,
+including all five of this round's Rust tests that assert a tree answer
+(`edge_break_and_skip_in_a_range_loop_written_as_source`,
+`edge_break_and_skip_in_a_stepped_range_loop_written_as_source`,
+`edge_skip_on_the_final_value_of_a_range_loop_and_break_on_its_first`,
+`edge_a_break_in_a_nested_range_loop_leaves_only_the_inner_one` and
+`edge_a_break_in_a_catch_inside_a_range_loop_leaves_the_loop`), and **35 of 51**
+`tests/test_loop_control.rb` blocks fail, including all four of this round's. The
+sixth Rust test,
+`edge_the_range_loop_variable_is_out_of_scope_after_a_break`, passes on both sides
+of that experiment, and is kept for the other half of the reason: the loop
+variable's release is a separate mechanism from the jump, and putting the jump
+back does not un-release a binding.
+
+Three of the four Redblue blocks and all six Rust tests assert the **exact lines
+on both engines** rather than only that the engines agree, so a golden the two of
+them agree on wrongly fails. Two of them were written wrong first and are worth
+naming, because writing them is how the answers were checked: the nested-range
+expectation was written as `1 1 2 3` and the run printed `1 1 1 2 1 3` — the inner
+`break` stops the inner loop, the outer turn still runs its own `say`, and the
+outer loop still reaches 3; and the boundary case expected `stopped_at` to be 3
+where the `break` is on the *first* value, so it is 1. The interpreter was right
+in both and the expectations were wrong.
+
+### Tests added
+
+| Test | Edge class covered | Fails without |
+|---|---|---|
+| `edge_break_and_skip_in_a_range_loop_written_as_source` | **boundary / singleton**: `for each i from 1 to 5` from source, `break` and `skip` each in the middle of the range and each on its first value, plus each as the only statement of a **range of one**. Six programs, both engines, exact lines | the no-op (`break` printed `1 2 3 4 5`, `skip` printed the value it skipped) |
+| `edge_break_and_skip_in_a_stepped_range_loop_written_as_source` | **boundary / numeric_boundary**: the `by` form from source — `by -3` descending, `by 2` ascending — with a `break` and a `skip` on a value the stride visits. A `break` on `7` of `10 by -3` prints `10` and stops; a `skip` on it prints `10 4 1` | the same |
+| `edge_skip_on_the_final_value_of_a_range_loop_and_break_on_its_first` | **boundary**: both ends of the range at once — a `skip` on the last value the loop has, and a `break` on the first, in one program, so the two answers have to be consistent with each other | the same |
+| `edge_a_break_in_a_nested_range_loop_leaves_only_the_inner_one` | **nesting_recursion**: a `break` and a `skip` in a range loop nested in a range loop, from source. The outer counter reaches 3 either way, which is the assertion the phase's definition of done names | the same (the outer loop stopped with it) |
+| `edge_the_range_loop_variable_is_out_of_scope_after_a_break` | **asserts a failure is produced**, and **out_of_bounds** in the only sense a loop variable has: naming `i` after the loop is a `RuntimeError` naming `i`, on both engines, with the same message — not a `Nothing` and not the last value. Each program prints as it goes, so the lines before the failure prove the loop turned | nothing — the release is a separate mechanism and this is green on both sides of the no-op experiment; that is why it is in the set |
+| `edge_a_break_in_a_catch_inside_a_range_loop_leaves_the_loop` | **asserts a failure is produced and handled**: a `break` in a `catch` written inside a range loop leaves the loop, and the same program without the `break` runs all three values. The second half is the guard against a jump path that reports nothing | the no-op (the loop ran all three values) |
+| `tests/test_loop_control.rb` — 4 `test` blocks | the same six shapes in Redblue, so `rb test` and the suite's own collector run them and `tests/differential_test.rs` sees the file | the no-op: `total` 15 rather than 3, `total` 12 rather than 10, `inner` 9 rather than 3, `turned` 3 rather than 2 |
+
+`tests/loop_control_test.rs` is 70 tests, up from 64. `cargo test --all-targets` is
+830, up from 824. `rb test` is 338, up from 334.
+
 ## Gates
 
-Re-run after this round's fix, on the tree as it now stands.
+Re-run after this round's tests, on the tree as it now stands.
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
-| `cargo test --all-targets` | **824 passed, 0 failed, 0 ignored** (31 binaries) |
+| `cargo test --all-targets` | **830 passed, 0 failed, 0 ignored** (31 binaries) |
+| `cargo test --doc` | 1 passed, 0 failed |
 | `./rbops/verify.sh phase-025` | **not run — `rbops/` is not in this checkout** |
 
 `rbops/` is absent from the working directory (`ls` shows `AGENTS.md`, `SPEC.md`,
@@ -810,21 +907,24 @@ prompt:
 
 | Check | Result |
 |---|---|
-| `rb test` (every `.rb` under `tests/`) | 334 run, 334 passed, 0 failed |
+| `rb test` (every `.rb` under `tests/`) | 338 run, 338 passed, 0 failed |
 | `./target/debug/rb run examples/*.rb` | 6/6 exit 0 |
 | `./target/debug/rb run modules/*.rb` | 2/2 exit 0 (`MathUtils.rb` passes as well) |
 | `tests/loop_bounds_test.rs` | 22 passed, 0 failed |
-| `tests/loop_control_test.rs` | 64 passed, 0 failed |
-| `tests/bytecode_vm_test.rs` (the both-VMs differential) | 60 passed, 0 failed, over a corpus of 411 programs |
-| `tests/object_model_test.rs` | 39 passed, 0 failed |
+| `tests/loop_control_test.rs` | 70 passed, 0 failed |
+| `tests/bytecode_vm_test.rs` (the both-VMs differential) | 60 passed, 0 failed |
 | `tests/differential_test.rs` | 81 passed, 0 failed |
 | `tests/for_range_test.rs` | 31 passed, 0 failed |
-| `cargo test --doc` | 1 passed, 0 failed |
-| the reproduction, through the binary | `break` prints `1`, `skip` prints `1` then `3`, `repeat` stops at 3, a `break` in no loop exits 1 with `'break' is only valid inside a loop` |
-| the phase's definition of done, program by program | `for each` prints `1`; `skip` prints `1` then `3`; the same in `repeat` (stops at 3) and `while` (stops at 4, prints `1 3 4 5 6 7 8 9`); a `break` in a nested `for each` leaves the outer loop counting to 3 |
+| `tests/object_model_test.rs` | 39 passed, 0 failed |
+| the phase's definition of done, program by program | `for each` prints `1`; `skip` prints `1` then `3`; `repeat` stops at 3; `while` prints `3 4` and `1 2 3 4 5`; a `break` in a nested `for each` leaves the outer loop counting to 3; `break` and `skip` in no loop each exit 1 naming the statement |
+| the 90-program both-engine sweep of this round | 0 disagreements in output or exit code |
 
-This round's three tests are the difference between 821 and 824, all in
-`tests/loop_control_test.rs` (61 → 64); the two `test` blocks in
+This round's ten tests are the difference between 824 and 830 — six in
+`tests/loop_control_test.rs` (64 → 70) — and between 334 and 338 in `rb test`, four
+of them `test` blocks in `tests/test_loop_control.rb`.
+
+The previous resumed round's three tests are the difference between 821 and 824,
+all in `tests/loop_control_test.rs` (61 → 64); the two `test` blocks in
 `tests/test_control_flow.rb` are the difference between 332 and 334 in `rb test`.
 
 This round's two tests are the difference between 819 and 821, both in
@@ -984,8 +1084,17 @@ this phase is unverified on that axis.
   `edge_break_and_skip_in_a_range_loop_that_runs_no_turns` (round 3: a range
   whose start is past its end), and
   `loop control: a loop over an empty list is unaffected by skip and break`.
+  The resumed round 4 adds the same question from **source** for the range form —
+  `loop_control_edge_a_range_loop_that_runs_no_turns_is_unaffected_by_both`, whose
+  empty range (`5 to 1`) runs no turns at all and whose `break` therefore has
+  nothing to leave.
 - **singleton** — covered: `edge_singleton_list_runs_one_turn_and_ends` (a
-  one-element list, both statements).
+  one-element list, both statements). The resumed round 4 adds the range form's
+  singleton from source — `break as the only value of a range of one` and
+  `skip as the only value of a range of one` inside
+  `edge_break_and_skip_in_a_range_loop_written_as_source`, where the one turn a
+  `1 to 1` range has is both the first and the last, so `break` and `skip` on it
+  must both leave the program at `after` and neither may take it past the loop.
 - **boundary** — covered: `edge_skip_on_the_final_iteration_of_a_for_each` (the
   last value) and `break_leaves_a_for_each_loop` (the first value, index 0);
   `edge_a_skip_is_charged_as_one_iteration` is exactly-cap / cap+1, and round 6
@@ -1011,12 +1120,27 @@ this phase is unverified on that axis.
   statement — `edge_a_jump_raised_in_a_cleanup_is_charged_one_turn`, which asks
   each loop form what a cap of 2, 3 and 5 allows when every turn is skipped from a
   cleanup (each cap is exactly that many turns on both engines) and where a `break`
-  in a cleanup stops the loop (on the turn the cleanup was written in).
+  in a cleanup stops the loop (on the turn the cleanup was written in). The resumed
+  round 4 asks the same question about the range form's **ends** and about its
+  **stride**, from source rather than through the AST helper:
+  `edge_skip_on_the_final_value_of_a_range_loop_and_break_on_its_first` puts a
+  `skip` on the last value and a `break` on the first in one program so the two
+  answers have to be consistent, and
+  `edge_break_and_skip_in_a_range_loop_written_as_source` covers both statements on
+  the first value and in the middle. `edge_break_and_skip_in_a_stepped_range_loop_written_as_source`
+  is the stride beside them: `10 by -3` and `0 to 10 by 2`, where a value the
+  stride never visits cannot be broken at and one it does visit must land the same
+  way on both engines.
 
-- **out_of_bounds** — N/A. `break` and `skip` are statements that take no
-  operand and index nothing, so they have no out-of-range case of their own. The
-  nearest thing — the ends of a `for each` — is the empty-list and final-iteration
-  tests above. List indexing bounds are `tests/index_bounds_test.rs`, untouched.
+- **out_of_bounds** — N/A for the statements themselves. `break` and `skip` take
+  no operand and index nothing, so they have no out-of-range case of their own.
+  The nearest thing — the ends of a loop — is the empty-list, final-iteration and
+  first-value tests above, including the range form's from source. The one place a
+  name outlives the loop it was bound by is covered as a failure:
+  `edge_the_range_loop_variable_is_out_of_scope_after_a_break` names `i` after the
+  loop on both engines and gets `RuntimeError: Unknown variable 'i'` from each,
+  rather than a `Nothing` or the last value. List indexing bounds are
+  `tests/index_bounds_test.rs`, untouched.
 - **type_mismatch** — covered: `edge_break_in_a_loop_over_a_non_list_never_runs`
   (`for each i in 5`, `repeat "five" times` — the body never runs, and that stays
   true rather than becoming an error).
@@ -1028,7 +1152,13 @@ this phase is unverified on that axis.
   `tests/loop_bounds_test.rs`, unchanged and still green; the range form's own
   counter is `edge_a_numeric_for_range_cannot_step_into_a_non_finite_number` in
   `tests/numeric_edge_test.rs`, unchanged, and round 3 adds the two statements
-  *around* that counter in `edge_break_and_skip_in_a_stepped_range_loop`.
+  *around* that counter in `edge_break_and_skip_in_a_stepped_range_loop`. The
+  resumed round 4 asks the stride from source and from the other side round —
+  `edge_break_and_skip_in_a_stepped_range_loop_written_as_source`, over
+  `10 to 1 by -3` and `0 to 10 by 2` — and
+  `loop control: a skip advances a range loop to its next value` starts a range at
+  **0**, so the boundary value is one the loop really visits and is not the one
+  being skipped.
 - **unicode** — covered: `edge_break_and_skip_over_unicode_values` (combining
   acute, CJK, emoji values through both statements).
 - **nesting_recursion** — covered: `a_break_in_a_nested_loop_leaves_only_the_inner_one`,
@@ -1070,6 +1200,12 @@ this phase is unverified on that axis.
   `object`-body, `module`-body, `test`-body, `unless`-body, `catch`-inside-`catch`
   and loop-nested-in-`finally` versions of the same shape were run on both engines
   during the sweep and agree, so the rule covers them without a test of its own each.
+  The resumed round 4 nests the range form instead of the list form —
+  `edge_a_break_in_a_nested_range_loop_leaves_only_the_inner_one` and
+  `loop_control_edge_a_break_in_a_nested_range_loop_leaves_only_the_inner_one`,
+  where the outer counter has to reach 3 whether the jump went through the inner
+  loop's second value or skipped it, and `edge_a_break_in_a_catch_inside_a_range_loop_leaves_the_loop`
+  puts a block with a scope of its own between the two loops.
 
 - **duplicate_missing_keys** — N/A. `break` and `skip` read no record field, bind
   no name and write no record, so there is no key to duplicate or miss. Record
@@ -1099,7 +1235,12 @@ this phase is unverified on that axis.
   a body that is a single statement. Round 4 adds the module body's two refusals —
   `edge_a_break_in_a_module_body_outside_a_loop_is_refused` covers a body written
   where there is no loop and one written inside a function body called from a loop,
-  both on both VMs. Unterminated
+  both on both VMs. The resumed round 4 adds the one malformed placement this
+  phase's own coverage had left for the range form — a jump in a `catch` written
+  inside a range loop is a jump, and the same program **without** the jump is
+  asserted beside it so the test cannot pass by the catch having swallowed
+  something (`edge_a_break_in_a_catch_inside_a_range_loop_leaves_the_loop`).
+  Unterminated
   `end`, stray tokens, BOM and CRLF are lexical/parser concerns owned by
   `tests/lexer_robustness_test.rs` and `tests/parser_hardening_test.rs`, which
   this change does not touch.
@@ -1120,7 +1261,11 @@ this phase is unverified on that axis.
   (`edge_a_jump_raised_in_a_cleanup_is_charged_one_turn`): a loop whose every turn
   is skipped from a cleanup is stopped by the cap at exactly the cap, on both
   engines, so a cleanup the jump passed through cannot be charged twice or not at
-  all.
+  all. The resumed round 4 does not add to this row: a range loop's turns are
+  already charged by `src/vm.rs`'s `run_iteration` on the path `main` wrote, the
+  boundary for it is `edge_a_range_at_exactly_the_iteration_limit_still_finishes`
+  in `tests/for_range_test.rs` (unchanged, green), and this round's tests use
+  ranges of five turns, well inside any cap a program can reach.
 
 ## Invariants touched
 
@@ -1212,6 +1357,12 @@ this phase is unverified on that axis.
   million turns from exit 1 into exit 0 — the answer the tree-walking VM has always
   given. A program that was comfortably inside every cap is untouched, and
   `examples/*.rb` and `modules/*.rb` all still exit 0.
+- **This round changes no answer on either engine.** No `src/` file was touched:
+  the 90-program two-engine sweep found no disagreement, and the stale finding it
+  did turn up (FINDINGS §10) was about the parser having too little rather than
+  too much. Ten tests were added, six in Rust and four in Redblue, and the Redblue
+  four are new `test` blocks in a file that already existed — no existing test was
+  renamed, moved, weakened or removed.
 
 ## Known gaps / follow-ups
 
@@ -1262,15 +1413,17 @@ this phase is unverified on that axis.
   FINDINGS §9 records the rule both VMs already follow, with the program that
   reproduces the old failure (`'has a' is only valid inside an object declaration`
   from `rb vm`).
-- `for each i from a to b [by s]` is documented in `SPEC.md` and
-  `docs/GRAMMAR.md` and **cannot be parsed**, so `Statement::ForRange` is
-  unreachable from source and the corpus's range programs compare two parse
-  errors. Found in round 3; FINDINGS §10 records it. The phase's own change to
-  that loop form is covered through the AST instead — `range_loop` in
-  `tests/loop_control_test.rs` and the five tests that run `break`, `skip`, the
-  stepped form and the empty range through it on both VMs. Adding the parser
-  production is a language change and belongs to the phase that adds it, the same
-  call made above about `repeat … until`.
+- ~~`for each i from a to b [by s]` is documented in `SPEC.md` and
+  `docs/GRAMMAR.md` and cannot be parsed~~ — **does not reproduce; corrected in
+  this round.** Round 3 recorded the claim against a branch whose `parse_for` had
+  no `from a to b` production, and the merge that adopted this phase's work kept
+  `main`'s, which has it (`src/parser.rs:838`). The form parses and runs, the
+  corpus's range entries run rather than comparing two parse errors, and the six
+  tests added this round ask the range questions from source on both VMs.
+  FINDINGS §10 records the correction with the two commands. `range_loop` and the
+  five AST-built tests beside them are kept — they still exercise the statement
+  through a body the parser did not lay out, which is a different thing from the
+  same statement through `parse_for`.
 - `corpus/loop-forms-0013` records the same lines before and after the fix
   (`2`, `after`) — a `skip` on the value 2 prints the same line the no-op printed,
   because the skipped turns in that program print nothing. So its golden did not
@@ -1312,6 +1465,8 @@ this phase is unverified on that axis.
   with it: which failure propagates when both the `catch` and the `finally` fail,
   and what an abrupt exit out of that `finally` names. FINDINGS §14 records the
   program and today's behaviour on both VMs, so a later phase that decides it can
-  see exactly which programs move. The same call was made about `repeat … until`
-  and about `for each i from a to b`.
+  see exactly which programs move. The same call was made about `repeat … until`.
+  ~~And about `for each i from a to b`~~ — that call was made on a stale premise
+  and is struck: the form parses on this tree (FINDINGS §10, corrected in the
+  resumed round 4), so there is nothing left to decide about it.
 - `./rbops/verify.sh` could not be run in this checkout; see the Gates table.

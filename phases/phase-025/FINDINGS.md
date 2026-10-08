@@ -342,13 +342,12 @@ lists are pinned by `object/a-declaration-opened-by-a-has-default-that-succeeds-
 `object/an-object-body-whose-declaration-failed-registers-nothing`.
 
 
-## 10. `for each i from a to b [by s]` is documented and cannot be parsed
+## 10. ~~`for each i from a to b [by s]` is documented and cannot be parsed~~ — does not reproduce
 
-Open, found in round 3 while writing the break/skip tests the review asked for.
-`SPEC.md` §"For Loop (Range)" and `docs/GRAMMAR.md`'s `for_statement` rule both
-give the range form, `docs/GRAMMAR.md` §"For Loop" gives it as the *worked example*
-for `for`, and `src/parser.rs`'s `parse_for` accepts `for each x in <expression>`
-and nothing else:
+**Closed in the resumed round 4. The claim was true when round 3 made it and is
+false on the tree this round inherited.** Round 3 was working from a branch whose
+`parse_for` accepted `for each x in <expression>` and nothing else, and recorded
+that `Statement::ForRange` was unreachable from source:
 
 ```
 $ printf 'for each i from 1 to 10\n    say i\nend\n' > target/tmp/range.rb
@@ -356,29 +355,44 @@ $ cargo run --bin rb -- run target/tmp/range.rb
 Error: ParserError: Expected In but got From
 ```
 
-`Statement::ForRange` is therefore unreachable from source. It is not dead code —
-the analyzer, the bytecode compiler, the formatter and the linter all carry it —
-and `tests/numeric_edge_test.rs` says so in a comment where it builds one by hand.
-Two consequences worth naming:
+The merge that adopted this phase's work kept `main`'s parser, which has the
+`from a to b [by s]` production (`src/parser.rs:838`, the `TokenKind::From` arm),
+so on the tree as it stands the form parses and runs:
 
-- **The corpus's range programs compare two parse errors.**
-  `tests/bytecode_vm_test.rs` holds entries such as `singleton/range-of-one`
-  written as `for each i from 1 to 1`; both VMs refuse them identically, so the
-  differential is green and nothing ran. That is a weaker guarantee than the entry
-  reads as giving.
-- **The round-3 review's finding 3 asks for a test that cannot be written.** The
-  requested `for each i from 1 to 10 / if i is 5 then break` is a parse error. The
-  coverage it asks for is delivered instead through the AST —
-  `range_loop` in `tests/loop_control_test.rs` builds the `ForRange` the way
-  `tests/numeric_edge_test.rs` does, and five tests run `break`, `skip`, the
-  stepped form and the empty range through it on **both** VMs, which is what pins
-  the `src/vm.rs` change that routes this loop form through `run_iteration`.
+```
+$ printf 'for each i from 1 to 3\n    say i\nend\n' > target/tmp/range.rb
+$ ./target/debug/rb run target/tmp/range.rb
+1
+2
+3
+exit=0
+```
 
-Adding the parser production is a language change rather than a review fix, and it
-would make a documented form real for the first time, so it belongs to the phase
-that adds it — the same call this phase made about `repeat … until` (REPORT.md,
-"Known gaps"). What is recorded here is that the two documents and the parser
-disagree, so a later reader does not have to find it again.
+Two things §10 asserted therefore no longer hold, and both are recorded here so a
+later reader does not carry them forward:
+
+- ~~**The corpus's range programs compare two parse errors.**~~ They do not.
+  `singleton/range-of-one`, `shape/range-backwards`, `shape/range-step-three`,
+  `shape/range-bounds-not-numbers` and `shape/range-no-end` in
+  `tests/bytecode_vm_test.rs` are written as source and now run; `tests/for_range_test.rs`
+  (31 tests) reads them through the parser too.
+- ~~**The round-3 review's finding 3 asks for a test that cannot be written.**~~ It
+  can. Round 3 delivered that coverage through the AST — `range_loop` in
+  `tests/loop_control_test.rs` builds the `ForRange` the way
+  `tests/numeric_edge_test.rs` does — and the resumed round 4 asks the same
+  questions from source, so the coverage is now pinned through the parser and the
+  bytecode compiler rather than around them. Six new tests do it; see REPORT.md,
+  "Resumed round 4".
+
+`range_loop` and the five tests that use it are **kept**: they still exercise
+`Statement::ForRange` on a body the parser did not lay out, which is a different
+thing from the same statement through `parse_for`, and removing working code is not
+this phase's job.
+
+Nothing in `src/` was wrong about the range loop. `src/vm.rs` routes it through
+`run_iteration`, and both engines agree on `break` and `skip` in it — the
+`for each` answers hold for this loop form too, which is what the six new tests
+ask.
 
 ## 11. The corpus had a test pinning the no-op on purpose
 
