@@ -1196,14 +1196,24 @@ to parse_if_then(tokens, pos, depth, line, cond)
     set parse_if_then_body to parse_block_body(tokens, parse_if_then_p, check_depth(line, depth + 1, "blocks"), ["end", "else"])
     set parse_if_then_out to nothing
     if token_kind(tokens, parse_if_then_body[1]) is "else" then
-        set parse_if_then_tail to parse_block_body(tokens, parse_if_then_body[1] + 1, depth + 1, ["end"])
-        set parse_if_then_out to parse_if_finish(tokens, parse_if_then_tail[1], line, cond, parse_if_then_body[0], parse_if_then_tail[0])
+        set parse_if_then_out to parse_if_else_branch(tokens, parse_if_then_body[1] + 1, depth + 1, line, cond, parse_if_then_body[0])
     end
     if type_of(parse_if_then_out) is "nothing" then
         set parse_if_then_q to expect_kind(tokens, parse_if_then_body[1], "end")
         set parse_if_then_out to [{s: "if", l: line, c: cond, t: parse_if_then_body[0], e: []}, parse_if_then_q]
     end
     give back parse_if_then_out
+end
+
+// The `else` branch, and the `end` that closes the `if` after it. `then_branch`
+// is a parameter rather than a name read out of `parse_if_then_body`, because
+// the body parsed here can hold another `if ... else`, which runs
+// `parse_if_then` again — and a name a Redblue function assigns is one
+// program-wide name, so `parse_if_then_body` would come back holding the
+// *inner* branch and the outer `if` would compile the wrong statements.
+to parse_if_else_branch(tokens, pos, depth, line, cond, then_branch)
+    set parse_if_else_branch_tail to parse_block_body(tokens, pos, depth, ["end"])
+    give back parse_if_finish(tokens, parse_if_else_branch_tail[1], line, cond, then_branch, parse_if_else_branch_tail[0])
 end
 
 to parse_if_finish(tokens, pos, line, cond, then_branch, else_branch)
@@ -2303,12 +2313,12 @@ to compile_statement(stmt, ctx, depth, reads_value, body_kind)
     if stmt.s is "forrange" then
         set ctx to compile_expr(stmt.a, ctx, stmt.l)
         set ctx to compile_expr(stmt.b, ctx, stmt.l)
-        set ctx to compile_expr(stmt.step, ctx, stmt.l)
-        if stmt.has_step is no then
-            // The step operand is compiled either way and popped when the loop
-            // has none, so `GET_RANGE`'s arity is the only thing that says how
-            // many bounds were pushed.
-            set ctx to emit(ctx, 2, 0, 0, stmt.l)
+        // Only the bounds the range actually has are compiled. A `for each i
+        // from 1 to 3` leaves `step` unset, and stage 1 pushes no step for it
+        // and emits no `POP` to undo one: `GET_RANGE`'s arity is the only thing
+        // that says how many bounds were pushed.
+        if stmt.has_step is yes then
+            set ctx to compile_expr(stmt.step, ctx, stmt.l)
         end
         set ctx to emit(ctx, 37, 0, range_arity(stmt.has_step), stmt.l)
         set ctx to emit_name(ctx, 4, stmt.v, 0, stmt.l)
@@ -2432,10 +2442,8 @@ end
 // `try ... catch ... finally ... end`: the handlers become blocks of their own,
 // so the protected code stays a straight run of instructions with no patching.
 to compile_try(stmt, ctx, depth, line)
-    set compile_try_line to line
     set compile_try_catch_index to 0
     set compile_try_r to 0
-    set compile_try_line to stmt.l
     set compile_try_catch_index to NO_CONST
     if length(stmt.cn) > 0 then
         set compile_try_r to nested_block(stmt.c, 5, stmt.cn, 0, [], depth, ctx, no, "statements")
@@ -2577,8 +2585,12 @@ to compile_if_branches(stmt, ctx, depth, slot)
         set ctx to patch_at(ctx, slot, length(ctx.c))
     else
         set compile_if_branches_r to emit_jump_at(ctx, 34, stmt.l)
-        set ctx to patch_at(compile_if_branches_r[0], slot, length(compile_if_branches_r[0].c))
-        set ctx to compile_if_else(stmt, compile_if_branches_r[0], depth, compile_if_branches_r[1])
+        // The patch that sends the false branch past the `else` is recorded on
+        // its own context, which is then the one the `else` is compiled into:
+        // handing `compile_if_branches` own context to the call below would drop
+        // the patch and leave the jump pointing at the end of the block.
+        set compile_if_branches_patched to patch_at(compile_if_branches_r[0], slot, length(compile_if_branches_r[0].c))
+        set ctx to compile_if_else(stmt, compile_if_branches_patched, depth, compile_if_branches_r[1])
     end
     give back ctx
 end

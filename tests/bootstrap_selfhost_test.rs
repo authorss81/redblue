@@ -370,7 +370,9 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
     assert!(
         checked >= 300,
         "only {checked} corpus programs were compared; stage 2 is byte-identical \
-         on every program of the corpus the frontend accepts, which is 308"
+         on every program of the corpus the frontend accepts, which is 306 of the \
+         315 in the families above — the other 9 are refused by the frontend, and \
+         the 46 in `malformed` are refused too"
     );
     for family in UNSUPPORTED {
         assert!(
@@ -393,3 +395,255 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
 /// `edge_malformed_source_is_reported_rather_than_compiled` covers, one shape at
 /// a time.
 const UNSUPPORTED: &[&str] = &["malformed"];
+
+/// The three defects below were all the same shape of mistake in different
+/// places, so each is pinned by name rather than left to be counted by the
+/// corpus walk that found it.
+///
+/// 1. An `if ... else` whose `else` holds another `if ... else`: the nested
+///    parse reused the outer one's body name, so the outer `if` compiled the
+///    *inner* branch as its own `then`. The two files were the same length and
+///    differed in the constant pool and in one line number.
+/// 2. The same `if ... else` with an empty `then`: the jump over the `else`
+///    pointed at the end of the block, so the `else` ran and the `then` never
+///    did, on any condition.
+/// 3. `for each i from 1 to 3`: the absent step was compiled as if it were
+///    present, and stage 2 died with a runtime error on `nothing`.
+#[test]
+fn edge_each_branch_compiles_the_statements_it_was_given() {
+    // (1) A doubly-nested `else`. Each level's `then` has to survive the parse
+    // of the level below it: the outer `then` is `say "A"`, and a compiler that
+    // lost it produced the inner `then` twice and no `A` at all.
+    assert_identical(
+        "edge_if_else_nested_in_else",
+        "set a to 1\n\
+         if a is 1 then\n\
+         \x20   say \"A\"\n\
+         else\n\
+         \x20   if a is 2 then\n\
+         \x20       say \"B\"\n\
+         \x20   else\n\
+         \x20       if a is 3 then\n\
+         \x20           say \"C\"\n\
+         \x20       else\n\
+         \x20           say \"D\"\n\
+         \x20       end\n\
+         \x20   end\n\
+         end\n",
+    );
+
+    // (1 again) The nested `if` is only the *first* statement of the `else`, so
+    // the statements after it have to be kept as well — the branch is a list,
+    // and losing its head is not the only way to get it wrong.
+    assert_identical(
+        "edge_if_else_then_statements_after_a_nested_if",
+        "set a to 1\n\
+         if a is 1 then\n\
+         \x20   say \"A\"\n\
+         else\n\
+         \x20   if a is 2 then\n\
+         \x20       say \"B\"\n\
+         \x20   end\n\
+         \x20   say \"C\"\n\
+         end\n",
+    );
+
+    // (1 a third time) The nesting on the `then` side, where the body is parsed
+    // before the `else` is even looked for.
+    assert_identical(
+        "edge_if_else_nested_in_then",
+        "set a to 1\n\
+         if a is 1 then\n\
+         \x20   if a is 2 then\n\
+         \x20       say \"B\"\n\
+         \x20   else\n\
+         \x20       say \"C\"\n\
+         \x20   end\n\
+         else\n\
+         \x20   say \"A\"\n\
+         end\n",
+    );
+
+    // (2) A `then` the size of a single instruction. Nothing about it is
+    // unusual except that there is nothing of it to notice a lost patch by, so
+    // it is the shape that made the jump bug invisible in a disassembly read.
+    assert_identical(
+        "edge_if_else_empty_then",
+        "set a to 1\nif a is 1 then\nelse\n    say \"two\"\nend\n",
+    );
+}
+
+/// Byte equality is the ladder's rule, but two engines that agree on a wrong
+/// jump would satisfy it, so the strongest statement available is also made
+/// here: the two files produce the same output when the bytecode VM runs them.
+///
+/// This is what turns "the bytes agree" into "the bytes are right", and it is
+/// the only check here that would notice a stage-2 bug that stage 1 shares.
+#[test]
+fn edge_the_two_engines_run_a_branching_program_the_same() {
+    // Every branch of the `if` is taken at least once across the four calls, so
+    // a jump that lands one instruction early or late shows up as output that
+    // differs rather than as output that stops.
+    let source = "\
+to classify(n)\n\
+\x20   if n is greater than 10 then\n\
+\x20       say \"big\"\n\
+\x20   else\n\
+\x20       if n is greater than 5 then\n\
+\x20           say \"mid\"\n\
+\x20       else\n\
+\x20           say \"small\"\n\
+\x20       end\n\
+\x20   end\n\
+end\n\
+classify(1)\n\
+classify(7)\n\
+classify(11)\n\
+classify(20)\n";
+
+    assert_identical("edge_run_same", source);
+
+    // `assert_identical` has already left stage 2's file in the scratch
+    // directory, so stage 1's is written beside it under its own name. Neither
+    // run reads the other's output, and nothing here compares the two files —
+    // that is what the byte test above is for. This test only runs them.
+    let name = "edge_run_same";
+    let stage1_file = scratch(&format!("{name}.stage1.rbc"));
+    let stage2_file = scratch(&format!("{name}.rbc"));
+    fs::write(
+        &stage1_file,
+        redblue::compile_source(source)
+            .expect("stage 1 compiles the program")
+            .encode(),
+    )
+    .expect("write stage 1's file");
+
+    let printed = |path: &Path| -> String {
+        let run = Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("vm")
+            .arg(path)
+            .output()
+            .expect("the rb binary runs a compiled file");
+        assert!(
+            run.status.success(),
+            "{} does not run:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        String::from_utf8_lossy(&run.stdout).into_owned()
+    };
+
+    let stage1_out = printed(&stage1_file);
+    let stage2_out = printed(&stage2_file);
+
+    assert_eq!(
+        stage1_out, "small\nmid\nbig\nbig\n",
+        "stage 1's file does not print what the source says, so this test proves nothing"
+    );
+    assert_eq!(
+        stage2_out, stage1_out,
+        "the two files print different things"
+    );
+}
+
+/// The bounds of a range: with a step, without one, and a step that is itself
+/// an expression rather than a literal.
+///
+/// A missing step is the case stage 2 got wrong, and it got it wrong by dying:
+/// `for each i from 1 to 3` left no step to compile and stage 2 read a property
+/// off `nothing`, so it produced no file at all.
+#[test]
+fn edge_for_range_pushes_only_the_bounds_it_was_given() {
+    // No step: two bounds, and `GET_RANGE`'s arity is 2.
+    assert_identical(
+        "edge_for_range_no_step",
+        "for each i from 1 to 3\n    say i\nend\n",
+    );
+
+    // A step: three bounds, arity 3.
+    assert_identical(
+        "edge_for_range_with_step",
+        "for each i from 10 to 1 by 3\n    say i\nend\n",
+    );
+
+    // A step written as an expression rather than a literal, so the branch that
+    // compiles it is entered because of what the parse produced, not because a
+    // token was spelled `by`.
+    assert_identical(
+        "edge_for_range_step_is_an_expression",
+        "set step to 4\nfor each i from 12 to 1 by step - 3\n    say i\nend\n",
+    );
+
+    // A descending range with no step: the step stage 1 defaults to is 1, and
+    // the file must not carry a step operand the source never wrote.
+    assert_identical(
+        "edge_for_range_descending_no_step",
+        "for each i from 1 to 3\n    say i\nend\nfor each j from 3 to 1\n    say j\nend\n",
+    );
+}
+
+/// The failure channel: stage 2 must refuse what stage 1 refuses, and must
+/// refuse it for the same reason rather than by accident.
+///
+/// The shapes here are the *branch* forms, because the three defects above were
+/// all in branch handling — a compiler that walks a branch wrongly is exactly
+/// the compiler most likely to walk an unterminated one wrongly too.
+#[test]
+fn edge_a_broken_branch_is_refused_and_writes_nothing() {
+    let broken = [
+        // An `else` with no `if` in front of it.
+        ("edge_stray_else", "set a to 1\nelse\n    say \"two\"\nend\n"),
+        // An `if` whose `else` is never closed.
+        (
+            "edge_unclosed_else",
+            "set a to 1\nif a is 1 then\n    say \"one\"\nelse\n    say \"two\"\n",
+        ),
+        // An `if` with a second `else`.
+        (
+            "edge_two_elses",
+            "set a to 1\nif a is 1 then\n    say \"one\"\nelse\n    say \"two\"\nelse\n    say \"three\"\nend\n",
+        ),
+        // An `if` with no `then` at all.
+        (
+            "edge_if_without_then",
+            "set a to 1\nif a is 1\n    say \"one\"\nend\n",
+        ),
+        // `unless` with an `else` arm, which the grammar has no production for.
+        (
+            "edge_unless_with_else",
+            "set a to 1\nunless a is 1 then\n    say \"one\"\nelse\n    say \"two\"\nend\n",
+        ),
+        // A `for each ... from ... to` with no upper bound.
+        (
+            "edge_for_range_no_upper_bound",
+            "for each i from 1\n    say i\nend\n",
+        ),
+        // A `for each ... by` with no step after it.
+        (
+            "edge_for_range_no_step_after_by",
+            "for each i from 1 to 3 by\n    say i\nend\n",
+        ),
+    ];
+
+    for (name, source) in broken {
+        let run = stage2(name, source);
+        assert!(
+            redblue::compile_source(source).is_err(),
+            "{name} is not a program stage 1 refuses either, so it is not a test"
+        );
+        assert!(
+            !run.succeeded,
+            "stage 2 accepted {name}, which the frontend refuses"
+        );
+        assert!(
+            run.bytes.is_empty(),
+            "stage 2 left a {} byte .rbc for the refused {name}",
+            run.bytes.len()
+        );
+        assert!(
+            run.stderr.contains("Error"),
+            "stage 2 failed on {name} without saying so:\n{}",
+            run.stderr
+        );
+    }
+}
