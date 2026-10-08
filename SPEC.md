@@ -455,6 +455,66 @@ for each i from 1 to 100
 end
 ```
 
+`break` leaves the loop it is written in and `skip` goes on to its next turn,
+abandoning the rest of this one. Neither takes an operand: there is nothing for
+one to say, because the loop they act on is the one around them and the turn they
+go to is the next one. Either ends the block it was written in as well as the
+loop, so the statements after one in the same `if` branch, `unless` body, `try`
+body, `catch` body, `finally` body or `test` body are part of the turn the signal
+stopped and do not run. A `finally` is still owed on the way out — an abrupt exit
+from a protected region is not a failure — and the loop's variable is still bound
+while it runs, because the turn it stopped has not ended until it has. Each block
+is given its turn in that order too: the blocks the signal passes through are
+finished one at a time, so a `finally` written inside one of them runs while that
+block's scope is live and a `finally` written around all of them runs once they
+are gone.
+
+The loop is the one *around* the statement, wherever the statement was written: a
+`break` in a `catch`, `finally`, `test`, `object` or `module` body inside a loop
+leaves that loop. A module body is in it for the same reason an `object` body is:
+the declaration runs where it is written, so a `break` in the module body around a
+loop is a `break` in that loop — and the module is then left declaring nothing,
+because the statements that would have published it did not run.
+
+```redblue
+set saved to nothing
+for each name in names
+    try
+        set record to files.read("records/{name}.rb")
+    catch error
+        break
+    end
+    set saved to record
+end
+```
+
+With no enclosing loop there is nothing to leave, and saying so is the point: a
+`break` in no loop is a mistake in the program, and a mistake that runs to
+completion reporting success is worse than one that stops with a message naming
+the statement.
+
+```redblue
+break
+```
+
+```
+RuntimeError: 'break' is only valid inside a loop
+```
+
+Two placements are refused for the same reason, and with the same message:
+
+- **A function body.** A function body is not written inside the loop that calls
+  it, so a `break` there is in no loop even when the call was made from one. The
+  caller's loop survives the refusal and goes on to its next turn. A `module`
+  declared inside a function body inherits this: its body is written inside a
+  function body, so it is in no loop either.
+- **An `object` body outside any loop.** The statements of an `object` body are run
+  once, when the type is declared, so a `break` in one is a `break` in no loop. The
+  same body written inside a loop leaves that loop, as above.
+
+The refusal is a runtime error rather than a compile error, so `try ... catch
+error` catches it like any other and the program carries on afterwards.
+
 ---
 
 ## Functions
@@ -752,6 +812,64 @@ finally
     end
 end
 ```
+
+The `finally` needs no `catch` beside it, and it is owed however its region is
+left — including by a failure, which is the case the cleanup above exists for.
+The `finally` runs on the way out and the failure is reported after it, not
+instead of it, unless the cleanup itself ends the region — see below:
+
+```redblue
+try
+    set file to might fail files.open("data.rb")
+finally
+    say "closing what was opened"
+end
+```
+
+```
+closing what was opened
+RuntimeError: ...
+```
+
+A `try` with no `catch` is not a handler and never was one: the failure belongs
+to whatever is written around it, so a `catch` there takes it, and a program with
+nothing around it stops with it as its own.
+
+Two things in a `finally` are not that failure being reported. A `finally` that
+*fails* replaces it, so the failure that reaches the `try` around this one is the
+cleanup's own. And a `finally` that leaves its region abruptly — a `break` or a
+`skip` — drops it: the region was left by the jump rather than by the failure, so
+there is nothing for a `catch` written around this `try` to handle, and the
+statements after the `finally` do not run.
+
+```redblue
+set log to ""
+for each name in ["ada", "bob", "cleo"]
+    try
+        try
+            set size to 1 + name
+        finally
+            if name is "bob" then skip end
+            set log to log + "read " + name + "\n"
+        end
+    catch error
+        set log to log + "missing " + name + "\n"
+    end
+end
+say log
+```
+
+```
+read ada
+missing ada
+read cleo
+missing cleo
+```
+
+`bob` contributes neither line. The cleanup was told to abandon that turn, and
+the turn was abandoned: the `catch` around the `try` did not run for it. Before
+this rule, the tree-walking VM ran that `catch` anyway and the bytecode VM did
+not — the same program, two answers, both exiting 0.
 
 ### Raising Errors
 

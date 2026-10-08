@@ -200,6 +200,45 @@ fn take(sequence: &mut Sequence, span: Span) -> Result<Option<Value>> {
 /// A `catch` body paired with the name its handler binds.
 type CatchHandler = ((Arc<Chunk>, Vec<u32>), String);
 
+/// The loop a `break` or a `skip` acts on: which frame's block the loop is in,
+/// and where in that block it is.
+///
+/// A loop does not have to be in the frame the instruction runs in. A `test`,
+/// `catch`, `finally` or `object` body compiles to a block of its own and so runs
+/// in a child frame, and a `break` written in one of those bodies is written
+/// inside the loop the enclosing frame is running — which is what the
+/// tree-walking VM answers, since it counts the loops a statement is lexically
+/// inside and only resets that count for a function call. Naming the owning frame
+/// alongside the loop is what lets an abrupt exit leave the loop and the frames
+/// between it and the instruction.
+#[derive(Clone, Copy)]
+struct LoopOwner {
+    /// The frame whose block the loop is in. It is an ancestor of the frame the
+    /// instruction runs in whenever the instruction is not in the loop's own
+    /// body, and the frame itself when it is.
+    frame: usize,
+    site: LoopSite,
+}
+
+/// Why [`BytecodeVm::drive`] stopped running the frames it was given.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// The frames ran out of instructions.
+    Finished,
+    /// A `break` or a `skip` in the body left a loop the body was written
+    /// inside, so the frame that owns the loop has been told where to go next and
+    /// the frames between them have been finished. The region that body belongs
+    /// to has been left with it, so a caller that would carry on past that region
+    /// does not.
+    Left,
+}
+
+impl Exit {
+    fn is_left(self) -> bool {
+        self == Exit::Left
+    }
+}
+
 /// One `try` whose protected code is still running.
 ///
 /// `TRY` names its handlers rather than jumping to them, and the protected code
@@ -223,6 +262,16 @@ struct Handler {
     /// How many loops were running when the protected code started, so a handler
     /// does not inherit a sequence the failed code left half drawn.
     loop_base: usize,
+    /// The frame whose block this `try` was written in, and the offset of its
+    /// `TRY` in that block.
+    ///
+    /// Together they say which instructions this handler protects, which is what
+    /// tells a `break` leaving a loop whether it has left this region too. A
+    /// `try` the loop is written *inside* is protected code the jump lands back
+    /// in, so its handler stays installed; a `try` written inside the loop body
+    /// is protected code the jump goes past, so its handler does not.
+    frame: usize,
+    start: u32,
 }
 
 /// One `object` declaration being assembled. Its body declares the fields and
@@ -283,6 +332,16 @@ struct Frame {
     /// Whether this frame is a user call, which is what the call-depth limit
     /// counts.
     is_call: bool,
+    /// The loop this block was written inside, when it was inside one.
+    ///
+    /// Recorded when the frame is pushed, from the instruction that entered it —
+    /// the `TEST` or `DEF_OBJECT` for a block, the `TRY` for a `catch` or a
+    /// `finally` — so that a `break` in the body names the loop enclosing that
+    /// instruction rather than refusing. `None` for a frame that is not written
+    /// inside a loop, and for a call: a function body is not lexically inside the
+    /// loop that called it, so a `break` there is refused rather than reaching out
+    /// and ending the caller's turn. See [`LoopOwner`].
+    loop_owner: Option<LoopOwner>,
     /// Whether a `STORE` here writes a global rather than a local — a module's
     /// bindings are the importing program's globals, exactly as they are for the
     /// tree-walking VM.
@@ -504,14 +563,17 @@ pub struct BytecodeVm {
     loops: Vec<Loop>,
     /// The `try` handlers currently installed, innermost last.
     handlers: Vec<Handler>,
-    /// The `object` declarations being assembled, outermost first.
+    /// The `object` declarations the open object bodies are assembling,
+    /// outermost first.
     ///
-    /// A **stack**, not a slot: a `has` field's `default` is compiled as an
+    /// A **stack**, not a slot. Two things nest: an `object` declared inside
+    /// another `object`'s body is a second declaration being assembled while the
+    /// first is still open, and a `has` field's `default` is compiled as an
     /// ordinary expression, so it may call a function that declares an object of
-    /// its own, and that declaration is still open when the enclosing one
-    /// declares its next field. One slot let the inner declaration overwrite the
-    /// outer one, so the outer body's `DefField` wrote into the inner type and
-    /// the outer body then finished a declaration that was gone.
+    /// its own while the enclosing one declares its next field. One slot let the
+    /// inner declaration take the outer one's place, so the outer body's
+    /// `DefField` wrote into the inner type and the outer body then finished a
+    /// declaration that was gone. See [`BytecodeVm::finish_object`].
     pending_objects: Vec<ObjectPending>,
     /// What the last frame to finish produced.
     outcome: Value,
@@ -530,6 +592,27 @@ pub struct BytecodeVm {
     /// interleaved a program's own output with the failure report is a test run
     /// nobody can read.
     echo: bool,
+    /// Whether a `break` or a `skip` has moved a frame that is not the one the
+    /// instruction ran in — the sign that an abrupt exit has crossed a frame
+    /// boundary.
+    ///
+    /// Read by [`BytecodeVm::drive`] when it stops, which is the body that was
+    /// running when the exit happened, and nowhere else: a `catch` or `finally`
+    /// body is driven by its caller, and that caller has to know whether the
+    /// region it was going to resume is one the program has already gone past.
+    /// See [`Exit::Left`].
+    abrupt_exit: bool,
+    /// Whether a failure is between [`BytecodeVm::handle_failure`] and the `catch`
+    /// or `finally` body it is running.
+    ///
+    /// The `finally` a `break` in a `catch` body is owed runs inside this window,
+    /// and it reads the loop's variable as the tree-walking VM reads it — still
+    /// bound, because the turn the `break` stopped has not ended yet. See
+    /// [`BytecodeVm::put_back_binding`].
+    handling_failure: bool,
+    /// Loop-variable bindings waiting for the failure handling that owes them —
+    /// see [`BytecodeVm::put_back_binding`].
+    deferred_bindings: Vec<LoopVariable>,
 }
 
 impl Default for BytecodeVm {
@@ -566,6 +649,9 @@ impl BytecodeVm {
             max_steps: resolve_max_steps(),
             max_iterations: resolve_max_iterations(),
             echo: true,
+            abrupt_exit: false,
+            handling_failure: false,
+            deferred_bindings: Vec::new(),
         }
     }
 
@@ -613,21 +699,26 @@ impl BytecodeVm {
     /// happens, which is where the tree-walking VM prints it too, so a program
     /// that mixes `say` and `print` writes its lines in the same order either
     /// way.
+    ///
+    /// A run that failed part-way through leaves the frames, loops and handlers
+    /// it had open, and the declarations its open `object` bodies were
+    /// assembling with them, so a second run on the same VM starts from a clean
+    /// state rather than from a body that is still half-declared.
     pub fn run(&mut self, chunk: &Chunk) -> Result<Value> {
         self.frames.clear();
         self.loops.clear();
         self.handlers.clear();
         self.stack.clear();
+        self.pending_objects.clear();
         self.locals.truncate(1);
         self.outcome = Value::Nothing;
-        // Nothing is being assembled by a run that has not started yet: a VM run
-        // again after a failure carries no half-declared `object` into the next
-        // program.
-        self.pending_objects.clear();
+        self.abrupt_exit = false;
 
         let chunk = Arc::new(chunk.clone());
         self.frames.push(self.frame_for(&chunk, Vec::new()));
-        let result = self.drive(0);
+        // `Exit` is not read here: a `break` in the program's outermost block is
+        // refused, so no loop is left for this body to have been written inside.
+        let result = self.drive(0).map(|_| ());
         if result.is_ok() && self.echo {
             for line in &self.output {
                 println!("{}", line);
@@ -661,6 +752,7 @@ impl BytecodeVm {
             module_body: None,
             module_exports: Vec::new(),
             is_call: false,
+            loop_owner: None,
             globals_only: false,
             sites,
         }
@@ -762,9 +854,27 @@ impl BytecodeVm {
         Ok(())
     }
 
+    /// The `while` loop whose condition this `JUMP_IF_FALSE` is, if it is one.
+    ///
+    /// A loop's `exit` is the target of the `JUMP_IF_FALSE` that leaves it, so
+    /// the two match on the operand alone; the range check picks the innermost of
+    /// nested loops, whose `exit` values are distinct because each is one past
+    /// its own backward jump. A sequence loop has no such jump — it leaves by
+    /// running out of values — and is charged at its `STORE` instead.
+    fn condition_site(&self, frame: usize, instruction: Instruction) -> Option<LoopSite> {
+        let ip = self.frames[frame].ip as u32;
+        self.frames[frame]
+            .sites
+            .iter()
+            .filter(|site| !site.iterator && site.exit == instruction.arg)
+            .filter(|site| site.top < ip && ip <= site.back_edge)
+            .max_by_key(|site| site.top)
+            .copied()
+    }
+
     /// Charges one iteration to `iterations`.
     ///
-    /// Called where the loop is about to run its body again, which is the same
+    /// Called where the loop is about to run its body, which is the same
     /// point the tree-walking VM charges: after a sequence has been found to have
     /// a value left, and after a `while`'s condition has come out true.
     fn charge_loop(&mut self, index: usize) -> Result<()> {
@@ -925,8 +1035,29 @@ impl BytecodeVm {
 
     // -- the interpreter loop -----------------------------------------------
 
-    /// Runs instructions until the frame stack is down to `base`.
-    fn drive(&mut self, base: usize) -> Result<()> {
+    /// Runs instructions until the frame stack is down to `base`, and reports why
+    /// it stopped.
+    ///
+    /// An abrupt exit that crossed a frame boundary pops every frame above the
+    /// one that owns the loop, so a chain of nested drivers stops along with them
+    /// and each has to report it: the flag is *read* here rather than taken, and
+    /// the driver that carries on clears it (see [`Self::step_frames`]). That way
+    /// the caller that owns the region the exit left — a `catch` or `finally`
+    /// body, or the program itself — is the one told, rather than whichever
+    /// driver happened to stop first. See [`Exit::Left`].
+    fn drive(&mut self, base: usize) -> Result<Exit> {
+        self.step_frames(base).map(|ran_out| {
+            if ran_out && self.abrupt_exit {
+                Exit::Left
+            } else {
+                Exit::Finished
+            }
+        })
+    }
+
+    /// The instruction loop of [`BytecodeVm::drive`], reporting whether it stopped
+    /// because the frames ran out rather than because of a failure.
+    fn step_frames(&mut self, base: usize) -> Result<bool> {
         loop {
             // Unwinding is a place a failure can come from as much as stepping
             // is: an `object` body registers its type on the way out, so a
@@ -945,8 +1076,12 @@ impl BytecodeVm {
                 }
             }
             if self.frames.len() <= base {
-                return Ok(());
+                return Ok(true);
             }
+            // Every frame an abrupt exit popped has already stopped, so a driver
+            // that is still stepping has delivered the exit it was carrying and
+            // the flag is cleared here. See [`Self::drive`].
+            self.abrupt_exit = false;
             if let Err(error) = self.step() {
                 if !self.handle_failure(&error)? {
                     return Err(error);
@@ -983,7 +1118,7 @@ impl BytecodeVm {
             self.module_depth = self.module_depth.saturating_sub(1);
             self.importing.pop();
         }
-        self.loops.truncate(frame.loop_base);
+        self.unwind_loops(frame.loop_base);
         self.handlers.truncate(frame.handler_base);
         self.locals.truncate(frame.locals_base);
         if frame.is_call {
@@ -1045,11 +1180,28 @@ impl BytecodeVm {
     /// walked again. A parent that is not declared is the same failure.
     ///
     /// The declaration being finished is the innermost one, and it is **taken**
-    /// off [`Self::pending_objects`]. A body that finishes with nothing of its
-    /// own left on the stack is a program this VM cannot make sense of — the
-    /// declaration it opened is gone — and that is a failure naming the object,
-    /// not a panic: a `panic!` here is reachable from Redblue source, and a
-    /// reachable panic is a crash rather than a diagnostic.
+    /// off [`Self::pending_objects`], so a body nested inside another `object`
+    /// body's takes its own and leaves the outer one to the frame that finishes
+    /// it. That is the whole reason `pending_objects` is a stack: with one slot
+    /// the inner declaration overwrites the outer one, and the outer body's
+    /// finish finds nothing left to register.
+    ///
+    /// A body that finishes with nothing of its own left on the stack is a
+    /// program this VM cannot make sense of — the declaration it opened is gone —
+    /// and that is a failure naming the object, not a panic: a `panic!` here is
+    /// reachable from Redblue source, and a reachable panic is a crash rather
+    /// than a diagnostic.
+    ///
+    /// A parent that is not among [`BytecodeVm::objects`] is looked for among
+    /// the declarations still being assembled. The tree-walking VM registers a
+    /// type before it runs the statements after its declarations, so a nested
+    /// `object B extends A` written inside `object A` finds `A` there; this VM
+    /// runs the nested declaration first, so `A` is still a pending declaration
+    /// rather than a registered type, and refusing it would be a disagreement
+    /// about a program the other VM runs. The declaration that is found
+    /// contributes the fields and methods it has declared so far, which are all
+    /// of them in a body whose declarations come before its other statements —
+    /// the order the tree-walking VM collects them in.
     fn finish_object(&mut self, name: &str) -> Result<Fields> {
         let Some(pending) = self.pending_objects.pop() else {
             return Err(Error::Runtime(
@@ -1074,7 +1226,7 @@ impl BytecodeVm {
                     self.span(),
                 ));
             }
-            let Some(object) = self.objects.get(&current).cloned() else {
+            let Some(object) = self.resolve_object(&current) else {
                 return Err(Error::Runtime(
                     format!(
                         "Object '{}' extends '{current}', which is not declared",
@@ -1113,6 +1265,46 @@ impl BytecodeVm {
             },
         );
         Ok(fields)
+    }
+
+    /// The type `name` denotes for a parent chain to walk: a registered type
+    /// first, then — innermost first — a declaration still being assembled by an
+    /// open `object` body.
+    ///
+    /// A pending declaration is a type whose fields and methods are the ones its
+    /// body has declared so far, which is all of them when the body declares
+    /// before it does anything else. See [`BytecodeVm::finish_object`] for why a
+    /// chain walk needs to see one.
+    fn resolve_object(&self, name: &str) -> Option<ObjectType> {
+        if let Some(object) = self.objects.get(name) {
+            return Some(object.clone());
+        }
+        self.pending_objects.iter().rev().find_map(|pending| {
+            if pending.name != name {
+                return None;
+            }
+            Some(ObjectType {
+                parent: pending.parent.clone(),
+                fields: pending.fields.clone(),
+                methods: pending.methods.clone(),
+            })
+        })
+    }
+
+    /// Whether `name` is already declared, or is a declaration an open `object`
+    /// body is still assembling.
+    ///
+    /// The tree-walking VM reports `Object 'A' is already declared` for
+    /// `object A` written inside `object A`'s own body, because it registers the
+    /// outer type before it runs the nested declaration. This VM runs the nested
+    /// declaration first, so it has to ask about the pending stack as well to
+    /// report the same failure.
+    fn object_is_declared(&self, name: &str) -> bool {
+        self.objects.contains_key(name)
+            || self
+                .pending_objects
+                .iter()
+                .any(|pending| pending.name == name)
     }
 
     fn step(&mut self) -> Result<()> {
@@ -1154,7 +1346,12 @@ impl BytecodeVm {
                 };
                 let handler = handler.clone();
                 self.handlers.pop();
-                self.run_finally(&handler)?;
+                if self.run_finally(&handler)?.is_left() {
+                    // A `break` or a `skip` in the `finally` has already moved
+                    // this frame — or unwound it — so the instruction after the
+                    // region is not where the program goes next.
+                    return Ok(());
+                }
                 self.advance(frame);
                 Ok(())
             }
@@ -1285,8 +1482,31 @@ impl BytecodeVm {
                 let target = instruction.arg as usize;
                 let value = self.pop()?;
                 if value.is_truthy() {
+                    // A `while`'s condition is where a turn *begins*, so it is
+                    // where a turn is charged — the same point the tree-walking
+                    // VM charges, immediately after its condition comes out
+                    // truthy and before the body runs. Charging anywhere else
+                    // counts turns the program never started: at the backward
+                    // `JUMP` the turn is only over, not known to have another
+                    // turn after it, so a cap of N refused a `while` of N turns
+                    // here that the tree-walking VM ran to its end.
+                    if let Some(site) = self.condition_site(frame, instruction) {
+                        let index = self.loop_entry(frame, site);
+                        self.charge_loop(index)?;
+                    }
                     self.advance(frame);
                 } else {
+                    // A `while` that ends on its condition leaves the loop the way
+                    // a sequence loop leaves by running out of values: its entry is
+                    // given back. Keeping it let the next turn of an *enclosing*
+                    // loop find the same entry and charge a loop that had already
+                    // finished, so a nested `while` cost its cap in the sum of its
+                    // siblings' turns rather than in its own.
+                    if let Some(site) = self.condition_site(frame, instruction) {
+                        if let Some(index) = self.loop_index(frame, site) {
+                            self.leave_loop(frame, index);
+                        }
+                    }
                     self.set_ip(frame, target);
                 }
                 Ok(())
@@ -1324,6 +1544,9 @@ impl BytecodeVm {
                 let (chunk, path) = self.child_path(frame, instruction.arg)?;
                 let mut new_frame = self.frame_for(&chunk, path);
                 new_frame.stack_base = self.stack.len();
+                // Read before the advance below, so it is the `TEST`
+                // instruction itself the loop is looked up from.
+                new_frame.loop_owner = self.loop_at(frame);
                 self.frames.push(new_frame);
                 self.advance(frame);
                 Ok(())
@@ -1360,19 +1583,7 @@ impl BytecodeVm {
 
     /// `JUMP`, which is a `while` loop's turn-over when it goes backwards.
     fn jump(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
-        let target = instruction.arg as usize;
-        if target < self.frames[frame].ip {
-            if let Some(site) = self.frames[frame]
-                .sites
-                .iter()
-                .find(|site| site.top as usize == target && !site.iterator)
-                .copied()
-            {
-                let index = self.loop_entry(frame, site);
-                self.charge_loop(index)?;
-            }
-        }
-        self.set_ip(frame, target);
+        self.set_ip(frame, instruction.arg as usize);
         Ok(())
     }
 
@@ -1530,9 +1741,7 @@ impl BytecodeVm {
     /// frame would find the *other* block's loop, and its stack base would be
     /// truncated to on the way out.
     fn loop_entry(&mut self, frame: usize, site: LoopSite) -> usize {
-        if let Some(index) = self.loops.iter().position(|entry| {
-            entry.frame == frame && entry.top == site.top && entry.back_edge == site.back_edge
-        }) {
+        if let Some(index) = self.loop_index(frame, site) {
             // The entry was made by the loop's own opening instruction, which runs
             // before the loop's `STORE` — and so before the loop has displaced
             // anything. Recording the shadow here, on the first turn, is what puts
@@ -1550,12 +1759,34 @@ impl BytecodeVm {
             top: site.top,
             back_edge: site.back_edge,
             exit: site.exit,
+            // Both loop forms are charged where the tree-walking VM charges: at
+            // the instruction that begins a turn — a sequence loop's `STORE` at
+            // its `top`, which runs once per turn, and a `while`'s condition,
+            // which comes out true once per turn. A turn that runs to its end, a
+            // `break` that leaves the loop and a `skip` that starts the next one
+            // all reach one of those between them, so a cap of three is three
+            // turns on both engines whatever way the loop left them.
+            //
+            // A sequence loop's `GET_ITER` and `GET_RANGE` draw its entry before
+            // the first turn; a `while`'s entry is drawn by the charge for that
+            // first turn, since the condition is the first instruction it has.
+            // Both are reached through `loop_entry`, so a loop an abrupt exit
+            // leaves before its first charge has an entry to leave.
             iterations: 0,
             frame,
             stack_base: self.frames[frame].stack_base,
             variable: self.shadow_of(site, frame),
         });
         self.loops.len() - 1
+    }
+
+    /// The index in [`BytecodeVm::loops`] of the loop at `site`, or `None` when
+    /// that loop has no entry — because it has not been reached yet, or because
+    /// something already dropped it.
+    fn loop_index(&self, frame: usize, site: LoopSite) -> Option<usize> {
+        self.loops.iter().position(|entry| {
+            entry.frame == frame && entry.top == site.top && entry.back_edge == site.back_edge
+        })
     }
 
     /// What the name at `site`'s `STORE` is bound to right now, or `None` when the
@@ -1594,9 +1825,55 @@ impl BytecodeVm {
         let base = loop_entry.stack_base;
         self.stack.truncate(base);
         if let Some(variable) = loop_entry.variable {
-            self.restore_shadowed(variable);
+            self.put_back_binding(variable);
         }
         self.set_ip(frame, exit as usize);
+    }
+
+    /// Puts back the binding a loop's variable displaced, holding it back while a
+    /// failure is still being handled.
+    ///
+    /// A `break` written in a `catch` body leaves the loop the body is inside,
+    /// and the `finally` of the `try` that body belongs to is still owed: the
+    /// tree-walking VM runs it before the turn ends, and the turn is what puts the
+    /// loop's variable back. So while that `finally` is outstanding the binding is
+    /// held rather than restored, and [`Self::handle_failure`] restores it once
+    /// both bodies have run. Everywhere else — a `break` in the loop's own body,
+    /// where the `finally` bodies the jump passes through have already run — it is
+    /// put back at once.
+    fn put_back_binding(&mut self, variable: LoopVariable) {
+        if self.handling_failure {
+            self.deferred_bindings.push(variable);
+        } else {
+            self.restore_shadowed(variable);
+        }
+    }
+
+    /// Puts back every binding [`Self::put_back_binding`] held, outermost first.
+    fn restore_deferred_bindings(&mut self) {
+        for variable in std::mem::take(&mut self.deferred_bindings) {
+            self.restore_shadowed(variable);
+        }
+    }
+
+    /// Drops the loops above `base`, innermost first, putting back the bindings
+    /// their variables displaced.
+    ///
+    /// A failure that leaves a loop abandons it rather than finishing it, so the
+    /// truncation the handler does on its way out has to do what
+    /// [`Self::leave_loop`] does on a `break`: a loop that is gone must not leave
+    /// its variable bound. Without this the name read after the `try` would be
+    /// the loop's last value, which is not what the tree-walking VM reads — each
+    /// of its turns runs in a scope that is popped however the turn ends.
+    fn unwind_loops(&mut self, base: usize) {
+        while self.loops.len() > base {
+            let Some(loop_entry) = self.loops.pop() else {
+                break;
+            };
+            if let Some(variable) = loop_entry.variable {
+                self.restore_shadowed(variable);
+            }
+        }
     }
 
     /// Puts back the binding a loop's variable displaced, as the tree-walking VM
@@ -1623,24 +1900,291 @@ impl BytecodeVm {
         }
     }
 
-    /// `BREAK`: no effect.
+    /// `BREAK`: leaves the innermost loop the instruction sits in.
     ///
-    /// The tree-walking VM parses `break` and does nothing with it — see the
-    /// `Statement::Break` arm in `crate::vm` and the two tests in
-    /// `tests/test_lists.rb` that pin the iteration count rather than the
-    /// break. This VM has the loop-exit machinery that a real `break` would
-    /// need, and it is not wired up here, because the two VMs disagreeing about
-    /// what a program means is worse than a language feature being unfinished.
-    /// `FINDINGS.md` carries the gap.
+    /// The loop is found from the offset of the instruction being executed, not
+    /// from the top of [`BytecodeVm::loops`]: a `while` draws its loop entry
+    /// when it turns over, so on its first turn there is no entry for it yet and
+    /// the innermost entry on the stack belongs to some *outer* loop. Leaving
+    /// that one would be the worst available answer — the wrong loop, silently
+    /// shortened — so the offset decides, and no loop at the offset is a refusal
+    /// rather than a jump.
     fn break_loop(&mut self, frame: usize) -> Result<()> {
-        self.advance(frame);
+        let Some(owner) = self.loop_at(frame) else {
+            return Err(Error::Runtime(
+                "'break' is only valid inside a loop".to_string(),
+                self.span(),
+            ));
+        };
+        self.leave_owned_loop(frame, owner)
+    }
+
+    /// `SKIP`: goes on to the next turn of the innermost loop the instruction
+    /// sits in, abandoning the rest of this turn's body.
+    ///
+    /// Going to the loop's `top` rather than past it is what makes a skipped turn
+    /// cost exactly what an ordinary one costs: a sequence loop draws and
+    /// charges its next value there, and a `while` evaluates its condition, so
+    /// neither spends an iteration the body never asked for.
+    fn skip_loop(&mut self, frame: usize) -> Result<()> {
+        let Some(owner) = self.loop_at(frame) else {
+            return Err(Error::Runtime(
+                "'skip' is only valid inside a loop".to_string(),
+                self.span(),
+            ));
+        };
+        self.turn_over_to(frame, owner)
+    }
+
+    /// Ends the loop `owner` names, from an instruction running in `frame`.
+    ///
+    /// Shared by `break` and `skip`, because everything the two have to do before
+    /// the jump is the same: create the entry if the loop has not drawn one yet,
+    /// run the `finally` of every `try` written inside the body being left, and
+    /// finish the frames between the instruction and the loop — a `catch`,
+    /// `finally`, `test` or `object` body the abrupt exit passes through on its
+    /// way out. What differs is only where the owning frame goes afterwards.
+    fn leave_owned_loop(&mut self, frame: usize, owner: LoopOwner) -> Result<()> {
+        self.prepare_exit(frame, owner)?;
+        // A `finally` that fails and is handled drops the loops its `try` was
+        // written inside, so the entry this jump was leaving can be gone by the
+        // time it gets here — and the handler that handled the failure has
+        // already put the frame where it belongs. Reaching for the entry anyway
+        // would be a removal from an empty stack.
+        if let Some(index) = self.loop_index(owner.frame, owner.site) {
+            self.leave_loop(owner.frame, index);
+        }
         Ok(())
     }
 
-    /// `SKIP`: no effect, for the same reason as [`Self::break_loop`].
-    fn skip_loop(&mut self, frame: usize) -> Result<()> {
-        self.advance(frame);
+    /// [`Self::leave_owned_loop`] for a `skip`: the loop is left by turning over
+    /// to its `top`, with its entry kept.
+    fn turn_over_to(&mut self, frame: usize, owner: LoopOwner) -> Result<()> {
+        self.prepare_exit(frame, owner)?;
+        // The same dropped entry as in [`Self::leave_owned_loop`]: a `finally`
+        // that failed and was handled has already turned the frame over, so
+        // there is no turn left to go on to.
+        let Some(index) = self.loop_index(owner.frame, owner.site) else {
+            return Ok(());
+        };
+        let (top, base) = {
+            let entry = &self.loops[index];
+            (entry.top, entry.stack_base)
+        };
+        // The turn this is starting is charged by the instruction it lands on —
+        // the `STORE` of a sequence loop, and a `while`'s condition — so a
+        // `while` that skips every turn is charged exactly as one that runs every
+        // turn. Nothing is charged here: charging it as well is what made a
+        // `skip` cost two turns, and stopped a `while` of N turns at a cap of N.
+
+        // The operand stack goes back to the height this loop began at. A
+        // sequence loop keeps the value its variable is drawn from, which sits on
+        // the base; a `while` has none, so its base is the height itself.
+        self.stack
+            .truncate(if owner.site.iterator { base + 1 } else { base });
+        self.set_ip(owner.frame, top as usize);
         Ok(())
+    }
+
+    /// Everything a `break` or a `skip` does before it jumps, and the record that
+    /// it did.
+    ///
+    /// An exit from a frame that is not the loop's own frame has left the block it
+    /// was written in — a `catch` or `finally` body, a `test` or an `object` body
+    /// — and that block's caller is waiting to be told whether the region it owns
+    /// is one the program has gone past. The flag says so, and is read by
+    /// [`BytecodeVm::drive`], which is where the block being left comes to an end.
+    ///
+    /// A failure on the way out clears it again: a `finally` that could not run
+    /// leaves the region by the failing path, and the handler that catches it
+    /// carries on after its own region as it was written to.
+    fn prepare_exit(&mut self, frame: usize, owner: LoopOwner) -> Result<()> {
+        let crossed = owner.frame != frame;
+        let outcome = self
+            .abandon_handlers(owner)
+            .and_then(|()| self.unwind_frames_above(owner.frame));
+        if let Err(error) = outcome {
+            self.abrupt_exit = false;
+            return Err(error);
+        }
+        // The entry is created if this is the loop's first turn — a `while`
+        // draws its entry when it turns over, so a `break` in a body that runs
+        // once has nothing to leave until now. It is made *after* the frames
+        // above are finished, because finishing a frame unwinds the loops above
+        // the base that frame recorded, and an entry made before that would be
+        // dropped along with them: the loop the exit was leaving would be left
+        // running.
+        self.loop_entry(owner.frame, owner.site);
+        self.abrupt_exit = crossed;
+        Ok(())
+    }
+
+    /// The innermost loop the instruction running in `frame` acts on, and the
+    /// frame that owns it. `None` when that instruction is in no loop at all.
+    ///
+    /// A block with its own frame carries the loop it was written inside in
+    /// [`Frame::loop_owner`], so a `break` in a `catch`, `finally`, `test` or
+    /// `object` body names the loop enclosing the `TRY`, `TEST` or `DEF_OBJECT`
+    /// that entered it — which is what the tree-walking VM answers, and which
+    /// leaves a call frame out of it: a function body records none, so a `break`
+    /// there is still a `break` in no loop.
+    ///
+    /// It is also what a block being entered records, before its own frame
+    /// exists: the loop a frame is written inside is the one at the instruction
+    /// that entered it.
+    fn loop_at(&self, frame: usize) -> Option<LoopOwner> {
+        self.loop_written_at(frame, self.frames[frame].ip as u32)
+    }
+
+    /// [`Self::loop_at`] at `at` in `frame`'s own block rather than at its current
+    /// instruction, for the frame a `catch` or a `finally` body is entered from:
+    /// that body was written where its `TRY` is, and the `TRY` is where the
+    /// handler records it.
+    fn loop_written_at(&self, frame: usize, at: u32) -> Option<LoopOwner> {
+        self.loop_around(frame, at)
+            .or(self.frames[frame].loop_owner)
+    }
+
+    /// The innermost loop of `frame`'s own block whose body `at` sits in.
+    ///
+    /// A loop's body is the inclusive instruction range from its `top` to its
+    /// backward jump, which no two loops in one block share — an inner loop's
+    /// range is nested inside the outer's and a sibling's is beside it — so the
+    /// highest `top` among the matches is the innermost loop.
+    fn loop_around(&self, frame: usize, at: u32) -> Option<LoopOwner> {
+        self.frames[frame]
+            .sites
+            .iter()
+            .filter(|site| site.top <= at && at <= site.back_edge)
+            .max_by_key(|site| site.top)
+            .map(|site| LoopOwner { frame, site: *site })
+    }
+
+    /// Finishes the frames above `keep`, so that an abrupt exit takes the blocks
+    /// it passes through with it.
+    ///
+    /// Each frame is finished as [`BytecodeVm::unwind_frame`] finishes one: its
+    /// loops are dropped, its handlers and scopes released and its operand-stack
+    /// slots given back. Two things are different, and both follow from there
+    /// being no caller left to receive what a finished frame leaves: no value is
+    /// pushed for one, and no call depth is given back — a `break` in a function
+    /// body is refused, so the frame running one belongs to the block the loop
+    /// was written in and never to a call above it.
+    ///
+    /// A module body among them publishes nothing and declares nothing, which is
+    /// the rollback [`BytecodeVm::discard_frames_above`] does for a failure and
+    /// the one the tree-walking VM does for a body an exit left early: leaving
+    /// the name registered would answer a later `module` of the same name with
+    /// `is already declared` and a later `import` of it with a module that
+    /// published nothing.
+    fn unwind_frames_above(&mut self, keep: usize) -> Result<()> {
+        while self.frames.len() > keep + 1 {
+            self.finish_top_frame()?;
+        }
+        Ok(())
+    }
+
+    /// Finishes the topmost frame, which is one step of
+    /// [`BytecodeVm::unwind_frames_above`] — split out because
+    /// [`BytecodeVm::abandon_handlers`] stops between frames.
+    fn finish_top_frame(&mut self) -> Result<()> {
+        let Some(frame) = self.frames.pop() else {
+            return Ok(());
+        };
+        if let Some(name) = frame.module_body.as_deref() {
+            self.declared_modules.remove(name);
+            self.module_depth = self.module_depth.saturating_sub(1);
+            self.importing.pop();
+        }
+        self.unwind_loops(frame.loop_base);
+        self.handlers.truncate(frame.handler_base);
+        self.locals.truncate(frame.locals_base);
+        self.stack.truncate(frame.stack_base);
+        // An `object` body registers its type however it is left, as it does
+        // when it runs to the end: the tree-walking VM registers the type
+        // before it runs the statements after the declarations, so a `break`
+        // in one of those leaves the type declared.
+        if frame.object_body {
+            let name = self
+                .block_of(&frame.chunk, &frame.path)
+                .map(|block| block.name.clone())
+                .unwrap_or_default();
+            self.finish_object(&name)?;
+        }
+        Ok(())
+    }
+
+    /// Runs and drops the `finally` of every `try` whose protected region an exit
+    /// out of the loop `owner` names is passing through, so none is left
+    /// installed over code the program has gone past.
+    ///
+    /// The instruction that pops a handler is the `NOP` closing its protected
+    /// region, and a jump out of the loop never reaches it. An abandoned handler
+    /// would go on catching failures raised long after the region that could have
+    /// caught them, so they are run and dropped here. The `finally` runs because
+    /// the tree-walking VM runs it too: a `break` leaving a `try` body is an
+    /// abrupt exit from the region, not a failure.
+    ///
+    /// Two kinds of region are passed through. One is a `try` written inside the
+    /// body being left, in the frame that owns the loop. The other is a `try` in a
+    /// frame the exit crosses — inside the `catch`, `finally`, `test` or `object`
+    /// body the instruction is written in — and the tree-walking VM runs those
+    /// `finally` bodies too: the signal passes out through the `try` statement
+    /// whose protected code it stopped, wherever that statement was written.
+    ///
+    /// A `try` the loop is written inside is not among them. It is still
+    /// protecting the code the jump lands back in, so its handler stays installed
+    /// and its `finally` is owed at the end of its own region rather than here —
+    /// dropping it would take the `catch` with it, so a failure in code the `try`
+    /// was written to handle would stop being handled, which is exactly what the
+    /// tree-walking VM does not do.
+    ///
+    /// The frames the exit crosses are finished *between* the `finally` bodies,
+    /// not after all of them, and that ordering is what the tree-walking VM's is:
+    /// the signal passes out through one block at a time, so a `finally` written
+    /// inside a block that is still on the stack runs while that block's scope is
+    /// live, and a `finally` written outside every crossed block runs once they
+    /// are all gone. The difference is observable — a module body crossed by the
+    /// exit has given back its `module_depth` and its scope by the time the
+    /// `finally` of a `try` written around the declaration runs, so a `set` in
+    /// that `finally` is a name of the program rather than one of the module the
+    /// exit just left.
+    fn abandon_handlers(&mut self, owner: LoopOwner) -> Result<()> {
+        // Handlers are pushed in the order the regions nest and popped in the
+        // reverse, so the ones being passed through are a suffix of the stack and
+        // the first of them is the base to pop down to. A body with no `try` in it
+        // has none, and nothing is dropped.
+        let base = self
+            .handlers
+            .iter()
+            .position(|handler| self.passed_through_by(handler, owner))
+            .unwrap_or(self.handlers.len());
+        while self.handlers.len() > base {
+            let Some(handler) = self.handlers.pop() else {
+                break;
+            };
+            // The frames above the one this handler was written in, and only
+            // those: a `finally` in a frame further down the stack is a `try`
+            // that encloses the crossed blocks, so its own turn comes later.
+            self.unwind_frames_above(handler.frame)?;
+            self.run_finally(&handler)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the region `handler` protects is one an exit out of the loop
+    /// `owner` names passes through: either the handler is in a frame the exit
+    /// crosses, or it is in the loop's own frame with its `TRY` inside the body
+    /// being left.
+    fn passed_through_by(&self, handler: &Handler, owner: LoopOwner) -> bool {
+        handler.frame > owner.frame || self.protects_body_of(handler, owner)
+    }
+
+    /// Whether `handler` is a `try` written inside the body of the loop `owner`
+    /// names, both in the frame that owns the loop.
+    fn protects_body_of(&self, handler: &Handler, owner: LoopOwner) -> bool {
+        let LoopOwner { frame, site } = owner;
+        handler.frame == frame && site.top <= handler.start && handler.start <= site.back_edge
     }
 
     // -- properties ---------------------------------------------------------
@@ -1908,7 +2452,7 @@ impl BytecodeVm {
     /// and methods and then register the type.
     fn def_object(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let name = self.object_name(frame, instruction)?;
-        if self.objects.contains_key(&name) {
+        if self.object_is_declared(&name) {
             return Err(Error::Runtime(
                 format!("Object '{name}' is already declared"),
                 self.span(),
@@ -1924,6 +2468,9 @@ impl BytecodeVm {
         new_frame.object_body = true;
         new_frame.pending_base = self.pending_objects.len();
         new_frame.stack_base = self.stack.len();
+        // Read before the advance below, so it is the `DEF_OBJECT` instruction
+        // itself the loop is looked up from.
+        new_frame.loop_owner = self.loop_at(frame);
         self.pending_objects.push(ObjectPending {
             name,
             parent,
@@ -1976,61 +2523,121 @@ impl BytecodeVm {
             finally,
             stack_base: self.frames[frame].stack_base,
             loop_base: self.loops.len(),
+            frame,
+            start: self.frames[frame].ip as u32,
         });
         self.advance(frame);
         Ok(())
     }
 
     /// Runs the handlers of the innermost installed `try`, if the failure is one
-    /// of them to handle.
+    /// of them to handle, and then of the next one out, and so on.
     ///
-    /// Answers whether the failure was handled. A handler that fails itself leaves
-    /// that failure in place, which is what the tree-walking VM does — the second
-    /// `?` — so an error in a `catch` is not swallowed by the `try` that caught
-    /// it.
+    /// Answers whether the failure was handled. A `try` with no `catch` cannot
+    /// handle one: it runs the `finally` it is owed and passes the failure on, and
+    /// the search carries on from what is left — which is the tree-walking VM's
+    /// `?` reaching an enclosing `try`. Only a search that runs out of handlers
+    /// answers `false`, and that is the failure leaving the program.
+    ///
+    /// A handler body that fails itself leaves that failure in place, which is what
+    /// the tree-walking VM does — the second `?` — so an error in a `catch` is not
+    /// swallowed by the `try` that caught it.
     fn handle_failure(&mut self, _error: &Error) -> Result<bool> {
-        // The handler is the innermost frame's only when the failure happened in
-        // the frame that installed it. A failure inside a call made by the
-        // protected code is caught by the caller's `try` instead, which is what
-        // the tree-walking VM does when `?` propagates out of a call — so the
-        // frames in between are dropped first, and the call depth they charged
-        // is given back so a caught failure leaves the counter balanced.
-        let frame = match (0..self.frames.len())
-            .rev()
-            .find(|index| self.handlers.len() > self.frames[*index].handler_base)
-        {
-            Some(frame) => frame,
-            None => return Ok(false),
-        };
-        self.discard_frames_above(frame);
+        // Looped, because a handler is not obliged to handle anything: a `try`
+        // with no `catch` runs its `finally` and passes the failure on, so the
+        // search continues from what is left rather than the failure leaving the
+        // region and the program at once. Each turn pops a handler, so the
+        // search cannot run for ever — it ends when nothing is left to ask.
+        loop {
+            // The handler is the innermost frame's only when the failure happened in
+            // the frame that installed it. A failure inside a call made by the
+            // protected code is caught by the caller's `try` instead, which is what
+            // the tree-walking VM does when `?` propagates out of a call — so the
+            // frames in between are dropped first, and the call depth they charged
+            // is given back so a caught failure leaves the counter balanced.
+            let frame = match (0..self.frames.len())
+                .rev()
+                .find(|index| self.handlers.len() > self.frames[*index].handler_base)
+            {
+                Some(frame) => frame,
+                None => return Ok(false),
+            };
+            self.discard_frames_above(frame);
 
-        let handler = self.handlers.pop().expect("a handler");
-        // Truncated to where the protected code started rather than to the frame
-        // that raised the failure: a loop the failing statement opened is half
-        // drawn and cannot be resumed, but a loop the `try` is *inside* is still
-        // the one that turns next.
-        self.loops.truncate(handler.loop_base);
-        self.stack.truncate(handler.stack_base);
-        self.run_catch(&handler)?;
-        self.run_finally(&handler)?;
+            let handler = self.handlers.pop().expect("a handler");
+            // Unwound to where the protected code started rather than to the frame
+            // that raised the failure: a loop the failing statement opened is half
+            // drawn and cannot be resumed, but a loop the `try` is *inside* is still
+            // the one that turns next.
+            self.unwind_loops(handler.loop_base);
+            self.stack.truncate(handler.stack_base);
+            // How many handlers enclose this one, counted once it has been popped.
+            // A body that raises a failure of its own and has one of *those* take
+            // it is a different failure leaving the region, and that is what tells
+            // the `try` with no `catch` below from stopping when it has.
+            let enclosing_handlers = self.handlers.len();
+            // The two bodies run inside this window, and what it changes is what they
+            // read: a `break` in the `catch` leaves the loop the body is inside, but
+            // the turn it stops has not ended until this `finally` has run, so the
+            // loop's variable is still the turn's own. The enclosing value is put
+            // back below, once both bodies are done. Saved and restored rather than
+            // set, because a failure inside either body is handled in its own right.
+            let enclosing = std::mem::replace(&mut self.handling_failure, true);
+            let bodies = self.run_catch(&handler).and_then(|caught| {
+                self.run_finally(&handler)
+                    .map(|finally| caught.is_left() || finally.is_left())
+            });
+            self.handling_failure = enclosing;
+            self.restore_deferred_bindings();
+            // The `finally` is owed whether the `catch` handled the failure or not,
+            // and whether or not the `catch` left the region: an abrupt exit out of a
+            // `catch` body is not a failure either, and the cleanup is still owed.
+            if bodies? {
+                // A `break` or a `skip` in the `catch` or the `finally` has already
+                // told the frame that owns the region where to go — or taken it away
+                // entirely — so the instruction pointer is not put back where the
+                // region would have carried on from. See [`Exit::Left`].
+                return Ok(true);
+            }
 
-        // The protected region is the instructions between `TRY` and the marked
-        // `NOP` that closes it, and both handlers have run above, so execution
-        // carries on *after* that `NOP` rather than at it. Resuming at it would
-        // be wrong twice over: the instruction pops whatever handler is on top,
-        // which for an inner `try` is the *enclosing* one — its `finally` would
-        // run before the rest of its protected code and it would lose its
-        // protection — and the `finally` owed here has already run. A `try` with
-        // no marker to go to — a file the compiler did not write — ends the
-        // block instead of resuming into whatever follows.
-        if self.frames.is_empty() {
+            // A `try` with no `catch` is not a handler. The `finally` above is owed
+            // and has run, and the failure is the program's own rather than this
+            // region's — an enclosing `try` written around this one catches it, which
+            // is what the tree-walking VM's `?` does. Answering `true` here instead
+            // would swallow it: this `try` had no `catch` to handle it, the marked
+            // `NOP` that execution would carry on past is never reached, and a
+            // program that had failed would run to its end reporting success.
+            //
+            // A body that failed and was taken by a handler *outside* this `try` is
+            // the one case where the failure this region was handling is not the one
+            // left over: the original is spent — the tree-walking VM drops it the
+            // same way, where the failing `finally` replaces it — and the `try` that
+            // took the body's is what has already said where the program goes next.
+            if handler.catch.is_none() {
+                if self.handlers.len() < enclosing_handlers {
+                    return Ok(true);
+                }
+                continue;
+            }
+
+            // The protected region is the instructions between `TRY` and the marked
+            // `NOP` that closes it, and both handlers have run above, so execution
+            // carries on *after* that `NOP` rather than at it. Resuming at it would
+            // be wrong twice over: the instruction pops whatever handler is on top,
+            // which for an inner `try` is the *enclosing* one — its `finally` would
+            // run before the rest of its protected code and it would lose its
+            // protection — and the `finally` owed here has already run. A `try` with
+            // no marker to go to — a file the compiler did not write — ends the
+            // block instead of resuming into whatever follows.
+            if self.frames.is_empty() {
+                return Ok(true);
+            }
+            match self.end_try_after(frame, handler.start) {
+                Some(target) => self.set_ip(frame, target + 1),
+                None => self.set_ip(frame, self.code_len(frame)),
+            }
             return Ok(true);
         }
-        match self.end_try_after(frame) {
-            Some(target) => self.set_ip(frame, target + 1),
-            None => self.set_ip(frame, self.code_len(frame)),
-        }
-        Ok(true)
     }
 
     /// Drops every frame above `keep`, releasing the call depth they charged.
@@ -2054,13 +2661,28 @@ impl BytecodeVm {
                 self.module_depth = self.module_depth.saturating_sub(1);
                 self.importing.pop();
             }
-            self.loops.truncate(frame.loop_base);
+            self.unwind_loops(frame.loop_base);
             self.handlers.truncate(frame.handler_base);
             self.locals.truncate(frame.locals_base);
-            // An `object` body a `catch` discards never registers its type, so
-            // its declaration goes with it. Leaving it on the stack would let the
-            // next declaration's `DefField` write its fields into a type that is
-            // not being declared any more.
+            // An abandoned `object` body does not register its type — the
+            // tree-walking VM registers one only after its declarations have been
+            // collected, and a body dropped with its declarations half-evaluated
+            // has none worth registering — so its declaration stops being
+            // assembled. `truncate` to the height this frame recorded when it
+            // pushed its own entry does exactly that and nothing more: the
+            // declaration being dropped is the one at that index, and every entry
+            // above it belongs to a frame this loop has already finished.
+            //
+            // Popping as well was wrong for any frame whose entry was not at index
+            // zero. An `object` body reached from a `has` default — a declaration
+            // inside a call the default makes, while another body is still being
+            // assembled — records `pending_base` above zero, and the extra pop took
+            // the *enclosing* body's declaration with it: the outer body then found
+            // nothing left to register and reported
+            // `Object 'A' lost its declaration before its body finished` for a
+            // program the tree-walking VM runs. `truncate` needs no second pop: an
+            // `object` frame on the stack always has its own entry at its base, or
+            // the frame that pushed it has already been finished.
             self.pending_objects.truncate(frame.pending_base);
             if frame.is_call {
                 self.call_depth = self.call_depth.saturating_sub(1);
@@ -2073,9 +2695,20 @@ impl BytecodeVm {
     /// A `catch` binds the failure's message to its name; the tree-walking VM
     /// binds the word `error`, so this does too rather than inventing a message
     /// the language does not produce.
-    fn run_catch(&mut self, handler: &Handler) -> Result<()> {
+    ///
+    /// The scope pushed above is *the frame's*: `locals_base` points at it, so
+    /// finishing the catch frame truncates it away however the body ended — it ran
+    /// to the end, it failed and an outer handler took over, or a `break` left it
+    /// early. Nothing pops it as well. Every path that pops a frame already
+    /// truncates `locals` to that frame's base (`unwind_frame`, `finish_top_frame`,
+    /// `discard_frames_above`), and a second removal took the **enclosing**
+    /// frame's own scope with it: a `catch` inside a function body dropped the
+    /// function's parameter scope, so every name it declared afterwards was
+    /// unknown. Top-level programs did not show it, because a program's names live
+    /// in globals rather than in a scope a `catch` could take.
+    fn run_catch(&mut self, handler: &Handler) -> Result<Exit> {
         let Some(((chunk, path), _)) = &handler.catch else {
-            return Ok(());
+            return Ok(Exit::Finished);
         };
         self.locals.push(CapturedScope::new());
         if !handler.catch_var.is_empty() {
@@ -2087,10 +2720,9 @@ impl BytecodeVm {
         let mut catch_frame = self.frame_for(chunk, path.clone());
         catch_frame.locals_base = self.locals.len() - 1;
         catch_frame.stack_base = handler.stack_base;
+        catch_frame.loop_owner = self.handler_body_loop(handler);
         self.frames.push(catch_frame);
-        let outcome = self.drive(self.frames.len() - 1);
-        self.locals.pop();
-        outcome
+        self.drive(self.frames.len() - 1)
     }
 
     /// The `finally` body of `handler`, if it has one.
@@ -2098,31 +2730,53 @@ impl BytecodeVm {
     /// It runs whether or not the protected code failed: the success path runs
     /// it at the marked `NOP` that closes the region, and the failure path runs
     /// it here. Both reach the same code, by the same handler.
-    fn run_finally(&mut self, handler: &Handler) -> Result<()> {
+    fn run_finally(&mut self, handler: &Handler) -> Result<Exit> {
         let Some((chunk, path)) = &handler.finally else {
-            return Ok(());
+            return Ok(Exit::Finished);
         };
         let locals_base = self.locals.len();
         let mut finally_frame = self.frame_for(chunk, path.clone());
         finally_frame.locals_base = locals_base;
         finally_frame.stack_base = handler.stack_base;
+        finally_frame.loop_owner = self.handler_body_loop(handler);
         self.frames.push(finally_frame);
         self.drive(self.frames.len() - 1)
+    }
+
+    /// The loop a `catch` or a `finally` body was written inside, looked up in the
+    /// frame that installed its `try` at the `TRY` itself.
+    ///
+    /// The `TRY` is where the handler records the position it protects, and it is
+    /// the position that answers it: a `try` written inside a loop has its
+    /// handlers in a body the loop is leaving, and one written outside a loop has
+    /// them in none — and where the frame holding the `try` has no loop of its own
+    /// at that offset, the frame's own owner answers, so a `try` inside a `test`
+    /// inside a loop still finds the loop.
+    fn handler_body_loop(&self, handler: &Handler) -> Option<LoopOwner> {
+        self.loop_written_at(handler.frame, handler.start)
     }
 
     /// The offset of the marked `NOP` that closes the `try` running in `frame`,
     /// or `None` when the block has none.
     ///
-    /// Scanned forward from the current instruction, because a failure inside
-    /// the protected code is in the middle of the region it has to skip. Only
-    /// the marked `NOP` closes a region — a filler `NOP` inside protected code
-    /// is not an end, so it cannot truncate the region — while a *nested* `try`
-    /// ends at its own marked `NOP` first, which is what the nesting count is
-    /// for: it steps over those and finds the end of this one.
-    fn end_try_after(&self, frame: usize) -> Option<usize> {
+    /// Scanned forward from the `TRY` that installed `handler`, which is where
+    /// the region begins: a failure inside the protected code is in the middle of
+    /// the region it has to skip, and the instructions *before* the failure are
+    /// part of it. Only the marked `NOP` closes a region — a filler `NOP` inside
+    /// protected code is not an end, so it cannot truncate the region — while a
+    /// *nested* `try` ends at its own marked `NOP` first, which is what the
+    /// nesting count is for: it steps over those and finds the end of this one.
+    ///
+    /// Scanning from the `TRY` rather than from the current instruction is what
+    /// makes a `try` that has already been passed through resolvable: a handler
+    /// this search reached by skipping a `try` with no `catch` — the failure went
+    /// through an inner region whose `TRY` is *behind* the instruction that
+    /// failed — would otherwise stop at that region's `NOP` and resume inside
+    /// the protected code of the `try` it is supposed to have left.
+    fn end_try_after(&self, frame: usize, start: u32) -> Option<usize> {
         let code = block_at(&self.frames[frame].chunk, &self.frames[frame].path)?;
         let mut depth = 0usize;
-        for (offset, instruction) in code.code.iter().enumerate().skip(self.frames[frame].ip) {
+        for (offset, instruction) in code.code.iter().enumerate().skip(start as usize + 1) {
             match (instruction.opcode, instruction.arg) {
                 (Opcode::Try, _) => depth += 1,
                 (Opcode::Nop, END_TRY_MARKER) if depth == 0 => return Some(offset),
@@ -2319,6 +2973,14 @@ impl BytecodeVm {
         module_frame.locals_base -= 1;
         module_frame.module_body = Some(name);
         module_frame.module_exports = exports;
+        // The loop the declaration is written inside, read before the advance
+        // below so it is the `MODULE` instruction itself the loop is looked up
+        // from. A module body runs where it is written, so it is inside that
+        // loop exactly as an `object` body is, and a `break` or a `skip` in it
+        // names it — the same shape as [`Self::def_object`]. A call frame
+        // records no loop, which is what leaves a module declared inside a
+        // function body a `break` in no loop, as the tree-walking VM has it.
+        module_frame.loop_owner = self.loop_at(frame);
         self.frames.push(module_frame);
         self.advance(frame);
         Ok(())

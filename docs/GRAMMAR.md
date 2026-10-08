@@ -252,10 +252,18 @@ repeat_until     = 'repeat'
 
 ```
 break_statement  = 'break'
-skip_statement   = 'skip' [ expression ]
+skip_statement   = 'skip'
 return_statement = 'return' [ expression ]
                  | 'give back' [ expression ]
 ```
+
+Neither `break` nor `skip` takes an operand: both act on the innermost loop the
+statement is written inside, and end the block they were written in as well as
+the loop — a `catch`, `finally`, `test`, `object` or `module` body, or an `unless`
+body, inside a loop is inside that loop. With no enclosing loop they are a
+runtime error, `'<keyword>' is only valid inside a loop`, which
+`try ... catch error` catches; a function body is not inside the loop that called
+it, so a `break` in one is refused too. See SPEC.md, "Break and Skip".
 
 ### 4.5 Function Declaration
 
@@ -299,6 +307,19 @@ try_statement    = 'try'
                       { statement } ]
                     'end'
 ```
+
+The `catch` is optional, and a `try` without one is not a handler: the `finally`
+is still owed however its region is left — a failure runs it before the failure is
+reported on — and the failure is then the enclosing program's to catch, or its
+own to stop with. See `SPEC.md`, "Finally".
+
+Two things in that `finally` are not the failure being reported:
+
+- a `finally` that **fails** replaces it — the failure that reaches the enclosing
+  `try` is the cleanup's own;
+- a `finally` that leaves its region **abruptly** — a `break` or a `skip` — drops
+  it, because the region was left by the jump rather than by the failure, so a
+  `catch` written around the `try` does not run. See `SPEC.md`, "Finally".
 
 ### 4.8 Async Statements
 
