@@ -250,11 +250,65 @@ pub enum Value {
     Number(f64),
     Text(String),
     YesNo(bool),
-    List(Vec<Value>),
-    Record(Fields),
-    Object(String, Fields),
+    List(Shared<Vec<Value>>),
+    Record(Shared<Fields>),
+    Object(String, Shared<Fields>),
     Function(FunctionValue),
     Builtin(String),
+}
+
+/// Storage a list or a record's contents live in, shared rather than owned.
+///
+/// This is the one place Redblue's value semantics are implemented, and the
+/// reason a *copy* of a list is not a *traversal* of it. Every value a program
+/// binds is copied when it is read — a variable read, an argument, a returned
+/// value — and with an owned `Vec` each of those copies walked the whole list,
+/// so a loop that indexes a list of n cost n per index and a loop that appended
+/// to one cost n per append. Redblue has no way to observe the difference: an
+/// append still produces a new list for every other binding to see, because
+/// [`Arc::make_mut`] copies whenever the storage is shared and only writes
+/// through when the value holds the last handle.
+///
+/// The rule that keeps the meaning of a program unchanged is therefore: **read
+/// by cloning the handle, write through [`Arc::make_mut`] and never through
+/// `&mut`**. A `&mut Vec` reaching an element of a shared list is the one way
+/// to make a change a program cannot see through the name it made it with.
+pub type Shared<T> = std::sync::Arc<T>;
+
+impl Value {
+    /// A list holding `items`.
+    pub fn list(items: Vec<Value>) -> Value {
+        Value::List(Shared::new(items))
+    }
+
+    /// A record holding `fields`.
+    pub fn record(fields: Fields) -> Value {
+        Value::Record(Shared::new(fields))
+    }
+
+    /// An object of type `name` holding `fields`.
+    pub fn object(name: String, fields: Fields) -> Value {
+        Value::Object(name, Shared::new(fields))
+    }
+
+    /// Appends `value` to this list if it is a list, growing the storage in
+    /// place when this value holds the only handle to it and copying it when it
+    /// does not.
+    ///
+    /// This is the whole of the growth contract in one place, and both callers
+    /// of a growing list go through it: `push`, which returns the grown list, and
+    /// `append`, which writes it back through a name. What it never does is
+    /// grow a list another binding can see, which is what makes sharing the
+    /// storage invisible.
+    pub fn append(&mut self, value: Value) -> bool {
+        match self {
+            Value::List(items) => {
+                Shared::make_mut(items).push(value);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Value {

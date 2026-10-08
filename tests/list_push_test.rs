@@ -74,7 +74,7 @@ fn edge_push_does_not_alias_its_argument() {
     // Two names, one list. `b` is read after `a` has been appended to.
     assert_eq!(
         both("set a to [1, 2]\nset b to a\nset a to push(a, 3)\nb\n"),
-        Value::List(vec![Value::Number(1.0), Value::Number(2.0)]),
+        Value::list(vec![Value::Number(1.0), Value::Number(2.0)]),
         "a push through one name was visible through the name the list was \
          already bound to"
     );
@@ -83,7 +83,7 @@ fn edge_push_does_not_alias_its_argument() {
     // because `push` appended nothing.
     assert_eq!(
         both("set a to [1, 2]\nset b to a\nset a to push(a, 3)\na\n"),
-        Value::List(vec![
+        Value::list(vec![
             Value::Number(1.0),
             Value::Number(2.0),
             Value::Number(3.0)
@@ -108,12 +108,12 @@ fn edge_push_of_a_shared_list_copies_rather_than_writing_through() {
                   [a, b, holder.items]\n";
     assert_eq!(
         both(source),
-        Value::List(vec![
+        Value::list(vec![
             // The push's own result: grown.
-            Value::List(vec![Value::Number(1.0), Value::Number(2.0)]),
+            Value::list(vec![Value::Number(1.0), Value::Number(2.0)]),
             // The names that still hold the original: unchanged.
-            Value::List(vec![Value::Number(1.0)]),
-            Value::List(vec![Value::Number(1.0)]),
+            Value::list(vec![Value::Number(1.0)]),
+            Value::list(vec![Value::Number(1.0)]),
         ]),
         "a push into a list held by three bindings wrote through the other two, \
          or its own result did not hold the new value exactly once"
@@ -123,7 +123,7 @@ fn edge_push_of_a_shared_list_copies_rather_than_writing_through() {
     // accumulate once per step and in order.
     assert_eq!(
         both("set a to []\nset a to push(a, 1)\nset a to push(a, 2)\nset a to push(a, 3)\na\n"),
-        Value::List(vec![
+        Value::list(vec![
             Value::Number(1.0),
             Value::Number(2.0),
             Value::Number(3.0)
@@ -149,7 +149,7 @@ fn edge_push_stores_the_value_it_was_given_without_aliasing_it() {
               set tok.kind to \"text\"\n\
               [length(tokens), tokens[0].kind, tok.kind]\n"
         ),
-        Value::List(vec![
+        Value::list(vec![
             Value::Number(1.0),
             // Inside the list: the record as it was when it was pushed.
             Value::Text("number".to_string()),
@@ -164,7 +164,7 @@ fn edge_push_stores_the_value_it_was_given_without_aliasing_it() {
     // list it was pushed onto.
     assert_eq!(
         both("set inner to [2, 3]\nset outer to push([1], inner)\nset inner to push(inner, 4)\nouter\n"),
-        Value::List(vec![Value::Number(1.0), Value::List(vec![Value::Number(2.0), Value::Number(3.0)])]),
+        Value::list(vec![Value::Number(1.0), Value::list(vec![Value::Number(2.0), Value::Number(3.0)])]),
         "a list pushed into another list kept aliasing the one it was pushed from"
     );
 }

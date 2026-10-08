@@ -459,8 +459,8 @@ mod tests {
         let numbers = Typed::List(vec![Typed::Number(5.0)]);
         let texts = Typed::List(vec![Typed::Text("5".to_string())]);
         assert_eq!(
-            Value::List(vec![Value::Number(5.0)]).to_string(),
-            Value::List(vec![Value::Text("5".to_string())]).to_string(),
+            Value::list(vec![Value::Number(5.0)]).to_string(),
+            Value::list(vec![Value::Text("5".to_string())]).to_string(),
         );
         assert_ne!(numbers, texts);
         assert_eq!(numbers.tagged(), "list:[number:5]");

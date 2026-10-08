@@ -927,6 +927,24 @@ impl Vm {
         self.get_var_ref(name).cloned()
     }
 
+    /// The binding a read of `name` resolves to, mutably.
+    ///
+    /// This is the one door a value is changed *through* rather than copied
+    /// into, and `append` is the only caller: handing back a `&mut` is what
+    /// lets it grow a list in place, because a `Value` read out of a scope has
+    /// one more handle on the storage than the scope itself and `make_mut`
+    /// would copy for it. The name resolves exactly as [`Vm::get_var`] does,
+    /// and nothing is ever created here — a name that is not bound stays not
+    /// bound, because growing a name into existence would be a `set`.
+    fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
+        for scope in self.locals.iter_mut().rev() {
+            if scope.contains_key(name) {
+                return scope.get_mut(name);
+            }
+        }
+        self.globals.get_mut(name)
+    }
+
     /// [`Vm::get_var`] without the copy, for a caller that is only going to look
     /// at what is bound — `:vars` and `:inspect` both are.
     fn get_var_ref(&self, name: &str) -> Option<&Value> {
@@ -1075,7 +1093,7 @@ impl Vm {
             } => {
                 let val = self.evaluate(value)?;
                 if let Some(Value::Record(mut fields)) = self.get_var(object) {
-                    fields.insert(property.clone(), val);
+                    std::sync::Arc::make_mut(&mut fields).insert(property.clone(), val);
                     self.set_var(object, Value::Record(fields))?;
                 }
                 Ok(Value::Nothing)
@@ -1122,9 +1140,9 @@ impl Vm {
                 let iterable_value = self.evaluate(iterable)?;
                 if let Value::List(items) = iterable_value {
                     let mut loop_iterations = 0;
-                    for item in items {
+                    for item in items.iter() {
                         self.charge_iteration(&mut loop_iterations, "for each")?;
-                        if self.run_iteration(Some(variable), Some(item), body)?
+                        if self.run_iteration(Some(variable), Some(item.clone()), body)?
                             == Some(LoopControl::Break)
                         {
                             break;
@@ -1480,14 +1498,14 @@ impl Vm {
             }
             Expr::List(items) => {
                 let values: Result<Vec<Value>> = items.iter().map(|i| self.evaluate(i)).collect();
-                Ok(Value::List(values?))
+                Ok(Value::list(values?))
             }
             Expr::Record(fields) => {
                 let mut record = Fields::new();
                 for (key, value) in fields {
                     record.insert(key.clone(), self.evaluate(value)?);
                 }
-                Ok(Value::Record(record))
+                Ok(Value::record(record))
             }
             // The literal captures exactly where it is written, the same way a
             // named declaration does: `make_function` copies the live scopes,
@@ -1519,6 +1537,14 @@ impl Vm {
     }
 
     fn call(&mut self, name: &str, args: &[Value]) -> Result<Value> {
+        // `append` writes through a binding, so it needs the frame the free
+        // `runtime::builtin` does not have; every other builtin is asked first.
+        if name == "append" {
+            let span = self.span();
+            let target = runtime::append_target(span, args)?;
+            runtime::append_through(span, target, self.get_var_mut(target), args[1].clone())?;
+            return Ok(Value::Nothing);
+        }
         if let Some(value) = runtime::builtin(self.span(), name, args)? {
             return Ok(value);
         }
@@ -1551,17 +1577,17 @@ impl Vm {
             ));
         };
 
-        self.apply_map(items.clone(), function.clone())
+        self.apply_map(&**items, &function)
     }
 
     /// Applies `function` to every element of `items`, in order.
-    fn apply_map(&mut self, items: Vec<Value>, function: FunctionValue) -> Result<Value> {
+    fn apply_map(&mut self, items: &[Value], function: &FunctionValue) -> Result<Value> {
         let mut mapped = Vec::with_capacity(items.len());
         for item in items {
-            mapped.push(self.call_user_function(ANONYMOUS_FUNCTION, &function, &[item])?);
+            mapped.push(self.call_user_function(ANONYMOUS_FUNCTION, function, &[item.clone()])?);
         }
 
-        Ok(Value::List(mapped))
+        Ok(Value::list(mapped))
     }
 
     /// Runs the body of a user function `name` in its own scope and returns the
@@ -1599,7 +1625,7 @@ impl Vm {
                                 ))
                             }
                         };
-                        return self.apply_map(items.clone(), function);
+                        return self.apply_map(&items, &function);
                     }
                 }
                 return Err(Error::Runtime(
@@ -1751,7 +1777,7 @@ impl Vm {
                 methods,
             },
         );
-        let record = Value::Record(fields);
+        let record = Value::record(fields);
         self.declare(name);
         self.set_var(name, record)?;
 

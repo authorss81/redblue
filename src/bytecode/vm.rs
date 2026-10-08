@@ -53,7 +53,7 @@ use crate::runtime;
 use crate::stdlib;
 use crate::value::{
     expect_range_number, expect_repeat_count, finite_number, range_has_next, Captured,
-    CapturedScope, Fields, FunctionBody, FunctionValue, Value,
+    CapturedScope, Fields, FunctionBody, FunctionValue, Shared, Value,
 };
 
 /// The block at `path` of `chunk`, or `None` when a name a file wrote points past
@@ -134,7 +134,10 @@ enum Sequence {
     /// `for each x in items`. A list is its own sequence; anything else has none
     /// at all, which is what makes `for each x in 5` run no times rather than
     /// fail — the behaviour the tree-walking VM has.
-    Each { items: Vec<Value>, index: usize },
+    Each {
+        items: Shared<Vec<Value>>,
+        index: usize,
+    },
     /// `for each x from start to end by step`.
     Range { current: f64, end: f64, step: f64 },
     /// `repeat n times`. The count arrives already turned into a whole number of
@@ -985,6 +988,23 @@ impl BytecodeVm {
         self.globals.get(name).cloned()
     }
 
+    /// The binding a read of `name` resolves to, mutably.
+    ///
+    /// The same rule [`BytecodeVm::get_var`] reads by, and for the same reason
+    /// the tree-walking VM has one: a value taken out of a scope by value carries
+    /// a second handle on a list's storage, and the copy-on-write in
+    /// [`crate::value::Shared`] answers a second handle with a copy. `append` is
+    /// the only caller, and it is why growing a list through its own name is a
+    /// step rather than a copy of everything appended so far.
+    fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
+        for scope in self.locals.iter_mut().rev() {
+            if scope.contains_key(name) {
+                return scope.get_mut(name);
+            }
+        }
+        self.globals.get_mut(name)
+    }
+
     /// Binds `name` in the innermost live scope that already has it, and in a
     /// global when no local scope does. This resolves a name exactly as
     /// [`BytecodeVm::get_var`] does, so a read and a write of one name agree.
@@ -1183,7 +1203,7 @@ impl BytecodeVm {
             // found it.
             self.pending_objects.truncate(frame.pending_base);
             if !self.frames.is_empty() {
-                self.stack.push(Value::Record(fields));
+                self.stack.push(Value::record(fields));
             }
             return Ok(());
         }
@@ -1466,7 +1486,7 @@ impl BytecodeVm {
             }
             Opcode::BuildList => {
                 let values = self.pop_n(instruction.arg)?;
-                self.push(Value::List(values));
+                self.push(Value::list(values));
                 self.advance(frame);
                 Ok(())
             }
@@ -1482,7 +1502,7 @@ impl BytecodeVm {
                     };
                     fields.insert(key.clone(), pair[1].clone());
                 }
-                self.push(Value::Record(fields));
+                self.push(Value::record(fields));
                 self.advance(frame);
                 Ok(())
             }
@@ -1653,7 +1673,7 @@ impl BytecodeVm {
             // no times — the tree-walking VM does the same rather than failing.
             Value::List(items) => Sequence::Each { items, index: 0 },
             _ => Sequence::Each {
-                items: Vec::new(),
+                items: Shared::new(Vec::new()),
                 index: 0,
             },
         }));
@@ -2287,7 +2307,7 @@ impl BytecodeVm {
         // The tree-walking VM reads the object out of the variable, and an object
         // that is not a record is left alone rather than reported.
         if let Some(Value::Record(mut fields)) = self.get_var(object) {
-            fields.insert(field.to_string(), value);
+            Shared::make_mut(&mut fields).insert(field.to_string(), value);
             self.bind(frame, object, Value::Record(fields));
         }
         // The receiver the `LOAD` before it pushed is consumed too:
@@ -2344,6 +2364,21 @@ impl BytecodeVm {
 
     /// Calls `name`, which is either a builtin or a declared function.
     fn call_named(&mut self, name: &str, args: &[Value], frame: usize) -> Result<()> {
+        // `append` writes through a binding, so it is answered here where the
+        // frame is and not by the free `runtime::builtin`, which has none. The
+        // write is the one a `STORE` would do, so a name that is a constant is
+        // refused the same way and in the same place.
+        if name == "append" {
+            let span = self.span();
+            let target = runtime::append_target(span, args)?;
+            if self.module_depth == 0 {
+                self.refuse_constant_rebind(target)?;
+            }
+            runtime::append_through(span, target, self.get_var_mut(target), args[1].clone())?;
+            self.push(Value::Nothing);
+            self.advance(frame);
+            return Ok(());
+        }
         if let Some(value) = runtime::builtin(self.span(), name, args)? {
             self.push(value);
             self.advance(frame);

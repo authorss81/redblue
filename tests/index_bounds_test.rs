@@ -193,7 +193,7 @@ fn a_legal_index_on_every_boundary_of_the_list_still_answers_the_element() {
     // `nothing` — the error is about the position, never the value stored
     // there, and a two-deep walk through it is legal.
     assert_eq!(eval("[[nothing]][0][0]"), Value::Nothing);
-    assert_eq!(eval("[]"), Value::List(vec![]));
+    assert_eq!(eval("[]"), Value::list(vec![]));
 }
 
 #[test]
