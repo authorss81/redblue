@@ -216,7 +216,7 @@ impl TestHarness {
     }
 
     fn execute_test_program(&self, program: &Program) -> std::result::Result<(), TestFailure> {
-        let (mut vm, run) = crate::vm::run_isolated(program);
+        let (mut vm, run) = crate::interpreter::run_isolated(program);
 
         if run.is_err() {
             // A failed `expect` carries more than the rendered message; keep the

@@ -1,7 +1,7 @@
 //! `break` and `skip` must leave a loop, not sit in it doing nothing.
 //!
 //! Both words were lexed, parsed and then evaluated to `Nothing`:
-//! `src/vm.rs` carried a `// TODO: Implement proper control flow` on each of
+//! `src/interpreter.rs` carried a `// TODO: Implement proper control flow` on each of
 //! them and no loop ever consulted them. So `for each i in [1, 2, 3]` with a
 //! `break` when `i` is 2 printed 1, 2, 3 and exited 0 — a program that ran to
 //! completion, reported success, and gave the wrong answer. That is what these
@@ -2186,7 +2186,7 @@ fn edge_both_vms_answer_the_same_for_a_jump_in_a_module_body() {
 /// an enclosing `catch` to handle.
 ///
 /// The tree-walking VM propagated the body's failure anyway
-/// (`src/vm.rs`, `Statement::Try`'s `!has_catch` arm returned it above whatever
+/// (`src/interpreter.rs`, `Statement::Try`'s `!has_catch` arm returned it above whatever
 /// the cleanup raised), so it ran the enclosing `catch` *after* being told to
 /// leave the loop and the bytecode VM did not. Both programs exit 0 with
 /// different answers.

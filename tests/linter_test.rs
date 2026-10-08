@@ -126,7 +126,7 @@ fn a_parent_object_named_by_extends_is_not_reported() {
     assert_eq!(
         warnings(source),
         vec!["Unused variable: 'Two'"],
-        "`extends One` reads the parent record at declaration time (src/vm.rs:1419), \
+        "`extends One` reads the parent record at declaration time (src/interpreter.rs:1419), \
          so `One` is used and only the never-referenced child is unused"
     );
 }

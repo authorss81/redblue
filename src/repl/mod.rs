@@ -10,10 +10,10 @@ pub use completer::ReplCompleter;
 pub use history::ReplHistory;
 
 use crate::analyzer;
+use crate::interpreter::Vm;
 use crate::lexer::Lexer;
 use crate::parser::{open_block_depth, Parser, Program};
 use crate::value::Value;
-use crate::vm::Vm;
 
 /// How many lines a session keeps before the oldest is dropped. A terminal
 /// scrollback holds far more, so a session that outgrows this has already lost

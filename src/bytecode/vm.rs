@@ -17,7 +17,7 @@
 //!
 //! That is what makes deep recursion safe here: [`BytecodeVm::call_depth`]
 //! counts frames in a `Vec`, so a call chain as deep as
-//! [`DEFAULT_MAX_CALL_DEPTH`](crate::vm::MAX_CALL_DEPTH) costs heap rather than
+//! [`DEFAULT_MAX_CALL_DEPTH`](crate::interpreter::MAX_CALL_DEPTH) costs heap rather than
 //! machine stack. There is no path from a `.rbc` to a native stack overflow.
 //!
 //! # What the file has to say
@@ -42,6 +42,11 @@ use crate::bytecode::format::{Block, Chunk, Constant, Instruction};
 use crate::bytecode::opcode::Opcode;
 use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER};
 use crate::error::{Error, Result, Span};
+use crate::interpreter::{qualified_member, DeclaredModule};
+use crate::interpreter::{
+    resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps,
+    resolve_max_steps_from, MAX_CALL_DEPTH, MAX_ITERATIONS, MAX_STEPS,
+};
 use crate::lexer::Lexer;
 use crate::parser::{self, BinaryOp, Program, Statement, UnaryOp};
 use crate::runtime;
@@ -49,11 +54,6 @@ use crate::stdlib;
 use crate::value::{
     expect_range_number, expect_repeat_count, finite_number, range_has_next, Captured,
     CapturedScope, Fields, FunctionBody, FunctionValue, Value,
-};
-use crate::vm::{qualified_member, DeclaredModule};
-use crate::vm::{
-    resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps,
-    resolve_max_steps_from, MAX_CALL_DEPTH, MAX_ITERATIONS, MAX_STEPS,
 };
 
 /// The block at `path` of `chunk`, or `None` when a name a file wrote points past
@@ -547,7 +547,7 @@ pub struct BytecodeVm {
     /// a `constant` cannot be declared twice at all, so a second `import` of the
     /// same module would fail on the module's own first declaration. The
     /// tree-walking VM keeps the parsed program here for the same reason — see
-    /// [`crate::vm::Vm::load_module`], which answers the second import with a
+    /// [`crate::interpreter::Vm::load_module`], which answers the second import with a
     /// no-op.
     modules: HashSet<String>,
     /// The name each imported module is called by, to the module it names.
@@ -555,14 +555,14 @@ pub struct BytecodeVm {
     /// An `import X as Y` binds `Y`, and a call written `Y.member` has to reach
     /// the same function `X.member` does — which is a function named
     /// `X_member`, not `Y_member`. The tree-walking VM keeps the same table; see
-    /// [`crate::vm::Vm`]'s `module_aliases`.
+    /// [`crate::interpreter::Vm`]'s `module_aliases`.
     module_aliases: HashMap<String, String>,
     /// Every `module` declaration that has run, by module name.
     ///
     /// An entry is what a second declaration of the same name is refused
     /// against, what `is_module_name` counts, and what an `import` of the name
     /// finds in place of a file. The tree-walking VM keeps the same table; see
-    /// [`crate::vm::Vm`].
+    /// [`crate::interpreter::Vm`].
     declared_modules: HashMap<String, DeclaredModule>,
     /// How many `module` bodies are running. Above zero a `set` binds in the
     /// module's own scope rather than becoming a global, which is what makes a
@@ -873,7 +873,7 @@ impl BytecodeVm {
     /// Charges one statement to the step budget.
     ///
     /// Charged where the compiler's statement marker is — once per statement,
-    /// which is the unit [`crate::vm::Vm`] charges too. Counting instructions
+    /// which is the unit [`crate::interpreter::Vm`] charges too. Counting instructions
     /// instead, which is what this VM used to do, made the same program reach
     /// the budget at a different point on each engine: one statement is several
     /// instructions, so the budget ran out inside the same loop's earlier turns
@@ -2393,7 +2393,7 @@ impl BytecodeVm {
             // alias is resolved to the module it names first, so `import json
             // as J` then `J.stringify(..)` reaches the same function
             // `json.stringify(..)` does — the tree-walking VM resolves the same
-            // way; see [`crate::vm::Vm::call_method`].
+            // way; see [`crate::interpreter::Vm::call_method`].
             let module = self
                 .module_aliases
                 .get(object_name)
@@ -3113,7 +3113,7 @@ impl BytecodeVm {
     /// Read while the module's own scope is still live, so a member that is not
     /// bound is not published — which is what stops a module offering a function
     /// whose declaration failed. The tree-walking VM reads the same scope at the
-    /// same point; see [`crate::vm::Vm::declare_module`].
+    /// same point; see [`crate::interpreter::Vm::declare_module`].
     fn finish_module(&mut self, frame: &Frame) {
         let Some(name) = frame.module_body.clone() else {
             return;
@@ -3232,7 +3232,7 @@ pub struct Limits {
 pub fn limits() -> Limits {
     Limits {
         max_steps: resolve_max_steps(),
-        max_iterations: crate::vm::resolve_max_iterations(),
+        max_iterations: crate::interpreter::resolve_max_iterations(),
         max_call_depth: resolve_max_call_depth(),
     }
 }

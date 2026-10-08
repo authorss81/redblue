@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-dea584.svg?logo=rust)](https://www.rust-lang.org)
+[![CI](https://github.com/authorss81/redblue/actions/workflows/ci.yml/badge.svg)](https://github.com/authorss81/redblue/actions/workflows/ci.yml)
 
 **Redblue** is a programming language designed to be as readable as plain English. Write code that reads like natural sentences while maintaining the power of modern programming languages.
 
@@ -67,9 +68,27 @@ end
 
 **Values that behave.** Numbers are 64-bit floats and always finite — `1 / 0` is a clean runtime error, never infinity. Text is fully Unicode. Records keep insertion order. Objects support inheritance and method dispatch, closures capture lexically.
 
-**Two engines that must agree.** Programs run on the tree-walking interpreter or compile to versioned bytecode (`.rbc`). A differential harness runs hundreds of programs on both and compares outcomes — if the engines ever disagree, it's a bug, and there's a test proving it.
+**Two engines that must agree.** Programs run on the tree-walking interpreter or compile to versioned bytecode (`.rbc`). A differential harness runs 361 programs on both and compares outcomes — if the engines ever disagree, it's a bug, and there's a test proving it.
+
+**Errors you can read.** Every error names its kind and points at the line:
+
+```
+Error: AnalyzerError: Unknown variable 'y'
+  --> err.rb:2:1
+2 | say y
+  | ^
+```
 
 ## Quick Start
+
+### Build
+
+```bash
+git clone https://github.com/authorss81/redblue.git
+cd redblue
+cargo build --release
+# the binary is at ./target/release/rb
+```
 
 ```bash
 # Run a file
@@ -96,7 +115,7 @@ rb vm hello.rbc
 ### Examples
 
 ```redblue
-// variables.redblue
+// variables.rb
 set name to "Alice"
 set age to 30
 set fruits to ["apple", "banana", "orange"]
@@ -107,7 +126,7 @@ say fruits
 ```
 
 ```redblue
-// loops.redblue
+// loops.rb
 for each number from 1 to 5
     say number
 end
@@ -119,7 +138,7 @@ end
 ```
 
 ```redblue
-// files.redblue
+// files.rb
 import files
 
 files.write("output.txt", "Hello from Redblue!")
@@ -139,6 +158,11 @@ say content
 | `while … end`, `repeat … until …` | loops |
 | `break` / `skip` | leave / skip one iteration |
 | `unless … end` | negated conditional |
+| `x is 5`, `x is not 5` | equality (also `==`, `!=`) |
+| `x is greater than 4` | comparison (also `<`, `<=`, `>`, `>=`) |
+| `a and b`, `a or b`, `not x` | logic |
+| `list[0]` | indexing (out of bounds is a clean error) |
+| `7 mod 3` | remainder |
 | `to name(params) … end` | function declaration |
 | `to (x) … end` | function literal |
 | `object Name … has x … to f() … end` | object with fields and methods |

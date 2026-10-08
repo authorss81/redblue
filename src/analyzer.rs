@@ -344,7 +344,7 @@ impl Analyzer {
                 // that cannot be found or parsed binds nothing and is still
                 // reported by the loader, at runtime, where it belongs.
                 for item in items {
-                    for name in crate::vm::module_bound_names(&item.name) {
+                    for name in crate::interpreter::module_bound_names(&item.name) {
                         self.declare(&name);
                     }
                     // Both the name the import gives the module and the alias
@@ -524,7 +524,7 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
             Statement::Import(items) => {
                 for item in items {
                     out.imported
-                        .extend(crate::vm::module_bound_names(&item.name));
+                        .extend(crate::interpreter::module_bound_names(&item.name));
                 }
             }
             Statement::If {

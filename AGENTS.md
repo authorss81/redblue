@@ -91,7 +91,7 @@ src/
 ├── lexer.rs         # Tokenizer (TokenKind enum)
 ├── parser.rs        # AST builder
 ├── analyzer.rs      # Semantic analysis
-├── vm.rs            # Virtual machine
+├── interpreter.rs  # Tree-walking interpreter (the bytecode VM lives in bytecode/)
 ├── stdlib.rs        # Standard library (builtins function)
 ├── formatter.rs     # Code formatter
 ├── linter.rs        # Code linter
@@ -108,13 +108,13 @@ src/
 
 ### Standard Library Function
 1. Add to `src/stdlib.rs` → `builtins()` function
-2. Implement in `vm.rs` → `call_builtin()`
+2. Implement in `interpreter.rs` → `call_builtin()`
 3. Add tests
 
 ### New Statement Type
 1. Add variant to `parser.rs` → `Statement` enum
 2. Implement `parse_*()` method
-3. Handle in `vm.rs` → `execute_statement()`
+3. Handle in `interpreter.rs` → `execute_statement()`
 
 ## Testing
 

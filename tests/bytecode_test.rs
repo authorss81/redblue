@@ -667,7 +667,7 @@ fn functions_tests_and_methods_become_named_blocks() {
 
 /// `object Child extends Parent` has to put `Parent` in the file. A flag
 /// saying "this one extends something" is not enough: the parent chain is
-/// walked by name (`src/vm.rs`, `declare_object`), and a file that carries only
+/// walked by name (`src/interpreter.rs`, `declare_object`), and a file that carries only
 /// the flag cannot be resolved by anything.
 #[test]
 fn an_extending_object_names_its_parent_in_the_constant_pool() {

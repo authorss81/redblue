@@ -200,7 +200,7 @@ pub fn expect_range_number(value: &Value, argument: &str, span: Span) -> Result<
 ///   `repeat 2.5 times` runs twice and `repeat -5 times` runs no times: there is
 ///   no turn before the first one for a negative count to be counted back from.
 /// - A count past [`i64::MAX`] saturates rather than refusing, because the bound
-///   on turns is [`crate::vm::MAX_ITERATIONS`] and not the width of this counter:
+///   on turns is [`crate::interpreter::MAX_ITERATIONS`] and not the width of this counter:
 ///   such a loop is stopped by the iteration cap, which names the limit that
 ///   stopped it, or left by a `break` on its first turn.
 /// - A count that is not finite is refused by [`finite_number`], the refusal

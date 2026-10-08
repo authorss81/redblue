@@ -47,3 +47,12 @@ jobs:
                   failed += 1
           sys.exit(1 if failed else 0)
           EOF
+      # The README names the differential corpus size. Pin it so the number
+      # cannot rot when the corpus grows: update both together or fail here.
+      - name: corpus count matches README
+        shell: bash
+        run: |
+          n=$(ls corpus/*.rb | wc -l)
+          readme=$(grep -oE '[0-9]+ programs run on both' README.md | grep -oE '[0-9]+')
+          echo "corpus programs: $n, README says: $readme"
+          [ "$n" = "$readme" ] || { echo "::error::corpus has $n programs but README says $readme"; exit 1; }

@@ -2,6 +2,7 @@ pub mod analyzer;
 pub mod bytecode;
 mod error;
 pub mod formatter;
+mod interpreter;
 pub mod lexer;
 pub mod linter;
 pub mod lsp;
@@ -11,7 +12,6 @@ mod runtime;
 pub mod stdlib;
 pub mod testing;
 mod value;
-mod vm;
 
 use std::env;
 use std::fs;
@@ -29,12 +29,12 @@ pub use lsp::{
 // `Value::Function` variant: a caller that matches that variant has to be able
 // to name the type it binds.
 pub use bytecode::{compile_source, Chunk, Opcode};
-pub use value::{expect_repeat_count, FunctionBody, FunctionValue, Value};
-pub use vm::{
+pub use interpreter::{
     resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
     run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS, MAX_ITERATIONS_ENV,
     MAX_STEPS, MAX_STEPS_ENV, NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
+pub use value::{expect_repeat_count, FunctionBody, FunctionValue, Value};
 
 pub fn run_file(path: &str) -> Result<(), Error> {
     let source = fs::read_to_string(path).map_err(|e| Error::Io(e.to_string()))?;
@@ -63,7 +63,7 @@ pub fn run_source(source: &str) -> Result<(), Error> {
     let ast = parser::parse(tokens)?;
     analyzer::analyze(&ast)?;
 
-    let (_vm, result) = vm::run_isolated(&ast);
+    let (_vm, result) = interpreter::run_isolated(&ast);
     result.map(|_| ())
 }
 
@@ -79,7 +79,7 @@ pub fn run_source_value(source: &str) -> Result<Value, Error> {
     let ast = parser::parse(tokens)?;
     analyzer::analyze(&ast)?;
 
-    let (_vm, result) = vm::run_isolated(&ast);
+    let (_vm, result) = interpreter::run_isolated(&ast);
     result
 }
 
