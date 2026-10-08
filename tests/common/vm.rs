@@ -615,11 +615,16 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/vm-one-run");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir should be creatable");
+        // Forward slashes: the path is embedded in Redblue source, where a
+        // backslash starts an escape (`\t` is a tab), so a Windows path would
+        // arrive mangled. Windows file APIs accept `/` everywhere, so this
+        // keeps the test's intent (the harness runs the program exactly once)
+        // identical on every platform.
         let file = dir.join("out.txt");
+        let unix_path = file.display().to_string().replace('\\', "/");
         let source = format!(
             "files.append(\"{}\", \"a\")\nfiles.append(\"{}\", \"b\")\n",
-            file.display(),
-            file.display(),
+            unix_path, unix_path,
         );
         let outcome = tree_walk(&source);
         assert!(

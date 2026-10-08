@@ -2038,8 +2038,12 @@ fn edge_rb_vm_reports_a_missing_file() {
         "rb vm should fail on a file that is not there"
     );
     let stderr = String::from_utf8_lossy(&vm.stderr);
+    // Assert the error KIND, not OS phrasing: Unix says "No such file ...",
+    // Windows says "The system cannot find the file ...", and both print the
+    // `IoError` label the binary itself attaches. Matching the label keeps this
+    // green on every platform without weakening what it proves.
     assert!(
-        stderr.contains("No such file") || stderr.contains("cannot read"),
+        stderr.contains("IoError"),
         "the refusal should be an I/O failure, said: {stderr}"
     );
 }

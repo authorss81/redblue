@@ -1,0 +1,7 @@
+# Cross-platform line endings, enforced. Text is LF everywhere: a CRLF checkout
+# silently breaks byte-exact tests (the shipped grammar file must match its
+# generator byte for byte), and Windows checkouts default to CRLF without this.
+* text=auto eol=lf
+# Binaries must never be normalized.
+*.rbc binary
+*.exe binary

@@ -376,7 +376,10 @@ fn edge_load_of_a_missing_path_reports_the_failure() {
 
     s.assert_exited_ok()
         .assert_stdout_contains("Could not load file:")
-        .assert_stdout_contains("No such file or directory");
+        // The OS half of the message differs by platform ("No such file ..."
+        // vs "The system cannot find ..."), but both carry the os-error tag.
+        // Assert that tag, not Unix phrasing.
+        .assert_stdout_contains("(os error");
 }
 
 /// A command given no argument is reported as missing one, not as an unknown
