@@ -223,7 +223,10 @@ always `0`.
 
 `NO_BLOCK` is `0xFFFFFFFF`, the operand that says "this handler is not there".
 A `try` with no `catch` and no `finally` writes it in both fields and creates
-no blocks.
+no blocks. A `catch` operand of `NO_BLOCK` is what says a `try` cannot handle a
+failure: its `finally` is still run on the failure path, and the failure is then
+offered to the next `try` out rather than being dropped — so a VM must not treat
+an absent catch block as "handled".
 
 `NO_CONST` is `0xFFFFFFFF` too, and says "this instruction names no constant":
 `DEF_OBJECT` writes it for an object that extends nothing, and `EXPORT` writes it
@@ -312,7 +315,16 @@ body, `JUMP` back to the `STORE`. `for each x from a to b` and
 the end.
 
 `break` and `skip` are opcodes rather than jumps, so a loop's shape does not
-have to be rewritten to find them.
+have to be rewritten to find them. Both leave the block they are written in as
+well as the loop, and every block that compiles *inline* — an `if` branch, an
+`unless` body, a loop body — needs no block of its own for that: the jump is a
+jump in the enclosing block, so it goes over whatever follows it there. A block
+that has a child block of its own (`to`, `object`, `test`, `module`, and the two
+`try` bodies) is where a VM has to work out which loop the instruction belongs
+to, and in which order the blocks it leaves are finished: the tree-walking
+interpreter passes the signal out through one block at a time, so a `finally` in
+a block that is still on the stack runs while that block's scope is live, and a
+`finally` written around all of them runs once they are gone.
 
 `to f(a)` compiles `DEF_FUNCTION` naming a function block, then `STORE f`.
 `object Name … end` compiles `DEF_OBJECT` naming an object block, then
@@ -330,7 +342,17 @@ order.
 
 `try … end` compiles `TRY` naming a catch block and a finally block, then the
 protected statements inline. The handlers are separate blocks so the protected
-code stays a straight run of instructions with no jump patching.
+code stays a straight run of instructions with no jump patching. A `catch` body
+runs in a scope and a frame of its own, because the name it binds is its own name
+and not a name of the block that wrote it — and that scope belongs to the frame,
+so however the body ends (it ran to the end, it failed and an outer handler took
+over, or a `break` left it early) finishing the frame gives the scope back and
+nothing else with it. A VM that also removed it by hand would take the *enclosing*
+frame's scope, and a `catch` inside a function body would leave that function
+without its parameter scope; the tree-walking VM truncates rather than pops, and
+this is the same rule. A `finally` body runs in a scope of its own without a frame,
+and the order the two are run in on the failure path is a VM's business rather than
+the file's — the `TRY` records both blocks and does not say which runs first.
 
 `module Name … end` compiles `MODULE` naming the declaration's body block, whose
 name is the module's. The
@@ -344,6 +366,18 @@ rather than as a flag, so the file says what the declaration publishes without
 the reader having to know the rule; an `export` of a name the module does not
 define carries `NO_CONST`, which is a VM's cue to refuse it rather than publish
 it, in the same words the tree-walking interpreter uses.
+
+`BREAK` and `SKIP` inside that body name the loop the `MODULE` instruction sits
+in, exactly as they do in an `object` body — a declaration runs where it is
+written, so it is inside the loop around it — and a call frame names none, which
+is what leaves a module declared inside a function body in no loop. Finishing a
+module body leaves the module **undeclared**: a body whose exit ran past the
+statements that would have published it published nothing, so a later `module` of
+that name is a fresh declaration and a later `import` of it is a miss. The same
+is true of a body a failure left, and the two orders differ in what the enclosing
+code sees: a `finally` written around the declaration runs *after* the module's
+frame is finished, so a `set` in it is a name of the program rather than one of
+the module. See SPEC.md, "Break and Skip".
 
 `import Name as Alias` compiles `IMPORT` naming the module and the alias, then
 `STORE Alias`. A VM that finds the alias already bound steps over the `STORE`

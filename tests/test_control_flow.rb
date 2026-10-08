@@ -237,6 +237,82 @@ test "edge: a named catch still binds the error"
     expect caught to be "error"
 end
 
+test "edge: a catch leaves the function body it was written in alone"
+    // A catch runs in a scope of its own and gives it back - and nothing else.
+    // The bytecode VM pushed a scope for the body and popped it again once the
+    // body had run, though finishing the body's frame had already taken it, so
+    // the second removal took the function's own scope with it. `total` is
+    // declared before the try and `x` is a parameter, so the body reads both
+    // kinds of name the function owns - and both came back unknown.
+    to add(x)
+        set total to 0
+        try
+            set bad to 1 + "one"
+        catch error
+            set caught to yes
+        end
+        set total to total + x
+        give back total
+    end
+
+    expect add(7) to be 7
+end
+
+test "edge: a finally is owed when there is no catch to handle the failure"
+    // The form SPEC.md documents takes no `catch` beside the `finally`, and a
+    // failure is the case the cleanup exists for - so the tree-walking VM used
+    // to return above `run_finally_body` and skip it on exactly that path,
+    // while the bytecode VM ran it and then swallowed the failure. One promise
+    // kept and one broken on the two engines: the two below say the finally
+    // runs *and* that the failure is the enclosing `try`'s to catch.
+    set log to ""
+    try
+        try
+            set bad to 1 + "one"
+        finally
+            set log to log + "f"
+        end
+    catch error
+        set log to log + "c"
+    end
+    expect log to be "fc"
+end
+
+test "edge: a try with no catch hands the failure to the one around it"
+    // A `try` with no `catch` is not a handler. The bytecode VM's
+    // `handle_failure` answered `true` for one anyway - it ran the `finally`
+    // and then resumed past the marked `NOP`, so the failure vanished and the
+    // program carried on as though the region had succeeded. This catches it.
+    set reached to "no"
+    try
+        try
+            set bad to 1 + "one"
+        end
+        set reached to "yes"
+    catch error
+        set reached to "caught"
+    end
+    expect reached to be "caught"
+end
+
+test "edge: a failing finally still leaves the outer try to catch the failure"
+    // The cleanup ran and it is the cleanup that failed, so the failure that
+    // reaches the enclosing `try` is that one - the original is spent. Both VMs
+    // have to agree on which, and the `finally`'s `f` says it ran.
+    set log to ""
+    try
+        try
+            set bad to 1 + "one"
+        finally
+            set log to log + "f"
+            set bad to 1 + "two"
+        end
+    catch error
+        set log to log + "c"
+    end
+    expect log to be "fc"
+end
+
 test "control: unless takes its body when the condition is false"
     set branch to "none"
     set n to 0

@@ -103,14 +103,76 @@ fn bytecode(source: &str) -> Outcome {
 }
 
 /// Runs `source` both ways and fails with the two outcomes when they differ.
+///
+/// Both outcomes come back, so a test can say more about what they agreed on —
+/// what a program printed, or which of two failures it reported.
 #[track_caller]
-fn assert_agrees(source: &str) {
+fn assert_agrees(source: &str) -> (Outcome, Outcome) {
     let tree = tree_walk(source);
     let byte = bytecode(source);
     assert_eq!(
         tree, byte,
         "the two VMs disagree\n--- source ---\n{source}--- tree ---\n{tree:?}\n--- bytecode ---\n{byte:?}\n"
     );
+    (tree, byte)
+}
+
+/// [`tree_walk`] with the per-loop iteration cap lowered to `max_iterations`.
+///
+/// The corpus runs at the published cap, which nothing in a corpus program can
+/// reach — a program that needs one million turns takes a million turns to run —
+/// so a disagreement about *how many turns a cap allows* is invisible to it. This
+/// is how such a program is asked about.
+fn tree_walk_capped(source: &str, max_iterations: usize) -> Outcome {
+    let tokens = match redblue::lexer::Lexer::tokenize(source) {
+        Ok(tokens) => tokens,
+        Err(error) => return failed(failure_of(&error)),
+    };
+    let ast = match redblue::parser::parse(tokens) {
+        Ok(ast) => ast,
+        Err(error) => return failed(failure_of(&error)),
+    };
+    if let Err(error) = redblue::analyzer::analyze(&ast) {
+        return failed(failure_of(&error));
+    }
+    let mut vm = redblue::Vm::with_max_iterations(max_iterations);
+    let result = vm.run(&ast);
+    Outcome {
+        output: vm.take_output(),
+        result: result
+            .map(|value| value.to_string())
+            .map_err(|error| failure_of(&error)),
+    }
+}
+
+/// [`bytecode`] with the per-loop iteration cap lowered to `max_iterations`.
+fn bytecode_capped(source: &str, max_iterations: usize) -> Outcome {
+    let chunk = match compile_source(source) {
+        Ok(chunk) => chunk,
+        Err(error) => return failed(failure_of(&error)),
+    };
+    let mut vm = BytecodeVm::with_max_iterations(max_iterations);
+    let result = vm.run(&chunk);
+    Outcome {
+        output: vm.take_output(),
+        result: result
+            .map(|value| value.to_string())
+            .map_err(|error| failure_of(&error)),
+    }
+}
+
+/// [`assert_agrees`] with the per-loop iteration cap lowered to `max_iterations`,
+/// and the outcome of both VMs returned for a test to say more about.
+#[track_caller]
+fn assert_agrees_capped(source: &str, max_iterations: usize) -> (Outcome, Outcome) {
+    let tree = tree_walk_capped(source, max_iterations);
+    let byte = bytecode_capped(source, max_iterations);
+    assert_eq!(
+        tree, byte,
+        "the two VMs disagree under a cap of {max_iterations}\n--- source ---\n{source}\
+         --- tree ---\n{tree:?}\n--- bytecode ---\n{byte:?}\n"
+    );
+    (tree, byte)
 }
 
 /// Programs read from disk that this test cannot compare, named rather than
@@ -685,7 +747,31 @@ fn generated_corpus() -> Vec<(String, String)> {
         "say \"a\" is \"a\"\nsay \"a\" is \"b\"\n".to_string(),
     );
     add(
-        "flow/a-break-inside-a-bounded-while-is-not-a-jump-yet",
+        "flow/a-finally-runs-every-statement-on-the-way-out-of-a-break",
+        "set cleaned to 0\nrepeat 3 times\n    try\n        break\n    finally\n        set cleaned to cleaned + 1\n        set cleaned to cleaned + 10\n    end\nend\nsay cleaned\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-loop-inside-a-try-keeps-the-try-installed",
+        "try\n    for each i in [1, 2, 3]\n        if i is 2 then\n            break\n        end\n        say i\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-nested-loop-inside-a-try-leaves-the-outer-try-installed",
+        "try\n    for each a in [1, 2]\n        for each b in [1, 2]\n            try\n                if b is 2 then\n                    break\n                end\n            finally\n                say \"inner cleaned\"\n            end\n        end\n        say \"outer turn\"\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"outer cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-while-inside-a-try-keeps-the-try-installed",
+        "try\n    set n to 0\n    while n is not 4\n        set n to n + 1\n        if n is 2 then\n            break\n        end\n        say n\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-failing-finally-on-the-way-out-of-a-break-does-not-end-the-next-loop",
+        "set caught to no\ntry\n    repeat 3 times\n        try\n            break\n        finally\n            set bad to 1 + \"one\"\n        end\n    end\ncatch error\n    set caught to yes\nend\nset n to 0\nrepeat 3 times\n    set n to n + 1\nend\nsay caught\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-a-loop-inside-a-try-keeps-the-try-installed",
+        "try\n    for each i in [1, 2, 3]\n        if i is 2 then\n            skip\n        end\n        say i\n    end\n    set bad to 1 + \"one\"\ncatch error\n    say \"caught\"\nfinally\n    say \"cleaned\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-bounded-while-leaves-the-loop",
         "set n to 0\nset seen to 0\nwhile n is not 4\n    set n to n + 1\n    set seen to seen + 1\n    if n is 2 then\n        break\n    end\nend\nsay n\nsay seen\n".to_string(),
     );
     add(
@@ -718,8 +804,146 @@ fn generated_corpus() -> Vec<(String, String)> {
         "to first_even(xs)\n    for each x in xs\n        if x % 2 is 0 then\n            give back x\n        end\n    end\n    give back nothing\nend\nsay first_even([1, 3, 4, 5])\n".to_string(),
     );
     add(
-        "flow/a-skip-inside-a-bounded-loop-is-not-a-jump-yet",
+        "flow/a-skip-inside-a-bounded-loop-leaves-its-own-iteration-out",
         "set total to 0\nfor each v in [1, 2, 3]\n    skip\n    set total to total + v\nend\nsay total\n".to_string(),
+    );
+    // -- a break or a skip in an `unless` body ------------------------------
+    //
+    // An `unless` body compiles into the *enclosing* block, so the bytecode VM's
+    // `BREAK`/`SKIP` jumps over the rest of the body — while the tree-walking VM
+    // used to run the body as a plain statement list and so kept going past a
+    // signal that was already raised. These are the shapes the two used to
+    // answer differently.
+    add(
+        "flow/a-break-in-an-unless-body-ends-the-block-it-is-written-in",
+        "for each i in [1, 2, 3]\n    unless i is 2 then\n        say i\n        break\n        say \"unreachable\"\n    end\n    say \"after\"\nend\nsay \"done\"\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-an-unless-body-leaves-the-rest-of-it-unreached",
+        "set log to \"\"\nfor each i in [1, 2, 3]\n    unless i is 99 then\n        say i\n        skip\n        say \"unreachable\"\n    end\n    set log to log + i\nend\nsay log\nsay \"done\"\n".to_string(),
+    );
+    // -- a break or a skip in a module body --------------------------------
+    //
+    // A module body runs where the declaration is written, so it is inside the
+    // loop around that declaration exactly as an `object` body is. The bytecode
+    // VM gave the module's frame no loop of its own and no owner, so it refused
+    // these where the tree-walking VM honoured them.
+    add(
+        "module/a-break-in-a-module-body-inside-a-loop-leaves-that-loop",
+        "set count to 0\nfor each i in [1, 2, 3]\n    set count to count + 1\n    module Inner\n        set held to i\n        break\n        say \"unreachable\"\n    end\n    say \"unreachable\"\nend\nsay count\n".to_string(),
+    );
+    add(
+        "module/a-skip-in-a-module-body-inside-a-loop-advances-that-loop",
+        "set log to \"\"\nfor each i in [\"a\", \"b\", \"c\"]\n    set log to log + i\n    module Inner\n        skip\n        say \"unreachable\"\n    end\n    set log to log + \".\"\nend\nsay log\n".to_string(),
+    );
+    add(
+        "module/a-break-in-a-module-body-in-a-while-leaves-the-while",
+        "set n to 0\nset log to \"\"\nwhile n is not 9\n    set n to n + 1\n    module Inner\n        set held to n\n        break\n        set log to log + \"unreachable\"\n    end\n    set log to log + \".\"\nend\nsay n\nsay log\n".to_string(),
+    );
+    add(
+        "module/a-module-body-left-by-a-break-publishes-nothing",
+        "set count to 0\nrepeat 2 times\n    set count to count + 1\n    module Gone\n        export value\n        set value to 1\n        break\n    end\nend\nsay count\ntry\n    import Gone\n    say \"imported\"\ncatch error\n    say \"no module\"\nend\n".to_string(),
+    );
+    // The `finally` a jump passes through runs after the module body has given
+    // its scope back, so a `set` in it is a name of the program rather than one
+    // of the module the exit just left.
+    add(
+        "module/a-finally-around-a-module-declaration-runs-after-its-scope-is-gone",
+        "set log to \"\"\nrepeat 2 times\n    set log to log + \"t\"\n    try\n        module Inner\n            set held to 1\n            break\n        end\n        set log to log + \"unreachable\"\n    catch error\n        set log to log + \"c\"\n    finally\n        set log to log + \"f\"\n    end\n    set log to log + \".\"\nend\nsay log\n".to_string(),
+    );
+    // The two refusals: a module body written where there is no loop, and one
+    // written inside a function body — a function is not lexically inside the
+    // loop that called it, so the module inherits the exemption and the caller's
+    // loop survives.
+    add(
+        "module/a-break-in-a-module-body-outside-a-loop-is-refused",
+        "set caught to \"no\"\ntry\n    module Lone\n        break\n    end\ncatch error\n    set caught to \"yes\"\nend\nsay caught\n".to_string(),
+    );
+    add(
+        "module/a-break-in-a-module-body-in-a-function-called-from-a-loop-is-refused",
+        "to declare()\n    module Inner\n        break\n    end\nend\nset n to 0\nset caught to \"no\"\nrepeat 2 times\n    set n to n + 1\n    try\n        declare()\n    catch error\n        set caught to \"yes\"\n    end\nend\nsay n\nsay caught\n".to_string(),
+    );
+    // -- a break or a skip in a block that has a frame of its own -------------
+    //
+    // A `test`, `catch`, `finally` or `object` body is a block with a frame of
+    // its own on the bytecode VM, and it is still written inside the loop around
+    // it. Each of these is the shape the two VMs used to answer differently: the
+    // tree-walking VM counts the loops a statement is lexically inside, and the
+    // bytecode VM looked only at the frame the instruction ran in, so it refused
+    // these where the other VM honoured them.
+    add(
+        "flow/a-break-in-a-catch-body-inside-a-loop-leaves-that-loop",
+        "set n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        set bad to 1 + \"one\"\n    catch error\n        if n is 2 then\n            break\n        end\n        say \"caught\"\n    end\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-a-catch-body-inside-a-loop-advances-that-loop",
+        "set seen to \"\"\nfor each i in [\"one\", \"two\", \"three\"]\n    try\n        set bad to 1 + \"one\"\n    catch error\n        if i is \"two\" then\n            skip\n        end\n        set seen to seen + i\n    end\n    set seen to seen + \"!\"\nend\nsay seen\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-finally-body-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        say \"try\"\n    finally\n        if n is 2 then\n            break\n        end\n        set log to log + \"f\"\n    end\n    set log to log + \".\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-test-body-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    test \"a test written inside a loop\"\n        if n is 2 then\n            break\n        end\n        set log to log + \"t\"\n    end\n    set log to log + \".\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-an-object-body-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nfor each x in [\"a\", \"b\"]\n    set log to log + x\n    object Once\n        has a\n        break\n        set log to log + \"unreachable\"\n    end\n    set log to log + \".\"\nend\nsay log\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-block-within-a-block-inside-a-loop-leaves-that-loop",
+        "set log to \"\"\nrepeat 2 times\n    set log to log + \"t\"\n    test \"outer\"\n        test \"inner\"\n            break\n            set log to log + \"unreachable\"\n        end\n        set log to log + \"after the inner test\"\n    end\n    set log to log + \".\"\nend\nsay log\n".to_string(),
+    );
+    // The exemption: a function body is not lexically inside the loop that called
+    // it, so the block it is written in records no loop and the `break` is
+    // refused — while the loop that called it survives and goes round again.
+    add(
+        "flow/a-break-in-a-test-body-inside-a-function-called-from-a-loop-is-refused",
+        "to escape()\n    test \"a test inside a function inside a loop\"\n        break\n    end\nend\nset caught to no\nset n to 0\nrepeat 2 times\n    set n to n + 1\n    try\n        escape()\n    catch error\n        set caught to yes\n    end\nend\nsay n\nsay caught\n".to_string(),
+    );
+    // The loop's variable is still bound while the `finally` the signal passed
+    // through runs: the turn the `break` stopped has not ended yet.
+    add(
+        "flow/a-catch-body-reads-the-loop-variable-before-the-turn-ends",
+        "set seen to \"none\"\nset i to \"outer\"\nfor each i in [1, 2]\n    try\n        set bad to 1 + \"one\"\n    catch error\n        break\n    finally\n        set seen to i\n    end\nend\nsay seen\nsay i\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-nested-try-inside-a-catch-runs-its-finally",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        set bad to 1 + \"one\"\n    catch error\n        try\n            break\n        finally\n            set log to log + \"i\"\n        end\n        set log to log + \"unreachable\"\n    finally\n        set log to log + \"o\"\n    end\n    set log to log + \"after\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-finally-inside-a-catch-runs-the-finally-it-passed-through",
+        "set seen to \"none\"\nset i to \"outer\"\nfor each i in [1, 2]\n    try\n        set bad to 1 + \"one\"\n    catch error\n        try\n            say \"caught\"\n        finally\n            break\n        end\n    finally\n        set seen to i\n    end\nend\nsay seen\nsay i\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-catch-inside-a-loop-inside-a-test-leaves-the-inner-loop",
+        "set log to \"\"\nrepeat 2 times\n    test \"a test around the loop\"\n        for each x in [1, 2, 3]\n            try\n                set bad to 1 + \"one\"\n            catch error\n                if x is 2 then\n                    break\n                end\n                set log to log + \"c\"\n            finally\n                set log to log + \"f\"\n            end\n            set log to log + \".\"\n        end\n        set log to log + \"|\"\n    end\n    set log to log + \";\"\nend\nsay log\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-a-finally-inside-a-loop-advances-the-turn",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    try\n        set log to log + \"t\"\n    finally\n        if n is 2 then\n            skip\n        end\n        set log to log + \"f\"\n    end\n    set log to log + \".\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    // The `skip` counterpart of the two entries above it: a `test` body and an
+    // `object` body are the other blocks that have a frame of their own, so
+    // `skip` through them is a second branch of the same ownership lookup. The
+    // object body is declared under a guard because a name cannot be declared
+    // twice, and the turn that skipped is the one turn it is declared on.
+    add(
+        "flow/a-skip-in-a-test-body-inside-a-loop-advances-the-turn",
+        "set log to \"\"\nset n to 0\nrepeat 3 times\n    set n to n + 1\n    test \"a test written inside a loop\"\n        if n is 2 then\n            skip\n        end\n        set log to log + \"t\"\n    end\n    set log to log + \".\"\nend\nsay log\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-skip-in-an-object-body-inside-a-loop-advances-the-turn",
+        "set log to \"\"\nset declared to no\nfor each x in [\"a\", \"b\", \"c\"]\n    if declared is no then\n        set declared to yes\n        object Once\n            has a\n            if x is \"a\" then\n                skip\n            end\n            set log to log + \"o\"\n        end\n    end\n    set log to log + x\nend\nsay log\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-catch-body-inside-a-while-leaves-the-while",
+        "set n to 0\nwhile n is not 9\n    set n to n + 1\n    try\n        set bad to 1 + \"one\"\n    catch error\n        break\n    end\n    say \"after the try\"\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/a-break-in-a-catch-body-inside-a-loop-inside-a-function-leaves-the-loop",
+        "to walk(items)\n    set log to \"\"\n    for each item in items\n        try\n            set bad to 1 + \"one\"\n        catch error\n            if item is \"two\" then\n                break\n            end\n            set log to log + \"c\"\n        end\n        set log to log + item\n    end\n    give back log\nend\nsay walk([\"one\", \"two\", \"three\"])\n".to_string(),
     );
     add(
         "flow/a-statement-after-a-return",
@@ -1183,6 +1407,111 @@ fn generated_corpus() -> Vec<(String, String)> {
         "object A\n    has n default 1\nend\nobject B\n    has n default 2\nend\nsay A.n + B.n\n"
             .to_string(),
     );
+    // An `object` body written inside another `object`'s body. The bytecode VM
+    // held the declaration being assembled in one slot, so the inner
+    // declaration took the outer one's place and the outer body's finish found
+    // nothing left — a panic, where the tree-walking VM ran the program. See
+    // `objects_an_object_declared_inside_an_object_body_declares_both_types`.
+    add(
+        "object/an-object-declared-inside-an-object-body",
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n    end\nend\n\
+         say Outer.o + Inner.i\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-may-extend-the-body-it-is-written-in",
+        "object Outer\n    has o default 1\n    object Inner extends Outer\n        has i default 2\n    end\n\
+         say Inner.o + Inner.i\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-may-extend-two-levels-up",
+        "object One\n    has n default 1\n    object Two\n        object Three extends One\n            has k default 3\n\
+         end\n    end\nend\nsay Three.n + Three.k\n"
+            .to_string(),
+    );
+    add(
+        "object/three-nested-object-bodies",
+        "object L1\n    object L2\n        object L3\n            has deep default \"deep\"\n        end\n    end\nend\n\
+         say \"ran\"\n"
+            .to_string(),
+    );
+    add(
+        "object/two-declarations-nested-in-the-same-body",
+        "object Outer\n    has o default 1\n    object First\n        has a default 1\n    end\n\
+         object Second extends Outer\n        has b default 2\n    end\nend\nsay First.a + Second.b + Second.o\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-reusing-the-enclosing-name-is-refused",
+        "object A\n    has a default 1\n    object A\n        has b default 2\n    end\nend\nsay \"ran\"\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-declaration-extending-its-own-name-is-a-cycle",
+        "object A\n    object B extends B\n        has b default 1\n    end\nend\nsay \"ran\"\n"
+            .to_string(),
+    );
+    add(
+        "object/a-failure-inside-a-nested-body-is-caught-outside-both",
+        "set caught to \"no\"\ntry\n    object A\n        object B\n            has b default 1\n            set bad to 1 + \"one\"\n\
+         end\n    end\ncatch error\n    set caught to \"yes\"\nend\nsay caught\n"
+            .to_string(),
+    );
+    add(
+        "object/a-failure-inside-a-nested-body-is-caught-inside-the-outer-one",
+        "set after to \"no\"\nobject A\n    object B\n        has b default 1\n        try\n            set bad to 1 + \"one\"\n\
+         catch error\n            say \"inner\"\n        end\n    end\n    set after to \"yes\"\nend\nsay after\n"
+            .to_string(),
+    );
+    add(
+        "object/an-object-body-nested-in-a-loop-can-break-out-of-it",
+        "set n to 0\nrepeat 3 times\n    object A\n        object B\n            has b default 1\n        end\n        set n to n + 1\n\
+         break\n    end\nend\nsay n\n"
+            .to_string(),
+    );
+    add(
+        "object/a-nested-body-that-recovers-leaves-both-types-declared",
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n        try\n            set bad to 1 + \"one\"\n    \
+         catch error\n            set inner_ok to \"caught\"\n        end\n    end\n    set outer_ok to \"registered\"\nend\nsay Outer.o\nsay outer_ok\nsay inner_ok\n"
+            .to_string(),
+    );
+    // A `has` default is compiled as an expression, so it can open a
+    // declaration of its own — and that declaration's frame records a
+    // `pending_objects` height above zero. A `catch` that abandons it must take
+    // only its own entry off the stack of declarations being assembled: taking
+    // one more took the *enclosing* body's entry with it, and the outer body
+    // then found nothing left to register.
+    add(
+        "object/a-declaration-opened-by-a-has-default-a-failure-abandons",
+        "to maker()\n    try\n        object Inner\n            has x default 1 + \"one\"\n        end\n        set reached to \"no failure\"\n    \
+         catch error\n        set reached to \"caught\"\n    end\n    give back reached\nend\nobject A\n    has a default maker()\nend\nsay A.a\n"
+            .to_string(),
+    );
+    add(
+        "object/a-declaration-opened-by-a-has-default-that-succeeds-registers-both",
+        "to maker()\n    object Inner\n        has x default 5\n    end\n    give back 1\nend\nobject A\n    has a default maker()\nend\nsay A.a\n\
+         say \"ran\"\n"
+            .to_string(),
+    );
+    // A body the program leaves through a *failure* in the statements after its
+    // declarations: the type is registered on both VMs, because each registers
+    // it before those statements run.
+    add(
+        "object/an-object-body-left-through-a-failure-has-registered-its-type",
+        "try\n    object Outer\n        has o default 1\n        set bad to 1 + \"one\"\n    end\ncatch error\n    say \"caught\"\n\
+         end\nset Outer.o to 5\nsay Outer.o\n"
+            .to_string(),
+    );
+    // The other half of that rule: a failure in a `has` default leaves nothing
+    // worth registering, so the name is not bound on either VM.
+    add(
+        "object/an-object-body-whose-declaration-failed-registers-nothing",
+        "try\n    object Half\n        has h default 1 + \"one\"\n    end\ncatch error\n    say \"caught\"\nend\ntry\n    say Half.h\ncatch error\n    say \
+         \"no Half\"\nend\n"
+            .to_string(),
+    );
+
     add("print/print-of-a-list", "print [1, [2]]\n".to_string());
     add("print/print-of-a-number", "print 1\n".to_string());
     add("print/print-of-a-record", "print { a: 1 }\n".to_string());
@@ -1381,6 +1710,10 @@ fn generated_corpus() -> Vec<(String, String)> {
         "set count to 0\nfor each v in [1, 2, 3]\n    try\n        say 1 / 0\n    catch\n        set count to count + 1\n    end\nend\nsay count\n".to_string(),
     );
     add(
+        "try/a-catch-inside-a-function-body-leaves-the-calls-own-scope-alone",
+        "to add(x)\n    set total to 0\n    try\n        set bad to 1 + \"one\"\n    catch error\n        set caught to yes\n    end\n    set total to total + x\n    give back total\nend\nsay add(7)\n".to_string(),
+    );
+    add(
         "try/a-catch-that-does-not-fire",
         "set caught to \"no\"\ntry\n    say \"fine\"\ncatch error\n    set caught to \"yes\"\nend\nsay caught\n".to_string(),
     );
@@ -1397,6 +1730,30 @@ fn generated_corpus() -> Vec<(String, String)> {
         "set log to \"\"\nfor each v in [1, 2]\n    try\n        if v is 1 then\n            say 1 / 0\n        end\n        set log to log + v\n    catch\n        set log to log + \"e\"\n    end\nend\nsay log\n".to_string(),
     );
     add(
+        "try/a-failure-with-nothing-around-it-stops-the-program-after-the-finally",
+        // The form `SPEC.md`'s \"Finally\" documents needs no `catch` beside it,
+        // so a failure in the protected region has nothing there to handle it.
+        // The tree-walking VM returned above `run_finally_body` and skipped the
+        // cleanup on exactly that path; the bytecode VM ran the cleanup and then
+        // answered `true` — swallowing the failure and carrying on past the
+        // marked `NOP`. The `say` in the `finally` is the half that was missing
+        // on one engine, and the `RuntimeError` is the half the other one lost.
+        "try\n    say 1 / 0\nfinally\n    say \"cleaned\"\nend\nsay \"unreachable\"\n".to_string(),
+    );
+    add(
+        "try/a-finally-runs-on-the-way-out-of-a-failure-with-no-catch",
+        "set log to \"\"\ntry\n    try\n        set bad to 1 + \"one\"\n    finally\n        set log to log + \"f\"\n    end\ncatch error\n    set log to log + \"c\"\nend\nsay log\n".to_string(),
+    );
+    add(
+        "try/a-failing-finally-inside-a-try-with-no-catch-is-the-one-that-propagates",
+        // Two failures, one protected region: the protected code's and the
+        // cleanup's, and they say different things so the recorded message says
+        // which one left. The cleanup is what the program hears about, because it
+        // is the last thing that happened on the way out — and both VMs have to
+        // agree on that rather than one reporting a failure the other swapped.
+        "try\n    try\n        set a to 1 + \"one\"\n    finally\n        set b to 1 / 0\n    end\nend\nsay \"unreachable\"\n".to_string(),
+    );
+    add(
         "try/a-finally-that-runs-after-a-catch",
         "set log to \"\"\ntry\n    say 1 / 0\ncatch error\n    set log to log + \"c\"\nfinally\n    set log to log + \"f\"\nend\nsay log\n".to_string(),
     );
@@ -1407,6 +1764,10 @@ fn generated_corpus() -> Vec<(String, String)> {
     add(
         "try/a-try-inside-a-function",
         "to guarded()\n    try\n        give back 1 / 0\n    catch error\n        give back 0\n    end\nend\nsay guarded()\n".to_string(),
+    );
+    add(
+        "try/a-try-with-no-catch-hands-the-failure-to-the-try-around-it",
+        "set reached to \"no\"\ntry\n    try\n        set bad to 1 + \"one\"\n    end\n    set reached to \"yes\"\ncatch error\n    set reached to \"caught\"\nend\nsay reached\n".to_string(),
     );
     add(
         "try/a-try-that-recovers-and-continues",
@@ -1608,11 +1969,45 @@ fn edge_rb_vm_refuses_a_source_file() {
 
 // -- the differential test ---------------------------------------------
 
+/// Held for as long as a test is walking the corpus.
+///
+/// Three tests here run every program in the corpus, and one of them —
+/// `examples/files.rb` — writes `output.txt`, `output_copy.txt` and
+/// `renamed.txt` **by relative path**, in the process's own working directory.
+/// Two tests walking the corpus at once are therefore two runs of that program
+/// interleaved over one set of files, and the residue of one is read by the
+/// other: the second run appends to a file the first has not deleted yet and
+/// fails to rename a copy the first has already moved. That is a disagreement
+/// about the filesystem, not about the two VMs, and it is what
+/// `a_corpus_of_programs_runs_identically_on_both_vms` reported before this
+/// lock existed.
+///
+/// Serialised rather than excluded: every program still runs on both VMs in
+/// every test that walks the corpus, which is the whole value of the lock. The
+/// alternative — dropping `examples/files.rb` from the comparison — would take
+/// it out of the gate to make the gate quiet, and that is not a trade worth
+/// making for a test file's convenience.
+static CORPUS_WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes [`CORPUS_WALK`], recovering from a poisoned lock.
+///
+/// A test that panics while holding it leaves the mutex poisoned, and the tests
+/// that follow would otherwise refuse to run for a reason that has nothing to do
+/// with them: the corpus walk has no shared state to corrupt beyond the files it
+/// has already cleaned up, so the guard is taken whatever the poisoning.
+#[track_caller]
+fn walking_the_corpus() -> std::sync::MutexGuard<'static, ()> {
+    CORPUS_WALK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The differential test the phase requires: both VMs agree on every program in
 /// the corpus, which is at least 200 whole programs drawn from `examples/`,
 /// `modules/`, `tests/` and the generated set.
 #[test]
 fn a_corpus_of_programs_runs_identically_on_both_vms() {
+    let _walking = walking_the_corpus();
     let programs = corpus();
     assert!(
         programs.len() >= MINIMUM_CORPUS,
@@ -1645,6 +2040,7 @@ fn a_corpus_of_programs_runs_identically_on_both_vms() {
 /// comparison so a failure names errors rather than printouts.
 #[test]
 fn edge_the_two_vms_report_the_same_failure_for_every_corpus_program() {
+    let _walking = walking_the_corpus();
     let programs = corpus();
     let mut disagreements = Vec::new();
     for (name, source) in &programs {
@@ -1782,6 +2178,7 @@ fn edge_deeply_nested_data_does_not_overflow_the_bytecode_vm() {
 /// actually carried, not only on the compiler's in-memory value.
 #[test]
 fn edge_a_decoded_chunk_runs_identically_to_the_compiled_one() {
+    let _walking = walking_the_corpus();
     let mut ran = 0;
     for (name, source) in corpus() {
         // A program the frontend refuses never reaches a VM, so there is
@@ -1973,6 +2370,342 @@ fn edge_the_iteration_cap_names_the_kind_of_loop_that_hit_it() {
     );
 }
 
+/// A cap of N is N turns on both VMs, for every loop form — and a turn that a
+/// `skip` abandons is a turn.
+///
+/// The tree-walking VM charges at the top of every turn, before the body runs.
+/// The bytecode VM charged at the backward `JUMP` that ends one, which is the
+/// turn *after* the one it charges, and drew a `while`'s entry only when it
+/// turned over — so its cap allowed one turn more than the tree-walking VM's. A
+/// `skip` was worse than off by one: it jumps to the loop's `top` over that
+/// `JUMP`, so it spent nothing at all, and a `while` that skipped every turn ran
+/// until the ten-million-statement step budget stopped it rather than reporting
+/// `Maximum of N iterations`. Every program here counts its own turns, so the
+/// cap's answer is visible rather than inferred from the message.
+#[test]
+fn edge_a_cap_counts_turns_on_both_vms_and_a_skipped_turn_is_one() {
+    // `set turns to turns + 1` is the first statement of every body, so a
+    // skipped turn still counts: that is the property under test, and a `skip`
+    // placed after it would not exercise it.
+    let looping = |statement: &str, head: &str| {
+        format!(
+            "try\n    set turns to 0\n    {head}\n        set turns to turns + 1\n\
+             {statement}\n    end\ncatch error\n    say \"stopped\"\n    say turns\nend\n"
+        )
+    };
+    let cases: [(&str, String); 6] = [
+        ("while", looping("", "while turns is not 100")),
+        (
+            "while/skip",
+            looping("        skip", "while turns is not 100"),
+        ),
+        ("repeat", looping("", "repeat 100 times")),
+        ("repeat/skip", looping("        skip", "repeat 100 times")),
+        (
+            "for each",
+            looping("", "for each i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]"),
+        ),
+        (
+            "for each/skip",
+            looping(
+                "        skip",
+                "for each i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]",
+            ),
+        ),
+    ];
+
+    for cap in [1, 3, 4] {
+        for (name, source) in &cases {
+            let (tree, _) = assert_agrees_capped(source, cap);
+            assert_eq!(
+                tree.output,
+                vec!["stopped".to_string(), cap.to_string()],
+                "a cap of {cap} must be {cap} turns of a {name} loop on both VMs, \
+                 and no more"
+            );
+        }
+    }
+}
+
+/// The cap is the last line of defence rather than the only one: a `while` that
+/// skips every turn is still a loop, and charging it is what stops it rather
+/// than the program's step budget.
+#[test]
+fn edge_a_while_that_skips_every_turn_is_stopped_by_the_iteration_cap() {
+    let source = "set n to 0\nwhile yes is yes\n    set n to n + 1\n    skip\nend\n";
+
+    let (tree, byte) = assert_agrees_capped(source, 5);
+    let message = tree
+        .result
+        .as_ref()
+        .expect_err("a loop that skips every turn must still be bounded");
+    assert!(
+        message.contains("Maximum of 5 iterations"),
+        "the per-loop cap must be what stops it, said: {message}"
+    );
+    assert!(
+        byte.result.is_err(),
+        "and the bytecode VM must stop there too, said: {byte:?}"
+    );
+}
+
+/// The `finally` of a `try` with no `catch` is owed however the region is left,
+/// and the failure that leaves afterwards is the *last* one — the cleanup's, if
+/// the cleanup failed.
+///
+/// Both VMs place the cleanup below the propagated failure, so the original is
+/// spent: the tree-walking VM's `run_finally_body(...)?` sits under the
+/// `return Err(failure)`, and the bytecode VM's search for the handler that takes
+/// the failure finds none left once the cleanup's has been taken. The two
+/// failures here say different things, so which one the program is told about is
+/// visible rather than assumed.
+#[test]
+fn edge_a_failing_finally_is_the_failure_a_try_with_no_catch_reports() {
+    let source = concat!(
+        "try\n",
+        "    try\n",
+        "        set a to 1 + \"one\"\n",
+        "    finally\n",
+        "        set b to 1 / 0\n",
+        "    end\n",
+        "end\n",
+        "say \"unreachable\"\n",
+    );
+
+    let (tree, _) = assert_agrees(source);
+    let message = tree
+        .result
+        .as_ref()
+        .expect_err("both failures must stop the program");
+    assert!(
+        message.contains("Division by zero"),
+        "the cleanup's failure is the one that leaves, said: {message}"
+    );
+    assert!(
+        !message.contains("non-numbers"),
+        "the protected region's own failure is spent, said: {message}"
+    );
+    assert!(
+        tree.output.is_empty(),
+        "and nothing after the `try` runs, said: {:?}",
+        tree.output
+    );
+}
+
+/// A `break` in a `catch` body written around a `try` with no `catch` still leaves
+/// the loop the `catch` is written in, and the `finally` it passed through still
+/// runs: the two halves of `prepare_exit` are the same whether the `try` it
+/// crosses has a `catch` or only a `finally`.
+#[test]
+fn edge_a_break_in_a_catch_around_a_catch_less_try_leaves_the_loop_and_cleans_up() {
+    let source = concat!(
+        "set turns to 0\n",
+        "repeat 3 times\n",
+        "    set turns to turns + 1\n",
+        "    try\n",
+        "        try\n",
+        "            set bad to 1 + \"one\"\n",
+        "        finally\n",
+        "            say \"cleaned\"\n",
+        "        end\n",
+        "    catch error\n",
+        "        if turns is 2 then\n",
+        "            break\n",
+        "        end\n",
+        "    end\n",
+        "end\n",
+        "say turns\n",
+    );
+
+    let (tree, _) = assert_agrees(source);
+    assert_eq!(
+        tree.output,
+        vec![
+            "cleaned".to_string(),
+            "cleaned".to_string(),
+            "2".to_string()
+        ],
+        "two turns were cleaned up and the second one broke out of the loop"
+    );
+}
+
+/// A cap of N allows a loop N turns, and N turns is a loop that ends: a `while`
+/// whose condition goes false on its last turn has finished, not run out of
+/// budget.
+///
+/// The charge is made where the tree-walking VM makes it — after the condition
+/// comes out true, before the body — so the cap counts turns that *began*. A
+/// charge at the backward `JUMP` instead counts a turn before knowing its
+/// condition holds, which is what makes a cap of N refuse a `while` of N turns on
+/// this VM and run it on the other.
+#[test]
+fn edge_a_cap_allows_a_loop_exactly_that_many_turns() {
+    // The body's first statement counts, so what the program prints is how many
+    // turns the cap allowed. `TURNS` is fixed and only the cap moves, so the
+    // boundary is asked about rather than the loop being written to the cap.
+    const TURNS: usize = 5;
+    let looping = |head: &str, statement: &str| {
+        format!("set turns to 0\n{head}\n    set turns to turns + 1\n{statement}end\nsay turns\n")
+    };
+    // The last case is the nesting one: each outer turn starts a fresh inner
+    // loop, so an inner loop that kept its entry past its own last turn would
+    // charge the sum of its siblings' turns rather than its own.
+    let cases: [(&str, String); 5] = [
+        ("while", looping("while turns is not 5", "")),
+        ("while/skip", looping("while turns is not 5", "    skip\n")),
+        ("repeat", looping("repeat 5 times", "")),
+        ("for each", looping("for each i in [1, 2, 3, 4, 5]", "")),
+        (
+            "while/while",
+            concat!(
+                "set turns to 0\n",
+                "while turns is not 5\n",
+                "    set turns to turns + 1\n",
+                "    set inner to 0\n",
+                "    while inner is not 5\n",
+                "        set inner to inner + 1\n",
+                "    end\n",
+                "end\n",
+                "say turns\n",
+            )
+            .to_string(),
+        ),
+    ];
+
+    for (name, source) in &cases {
+        // A cap of exactly the turns the loop runs: the loop finishes.
+        let (tree, _) = assert_agrees_capped(source, TURNS);
+        assert_eq!(
+            tree.output,
+            vec![TURNS.to_string()],
+            "a cap of {TURNS} must be {TURNS} turns of a {name} loop on both VMs, and the \
+             loop must finish rather than report the cap"
+        );
+
+        // One turn less, and the cap is what stops it — on both VMs, naming itself.
+        let (tree, byte) = assert_agrees_capped(source, TURNS - 1);
+        let message = tree
+            .result
+            .as_ref()
+            .expect_err("a cap one turn short must stop a loop that needs one more");
+        assert!(
+            message.contains(&format!("Maximum of {} iterations", TURNS - 1)),
+            "and it must be the cap that stops it, said: {message}"
+        );
+        assert!(
+            byte.result.is_err(),
+            "and the bytecode VM must stop there too, said: {byte:?}"
+        );
+    }
+}
+
+/// A `break` and a `skip` are charged one turn each, on a `while` as much as on a
+/// sequence loop.
+///
+/// The two reach the cap by different instructions — `break` leaves without
+/// starting another turn, `skip` starts the next one without running it — so a
+/// charge placed at either one of those alone gets the other wrong. This asks the
+/// boundary about both: a cap that exactly covers the turns taken runs, and one
+/// turn short is the cap that stops it, on both engines.
+#[test]
+fn edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each() {
+    // The jump is on the last turn, so the loop needs every turn the cap allows
+    // and not one more. `break` ends it there; `skip` starts a turn that finds
+    // the condition false and ends there instead.
+    let jumping = |statement: &str| {
+        format!(
+            "set turns to 0\nwhile turns is not 5\n    set turns to turns + 1\n\
+             if turns is 5 then\n        {statement}\n    end\nend\nsay turns\n"
+        )
+    };
+    let cases = [("break", jumping("break")), ("skip", jumping("skip"))];
+
+    for (name, source) in &cases {
+        let (tree, _) = assert_agrees_capped(source, 5);
+        assert_eq!(
+            tree.output,
+            vec!["5".to_string()],
+            "a cap of 5 must be 5 turns of a `while` whose {name} is on the last one, \
+             on both VMs"
+        );
+
+        // One turn short the loop cannot finish, and a `skip` cannot pretend to:
+        // the turn it starts is a turn, so the cap stops the loop either way.
+        let (tree, byte) = assert_agrees_capped(source, 4);
+        assert!(
+            tree.result
+                .as_ref()
+                .is_err_and(|message| message.contains("Maximum of 4 iterations")),
+            "a cap of 4 must stop a `while` whose {name} is on its fifth turn, said: {:?}",
+            tree.result
+        );
+        assert!(
+            byte.result.is_err(),
+            "and the bytecode VM must stop there too, said: {byte:?}"
+        );
+    }
+}
+
+/// A `try` with no `catch` is not a handler, and the loop it is written in keeps
+/// turning: the failure leaves the region and the program, rather than the region
+/// pretending it succeeded.
+#[test]
+fn edge_a_catch_less_try_does_not_stop_the_loop_it_is_written_in() {
+    let source = concat!(
+        "set log to \"\"\n",
+        "repeat 3 times\n",
+        "    try\n",
+        "        set log to log + \"x\"\n",
+        "        set bad to 1 + \"one\"\n",
+        "    end\n",
+        "end\n",
+        "say log\n",
+    );
+
+    let (tree, _) = assert_agrees(source);
+    let message = tree
+        .result
+        .as_ref()
+        .expect_err("nothing handles the failure, so the program stops with it");
+    assert!(
+        message.contains("non-numbers"),
+        "the failure must be reported rather than swallowed, said: {message}"
+    );
+}
+
+/// A `break` leaves the loop rather than spending the rest of the cap, and it
+/// does that identically on both VMs — including on the first turn of a `while`,
+/// which is the one turn whose entry does not exist until the exit needs it.
+#[test]
+fn edge_a_break_stops_the_loop_at_the_same_turn_on_both_vms() {
+    let cases = [
+        (
+            "while",
+            "set n to 0\nwhile n is not 100\n    set n to n + 1\n    break\nend\nsay n\n",
+        ),
+        (
+            "repeat",
+            "set n to 0\nrepeat 100 times\n    set n to n + 1\n    break\nend\nsay n\n",
+        ),
+        (
+            "for each",
+            "set n to 0\nfor each i in [1, 2, 3]\n    set n to n + 1\n    break\nend\nsay n\n",
+        ),
+    ];
+
+    for cap in [1, 2] {
+        for (name, source) in cases {
+            let (tree, _) = assert_agrees_capped(source, cap);
+            assert_eq!(
+                tree.output,
+                vec!["1".to_string()],
+                "a break on the first turn of a {name} loop is one turn, whatever \
+                 the cap is"
+            );
+        }
+    }
+}
+
 /// A `break` outside a loop is a malformed program, and the bytecode VM says so
 /// instead of leaving the block it is in.
 #[test]
@@ -1986,6 +2719,110 @@ fn edge_a_return_that_is_not_the_blocks_last_statement_does_not_end_the_block() 
         vec!["after".to_string(), "nothing".to_string()],
         "the statement after a `return` runs, and the block's value is the last \
          statement's, both as in the tree-walker"
+    );
+}
+
+/// An `object` body written inside another `object`'s body declares two types,
+/// and the bytecode VM registers both.
+///
+/// The bytecode VM held the declaration being assembled in one slot, so the
+/// inner `DEF_OBJECT` took the outer one's place and the outer body's finish
+/// found nothing left to register — `finish_object` panicked on
+/// `pending_object.take().expect(...)`, taking the whole process down on a
+/// program the tree-walking VM ran to completion. This is the test that says the
+/// panic is gone and both VMs declare the same two types.
+#[test]
+fn objects_an_object_declared_inside_an_object_body_declares_both_types() {
+    // The nested type's field is read from inside the outer body, because the
+    // analyzer only declares an `object`'s own name to the scope the declaration
+    // is written in.
+    let source = concat!(
+        "object Outer\n    has o default 1\n    object Inner\n        has i default 2\n    end\n",
+        "    say Inner.i\nend\nsay Outer.o\n",
+    );
+    assert_agrees(source);
+    assert_eq!(
+        bytecode(source).output,
+        vec!["2".to_string(), "1".to_string()],
+        "both types are registered, each with its own field"
+    );
+}
+
+/// The same shape with `extends`: a declaration nested in an `object` body may
+/// name the body it is written in as its parent.
+///
+/// The tree-walking VM registers a type before it runs the statements after its
+/// declarations, so the parent is already there. This VM runs the nested
+/// declaration first, so the parent is a declaration still being assembled rather
+/// than a registered type, and the chain walk has to look for it there.
+#[test]
+fn objects_a_nested_declaration_may_extend_the_body_it_is_written_in() {
+    let source = concat!(
+        "object Outer\n    has o default 1\n    object Inner extends Outer\n        has i default 2\n    end\n",
+        "    say Inner.o\n    say Inner.i\nend\n",
+    );
+    assert_agrees(source);
+    assert_eq!(
+        bytecode(source).output,
+        vec!["1".to_string(), "2".to_string()],
+        "the nested type inherits the enclosing declaration's field and keeps its own"
+    );
+}
+
+/// A name an open `object` body has already taken is refused, whichever body
+/// wrote it.
+///
+/// The tree-walking VM has registered the outer type before the nested
+/// declaration runs, so `objects` alone is enough for it. This VM has not, so
+/// the check has to ask about the declarations being assembled too.
+#[test]
+fn edge_objects_a_nested_declaration_reusing_the_enclosing_name_is_refused() {
+    let cases = [
+        (
+            "object A\n    has a default 1\n    object A\n        has b default 2\n    end\nend\nsay \"ran\"\n",
+            "RuntimeError: Object 'A' is already declared",
+        ),
+        (
+            "object A\n    object B\n        has b default 1\n        object B\n            has c default 2\n        end\n    end\nend\nsay \"ran\"\n",
+            "RuntimeError: Object 'B' is already declared",
+        ),
+        (
+            "object Outer\n    object Inner\n        has i default 1\n    end\n    object Inner\n        has j default 2\n    end\nend\nsay \"ran\"\n",
+            "RuntimeError: Object 'Inner' is already declared",
+        ),
+    ];
+    for (source, expected) in cases {
+        let byte = bytecode(source);
+        assert_eq!(
+            byte.result
+                .as_ref()
+                .map(String::as_str)
+                .map_err(String::as_str),
+            Err(expected),
+            "a name an open declaration has taken is refused: {byte:?}"
+        );
+        assert_eq!(
+            tree_walk(source).result,
+            byte.result,
+            "both VMs refuse a name an open declaration has taken"
+        );
+    }
+}
+
+/// A loop written around an `object` body can be left from inside the body, and
+/// the body's declaration is registered on the way out.
+///
+/// This is the path where an abrupt exit finishes an `object` body rather than
+/// running it to its end, so it is where the declaration stack and the frame
+/// stack have to agree about which declaration is whose.
+#[test]
+fn edge_objects_an_object_body_nested_in_a_loop_can_break_out_of_it() {
+    let source = "set n to 0\nrepeat 3 times\n    object Outer\n        has o default 1\n        object Inner\n            has i default 2\n        end\n        set n to n + 1\n        break\n    end\nend\nsay n\n";
+    assert_agrees(source);
+    assert_eq!(
+        bytecode(source).output,
+        vec!["1".to_string()],
+        "the loop is left after its first turn"
     );
 }
 
@@ -2348,6 +3185,88 @@ fn edge_a_handled_inner_try_leaves_the_enclosing_region_protected() {
             bytecode(source).output,
             vec![expected.to_string()],
             "the handled inner try disturbed the enclosing region on the {name} path"
+        );
+    }
+}
+
+/// A `catch` runs in a scope of its own and gives it back — and gives back
+/// **nothing else**.
+///
+/// `run_catch` pushed a scope for the body and then popped it again once the
+/// frame was driven, but the frame's own `unwind_frame` already truncates
+/// `locals` to the base that scope sits at. Two removals took the *enclosing*
+/// frame's scope with it, so a `catch` inside a function body left that function
+/// without its own bindings and every name it declared afterwards read as
+/// unknown. A top-level program never showed it: its names live in globals, which
+/// no scope pop reaches.
+///
+/// Both ends are here: the second program reads a parameter *and* a name declared
+/// before the `try`, and the third has the catch body's own binding die with the
+/// body, which is the scope rule the fix rests on.
+#[test]
+fn edge_a_catch_body_gives_back_only_the_scope_it_pushed() {
+    for (name, source, expected) in [
+        (
+            "a parameter read after the catch",
+            concat!(
+                "to f(x)\n",
+                "    try\n",
+                "        set bad to 1 + \"one\"\n",
+                "    catch error\n",
+                "        set caught to yes\n",
+                "    end\n",
+                "    say x\n",
+                "    give back x + 1\n",
+                "end\n",
+                "say f(7)\n",
+            ),
+            vec!["7", "8"],
+        ),
+        (
+            "a name declared before the try, read after it",
+            concat!(
+                "to f(x)\n",
+                "    set total to 0\n",
+                "    try\n",
+                "        set bad to 1 + \"one\"\n",
+                "    catch error\n",
+                "        set caught to yes\n",
+                "    end\n",
+                "    set total to total + x\n",
+                "    say total\n",
+                "    give back total\n",
+                "end\n",
+                "say f(7)\n",
+            ),
+            vec!["7", "7"],
+        ),
+        (
+            "the catch's own binding dies with its body",
+            concat!(
+                "to f()\n",
+                "    set error to \"mine\"\n",
+                "    try\n",
+                "        set bad to 1 + \"one\"\n",
+                "    catch error\n",
+                "        set caught to error\n",
+                "    end\n",
+                "    say caught\n",
+                "    say error\n",
+                "end\n",
+                "f()\n",
+            ),
+            vec!["error", "mine"],
+        ),
+    ] {
+        assert_agrees(source);
+        let outcome = bytecode(source);
+        assert_eq!(
+            outcome.output,
+            expected
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>(),
+            "the catch body took the enclosing function's scope with it on the {name} path"
         );
     }
 }

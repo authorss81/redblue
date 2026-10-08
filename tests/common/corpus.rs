@@ -292,26 +292,30 @@ pub fn corpus() -> Vec<PathBuf> {
     files
 }
 
-/// The corpus programs whose recorded outcome is a **defect both engines share**,
-/// and the finding that says which defect.
+/// The corpus programs that write a `break` or a `skip`, and what each one prints
+/// now that both engines act on them.
 ///
-/// A golden file records what an interpreter does, so these record what `break`
-/// and `skip` do, which is nothing. They cannot be recorded as failures, because
-/// they do not fail — the defect is that they *succeed* wrongly, and a `.expected`
-/// file has nowhere to say so. So they are named here, and
-/// `edge_a_break_and_a_skip_are_pinned_as_the_defect_they_are` asserts the no-op
-/// on **both** engines: when either one implements `break`, that test fails and
-/// these two goldens are expected to change, which is what a golden should do to a
-/// deliberate fix rather than launder it.
-pub const KNOWN_DEFECT_PROGRAMS: &[(&str, &str)] = &[
-    (
-        "loop-forms-0012",
-        "FINDINGS.md §5: `break` does not leave the loop and does not skip the body",
-    ),
-    (
-        "loop-forms-0013",
-        "FINDINGS.md §5: `skip` does not skip the rest of the body",
-    ),
+/// `FINDINGS.md` §5 recorded both engines *parsing* the keywords and neither
+/// acting on them, so `loop-forms-0012` and `-0013` recorded a **completion** whose
+/// output was the no-op's, and the table that named them said so. Phase-025
+/// implemented the statements on both engines and refreshed the two goldens to the
+/// output the loops really produce, so this is the list of programs whose golden that
+/// fix moved.
+///
+/// Both are completions, and that is the point of naming them: a `break` in no loop is
+/// a runtime error (the refusal is asserted in `tests/loop_control_test.rs`), while
+/// one inside a loop simply leaves it. A golden cannot record "this used to be a
+/// defect", so the table and
+/// `edge_a_break_and_a_skip_leave_the_loop_on_both_engines` carry that instead: the
+/// test asserts the moved output on **both** engines, so editing a golden back to the
+/// no-op's makes it fail rather than passing quietly.
+pub const BREAK_AND_SKIP_PROGRAMS: &[(&str, &[&str])] = &[
+    // `break` is the last statement of the body, so the loop ends on its first turn
+    // and "found" — printed by the `if` on the value 2 — is never reached.
+    ("loop-forms-0012", &["after"]),
+    // `skip` ends each turn early: 1 and 3 are skipped before the `if`, and 2 is
+    // printed before the `skip` abandons the rest of the turn.
+    ("loop-forms-0013", &["2", "after"]),
 ];
 
 /// The `.expected` file beside `path`, read.

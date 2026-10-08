@@ -754,37 +754,46 @@ fn edge_the_control_flow_family_covers_the_if_else_it_has_and_pins_the_else_if_i
     );
 }
 
-/// `break` and `skip` are accepted, and neither does anything.
+/// `break` and `skip` leave the loop they are written in, on **both** engines.
 ///
-/// `FINDINGS.md` §5: both engines parse the keywords and neither acts on them, so
-/// `corpus/loop-forms-0012` and `-0013` record a **completion** whose output is
-/// the no-op's. A golden that records a defect as a success is read as coverage
-/// by whoever reads it next, so these programs are named in
-/// [`corpus::KNOWN_DEFECT_PROGRAMS`] and this test asserts the defect on both
-/// engines: the keyword is in the program, the loop runs to its end anyway, and
-/// both engines say the same thing. The day either engine implements `break`,
-/// this fails and the two goldens are expected to change — which is the whole
-/// reason the no-op is pinned rather than ignored.
+/// This test used to assert the opposite: `FINDINGS.md` §5 found both engines
+/// parsing the keywords and neither acting on them, so `corpus/loop-forms-0012` and
+/// `-0013` recorded a **completion** whose output was the no-op's, and this test
+/// named them in `corpus::KNOWN_DEFECT_PROGRAMS` and pinned the defect on both
+/// engines — deliberately, so that implementing `break` would fail loudly rather than
+/// quietly move two goldens.
+///
+/// Phase-025 implemented both statements on both engines. The two goldens were
+/// refreshed to what the loops now really print, and the table they were named in is
+/// now [`corpus::BREAK_AND_SKIP_PROGRAMS`], which carries **the output the fix
+/// produced**. So the assertion is stronger than the one it replaces rather than
+/// looser: it does not merely compare the engines with their own goldens, it pins the
+/// exact lines, so a golden edited back to the no-op's output — `found`/`after` for
+/// `-0012`, a leading `1` for `-0013` — fails here instead of passing quietly.
 #[test]
-fn edge_a_break_and_a_skip_are_pinned_as_the_defect_they_are() {
+fn edge_a_break_and_a_skip_leave_the_loop_on_both_engines() {
     let mut checked = 0usize;
-    for (name, why) in corpus::KNOWN_DEFECT_PROGRAMS {
+    for (name, printed) in corpus::BREAK_AND_SKIP_PROGRAMS {
         let path = corpus::corpus_dir().join(format!("{name}.rb"));
         assert!(
             path.exists(),
-            "{name} is named as a known defect and is not in the corpus: {why}",
+            "{name} is named in the `break`/`skip` table and is not in the corpus",
         );
         let source = source_of(&path);
         let expected = corpus::expectation(&path).unwrap_or_else(|e| panic!("{e}"));
         assert!(
             source.contains("break") || source.contains("skip"),
-            "{name} is named as a `break`/`skip` defect and holds neither keyword",
+            "{name} is in the `break`/`skip` table and holds neither keyword",
         );
         assert!(
             !expected.must_fail(),
-            "{name}: the defect is that the keyword is *accepted*, so this program \
-             completes. If it fails now, the defect is fixed and this table, the \
-             goldens and FINDINGS.md §5 all need revisiting",
+            "{name}: both statements are legal inside a loop, so this program \
+             completes. If it fails now, a refusal has crept in where the fix removed one",
+        );
+        assert_eq!(
+            &expected.output, printed,
+            "{name}: the golden is not the output the statements now produce, so \
+             either the fix or the table is out of date",
         );
         for (engine, outcome) in [
             ("tree-walking VM", vm::tree_walk(&source)),
@@ -793,19 +802,21 @@ fn edge_a_break_and_a_skip_are_pinned_as_the_defect_they_are() {
             assert_eq!(
                 outcome.result,
                 Ok(Typed::Nothing),
-                "{engine}: {name} is the recorded no-op, not a new behaviour",
+                "{engine}: {name} leaves the loop and the program completes",
             );
             assert_eq!(
-                outcome.output, expected.output,
-                "{engine}: {name} runs to the end of the loop, which is the defect",
+                &outcome.output, printed,
+                "{engine}: {name} prints {:?}, not {:?} — the statement did not leave \
+                 the loop",
+                outcome.output, printed,
             );
         }
         checked += 1;
     }
     assert!(
         checked >= 2,
-        "only {checked} known-defect programs are pinned; a table that shrinks is \
-         a defect that stopped being checked",
+        "only {checked} `break`/`skip` corpus programs are pinned; a table that \
+         shrinks is coverage that stopped being checked",
     );
 }
 
