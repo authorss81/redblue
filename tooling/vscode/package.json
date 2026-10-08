@@ -3,7 +3,7 @@
   "displayName": "Redblue",
   "description": "Syntax highlighting for the Redblue programming language",
   "version": "0.1.0",
-  "publisher": "redblue-lang",
+  "publisher": "authorss81",
   "license": "MIT",
   "engines": {
     "vscode": "^1.75.0"

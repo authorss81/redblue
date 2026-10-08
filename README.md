@@ -58,7 +58,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ### Build from Source
 ```bash
-git clone https://github.com/redblue-lang/redblue.git
+git clone https://github.com/authorss81/redblue.git
 cd redblue
 cargo build --release
 ./target/release/rb --version
@@ -81,6 +81,11 @@ rb lint hello.rb
 
 # Run tests
 rb test
+
+# Compile to bytecode, inspect it, run it on the VM
+rb compile hello.rb
+rb dis hello.rbc
+rb vm hello.rbc
 ```
 
 ### Examples
@@ -164,10 +169,15 @@ redblue/
 │   ├── stdlib.rs        # Standard library
 │   ├── formatter.rs     # Code formatter
 │   ├── linter.rs        # Code linter
+│   ├── lsp.rs           # Language server
+│   ├── bytecode/        # Bytecode format, compiler, disassembler, VM
 │   ├── repl/            # REPL
 │   └── testing/         # Test harness
+├── tests/               # Rust + Redblue test suites
+├── corpus/              # Differential-test programs
 ├── examples/            # Example programs
-└── modules/             # Importable modules
+├── modules/             # Importable modules
+└── tooling/vscode/      # Editor extension (highlighting)
 ```
 
 ## Development
@@ -194,6 +204,7 @@ cargo clippy
 - [x] Testing framework
 - [x] Formatter
 - [x] Linter
+- [x] Bytecode compiler + VM (`rb compile`, `rb dis`, `rb vm`)
 - [ ] IDE extensions (in progress)
 - [ ] Package manager (planned)
 

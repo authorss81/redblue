@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Redblue Contributors"]
 description = "A programming language as readable as plain English"
 license = "MIT"
-repository = "https://github.com/redblue-lang/redblue"
+repository = "https://github.com/authorss81/redblue"
 keywords = ["programming-language", "compiler"]
 categories = ["compiler", "development-tools"]
 
