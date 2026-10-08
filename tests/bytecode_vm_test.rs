@@ -4271,11 +4271,11 @@ fn edge_a_version_3_file_is_refused_before_its_imports_name_an_alias() {
 /// A sequence loop must put the operand stack back exactly where it found it
 /// when the sequence runs out.
 ///
-/// `GET_ITER` leaves the sequence sitting on the operand stack so the loop body
-/// sees the stack height the file expects, and `push_loop` records the height to
-/// return to. If that height is recorded one too low, leaving the loop truncates
-/// a value the *enclosing* frame had already pushed — here the `push` call's
-/// own first argument, which the callee then never receives.
+/// `GET_ITER` pops the sequence into the loop's own entry, so the loop body runs
+/// at whatever height the operand stack was left at, and `push_loop` records that
+/// height as the one to return to. If it is recorded one too low, leaving the loop
+/// truncates a value the *enclosing* frame had already pushed — here the `push`
+/// call's own first argument, which the callee then never receives.
 ///
 /// The shape is a sequence loop inside a function called as one argument of a
 /// call, so there is a live operand-stack value underneath the loop for the bad

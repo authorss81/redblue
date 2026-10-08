@@ -16,6 +16,7 @@
 //! two byte-identical without the Redblue source doing the work.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,12 +40,59 @@ struct Stage2 {
     succeeded: bool,
 }
 
+/// Reads a stage-2 output file, treating *absent* as "wrote nothing" and every
+/// other failure as the failure it is.
+///
+/// A stage 2 that refuses a program writes no file, and "no file" is a result
+/// several tests here assert. But that is the *only* absence these runs are
+/// allowed to have: `unwrap_or_default()` also turned an unreadable path — a
+/// directory where the file should be, a permissions failure, a full disk — into
+/// the same empty `Vec`, so a run whose output could not be read at all was
+/// reported as a compile that wrote nothing. That is the wrong diagnosis for the
+/// wrong cause, and on the byte-equality tests it hid behind a length mismatch
+/// rather than naming the IO error.
+///
+/// So: `NotFound` is the one answer that means "wrote nothing", and everything
+/// else stops the test by naming the file and the cause.
+fn read_output(path: &Path) -> Vec<u8> {
+    match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!(
+            "stage 2's output {} could not be read, so there is nothing to compare: {error}",
+            path.display()
+        ),
+    }
+}
+
+/// Removes a stale output file, so a run that writes nothing cannot be read as a
+/// run that wrote something.
+///
+/// This was `let _ = fs::remove_file(...)`, which discards every failure and not
+/// only the expected one. Several tests below assert "stage 2 wrote no file",
+/// and if the stale file could not be removed then the assertion would be
+/// reading the previous run's bytes and reporting them as this one's.
+///
+/// `NotFound` is the expected answer — there is nothing stale. Anything else is
+/// stopped here, by name and by cause.
+fn clear_output(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "the stale output {} could not be removed, so a run that writes nothing \
+             would be read as a run that did: {error}",
+            path.display()
+        ),
+    }
+}
+
 /// Compiles `source` by running `bootstrap/compiler.rb` under the Rust `rb`.
 fn stage2(name: &str, source: &str) -> Stage2 {
     let input = scratch(&format!("{name}.rb"));
     let output = scratch(&format!("{name}.rbc"));
     fs::write(&input, source).expect("write the program to compile");
-    let _ = fs::remove_file(&output);
+    clear_output(&output);
 
     let run = Command::new(env!("CARGO_BIN_EXE_rb"))
         .arg("run")
@@ -55,7 +103,7 @@ fn stage2(name: &str, source: &str) -> Stage2 {
         .expect("the rb binary runs");
 
     Stage2 {
-        bytes: fs::read(&output).unwrap_or_default(),
+        bytes: read_output(&output),
         stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
         succeeded: run.status.success(),
     }
@@ -336,6 +384,7 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
     ];
 
     let mut checked = 0usize;
+    let mut refused = 0usize;
     for family in families {
         let mut entries: Vec<PathBuf> = fs::read_dir(&root)
             .unwrap_or_else(|e| panic!("the corpus is readable: {e}"))
@@ -360,6 +409,7 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
                 // A family member the frontend refuses has no bytes to match;
                 // that refusal is what `edge_malformed_source_is_reported`
                 // covers, and a refused program is not a byte-identity case.
+                refused += 1;
                 continue;
             }
             assert_identical(&name, &source);
@@ -367,12 +417,31 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
         }
     }
 
-    assert!(
-        checked >= 300,
-        "only {checked} corpus programs were compared; stage 2 is byte-identical \
-         on every program of the corpus the frontend accepts, which is 306 of the \
-         315 in the families above — the other 9 are refused by the frontend, and \
-         the 46 in `malformed` are refused too"
+    // Exact counts, not floors. A floor is a gate that decays: `checked >= 300`
+    // still passes with six corpus programs deleted, which is the whole claim
+    // this test makes — that stage 2 is byte-identical on *every* program the
+    // frontend accepts. And a total that is never asserted is how six files go
+    // missing without anything noticing, because `refused == 9` and
+    // `checked >= 300` are both still true afterwards.
+    assert_eq!(
+        checked, 306,
+        "only {checked} corpus programs were compared; stage 2 is byte-identical on \
+         every program of the corpus the frontend accepts, which is 306 of the 315 in \
+         the families above — the other 9 are refused by the frontend, and the 46 in \
+         `malformed` are refused too"
+    );
+    assert_eq!(
+        checked + refused,
+        315,
+        "the 15 families above hold 315 programs between them; this walk saw \
+         {checked} compared and {refused} refused, which is not all of them — a file \
+         has been added or removed and the counts below still hold"
+    );
+    assert_eq!(
+        refused, 9,
+        "{refused} corpus programs in the families above are refused by the frontend; \
+         there were 9 when this test was written, and each is listed in \
+         phases/phase-021/FINDINGS.md section 2"
     );
     for family in UNSUPPORTED {
         assert!(
@@ -384,17 +453,67 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
 
 /// The corpus families stage 2 does not compile yet.
 ///
-/// `phases/phase-021/REPORT.md` lists the construct each one needs. They are
-/// named here rather than silently skipped, and this file's coverage is
-/// `families.len()` of the corpus — not the whole corpus, which is why the
-/// fixed point is not claimed.
-/// The corpus families stage 2 does not compare, and why.
-///
 /// `malformed` is here because the frontend refuses those programs: there are no
 /// bytes to agree about. Their refusals are what
-/// `edge_malformed_source_is_reported_rather_than_compiled` covers, one shape at
-/// a time.
+/// `edge_malformed_source_is_reported_rather_than_compiled` covers, one shape at a
+/// time.
 const UNSUPPORTED: &[&str] = &["malformed"];
+
+/// `examples/*.rb` and `modules/*.rb` are the language's specification by
+/// example, so stage 2 has to agree with stage 1 about every one of them.
+///
+/// They are whole programs that use the standard library — `files`, `time`,
+/// `formats`, a module import — rather than one construct each, and they are the
+/// only Redblue source in the repository that is both large and written by
+/// somebody who was not thinking about this compiler. Until this test existed the
+/// claim was made in a report and checked by hand; now the gate checks it.
+#[test]
+fn stage2_is_byte_identical_on_the_examples_and_the_modules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut checked = 0usize;
+
+    for directory in ["examples", "modules"] {
+        let dir = root.join(directory);
+        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{directory}/ is readable: {e}"))
+            .map(|entry| entry.expect("a directory entry").path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("rb"))
+            .collect();
+        entries.sort();
+
+        assert!(
+            !entries.is_empty(),
+            "{directory}/ has no .rb programs, so the specification by example is not being checked"
+        );
+
+        for path in entries {
+            let relative = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = fs::read_to_string(&path).expect("an example is UTF-8");
+            assert!(
+                redblue::compile_source(&source).is_ok(),
+                "stage 1 refuses {relative}, so there are no bytes to compare"
+            );
+            // Flat, because a `name` carrying the directory would name a
+            // subdirectory of the scratch directory that nothing creates.
+            let name = format!(
+                "{directory}-{}",
+                path.file_stem().unwrap().to_string_lossy()
+            );
+            assert_identical(&name, &source);
+            checked += 1;
+        }
+    }
+
+    assert_eq!(
+        checked, 8,
+        "{checked} of the examples and modules were compared, not all 8; the language's \
+         specification by example is what this test exists to check"
+    );
+}
 
 /// The three defects below were all the same shape of mistake in different
 /// places, so each is pinned by name rather than left to be counted by the
@@ -802,15 +921,18 @@ fn edge_the_bytecode_vm_reports_a_bad_invocation_as_a_failure() {
 /// `for each`, with a call after them — lost an operand and died with `bytecode
 /// asked for 2 values its frame never pushed`.
 ///
-/// The corpus here is a *sample* of each family, not the whole corpus, because a
-/// stage-2 run is a program of ~2 700 lines running on a bytecode VM and the
-/// whole corpus does not fit in a test's budget. The full-corpus comparison is
-/// the shell loop in `phases/phase-021/REPORT.md`; `edge_stage3_is_byte_identical_on_a_sample_of_every_family`
-/// pins the same invariant over a fixed, named sample so a regression is caught
-/// by `cargo test` and not only by hand.
+/// The corpus here is a *sample* of each family, so that the shapes a stage-2
+/// run is most likely to get wrong are named one by one.
+/// `edge_stage3_is_byte_identical_on_every_corpus_program` is the same comparison
+/// over all 306, and `edge_stage3_is_byte_identical_on_the_awkward_shapes` is it
+/// over the statement shapes the corpus families do not all reach.
+///
+/// `name` is the scratch file's stem, so it must be flat — a name carrying the
+/// `corpus/` prefix would name a directory under `target/tmp/` that nothing
+/// creates, and stage 2 would fail for the wrong reason.
 fn stage3(name: &str, path: &Path) -> Stage2 {
     let output = scratch(&format!("stage3-{name}.rbc"));
-    let _ = fs::remove_file(&output);
+    clear_output(&output);
 
     let run = Command::new(env!("CARGO_BIN_EXE_rb"))
         .arg("vm")
@@ -821,7 +943,7 @@ fn stage3(name: &str, path: &Path) -> Stage2 {
         .expect("the rb binary runs");
 
     Stage2 {
-        bytes: fs::read(&output).unwrap_or_default(),
+        bytes: read_output(&output),
         stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
         succeeded: run.status.success(),
     }
@@ -848,20 +970,25 @@ fn compiler_contents() -> String {
 
 /// One program per corpus family, named. A fixed sample rather than a slice, so
 /// a change to which files exist cannot silently change what this covers.
+///
+/// `-0001` is the first member of every family — the corpus counts from 1, so a
+/// `-0000` name names nothing. The assertion below is what says so: a sample
+/// naming a file that is not there fails by naming it, rather than passing on a
+/// family it never looked at.
 const STAGE3_SAMPLE: &[(&str, &str)] = &[
-    ("arithmetic", "corpus/arithmetic-0000.rb"),
-    ("control-flow", "corpus/control-flow-0000.rb"),
-    ("functions", "corpus/functions-0000.rb"),
-    ("lists", "corpus/lists-0000.rb"),
-    ("loop-forms", "corpus/loop-forms-0000.rb"),
-    ("nesting", "corpus/nesting-0000.rb"),
-    ("numeric-boundary", "corpus/numeric-boundary-0000.rb"),
-    ("objects", "corpus/objects-0000.rb"),
-    ("records", "corpus/records-0000.rb"),
-    ("stdlib", "corpus/stdlib-0000.rb"),
-    ("text-ops", "corpus/text-ops-0000.rb"),
-    ("unicode", "corpus/unicode-0000.rb"),
-    ("value-tails", "corpus/value-tails-0000.rb"),
+    ("arithmetic", "corpus/arithmetic-0001.rb"),
+    ("control-flow", "corpus/control-flow-0001.rb"),
+    ("functions", "corpus/functions-0001.rb"),
+    ("lists", "corpus/lists-0001.rb"),
+    ("loop-forms", "corpus/loop-forms-0001.rb"),
+    ("nesting", "corpus/nesting-0001.rb"),
+    ("numeric-boundary", "corpus/numeric-boundary-0001.rb"),
+    ("objects", "corpus/objects-0001.rb"),
+    ("records", "corpus/records-0001.rb"),
+    ("stdlib", "corpus/stdlib-0001.rb"),
+    ("text-ops", "corpus/text-ops-0001.rb"),
+    ("unicode", "corpus/unicode-0001.rb"),
+    ("value-tails", "corpus/value-tails-0001.rb"),
 ];
 
 /// The S3 fixed point, over one program from every corpus family stage 2
@@ -886,7 +1013,7 @@ fn edge_stage3_is_byte_identical_on_a_sample_of_every_family() {
         }
 
         let expected = stage1(relative, &source);
-        let actual = stage3(relative, &path);
+        let actual = stage3(family, &path);
         assert!(
             actual.succeeded,
             "stage 2 did not compile {relative} when run as bytecode:\n{}",
@@ -909,41 +1036,380 @@ fn edge_stage3_is_byte_identical_on_a_sample_of_every_family() {
     );
 }
 
-/// The S3 fixed point on the compiler's own source — the one program large
-/// enough to have held the loop bug.
+/// The statement shapes that decide whether the compiler, *run as bytecode*,
+/// emits the same bytes as the compiler run by the tree-walker.
 ///
-/// It is also the only assertion that would notice a regression in the *large*
-/// case: the sampled corpus programs are tens of lines, and this is 2 748. It
-/// is slow (minutes, not seconds) because it is 2 700 lines of Redblue running
-/// on a bytecode VM compiling 2 700 lines of Redblue again, and that cost is
-/// accepted here rather than mocked, because a mocked self-compilation proves
-/// nothing.
+/// The corpus families above are one program each, and each of them is a handful
+/// of statements. These are the shapes whose *opcodes* differ from one another —
+/// a loop, a call, a closure, a record, an object, a `try` — because the risk on
+/// this path is not the compiler's lexer but the bytecode VM mis-executing one
+/// construct and the compiler encoding the wrong result. A stage 2 that ran the
+/// `for each` of `bootstrap/compiler.rb` wrongly wrote bytes here too, which is
+/// what the sample test above caught.
 #[test]
-fn edge_stage3_recompiles_the_compiler_byte_identically() {
-    let path = compiler();
-    let expected = stage1("compiler", &compiler_contents());
-    let actual = stage3("compiler", &path);
+fn edge_stage3_is_byte_identical_on_the_awkward_shapes() {
+    let shapes: &[(&str, &str)] = &[
+        // An empty file and one that is only a comment: no tokens, one `.rbc`.
+        ("empty", ""),
+        ("comment_only", "// nothing\n"),
+        // A loop with a step, and one without, and a `while` with a `skip`: the
+        // three shapes that have to agree on where the operand stack is.
+        (
+            "for_range_with_step",
+            "for each i from 1 to 10 by 2\n    say i\nend\n",
+        ),
+        ("while_with_skip", "set i to 0\nwhile i is less than 5\n    set i to i + 1\n    if i is 3 then\n        skip\n    end\nend\nsay i\n"),
+        // A call with several arguments, so the arguments have to survive being
+        // pushed and then read back by the callee.
+        (
+            "call_with_many_arguments",
+            "to total(a, b, c)\n    give back a + b + c\nend\nsay total(1, 2, 3)\n",
+        ),
+        // A closure over a captured variable, and a nested call chain.
+        (
+            "closure_and_nesting",
+            "to adder(n)\n    to add(x)\n        give back x + n\n    end\n    give back add\nend\nset add5 to adder(5)\nsay add5(2)\n",
+        ),
+        // A record, a list and an object: three different constant-pool shapes.
+        (
+            "record_list_object",
+            "set r to {a: 1, b: \"two\"}\nset xs to [1, 2, 3]\nsay r.a\nsay length(xs)\n",
+        ),
+        // A `try`/`catch`/`finally`, and an `unless`: both compile to jumps whose
+        // targets have to land where the tree-walker's do. The failure is a
+        // division at *run* time, so the program itself is a program.
+        (
+            "try_catch_finally",
+            "to risky()\n    give back 1 / 0\nend\ntry\n    say risky()\ncatch failure\n    say \"caught\"\nfinally\n    say \"done\"\nend\nunless yes then\n    say \"no\"\nend\n",
+        ),
+        // A string with every escape, and non-ASCII text: the constant pool's
+        // length fields and UTF-8 bytes.
+        (
+            "text_and_escapes",
+            "say \"tab:\\tnl:\\nquote:\\\"backslash:\\\\\"\nsay \"héllo 日本語 🐉\"\n",
+        ),
+        // Every number spelling that has to survive as bits, not as text.
+        (
+            "number_boundaries",
+            "say 0\nsay -0.0\nsay 1e308\nsay 5e-324\nsay 9007199254740993\nsay 123456789012345678\n",
+        ),
+    ];
 
-    assert!(
-        actual.succeeded,
-        "stage 2 did not compile bootstrap/compiler.rb when run as bytecode:\n{}",
-        actual.stderr
+    for (name, source) in shapes {
+        assert!(
+            redblue::compile_source(source).is_ok(),
+            "{name} is refused by stage 1, so there are no bytes to compare"
+        );
+        let expected = stage1(name, source);
+
+        let input = scratch(&format!("s3shape-{name}.rb"));
+        fs::write(&input, source).expect("write the program for stage 3 to compile");
+        let actual = stage3(&format!("s3shape-{name}"), &input);
+
+        assert!(
+            actual.succeeded,
+            "stage 2 run as bytecode did not compile {name}:\n{}\nsource:\n{source}",
+            actual.stderr
+        );
+        assert!(
+            !actual.bytes.is_empty(),
+            "stage 2 wrote no file for {name} when run as bytecode"
+        );
+        assert_eq!(
+            actual.bytes.len(),
+            expected.len(),
+            "stage 2 wrote {} bytes where stage 1 wrote {} for {name} run as bytecode",
+            actual.bytes.len(),
+            expected.len()
+        );
+        assert_eq!(
+            actual.bytes, expected,
+            "stage 2 run as bytecode emitted different bytes than stage 1 for {name}\n\
+             source:\n{source}"
+        );
+    }
+}
+
+/// The S3 comparison over the **whole** corpus, not a sample of it.
+///
+/// `stage2_is_byte_identical_on_its_corpus_families` makes this comparison with
+/// the tree-walker executing the compiler. This one makes it with the bytecode VM
+/// executing the compiler, which is the only execution path S3 has: a stage 2
+/// that is byte-identical under one engine and wrong under the other is not a
+/// compiler, it is a coincidence. 306 programs, about 23 seconds.
+#[test]
+fn edge_stage3_is_byte_identical_on_every_corpus_program() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let mut checked = 0usize;
+    let mut refused = 0usize;
+
+    let mut entries: Vec<PathBuf> = fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("the corpus is readable: {e}"))
+        .map(|entry| entry.expect("a corpus entry").path())
+        .filter(|path| {
+            path.extension().and_then(|e| e.to_str()) == Some("rb")
+                && !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("malformed-"))
+        })
+        .collect();
+    entries.sort();
+    // Read before the loop consumes the vector: the total is what says the walk
+    // saw the whole corpus rather than a subset of it.
+    let total = entries.len();
+    assert_eq!(
+        total, 315,
+        "the corpus holds 315 programs outside `malformed`, and this walk found {total}; \
+         a family has been added or removed and the counts below are not the whole \
+         corpus any more"
     );
-    assert!(
-        !actual.bytes.is_empty(),
-        "stage 2 wrote no output for bootstrap/compiler.rb"
+
+    for path in entries {
+        let relative = path
+            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let source = fs::read_to_string(&path).expect("a corpus program is UTF-8");
+
+        if redblue::compile_source(&source).is_err() {
+            // No bytes to agree about. `edge_malformed_source_is_reported` and
+            // `edge_stage3_refuses_every_malformed_corpus_program` are where the
+            // refusals are asserted.
+            refused += 1;
+            continue;
+        }
+
+        let expected = stage1(&name, &source);
+        let actual = stage3(&name, &path);
+        assert!(
+            actual.succeeded,
+            "stage 2 run as bytecode did not compile {relative}:\n{}\nsource:\n{source}",
+            actual.stderr
+        );
+        assert!(
+            !actual.bytes.is_empty(),
+            "stage 2 run as bytecode wrote no file for {relative}"
+        );
+        assert_eq!(
+            actual.bytes, expected,
+            "stage 2 run as bytecode emitted different bytes than stage 1 for {relative}"
+        );
+        checked += 1;
+    }
+
+    // Exact, for the reason `stage2_is_byte_identical_on_its_corpus_families`
+    // says it: `checked >= 300` and `refused == 9` are both still true after six
+    // corpus programs are deleted, and this test's whole claim is that *every*
+    // program the frontend accepts is byte-identical through the bytecode path.
+    // A floor cannot carry that claim — only the count itself can.
+    assert_eq!(
+        checked, 306,
+        "{checked} corpus programs were compared through the bytecode path, not the \
+         306 of the 315 outside `malformed` that the frontend accepts; stage 2 run \
+         as bytecode is byte-identical on every one of them"
     );
     assert_eq!(
-        actual.bytes.len(),
-        expected.len(),
-        "stage 2 wrote {} bytes where stage 1 wrote {}",
-        actual.bytes.len(),
-        expected.len()
+        refused, 9,
+        "{refused} corpus programs outside `malformed` were refused by the frontend; \
+         there were 9 when this test was written"
     );
     assert_eq!(
-        actual.bytes, expected,
-        "bootstrap/compiler.rb compiled by itself must be byte-identical to \
-         bootstrap/compiler.rb compiled by stage 1"
+        checked + refused,
+        total,
+        "{checked} compared and {refused} refused is not every program this walk read, \
+         so a program fell through without being either"
+    );
+}
+
+/// Every program of the `malformed` family, through the bytecode path, held to
+/// what stage 1 does with it.
+///
+/// `edge_malformed_source_is_reported_rather_than_compiled` covers eight shapes by
+/// hand, with the tree-walker running the compiler. This walks all 46 the corpus
+/// actually holds, with the bytecode VM running it, which is the path whose
+/// operand-stack bookkeeping was wrong: a refusal that arrives through a
+/// half-executed block has to be a refusal, not a file.
+///
+/// The family is not homogeneous, and saying so is the point of walking it:
+///
+/// - **43** are refused by the frontend's lexer or parser. Stage 2 *is* a lexer
+///   and a parser, so it refuses them, exits non-zero and writes nothing.
+/// - **1** is refused by the frontend's analyzer alone — an unbound name. Stage 2
+///   implements no analyzer and compiles it. That is a gap, counted here so a new
+///   one is noticed rather than absorbed.
+/// - **2** are programs the frontend accepts. They are misfiled, and they are held
+///   to the ordinary rule instead: stage 2 must agree with stage 1, byte for byte.
+#[test]
+fn edge_stage3_refuses_every_malformed_corpus_program() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let mut entries: Vec<PathBuf> = fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("the corpus is readable: {e}"))
+        .map(|entry| entry.expect("a corpus entry").path())
+        .filter(|path| {
+            path.extension().and_then(|e| e.to_str()) == Some("rb")
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("malformed-"))
+        })
+        .collect();
+    entries.sort();
+
+    // Exact, not a floor: the three counts below only add up to the family if
+    // this one is right, and a floor here is what let `checked >= 40` stand in
+    // for "all 46" while the comment above already claimed all 46.
+    assert_eq!(
+        entries.len(),
+        46,
+        "the malformed family holds {} programs, and this walk is written to cover \
+         all of them; it is the only place the refusals of this family are asserted",
+        entries.len()
+    );
+
+    let mut refusals = 0usize;
+    let mut analyzer_only = 0usize;
+    let mut accepted = 0usize;
+
+    for path in entries {
+        let relative = path
+            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let source = fs::read_to_string(&path).expect("a corpus program is UTF-8");
+
+        let output = scratch("stage3-malformed.rbc");
+        clear_output(&output);
+
+        let run = Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("vm")
+            .arg(stage1_of_the_compiler())
+            .arg(&path)
+            .arg(&output)
+            .output()
+            .expect("the rb binary runs");
+
+        match redblue::compile_source(&source) {
+            // A lexer or parser refusal is the compiler's own business: stage 2
+            // is a lexer and a parser, so it has to refuse these too, and to
+            // refuse them by failing.
+            Err(redblue::Error::Lexer(_, _) | redblue::Error::Parser(_, _)) => {
+                assert!(
+                    !run.status.success(),
+                    "stage 2 run as bytecode accepted {relative}, whose source the \
+                     frontend's own lexer or parser refuses"
+                );
+                assert!(
+                    !output.exists(),
+                    "stage 2 run as bytecode left a {} byte .rbc for the refused {relative}",
+                    output.metadata().map(|m| m.len()).unwrap_or(0)
+                );
+                refusals += 1;
+            }
+            // An analyzer refusal is a *name* rule — an unbound variable, a parent
+            // that does not exist — and `bootstrap/compiler.rb` implements no
+            // analyzer, so it compiles these. That is a gap, not a disagreement.
+            //
+            // It used to be counted and nothing else, which threw away the run
+            // that had just happened: stage 2 could crash on this file, exit
+            // non-zero, or write bytes that were not a bytecode file at all and
+            // the arm still answered `analyzer_only += 1`. What stage 2 writes
+            // for a program stage 1 refuses to compile is exactly the case where
+            // nobody is looking, so it is held here to the rule every other arm
+            // is held to.
+            //
+            // Stage 1 has no bytes for this file — it refuses before codegen — so
+            // byte-equality is reached by running stage 1's *codegen* on the parse
+            // the analyzer refused, which is public (`Lexer` -> `parser::parse` ->
+            // `bytecode::compile_program`) and is the whole of stage 1 minus the
+            // analyzer stage 2 does not have. The arms then agree about the
+            // program, and the only disagreement left is the one being recorded.
+            Err(redblue::Error::Analyzer(_, _)) => {
+                let tokens = redblue::lexer::Lexer::tokenize(&source)
+                    .expect("the lexer accepts a program the analyzer refused");
+                let program = redblue::parser::parse(tokens)
+                    .expect("the parser accepts a program the analyzer refused");
+                let expected = redblue::bytecode::compile_program(&program)
+                    .expect("codegen accepts a program the analyzer refused")
+                    .encode();
+
+                assert!(
+                    run.status.success(),
+                    "stage 2 run as bytecode failed on {relative}, whose only frontend \
+                     refusal is the analyzer's, and it has no analyzer:\n{}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                let actual = read_output(&output);
+                assert!(
+                    !actual.is_empty(),
+                    "stage 2 run as bytecode wrote no file for {relative}, which it \
+                     compiles because it has no analyzer"
+                );
+                assert!(
+                    actual.starts_with(b"RED\x1a"),
+                    "stage 2 run as bytecode wrote a file for {relative} that is not a \
+                     Redblue bytecode file"
+                );
+                assert_eq!(
+                    actual, expected,
+                    "stage 2 run as bytecode emitted different bytes than stage 1's \
+                     codegen for {relative}, which the analyzer alone refuses"
+                );
+                // And the file is one this build reads back to itself, so the bytes
+                // that were compared are a file rather than something shaped like
+                // one.
+                let decoded = redblue::Chunk::decode(&actual).unwrap_or_else(|error| {
+                    panic!("stage 2's file for {relative} does not decode: {error:?}")
+                });
+                assert_eq!(
+                    decoded.encode(),
+                    expected,
+                    "stage 2's file for {relative} decodes to a different chunk than \
+                     stage 1's codegen emits for it"
+                );
+                analyzer_only += 1;
+            }
+            // Two programs of this family are programs the frontend accepts, so
+            // they are not refusals at all. They are held to the ordinary rule:
+            // stage 2 has to agree with stage 1 about them, byte for byte.
+            Ok(chunk) => {
+                let expected = chunk.encode();
+                assert!(
+                    run.status.success(),
+                    "stage 2 run as bytecode refused {relative}, which the frontend accepts:\n{}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(
+                    read_output(&output),
+                    expected,
+                    "stage 2 run as bytecode emitted different bytes than stage 1 for {relative}, \
+                     which the frontend accepts"
+                );
+                accepted += 1;
+            }
+            Err(other) => {
+                panic!("{relative} is refused in a way this test does not name: {other:?}")
+            }
+        }
+    }
+
+    assert_eq!(
+        refusals, 43,
+        "the malformed family holds 43 programs the frontend's lexer or parser refuses; \
+         this walk refused {refusals} of them through the bytecode path"
+    );
+    assert_eq!(
+        analyzer_only, 1,
+        "{analyzer_only} programs of the malformed family are refused by the frontend's \
+         analyzer alone, and stage 2 has no analyzer — there was 1"
+    );
+    assert_eq!(
+        accepted, 2,
+        "{accepted} programs of the malformed family are programs the frontend accepts, \
+         so they are compared rather than refused; there were 2"
     );
 }
 
@@ -960,7 +1426,7 @@ fn edge_stage3_reports_a_failure_rather_than_writing_a_file() {
     let broken = scratch("stage3-broken.rb");
     fs::write(&broken, "say \"unterminated\n").expect("the broken program is written");
     let output = scratch("stage3-broken.rbc");
-    let _ = fs::remove_file(&output);
+    clear_output(&output);
 
     let run = Command::new(env!("CARGO_BIN_EXE_rb"))
         .arg("vm")
@@ -984,7 +1450,7 @@ fn edge_stage3_reports_a_failure_rather_than_writing_a_file() {
     // refused by the same invocation, rather than being read as text.
     let not_source = scratch("stage3-not-source.rb");
     fs::write(&not_source, stage1("tiny", "say 1\n")).expect("the .rbc is written");
-    fs::remove_file(&output).ok();
+    clear_output(&output);
 
     let run = Command::new(env!("CARGO_BIN_EXE_rb"))
         .arg("vm")

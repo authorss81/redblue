@@ -1643,9 +1643,9 @@ impl BytecodeVm {
 
     /// `GET_ITER`, and `GET_RANGE` after it has built its sequence.
     ///
-    /// The sequence is pushed as a placeholder purely so the operand stack height
-    /// is where the file expects it; the sequence itself is held in the loop
-    /// entry, and the `STORE` at the loop's `top` draws from it.
+    /// Both pop the sequence they were given and keep it in the loop entry, so
+    /// the loop body runs at the operand-stack height that was left behind and
+    /// the `STORE` at the loop's `top` draws from the entry rather than the stack.
     fn start_loop(&mut self, sequence: Option<Sequence>, frame: usize) -> Result<()> {
         let value = self.pop()?;
         let sequence = Some(sequence.unwrap_or(match value {
@@ -1736,9 +1736,9 @@ impl BytecodeVm {
     /// `STORE`, which is either a plain binding or a loop's variable.
     ///
     /// A loop's variable is the one `STORE` that sits on its loop's `top`: the
-    /// loop keeps its sequence on the operand stack for the whole body, and the
-    /// instruction at `top` is where the next value is drawn from it. Every other
-    /// `STORE` binds what the statement pushed.
+    /// loop keeps its sequence in its own entry, and the instruction at `top` is
+    /// where the next value is drawn from it. Every other `STORE` binds what the
+    /// statement pushed.
     ///
     /// Only the plain binding refuses a write onto a constant. The loop-variable
     /// path is the loop's own per-turn binding of its iterator's element rather

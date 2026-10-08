@@ -102,52 +102,132 @@ filing alone.
 second is smaller and keeps the refusal cases near the constructs they exercise.
 ---
 
-## 3. The bytecode VM cannot run the compiler it compiles (blocks S3)
+## 3. S3 is blocked by a quadratic in `push`, not by the bytecode VM
 
-**Severity:** major. **Where:** `src/bytecode/vm.rs:963` (`pop_n`).
+**Severity:** major. **Where:** `src/runtime.rs:695` (`push`), and the absence of
+any mutable data structure in the language.
 
-`rb vm` over `bootstrap/compiler.rb`'s own stage-1 output fails partway through,
-on a program stage 1 compiles and the tree-walker runs:
+### 3a. The defect the earlier run of this phase recorded here is FIXED
+
+The first version of this section said the bytecode VM could not run the compiler
+it compiles: `rb vm stage1.rbc in.rb out.rbc` died with `bytecode asked for 2
+values its frame never pushed` at `bootstrap/compiler.rb:2176`. That is fixed —
+`push_loop` recorded a sequence loop's `stack_base` one below the height its body
+ran at (`src/bytecode/vm.rs:1721`), so leaving the loop ate a value the enclosing
+frame had pushed. The loop's sequence lives in the `Loop` entry, not on the
+operand stack, so the height is what `GET_ITER`/`GET_RANGE` left behind.
+
+Re-verified from scratch in this run, with the compiler running **as bytecode**:
+
+| Check | Result |
+|---|---|
+| Whole corpus outside `malformed` | **306 programs, 306 byte-identical, 0 differ** |
+| 13 hand-written awkward shapes (loops, calls, closures, records, `try`, escapes, `f64` boundaries) | **13 of 13 byte-identical** |
+| `corpus/malformed-*.rb` | 43 lexer/parser refusals, all refused with no file; 1 analyzer-only refusal; 2 programs the frontend accepts, both byte-identical |
+
+All three are `cargo test` cases now (`edge_stage3_is_byte_identical_on_every_corpus_program`,
+`edge_stage3_is_byte_identical_on_the_awkward_shapes`,
+`edge_stage3_refuses_every_malformed_corpus_program`), so the next rung does not
+have to re-derive them.
+
+### 3b. What still blocks S3: the compiler cannot compile itself in any useful time
 
 ```redblue
-$ rb compile bootstrap/compiler.rb -o target/tmp/rb021/stage1.rbc
-$ rb vm target/tmp/rb021/stage1.rbc target/tmp/rb021/s3/in.rb out.rbc
-Error: RuntimeError: bytecode asked for 2 values its frame never pushed
-  --> 2176:1
-$ echo $?
-1
+$ time rb run  bootstrap/compiler.rb target/tmp/s3/in.rb out.rbc   # 100 lines
+  30.17 s
+$ time rb run  bootstrap/compiler.rb target/tmp/s3/in.rb out.rbc   # 200 lines
+  110.69 s
+$ time rb run  bootstrap/compiler.rb target/tmp/s3/in.rb out.rbc   # 400 lines
+  430.40 s
 ```
 
-`bootstrap/compiler.rb:2176` is a `push(…, {o: …, a: …, x: …, l: …})` — a
-4-field record literal, so `BUILD_RECORD 4`. The disassembly of the failing
-block shows the record built on the operand stack and `pop_n(8)` reached for
-more than the frame had.
+Growth is ×3.6–3.9 per doubling of the input, i.e. **n^1.9**. `bootstrap/compiler.rb`
+is 2 748 lines, which is 6.9 doublings past 400: extrapolating, one self-compilation
+is of the order of **10^6 seconds — about 48 days**. `rb vm stage1.rbc` on the same
+inputs costs the same to within a few percent, so it is not an engine difference.
 
-**This is pre-existing and unrelated to the argument fix in this phase.** It
-reproduces with `src/lib.rs` reverted to `HEAD` (verified by stashing), so it is
-not a regression from the `rb vm` arm.
+**Cause, measured.** `push` clones the list it is given:
 
-**Not reduced to a minimal program.** Ten candidate reductions were tried —
-`BUILD_RECORD 4` in a `while` in a function, a 4-field record built from a
-`CALL` result, a record passed through two nested calls, a 4-field record as an
-argument to a 1-arg function, `push(list, {4 fields})` in a loop, and the
-literal line-2176 shape with the same names. Every one of them ran correctly.
-The bug therefore needs something in the 2 748-line program beyond the
-constructs above, and the reducer that would find it does not exist yet — it is
-`tests/common/shrink.rs`, which shrinks a failing *program* for the tree-walker
-differential and is not wired to a bytecode-VM failure.
+```rust
+// src/runtime.rs:705
+let mut pushed = items.clone();
+pushed.push(value.clone());
+```
+
+A loop of *n* appends is *n* deep clones of a growing list. Redblue has no mutable
+data structure — a `set r.field to x` evaluates `r` by value first — so every
+list-building program is quadratic, and the compiler's two hot loops
+(`lex` at `bootstrap/compiler.rb:394`, `parse_statements` at
+`bootstrap/compiler.rb:812`) are exactly that. Isolated on one machine:
+
+| Loop body | 400 | 800 | 1600 |
+|---|---|---|---|
+| `push(l, i)` — a number | 0.00 s | 0.02 s | 0.08 s |
+| `push(l, {k: "abcdefgh", l: 12345, x: 1.5})` — a record | 0.09 s | 0.36 s | 1.51 s |
+
+Numbers are nearly free; records are quadratic, because cloning a record clones its
+map and its text. The compiler's tokens are records (`{k, l}`) and so are its AST
+nodes, which is why it is the slow case and not merely the awkward one.
 
 **Why it matters for the ladder.** S3 is "the S2 compiler compiled by itself,
-byte-identical output". It cannot start: stage 1's output of `compiler.rb` does
-not run, so there is no stage-2 compiler to compare against. The `rb vm`
-argument channel this phase added is what makes the invocation expressible at
-all — before it, `rb vm a.rbc b c d` printed the help text and exited **0**.
-The next phase on this rung has to fix this first.
+byte-identical output". Its only proof is the fixed point, and the fixed point
+needs one self-compilation. So S3 is not reachable until this is fixed, and the fix
+is in the language, not in `bootstrap/`.
 
-**Suggested acceptance gate.** A `#[test]` that compiles `bootstrap/compiler.rb`
-with stage 1, runs the `.rbc` under `rb vm` with a small input, and asserts it
-either produces the byte-identical `.rbc` or fails on a *named* construct. Once
-`shrink.rs` can reduce it, pin the reduction.
+### 3c. The test that asserted it was removed, and why that is stated here
+
+The previous attempt of this phase added
+`edge_stage3_recompiles_the_compiler_byte_identically`, which compiles
+`bootstrap/compiler.rb` with stage 2 and compares the bytes. It was **removed** in
+this run. It did not fail — it cannot finish: by the numbers above it would run for
+weeks inside `cargo test`, which is worse than a red gate because a suite that
+never returns cannot be read at all. It was a test this phase added in its own
+first attempt, asserting a claim this phase cannot make; it is recorded here rather
+than deleted quietly.
+
+What replaced it is the coverage that *is* reachable and *is* in the gate: the whole
+corpus through the bytecode path, the awkward shapes, and the whole `malformed`
+family. The one thing still unasserted is the self-compilation, and §3b says why.
+
+### 3d. Suggested acceptance gates, either order
+
+1. **Give the callee exclusive ownership of the list it appends to.** Gate: a
+   `#[test]` that times nothing but *counts* — `push` a record 10 000 times into a
+   list built in a loop, and assert that the loop's own iteration cap is not what
+   stops it — plus `edge_push_does_not_alias_its_argument` (a list bound to two
+   names and appended through one must not change through the other) and
+   `edge_push_of_a_shared_list_copies_rather_than_writing_through`.
+
+   **The obvious spelling of this does not work, and the reason matters enough to
+   write down.** The first version of this section proposed
+   `Value::List(Vec<Value>)` → `Value::List(Rc<Vec<Value>>)` with `push` as
+   `Rc::make_mut`, on the grounds that it "is O(1) while the list has one owner —
+   the loop case". The loop case does not have one owner. At the moment `push`
+   runs in `set xs to push(xs, v)`, the list is held twice whatever its type:
+
+   - `Expr::Call` builds the argument list by calling `evaluate` on each argument
+     (`src/interpreter.rs:1455`), so
+   - `args[0]` is evaluated as an `Expr::Identifier`, which resolves through
+     `get_var` — `get_var_ref(name).cloned()` (`src/interpreter.rs:926`) — and
+     therefore clones the value out of the environment while the environment
+     keeps its own copy.
+
+   So `Rc::make_mut` sees a refcount of 2, takes the copying branch, and clones
+   the `Vec<Value>` — the same deep clone, element for element, that
+   `items.clone()` does today. The quadratic in §3b's table survives that change
+   unchanged; only the type changes. `Rc` fixes the case where the list really has
+   one owner, which is not the shape a compiler writes. The gate has to be the
+   count above, run before and after the change, because the type change alone
+   will leave it quadratic and pass any test that only checks behaviour.
+2. **A mutable accumulator for the language.** A `buffer` value with `append`,
+   `length` and `to_list`, or a list with an in-place append. Gate: the S3 fixed
+   point itself, once it can run. Cost: a new stdlib type, i.e. a language feature
+   and its own phase.
+
+Option 1 as corrected — moving the value out of the environment for the duration
+of the call, which the interpreter can only do if it also knows the assignment
+target the call's result is bound to — and option 2 are both language changes.
+Neither is this phase's diff, and neither is a `Value` payload change on its own.
 
 ## 4. The phase's stated finding no longer reproduces
 
