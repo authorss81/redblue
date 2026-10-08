@@ -100,3 +100,77 @@ filing alone.
 **Suggested fix.** Either move the nine into `malformed-*.rb`, or state in
 `corpus/README.md` that a family may contain frontend-refused members. The
 second is smaller and keeps the refusal cases near the constructs they exercise.
+---
+
+## 3. The bytecode VM cannot run the compiler it compiles (blocks S3)
+
+**Severity:** major. **Where:** `src/bytecode/vm.rs:963` (`pop_n`).
+
+`rb vm` over `bootstrap/compiler.rb`'s own stage-1 output fails partway through,
+on a program stage 1 compiles and the tree-walker runs:
+
+```redblue
+$ rb compile bootstrap/compiler.rb -o target/tmp/rb021/stage1.rbc
+$ rb vm target/tmp/rb021/stage1.rbc target/tmp/rb021/s3/in.rb out.rbc
+Error: RuntimeError: bytecode asked for 2 values its frame never pushed
+  --> 2176:1
+$ echo $?
+1
+```
+
+`bootstrap/compiler.rb:2176` is a `push(…, {o: …, a: …, x: …, l: …})` — a
+4-field record literal, so `BUILD_RECORD 4`. The disassembly of the failing
+block shows the record built on the operand stack and `pop_n(8)` reached for
+more than the frame had.
+
+**This is pre-existing and unrelated to the argument fix in this phase.** It
+reproduces with `src/lib.rs` reverted to `HEAD` (verified by stashing), so it is
+not a regression from the `rb vm` arm.
+
+**Not reduced to a minimal program.** Ten candidate reductions were tried —
+`BUILD_RECORD 4` in a `while` in a function, a 4-field record built from a
+`CALL` result, a record passed through two nested calls, a 4-field record as an
+argument to a 1-arg function, `push(list, {4 fields})` in a loop, and the
+literal line-2176 shape with the same names. Every one of them ran correctly.
+The bug therefore needs something in the 2 748-line program beyond the
+constructs above, and the reducer that would find it does not exist yet — it is
+`tests/common/shrink.rs`, which shrinks a failing *program* for the tree-walker
+differential and is not wired to a bytecode-VM failure.
+
+**Why it matters for the ladder.** S3 is "the S2 compiler compiled by itself,
+byte-identical output". It cannot start: stage 1's output of `compiler.rb` does
+not run, so there is no stage-2 compiler to compare against. The `rb vm`
+argument channel this phase added is what makes the invocation expressible at
+all — before it, `rb vm a.rbc b c d` printed the help text and exited **0**.
+The next phase on this rung has to fix this first.
+
+**Suggested acceptance gate.** A `#[test]` that compiles `bootstrap/compiler.rb`
+with stage 1, runs the `.rbc` under `rb vm` with a small input, and asserts it
+either produces the byte-identical `.rbc` or fails on a *named* construct. Once
+`shrink.rs` can reduce it, pin the reduction.
+
+## 4. The phase's stated finding no longer reproduces
+
+The evidence line in `phases/phase-021/PROMPT` is `The self-hosted path does not
+exist yet.` It does not reproduce. `bootstrap/compiler.rb` is 2 748 lines, runs
+under the Rust `rb`, and `cargo test --test bootstrap_selfhost_test` was green
+on arrival at 8 passed / 0 failed.
+
+Stage 2 was re-verified independently of that suite before anything was
+changed:
+
+| Check | Result |
+|---|---|
+| Whole corpus, every family | 308 programs stage 1 accepts → **308 byte-identical, 0 differ** |
+| `examples/*.rb` + `modules/*.rb` | 8 of 8 byte-identical |
+| `tests/*.rb` (large real programs) | 5 of 5 byte-identical |
+| 179 `f64` values (random bit patterns + subnormal boundaries) | **179 byte-identical, 0 differ** |
+| 19 text/unicode/escape cases | **19 byte-identical, 0 differ** |
+| Block nesting at 63 / 64 / 65 levels | 63 and 64 identical; 65 refused by both |
+| `rb lint bootstrap/compiler.rb` | exit 0, no output |
+
+**The five corpus programs stage 2 accepts and stage 1 refuses are all
+analyzer-stage refusals** (`Unknown variable 'x'`, `extends 'Nothing'`), and
+`bootstrap/compiler.rb` implements no analyzer — it is a lexer, parser and code
+generator. So there are no bytes to disagree about. Recorded here rather than
+claimed as a fix.
