@@ -656,7 +656,191 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             let type_name = args.first().map(|v| v.type_name()).unwrap_or("nothing");
             Ok(Some(Value::Text(type_name.to_string())))
         }
+        // The conversion and list builtins `stdlib::builtins` registers and
+        // this function did not answer. A program could name every one of them
+        // and each call failed with `Unknown function`, which is the message for
+        // a name nothing implements — not for a name the language documents.
+        "to_number" => {
+            let text = match args.first() {
+                Some(Value::Text(text)) => text,
+                _ => {
+                    return Err(Error::Runtime(
+                        "to_number requires a text argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            // The same parse the lexer does, so a number written in a program
+            // and the same number written as text are one value bit for bit.
+            let number: f64 = text
+                .trim()
+                .parse()
+                .map_err(|_| Error::Runtime(format!("Cannot read '{text}' as a number"), span))?;
+            crate::value::finite_number(number, span)
+                .map(Value::Number)
+                .map(Some)
+        }
+        "to_text" => {
+            let text = match args.first() {
+                Some(value) => value.to_string(),
+                None => {
+                    return Err(Error::Runtime(
+                        "to_text requires an argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            Ok(Some(Value::Text(text)))
+        }
+        "push" => {
+            let (items, value) = match (args.first(), args.get(1)) {
+                (Some(Value::List(items)), Some(value)) => (items, value),
+                _ => {
+                    return Err(Error::Runtime(
+                        "push requires a list and a value".to_string(),
+                        span,
+                    ))
+                }
+            };
+            let mut pushed = items.clone();
+            pushed.push(value.clone());
+            Ok(Some(Value::List(pushed)))
+        }
+        // `bytes.from_text` and `bytes.write` are the whole of a binary file
+        // API, and there was none: `files.write` writes the UTF-8 of a text, so
+        // a program had no way to write a byte it could not spell. That is not
+        // a gap a self-hosted compiler can be written around — its output is
+        // bytes — so it is the minimum binary output a language with a
+        // bytecode format needs.
+        "bytes_from_text" => {
+            let text = match args.first() {
+                Some(Value::Text(text)) => text,
+                _ => {
+                    return Err(Error::Runtime(
+                        "bytes.from_text requires a text argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            Ok(Some(Value::List(
+                text.as_bytes()
+                    .iter()
+                    .map(|byte| Value::Number(*byte as f64))
+                    .collect(),
+            )))
+        }
+        "bytes_write" => {
+            let (path, bytes) = match (args.first(), args.get(1)) {
+                (Some(Value::Text(path)), Some(Value::List(bytes))) => (path, bytes),
+                _ => {
+                    return Err(Error::Runtime(
+                        "bytes.write requires a path and a list of byte values".to_string(),
+                        span,
+                    ))
+                }
+            };
+            let mut out = Vec::with_capacity(bytes.len());
+            for byte in bytes {
+                let Value::Number(value) = byte else {
+                    return Err(Error::Runtime(
+                        format!(
+                            "bytes.write was given a {} where a byte belongs",
+                            byte.type_name()
+                        ),
+                        span,
+                    ));
+                };
+                // A byte is 0..=255, and the check is on the value rather than
+                // on a cast, so `bytes.write("f", [256])` is a refusal with a
+                // message instead of a file holding a wrapped zero.
+                if !value.is_finite() || value.fract() != 0.0 || *value < 0.0 || *value > 255.0 {
+                    return Err(Error::Runtime(
+                        format!("bytes.write was given {value}, which is not a byte (0 to 255)"),
+                        span,
+                    ));
+                }
+                out.push(*value as u8);
+            }
+            std::fs::write(path, out)
+                .map_err(|e| Error::Io(format!("Failed to write '{}': {}", path, e)))?;
+            Ok(Some(Value::Nothing))
+        }
+        "bytes_text" => {
+            // The inverse of `bytes.from_text`, so a program that reads a byte
+            // list does not have to give up and start again with text: the
+            // self-hosted compiler lexes bytes and still needs to say what a
+            // name is.
+            let bytes = match args.first() {
+                Some(Value::List(bytes)) => bytes,
+                _ => {
+                    return Err(Error::Runtime(
+                        "bytes.text requires a list of byte values".to_string(),
+                        span,
+                    ))
+                }
+            };
+            let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+            for byte in bytes {
+                let Value::Number(value) = byte else {
+                    return Err(Error::Runtime(
+                        format!(
+                            "bytes.text was given a {} where a byte belongs",
+                            byte.type_name()
+                        ),
+                        span,
+                    ));
+                };
+                if !value.is_finite() || value.fract() != 0.0 || *value < 0.0 || *value > 255.0 {
+                    return Err(Error::Runtime(
+                        format!("bytes.text was given {value}, which is not a byte (0 to 255)"),
+                        span,
+                    ));
+                }
+                out.push(*value as u8);
+            }
+            // Not every byte list is text, and the failure names the byte
+            // rather than reporting a replacement character three files later.
+            match String::from_utf8(out) {
+                Ok(text) => Ok(Some(Value::Text(text))),
+                Err(e) => Err(Error::Runtime(
+                    format!("bytes.text was given bytes that are not text: {e}"),
+                    span,
+                )),
+            }
+        }
+        "sys_argv" => Ok(Some(Value::List(
+            program_args()
+                .iter()
+                .map(|argument| Value::Text(argument.clone()))
+                .collect(),
+        ))),
         _ => Ok(None),
+    }
+}
+
+/// The arguments after the program path, for `sys.argv()`.
+///
+/// The CLI sets them when it runs a file and nothing else does, so a program run
+/// from the REPL or from a test sees an empty list rather than the arguments of
+/// whatever process happens to be running.
+fn program_args() -> Vec<String> {
+    PROGRAM_ARGS
+        .lock()
+        .map(|args| args.clone())
+        .unwrap_or_default()
+}
+
+/// Where `sys.argv()` reads from. See [`set_program_args`].
+static PROGRAM_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Records the arguments that follow the program path, for `sys.argv()`.
+///
+/// A program has no other way to be told what it was asked to do: `rb run` takes
+/// a path and nothing else, so a compiler written in Redblue could not be given
+/// a file to compile.
+pub fn set_program_args(args: Vec<String>) {
+    if let Ok(mut slot) = PROGRAM_ARGS.lock() {
+        *slot = args;
     }
 }
 

@@ -4,7 +4,9 @@ use std::collections::HashMap;
 /// The module names whose functions are registered as `module_function`
 /// builtins, so that a caller can tell `json.parse` — a module — from a
 /// variable that happens to be followed by a `.`.
-pub const MODULES: &[&str] = &["console", "csv", "files", "json", "list", "network", "time"];
+pub const MODULES: &[&str] = &[
+    "bytes", "console", "csv", "files", "json", "list", "network", "sys", "time",
+];
 
 /// Whether `name` is one of the [`MODULES`].
 pub fn is_module(name: &str) -> bool {
@@ -203,6 +205,28 @@ pub fn builtins() -> HashMap<String, Value> {
 
     // Type conversion
     globals.insert("type_of".to_string(), Value::Builtin("type_of".to_string()));
+
+    // Bytes module: the binary file API. `files` writes text, so without this a
+    // program cannot write a byte it cannot spell — which is most of a bytecode
+    // file.
+    globals.insert(
+        "bytes_from_text".to_string(),
+        Value::Builtin("bytes_from_text".to_string()),
+    );
+    globals.insert(
+        "bytes_write".to_string(),
+        Value::Builtin("bytes_write".to_string()),
+    );
+    globals.insert(
+        "bytes_text".to_string(),
+        Value::Builtin("bytes_text".to_string()),
+    );
+
+    // Sys module
+    globals.insert(
+        "sys_argv".to_string(),
+        Value::Builtin("sys_argv".to_string()),
+    );
 
     globals
 }
