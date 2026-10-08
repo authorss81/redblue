@@ -193,6 +193,17 @@ pub struct Vm {
     /// module declaration a boundary rather than a sequence of top-level
     /// statements.
     module_depth: usize,
+    /// The `module_member` names this VM has published for a module's own
+    /// members, which is where a call `MathUtils.circle_area(5)` resolves to.
+    ///
+    /// They are recorded rather than inferred from the name, because
+    /// `Module_member` is a naming convention and a program may bind a name with
+    /// an underscore in it: guessing would drop a name the program wrote.
+    /// [`Vm::user_names`] uses this to leave them out — they are the interior of
+    /// `MathUtils.circle_area`, so offering `MathUtils_circle_area` to
+    /// completion, `:vars`, `:funcs` and the analyzer's seed shows the program a
+    /// name it cannot write.
+    qualified_members: HashSet<String>,
     /// Every `object` declaration, by type name. The table is the inheritance
     /// model: an entry already holds its own fields and methods merged with
     /// everything it inherits, nearest declaration first, so a lookup is a
@@ -343,6 +354,7 @@ impl Vm {
             importing: Vec::new(),
             declared_modules: HashMap::new(),
             module_depth: 0,
+            qualified_members: HashSet::new(),
             objects: HashMap::new(),
             expectation_failure: None,
             current_span: Span::unknown(),
@@ -555,6 +567,92 @@ impl Vm {
         std::mem::take(&mut self.output)
     }
 
+    /// The names this VM has bound that the standard library did not: what a
+    /// `set`, a `to` or an `import` put here.
+    ///
+    /// A REPL asks for this three times over — to seed the analyzer so the next
+    /// line can read a name an earlier line bound, to offer its own names for
+    /// completion, and to list them for `:vars` and `:funcs`. It has to be the
+    /// names the standard library did *not* put there: offering `abs` or `files`
+    /// as a session's own is noise, and it is the only way to tell the two apart,
+    /// since both live in `globals`.
+    ///
+    /// The local scopes are read as well as `globals`, because a name is not
+    /// always a global: `to` binds a function with [`Vm::declare`] and
+    /// [`Vm::set_var`], which lands in the innermost live scope. Scanning
+    /// `globals` alone therefore never offered a function the program had just
+    /// defined, which is the name a REPL user is most likely to be reaching for
+    /// next.
+    ///
+    /// Sorted and deduplicated, because `globals` and each scope are hash maps and
+    /// their iteration order is not a result.
+    ///
+    /// The `module_member` names a module's members are published under are left
+    /// out — see [`Vm::qualified_members`]. They are in `globals` because that is
+    /// where [`Vm::call_method`] looks for them, and a name the program never
+    /// wrote is not one of its names: after `import MathUtils` this used to offer
+    /// `MathUtils_circle_area` to completion and list it in `:vars`, which is a
+    /// name no line of Redblue can call.
+    pub fn user_names(&self) -> Vec<String> {
+        let builtins = stdlib::builtins();
+        let mut names: Vec<String> = self
+            .globals
+            .keys()
+            .filter(|name| !builtins.contains_key(*name) && !self.qualified_members.contains(*name))
+            .cloned()
+            .collect();
+        for scope in &self.locals {
+            names.extend(scope.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Publishes `value` as the member `member` of `module`, under the
+    /// `module_member` name a call through the module resolves to.
+    ///
+    /// Every writer of such a name goes through here, so the set of them is
+    /// known exactly and [`Vm::user_names`] does not have to guess which globals
+    /// are mangled names and which are a program's own.
+    fn publish_member(&mut self, module: &str, member: &str, value: Value) {
+        let name = qualified_member(module, member);
+        self.qualified_members.insert(name.clone());
+        self.globals.insert(name, value);
+    }
+
+    /// The value bound to `name`, wherever this VM keeps it.
+    ///
+    /// What a REPL's `:inspect` and `:vars` read, and neither of them could
+    /// answer from its own bookkeeping: a `set`, a `to` and an `import` all bind
+    /// here, not in the REPL's own map, so `:inspect <session-name>` reported
+    /// "not found" for every name a session had actually bound.
+    pub fn user_value(&self, name: &str) -> Option<&Value> {
+        self.get_var_ref(name)
+    }
+
+    /// The names in [`Vm::user_names`] that hold a callable the program
+    /// declared, sorted.
+    ///
+    /// `:funcs` is a listing, so it reads this rather than printing a sentence
+    /// about where functions are stored: "User-defined functions are stored in
+    /// the VM" told the user nothing they could not already see from the same
+    /// line, and named none of the functions they had just written. A builtin is
+    /// a [`Value::Builtin`] and is already excluded from [`Vm::user_names`], so
+    /// what is left is what a `to` declared.
+    ///
+    /// A module's functions are not listed. They are reached as
+    /// `MathUtils.circle_area(..)`, and [`Vm::user_names`] deliberately holds the
+    /// published `MathUtils_circle_area` back rather than showing a name the user
+    /// cannot type; the module's own name is one of the session's names, so it is
+    /// still offered and inspectable.
+    pub fn user_functions(&self) -> Vec<String> {
+        self.user_names()
+            .into_iter()
+            .filter(|name| matches!(self.user_value(name), Some(Value::Function(_))))
+            .collect()
+    }
+
     /// Runs a module's declarations into this VM, under the name the `import`
     /// that reached it goes by.
     ///
@@ -621,7 +719,7 @@ impl Vm {
                 let Some(value) = self.declare_member(&member) else {
                     continue;
                 };
-                self.globals.insert(qualified_member(name, &member), value);
+                self.publish_member(name, &member, value);
             }
         }
         self.pop_scope();
@@ -746,7 +844,7 @@ impl Vm {
                     continue;
                 };
                 let qualified = qualified_member(name, member);
-                self.globals.insert(qualified.clone(), value.clone());
+                self.publish_member(name, member, value.clone());
                 members.push((member.clone(), qualified, value));
             }
         }
@@ -819,14 +917,20 @@ impl Vm {
     }
 
     fn get_var(&self, name: &str) -> Option<Value> {
+        self.get_var_ref(name).cloned()
+    }
+
+    /// [`Vm::get_var`] without the copy, for a caller that is only going to look
+    /// at what is bound — `:vars` and `:inspect` both are.
+    fn get_var_ref(&self, name: &str) -> Option<&Value> {
         // Check local scopes first
         for scope in self.locals.iter().rev() {
             if let Some(v) = scope.get(name) {
-                return Some(v.clone());
+                return Some(v);
             }
         }
         // Check globals
-        self.globals.get(name).cloned()
+        self.globals.get(name)
     }
 
     /// Binds `name` to `value` as a constant, refusing a second declaration of
@@ -1229,8 +1333,7 @@ impl Vm {
                     if let Some(declared) = self.declared_modules.get(&item.name) {
                         let members: Vec<(String, String, Value)> = declared.members.clone();
                         for (member, _, value) in members {
-                            self.globals
-                                .insert(qualified_member(&target_name, &member), value);
+                            self.publish_member(&target_name, &member, value);
                         }
                     }
 
