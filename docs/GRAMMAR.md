@@ -443,10 +443,24 @@ expression       = assignment_expr
 ## 6. Function Literals
 
 ```
-function_literal = 'to' [ '(' [ parameter { ',' parameter } ] ')' ]
-                    { statement }
-                    'end'
+function_literal = 'to' [ '(' [ parameter { ',' parameter } ] ')' ] { statement } [ 'end' ]
 ```
+
+The parameter list is optional, so `to give back 42 end` and `to () give back
+42 end` are both literals of no parameters.
+
+The closing `end` is optional only for a body written entirely on the `to`'s own
+line — the form `SPEC.md` § First-Class Functions uses, where the end of the
+line closes the literal:
+
+```redblue
+set double to to (x) give back x * 2
+set doubled to list.map([1, 2, 3], to (x) give back x * 2)
+```
+
+A body that runs onto a second line needs its `end`; without it the parser
+reports a spanned error naming the `end` it wanted rather than reading the rest
+of the file as the body.
 
 ---
 

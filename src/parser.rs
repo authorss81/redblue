@@ -61,6 +61,14 @@ pub enum Expr {
     // Record literal
     Record(Vec<(String, Expr)>),
 
+    // to (x, y) ... end — a function literal, so an anonymous function is a
+    // value rather than a declaration. `docs/GRAMMAR.md` § 6 and SPEC.md
+    // § First-Class Functions.
+    FunctionLiteral {
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
+
     // expect expression to be expected_value
     Expect {
         actual: Box<Expr>,
@@ -1036,6 +1044,116 @@ impl Parser {
         }))
     }
 
+    /// Parses the function literal `to [ '(' parameter { ',' parameter } ')' ]
+    /// { statement } [ 'end' ]` — `docs/GRAMMAR.md` § 6 and SPEC.md
+    /// § First-Class Functions.
+    ///
+    /// The parameter list is optional, so `to give back 42 end` and
+    /// `to () give back 42 end` are both literals of no parameters. The `end` is
+    /// optional only for a body written entirely on the `to`'s own line, which
+    /// is the form SPEC.md uses; a body that runs onto a second line without one
+    /// is a spanned `ParserError` that names the `end` the program has to write.
+    ///
+    /// The body is parsed as statements, so it claims the same block budget as
+    /// every other `... end` form and cannot nest past [`MAX_BLOCK_DEPTH`].
+    fn parse_function_literal(&mut self) -> Result<Expr> {
+        self.enter_block()?;
+        let result = self.parse_function_literal_inner();
+        self.leave_block();
+        result
+    }
+
+    fn parse_function_literal_inner(&mut self) -> Result<Expr> {
+        let open_line = self.span().line;
+        self.advance(); // consume 'to'
+
+        let params = self.parse_optional_params()?;
+        let body = self.parse_literal_body(open_line)?;
+
+        match self.current().map(|t| &t.kind) {
+            Some(TokenKind::End) => {
+                self.advance();
+            }
+            // The one-line form SPEC.md writes — `to (x) give back x * 2` and
+            // `list.map([1, 2, 3], to (x) give back x * 2)` — where the end of
+            // the `to`'s own line closes the literal. Only a body that never
+            // left that line may close this way, so a block whose `end` is
+            // missing is still the unterminated literal to report.
+            _ if self.last_consumed_line() == open_line => {}
+            _ => {
+                return Err(Error::Parser(
+                    "Expected 'end' to close the function literal".to_string(),
+                    self.span(),
+                ))
+            }
+        }
+
+        Ok(Expr::FunctionLiteral { params, body })
+    }
+
+    /// The body of a function literal.
+    ///
+    /// SPEC.md writes a literal two ways — a block that runs to its `end`, and
+    /// the one-line `to (x) give back x * 2` whose line ends it — and which one
+    /// this is is settled by the parameters. More of the body on the same line
+    /// means the body is what is on that line; the parameters ending the line
+    /// means the body is a block whose `end` is required.
+    fn parse_literal_body(&mut self, open_line: usize) -> Result<Vec<Stmt>> {
+        self.skip_newlines();
+
+        if self.span().line != open_line {
+            return self.parse_block_body();
+        }
+
+        let mut body = Vec::new();
+        while self.span().line == open_line && self.can_begin_statement() {
+            if let Some(stmt) = self.parse_statement()? {
+                body.push(stmt);
+            }
+        }
+
+        Ok(body)
+    }
+
+    /// Whether the upcoming token could begin a statement — used by the
+    /// one-line literal body to stop where the literal ends rather than reading
+    /// whatever follows it on the line, such as the `,` or `)` that closes the
+    /// call the literal was written into.
+    fn can_begin_statement(&self) -> bool {
+        matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::Say)
+                | Some(TokenKind::Print)
+                | Some(TokenKind::Set)
+                | Some(TokenKind::Constant)
+                | Some(TokenKind::Module)
+                | Some(TokenKind::Export)
+                | Some(TokenKind::Import)
+                | Some(TokenKind::If)
+                | Some(TokenKind::Unless)
+                | Some(TokenKind::For)
+                | Some(TokenKind::Repeat)
+                | Some(TokenKind::While)
+                | Some(TokenKind::Break)
+                | Some(TokenKind::Skip)
+                | Some(TokenKind::Return)
+                | Some(TokenKind::GiveBack)
+                | Some(TokenKind::To)
+                | Some(TokenKind::Object)
+                | Some(TokenKind::Try)
+                | Some(TokenKind::Test)
+                | Some(TokenKind::Expect)
+        ) || self.is_expression_start()
+    }
+
+    /// The line of the token most recently read, or `0` before the first one.
+    fn last_consumed_line(&self) -> usize {
+        self.tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|token| token.span().line)
+            .unwrap_or(0)
+    }
+
     /// Parses the shared tail of `to name(...)` and `to can name(...)`: the
     /// name, the parameter list, the body, and the closing `end`.
     fn parse_callable(&mut self) -> Result<(String, Vec<String>, Vec<Stmt>)> {
@@ -1057,6 +1175,19 @@ impl Parser {
         };
 
         // Parse parameters
+        let params = self.parse_optional_params()?;
+
+        let body = self.parse_block_body()?;
+
+        self.expect(&TokenKind::End)?;
+
+        Ok((name, params, body))
+    }
+
+    /// The `(a, b)` of a callable, when it has one: the parameter list is
+    /// optional, so `to f give back 1 end` and `to f() give back 1 end` are
+    /// the same zero-parameter declaration.
+    fn parse_optional_params(&mut self) -> Result<Vec<String>> {
         let mut params = Vec::new();
         if let Some(Token {
             kind: TokenKind::LeftParen,
@@ -1087,6 +1218,13 @@ impl Parser {
             self.expect(&TokenKind::RightParen)?;
         }
 
+        Ok(params)
+    }
+
+    /// The statements of an `... end` block, up to but not including the
+    /// `end`, so each caller can close the block with the message its own form
+    /// owes the author.
+    fn parse_block_body(&mut self) -> Result<Vec<Stmt>> {
         self.skip_newlines();
 
         let mut body = Vec::new();
@@ -1099,9 +1237,7 @@ impl Parser {
             self.skip_newlines();
         }
 
-        self.expect(&TokenKind::End)?;
-
-        Ok((name, params, body))
+        Ok(body)
     }
 
     /// `module Name ... export ... end` — the declaration form `SPEC.md` §
@@ -1428,6 +1564,7 @@ impl Parser {
                 | Some(TokenKind::LeftBrace)
                 | Some(TokenKind::Not)
                 | Some(TokenKind::Minus)
+                | Some(TokenKind::To)
         )
     }
 
@@ -1906,6 +2043,13 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Variable("this".to_string()))
             }
+            // A `to` here is a function literal, never a declaration: a
+            // declaration is a statement, and [`Parser::parse_statement`] takes
+            // that one before any expression is reached. `to name() ... end` at
+            // the start of a line is therefore still the declaration it has
+            // always been, while `to (x) ... end` and `to ... end` after an
+            // operator are the value SPEC.md documents.
+            TokenKind::To => self.parse_function_literal(),
             TokenKind::LeftParen => {
                 self.advance();
                 self.enter_nesting()?;
@@ -2287,6 +2431,85 @@ mod tests {
                 parser.opens_block(),
                 "{kind:?} opens a block to the parser as well, or its body is \
                  parsed without any budget"
+            );
+        }
+    }
+
+    /// The one-line function literal ends its body at the first token that
+    /// cannot begin a statement, so the two tables have to agree: a form that
+    /// `parse_statement` reads and `can_begin_statement` refuses ends the body
+    /// early, and one that `can_begin_statement` accepts and `parse_statement`
+    /// does not read past it swallows whatever follows the literal on the line.
+    #[test]
+    fn edge_the_one_line_literal_body_agrees_with_parse_statement_about_starts() {
+        for kind in [
+            TokenKind::Say,
+            TokenKind::Print,
+            TokenKind::Set,
+            TokenKind::Constant,
+            TokenKind::Module,
+            TokenKind::Export,
+            TokenKind::Import,
+            TokenKind::If,
+            TokenKind::Unless,
+            TokenKind::For,
+            TokenKind::Repeat,
+            TokenKind::While,
+            TokenKind::Break,
+            TokenKind::Skip,
+            TokenKind::Return,
+            TokenKind::GiveBack,
+            TokenKind::To,
+            TokenKind::Object,
+            TokenKind::Try,
+            TokenKind::Test,
+            TokenKind::Expect,
+        ] {
+            let parser = Parser::new(vec![Token::new(kind.clone(), 1, 1)]);
+            assert!(
+                parser.can_begin_statement(),
+                "{kind:?} begins a statement, so it must not end a one-line \
+                 literal body before the literal is finished"
+            );
+        }
+
+        for kind in [
+            TokenKind::Comma,
+            TokenKind::RightParen,
+            TokenKind::RightBracket,
+            TokenKind::RightBrace,
+            TokenKind::End,
+            TokenKind::Newline,
+            TokenKind::Eof,
+        ] {
+            let parser = Parser::new(vec![Token::new(kind.clone(), 1, 1)]);
+            assert!(
+                !parser.can_begin_statement(),
+                "{kind:?} cannot begin a statement, so it must end a one-line \
+                 literal body rather than being read as one"
+            );
+        }
+    }
+
+    /// A `to` in expression position is a literal, in both the one-line and the
+    /// block form, and the body of either is the statements between them.
+    #[test]
+    fn a_literal_parses_in_both_forms_with_the_body_it_was_written_with() {
+        let one_line = parse(
+            Lexer::tokenize("set double to to (x) give back x * 2").expect("the source should lex"),
+        )
+        .expect("a one-line literal should parse");
+        let block = parse(
+            Lexer::tokenize("set double to to (x)\n    give back x * 2\nend")
+                .expect("the source should lex"),
+        )
+        .expect("a block literal should parse");
+
+        for program in [one_line, block] {
+            assert_eq!(
+                program.statements.len(),
+                1,
+                "the program is one `set`, whatever the literal's shape"
             );
         }
     }

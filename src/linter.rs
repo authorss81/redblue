@@ -397,6 +397,11 @@ impl Linter {
                 self.analyze_expr(actual);
                 self.analyze_expr(expected);
             }
+            // A literal has no name to report as defined and no unused-variable
+            // bookkeeping of its own; only the scope it opens is new.
+            Expr::FunctionLiteral { params, body } => {
+                self.analyze_callable(params, body, Span::unknown());
+            }
         }
     }
 

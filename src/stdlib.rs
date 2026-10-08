@@ -4,7 +4,7 @@ use std::collections::HashMap;
 /// The module names whose functions are registered as `module_function`
 /// builtins, so that a caller can tell `json.parse` — a module — from a
 /// variable that happens to be followed by a `.`.
-pub const MODULES: &[&str] = &["console", "csv", "files", "json", "network", "time"];
+pub const MODULES: &[&str] = &["console", "csv", "files", "json", "list", "network", "time"];
 
 /// Whether `name` is one of the [`MODULES`].
 pub fn is_module(name: &str) -> bool {
@@ -65,6 +65,13 @@ pub fn builtins() -> HashMap<String, Value> {
     globals.insert("map".to_string(), Value::Builtin("map".to_string()));
     globals.insert("filter".to_string(), Value::Builtin("filter".to_string()));
     globals.insert("reduce".to_string(), Value::Builtin("reduce".to_string()));
+    // `list.map`, the module spelling SPEC.md § list writes for the same
+    // builtin. It is a higher-order call, so the VM resolves it rather than
+    // `runtime::builtin`.
+    globals.insert(
+        "list_map".to_string(),
+        Value::Builtin("list_map".to_string()),
+    );
 
     // Type checking
     globals.insert(

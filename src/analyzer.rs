@@ -449,6 +449,17 @@ impl Analyzer {
                     self.analyze_expr(value, span);
                 }
             }
+            // A literal's body is checked in a scope of its own, so a name it
+            // assigns or reads is accounted for there rather than in the
+            // enclosing statement's scope.
+            Expr::FunctionLiteral { params, body } => {
+                self.push_scope();
+                for param in params {
+                    self.declare(param);
+                }
+                self.analyze_deferred_body(body);
+                self.pop_scope();
+            }
             Expr::Expect { .. } => {}
         }
     }

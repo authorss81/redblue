@@ -573,6 +573,21 @@ set numbers to [1, 2, 3]
 set doubled to numbers.map(double)
 ```
 
+A function literal is an expression, so a function is a value: it can be held in
+a name, passed as an argument, stored in a list or a record, and read back out
+again. The block form — the literal written across several lines and closed with
+its own `end` — means exactly the same thing:
+
+```redblue
+set double to to (x)
+    give back x * 2
+end
+```
+
+Both forms above capture the bindings live where they were written, by value and
+not by reference: a literal defined inside a function sees that function's
+locals, never the caller's.
+
 ### Closures
 
 ```redblue

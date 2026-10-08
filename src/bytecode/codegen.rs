@@ -728,6 +728,19 @@ impl Compiler {
                 self.expr(expected, code, line)?;
                 emit(code, Opcode::Expect, 0, 0, line);
             }
+            // A literal needs a block of its own, and a block is compiled by the
+            // statement path: `expr` has no block pool to add one to. Rather
+            // than compile a literal to something the bytecode VM would read
+            // differently from the tree-walker, `rb compile` refuses it and says
+            // which runner can. See FINDINGS.md.
+            Expr::FunctionLiteral { .. } => {
+                return Err(Error::Parser(
+                    "`to (x) ... end` as an expression is not compiled yet; run \
+                     programs that use one with `rb run`"
+                        .to_string(),
+                    Span::unknown(),
+                ));
+            }
         }
 
         Ok(())

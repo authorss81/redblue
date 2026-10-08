@@ -775,6 +775,19 @@ impl Formatter {
                 self.write(" to be ");
                 self.format_expression(expected);
             }
+            // A literal is written as the block it is, so the output reads back
+            // as the literal it was parsed from: the body is indented under its
+            // own `to (`, and the `end` closes it at the indentation of the
+            // statement the literal belongs to.
+            Expr::FunctionLiteral { params, body } => {
+                self.write("to ");
+                self.write("(");
+                self.write(&params.join(", "));
+                self.write(")");
+                self.newline();
+                self.format_block(body);
+                self.write_keyword_line("end");
+            }
         }
 
         if parenthesise {

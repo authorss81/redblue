@@ -100,6 +100,13 @@ pub fn resolve_max_steps() -> usize {
 /// the interpreter runs on a thread sized from the limit.
 const STACK_BYTES_PER_CALL: usize = 256 * 1024;
 
+/// The name a function literal carries.
+///
+/// A literal has no name to carry, so diagnostics about one — a call-depth
+/// limit reached inside it, a body that could not be run — need a word that
+/// says the function has none rather than printing an empty quote.
+pub(crate) const ANONYMOUS_FUNCTION: &str = "anonymous function";
+
 /// Reads the call-depth limit from [`MAX_CALL_DEPTH_ENV`], falling back to
 /// [`MAX_CALL_DEPTH`] for an absent, non-numeric or zero value — a limit of zero
 /// would make every function call illegal, which is never what an operator
@@ -1482,6 +1489,13 @@ impl Vm {
                 }
                 Ok(Value::Record(record))
             }
+            // The literal captures exactly where it is written, the same way a
+            // named declaration does: `make_function` copies the live scopes,
+            // so a literal passed to `map` sees its own environment rather than
+            // whatever the caller binds.
+            Expr::FunctionLiteral { params, body } => {
+                Ok(self.make_function(ANONYMOUS_FUNCTION, params, body))
+            }
             Expr::Expect { actual, expected } => {
                 let a = self.evaluate(actual)?;
                 let e = self.evaluate(expected)?;
@@ -1511,11 +1525,43 @@ impl Vm {
 
         match self.get_var(name) {
             Some(Value::Function(function)) => self.call_user_function(name, &function, args),
+            // `map` is registered as a builtin name but has to *call* a
+            // Redblue function, which the free `runtime::builtin` cannot do.
+            _ if matches!(name, "map" | "list_map") => self.map_builtin(args),
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),
             )),
         }
+    }
+
+    /// `map(list, function)` — the higher-order builtin, in the three spellings
+    /// `SPEC.md` uses: `map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`.
+    ///
+    /// It lives here rather than in `runtime::builtin` because applying a
+    /// Redblue function needs this walker's captured scopes and its call-depth
+    /// budget. The function runs once per element in order and its result
+    /// becomes the mapped element; a failure inside it fails the whole call,
+    /// with the depth released as `call_user_function` releases it.
+    fn map_builtin(&mut self, args: &[Value]) -> Result<Value> {
+        let [Value::List(items), Value::Function(function)] = args else {
+            return Err(Error::Runtime(
+                "map requires a list and a function".to_string(),
+                self.span(),
+            ));
+        };
+
+        self.apply_map(items.clone(), function.clone())
+    }
+
+    /// Applies `function` to every element of `items`, in order.
+    fn apply_map(&mut self, items: Vec<Value>, function: FunctionValue) -> Result<Value> {
+        let mut mapped = Vec::with_capacity(items.len());
+        for item in items {
+            mapped.push(self.call_user_function(ANONYMOUS_FUNCTION, &function, &[item])?);
+        }
+
+        Ok(Value::List(mapped))
     }
 
     /// Runs the body of a user function `name` in its own scope and returns the
@@ -1539,6 +1585,23 @@ impl Vm {
             Expr::Variable(name) => name.clone(),
             _ => {
                 let this = self.evaluate(receiver)?;
+                // `xs.map(f)` is the method spelling of the higher-order builtin,
+                // and a list is the one receiver that is not an object and still
+                // has a method. Every other receiver is still the error below.
+                if method == "map" {
+                    if let Value::List(items) = this {
+                        let function = match args.as_slice() {
+                            [Value::Function(function)] => function.clone(),
+                            _ => {
+                                return Err(Error::Runtime(
+                                    "map requires a function".to_string(),
+                                    self.span(),
+                                ))
+                            }
+                        };
+                        return self.apply_map(items.clone(), function);
+                    }
+                }
                 return Err(Error::Runtime(
                     format!(
                         "Cannot call method '{}' on {}, which is not an object",
