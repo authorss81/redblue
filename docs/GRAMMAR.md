@@ -313,6 +313,14 @@ is still owed however its region is left — a failure runs it before the failur
 reported on — and the failure is then the enclosing program's to catch, or its
 own to stop with. See `SPEC.md`, "Finally".
 
+Two things in that `finally` are not the failure being reported:
+
+- a `finally` that **fails** replaces it — the failure that reaches the enclosing
+  `try` is the cleanup's own;
+- a `finally` that leaves its region **abruptly** — a `break` or a `skip` — drops
+  it, because the region was left by the jump rather than by the failure, so a
+  `catch` written around the `try` does not run. See `SPEC.md`, "Finally".
+
 ### 4.8 Async Statements
 
 ```

@@ -1494,6 +1494,35 @@ fn bytecode_say_lines(program: &redblue::parser::Program) -> Result<Vec<String>,
     result.map(|_| printed)
 }
 
+/// [`say_lines_of`] with the per-loop iteration cap lowered to `max_iterations`.
+///
+/// A cap of a million is what a program meets, and nothing a test writes can
+/// reach it, so a disagreement about how many turns a cap allows needs the cap
+/// lowered to be asked about at all.
+#[track_caller]
+fn capped_say_lines_of(
+    program: &redblue::parser::Program,
+    max_iterations: usize,
+) -> Result<Vec<String>, Error> {
+    let mut vm = Vm::with_max_iterations(max_iterations);
+    let result = vm.run(program);
+    let printed = vm.take_output();
+    result.map(|_| printed)
+}
+
+/// [`bytecode_say_lines`] with the per-loop iteration cap lowered.
+#[track_caller]
+fn capped_bytecode_say_lines(
+    program: &redblue::parser::Program,
+    max_iterations: usize,
+) -> Result<Vec<String>, Error> {
+    let chunk = redblue::bytecode::compile_program(program)?;
+    let mut vm = redblue::bytecode::vm::BytecodeVm::with_max_iterations(max_iterations);
+    let result = vm.run(&chunk);
+    let printed = vm.take_output();
+    result.map(|_| printed)
+}
+
 /// A `break` in a `for each i from a to b` loop ends it, and both VMs say so.
 ///
 /// The form is built as an AST rather than written as source because the parser
@@ -2143,4 +2172,308 @@ fn edge_both_vms_answer_the_same_for_a_jump_in_a_module_body() {
             "the two VMs disagree about a module body: {name}\n{source}"
         );
     }
+}
+
+/// A `finally` that leaves its region abruptly *is* the way the region is left,
+/// so a failure the body had is not the one that leaves it.
+///
+/// The rule the neighbouring case already follows is the same one: a `finally`
+/// that *fails* replaces the failure the body had (`tests/test_control_flow.rb`,
+/// "a failing finally still leaves the outer try to catch the failure"), because
+/// the failure that reaches the enclosing `try` is the cleanup's. A `break` or
+/// a `skip` in the cleanup is the same replacement with an abrupt exit in place
+/// of a failure — the region was left by the jump, so there is nothing left for
+/// an enclosing `catch` to handle.
+///
+/// The tree-walking VM propagated the body's failure anyway
+/// (`src/vm.rs`, `Statement::Try`'s `!has_catch` arm returned it above whatever
+/// the cleanup raised), so it ran the enclosing `catch` *after* being told to
+/// leave the loop and the bytecode VM did not. Both programs exit 0 with
+/// different answers.
+#[test]
+fn edge_a_finally_that_leaves_the_region_replaces_the_failure_it_was_owed() {
+    let cases = [
+        (
+            "break in a for each",
+            concat!(
+                "set log to \"\"\n",
+                "for each i in [1, 2, 3]\n",
+                "    try\n",
+                "        try\n",
+                "            set bad to 1 + \"one\"\n",
+                "        finally\n",
+                "            if i is 2 then break end\n",
+                "            set log to log + \"f\"\n",
+                "        end\n",
+                "    catch error\n",
+                "        set log to log + \"c\"\n",
+                "    end\n",
+                "    set log to log + \"b\"\n",
+                "end\n",
+                "say log\n",
+            ),
+            &["fcb"][..],
+        ),
+        (
+            "skip in a for each",
+            concat!(
+                "set log to \"\"\n",
+                "for each i in [1, 2, 3]\n",
+                "    try\n",
+                "        try\n",
+                "            set bad to 1 + \"one\"\n",
+                "        finally\n",
+                "            if i is 2 then skip end\n",
+                "            set log to log + \"f\"\n",
+                "        end\n",
+                "    catch error\n",
+                "        set log to log + \"c\"\n",
+                "    end\n",
+                "    set log to log + \"b\"\n",
+                "end\n",
+                "say log\n",
+            ),
+            &["fcbfcb"][..],
+        ),
+        (
+            "break in a while",
+            concat!(
+                "set log to \"\"\n",
+                "set n to 0\n",
+                "while n is not 3\n",
+                "    set n to n + 1\n",
+                "    try\n",
+                "        try\n",
+                "            set bad to 1 + \"one\"\n",
+                "        finally\n",
+                "            if n is 2 then break end\n",
+                "            set log to log + \"f\"\n",
+                "        end\n",
+                "    catch error\n",
+                "        set log to log + \"c\"\n",
+                "    end\n",
+                "    set log to log + \"b\"\n",
+                "end\n",
+                "say log\n",
+            ),
+            &["fcb"][..],
+        ),
+        (
+            "skip in a repeat",
+            concat!(
+                "set log to \"\"\n",
+                "set n to 0\n",
+                "repeat 3 times\n",
+                "    set n to n + 1\n",
+                "    try\n",
+                "        try\n",
+                "            set bad to 1 + \"one\"\n",
+                "        finally\n",
+                "            if n is 2 then skip end\n",
+                "            set log to log + \"f\"\n",
+                "        end\n",
+                "    catch error\n",
+                "        set log to log + \"c\"\n",
+                "    end\n",
+                "    set log to log + \"b\"\n",
+                "end\n",
+                "say log\n",
+            ),
+            &["fcbfcb"][..],
+        ),
+    ];
+    for (name, source, expected) in cases {
+        let expected: Vec<String> = expected.iter().map(|line| line.to_string()).collect();
+        let program = parse(source);
+        let tree = say_lines_of(&program).unwrap_or_else(|e| panic!("{name} on the tree: {e:?}"));
+        assert_eq!(
+            tree, expected,
+            "the tree-walking VM answered wrongly about a cleanup that leaves the region: {name}\n{source}"
+        );
+        let byte = bytecode_say_lines(&program)
+            .unwrap_or_else(|e| panic!("{name} on the bytecode: {e:?}"));
+        assert_eq!(
+            byte, expected,
+            "the bytecode VM answered wrongly about a cleanup that leaves the region: {name}\n{source}"
+        );
+    }
+}
+
+/// The other half of that rule: the jump only replaces a failure the *cleanup*
+/// met. A body that fails on a turn whose cleanup runs to its end has still
+/// failed, and a program with nothing around it stops with it — the `break` on
+/// a later turn is never reached and must not swallow the turn that did fail.
+///
+/// This is what keeps the rule above from being read as "a `finally` containing
+/// a `break` discards every failure". Without it the fix would pass the other
+/// test by never reporting anything.
+#[test]
+fn edge_a_cleanup_that_runs_to_its_end_still_reports_the_failure_it_was_owed() {
+    for source in [
+        concat!(
+            "set n to 0\n",
+            "for each i in [1, 2, 3]\n",
+            "    set n to n + 1\n",
+            "    try\n",
+            "        set bad to 1 + \"one\"\n",
+            "    finally\n",
+            "        if n is 3 then break end\n",
+            "    end\n",
+            "end\n",
+            "say \"reached the end\"\n",
+        ),
+        concat!(
+            "set n to 0\n",
+            "set i to 0\n",
+            "while i is not 3\n",
+            "    set i to i + 1\n",
+            "    set n to n + 1\n",
+            "    try\n",
+            "        set bad to 1 + \"one\"\n",
+            "    finally\n",
+            "        if n is 3 then skip end\n",
+            "    end\n",
+            "end\n",
+            "say \"reached the end\"\n",
+        ),
+    ] {
+        let program = parse(source);
+        let tree = say_lines_of(&program);
+        assert!(
+            tree.is_err(),
+            "the tree-walking VM reported success for a turn that failed\n{source}"
+        );
+        assert_eq!(
+            runtime_message(tree.as_ref().unwrap_err()),
+            "Cannot add non-numbers",
+            "the wrong failure reached the program\n{source}"
+        );
+        let byte = bytecode_say_lines(&program);
+        assert!(
+            byte.is_err(),
+            "the bytecode VM reported success for a turn that failed\n{source}"
+        );
+    }
+}
+
+/// A jump raised in a `finally` costs what an uninterrupted turn costs.
+///
+/// The signal travels out through the cleanup rather than being raised in the
+/// turn's own last statement, so this is the accounting for the long way round:
+/// a `skip` in a cleanup is one turn and not two, and a `break` in one stops the
+/// loop on the turn the cleanup was written in. Compared on both engines at
+/// three caps, because §16 moved the charge between instructions once already
+/// and §17 found the off-by-one the other way — a jump that cost a turn the
+/// other did not is invisible at the published cap of a million.
+#[test]
+fn edge_a_jump_raised_in_a_cleanup_is_charged_one_turn() {
+    // Each program fails every turn and is rescued by the cleanup's own `skip`,
+    // so it runs until the cap stops it: the turn count it prints is the cap.
+    let skipping = [
+        (
+            "for each",
+            concat!(
+                "set turns to 0\n",
+                "for each i in [1, 2, 3, 4, 5, 6, 7, 8]\n",
+                "    set turns to turns + 1\n",
+                "    try\n",
+                "        set bad to 1 + \"one\"\n",
+                "    finally\n",
+                "        skip\n",
+                "    end\n",
+                "end\n",
+                "say turns\n",
+            ),
+        ),
+        (
+            "while",
+            concat!(
+                "set turns to 0\n",
+                "set i to 0\n",
+                "while i is not 8\n",
+                "    set i to i + 1\n",
+                "    set turns to turns + 1\n",
+                "    try\n",
+                "        set bad to 1 + \"one\"\n",
+                "    finally\n",
+                "        skip\n",
+                "    end\n",
+                "end\n",
+                "say turns\n",
+            ),
+        ),
+        (
+            "repeat",
+            concat!(
+                "set turns to 0\n",
+                "repeat 8 times\n",
+                "    set turns to turns + 1\n",
+                "    try\n",
+                "        set bad to 1 + \"one\"\n",
+                "    finally\n",
+                "        skip\n",
+                "    end\n",
+                "end\n",
+                "say turns\n",
+            ),
+        ),
+    ];
+    for (name, source) in skipping {
+        for cap in [2, 3, 5] {
+            let program = parse(source);
+            let wanted = format!("Maximum of {cap} iterations reached in a '{name}' loop");
+            // Compared message by message rather than as `Error`s: the two carry
+            // their spans differently and only the message is the rule.
+            let tree = capped_say_lines_of(&program, cap);
+            assert_eq!(
+                tree.as_ref().err().map(runtime_message).as_deref(),
+                Some(wanted.as_str()),
+                "a `skip` in a cleanup should cost one turn of a {name}: cap {cap}\n{source}"
+            );
+            let byte = capped_bytecode_say_lines(&program, cap);
+            assert_eq!(
+                byte.as_ref().err().map(runtime_message).as_deref(),
+                Some(wanted.as_str()),
+                "the bytecode VM charged a `skip` in a cleanup differently: {name}, cap {cap}\n{source}"
+            );
+        }
+    }
+
+    // The `break` half: the loop ends on the turn whose cleanup breaks, and the
+    // turn after it never runs.
+    let breaking = concat!(
+        "set turns to 0\n",
+        "repeat 8 times\n",
+        "    set turns to turns + 1\n",
+        "    try\n",
+        "        try\n",
+        "            set bad to 1 + \"one\"\n",
+        "        finally\n",
+        "            if turns is 3 then break end\n",
+        "        end\n",
+        "    catch error\n",
+        "        say \"caught\"\n",
+        "    end\n",
+        "    say turns\n",
+        "end\n",
+    );
+    // Turns 1 and 2 are rescued by the `catch` and print their own turn; turn 3's
+    // cleanup breaks before the `catch` can run and before the turn's `say`, so
+    // the loop stops on the turn the cleanup was written in and the fourth turn
+    // never starts.
+    let wanted: Vec<String> = ["caught", "1", "caught", "2"]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    let program = parse(breaking);
+    assert_eq!(
+        say_lines_of(&program).expect("the break in the cleanup should end the loop"),
+        wanted,
+        "a `break` in a cleanup should stop the loop on its own turn\n{breaking}"
+    );
+    assert_eq!(
+        bytecode_say_lines(&program).expect("the bytecode VM should agree"),
+        wanted,
+        "the bytecode VM stopped somewhere else\n{breaking}"
+    );
 }

@@ -1132,7 +1132,22 @@ impl Vm {
                     // `catch` there that decides what the program does next.
                     if !has_catch {
                         self.run_finally_body(finally_body)?;
-                        return Err(failure);
+                        // A cleanup that left the region abruptly is the way the
+                        // region was left, so the failure is not the one leaving
+                        // it and there is nothing for an enclosing `catch` to
+                        // handle — propagating it would run that handler *after*
+                        // being told to go, which is what the bytecode VM does
+                        // not do and what the two engines disagreed about. This
+                        // is the replacement a failing cleanup already makes
+                        // ("a failing finally still leaves the outer try to catch
+                        // the failure", `tests/test_control_flow.rb`), with an
+                        // abrupt exit in place of a failure: the signal is
+                        // pending exactly when the cleanup raised one, because a
+                        // body that raised one instead of failing never got here.
+                        if self.loop_control.is_none() {
+                            return Err(failure);
+                        }
+                        return Ok(Value::Nothing);
                     }
                     self.run_catch_body(catch_var.as_deref(), catch_body)?;
                 }

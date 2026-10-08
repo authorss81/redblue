@@ -339,3 +339,56 @@ test "edge: an unless with an empty body changes nothing"
     end
     expect branch to be "none"
 end
+
+test "edge: a finally that leaves the region replaces the failure it was owed"
+    // The cleanup below is told to abandon the turn, and the turn IS abandoned:
+    // the failure the body had is not the one leaving the region, so the `catch`
+    // written around it never runs. Before this, the tree-walking VM ran that
+    // `catch` anyway and the bytecode VM did not - the same program, two
+    // answers, both exiting 0.
+    //
+    // The rule is the one the test above already follows: a cleanup that *fails*
+    // replaces the body's failure. A cleanup that leaves the region abruptly is
+    // the same replacement with a jump in place of a failure.
+    set log to ""
+    set turns to 0
+    for each i in [1, 2, 3]
+        set turns to turns + 1
+        try
+            try
+                set bad to 1 + "one"
+            finally
+                if i is 2 then break end
+                set log to log + "f"
+            end
+        catch error
+            set log to log + "c"
+        end
+        set log to log + "b"
+    end
+    expect turns to be 2
+    expect log to be "fcb"
+end
+
+test "edge: a skip in a finally advances the loop and drops the failure with it"
+    // The `skip` companion: the turn is abandoned rather than the loop ended, so
+    // the loop carries on and the third value is still seen.
+    set log to ""
+    set turns to 0
+    for each i in [1, 2, 3]
+        set turns to turns + 1
+        try
+            try
+                set bad to 1 + "one"
+            finally
+                if i is 2 then skip end
+                set log to log + "f"
+            end
+        catch error
+            set log to log + "c"
+        end
+        set log to log + "b"
+    end
+    expect turns to be 3
+    expect log to be "fcbfcb"
+end

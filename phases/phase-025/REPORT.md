@@ -258,6 +258,10 @@ move with it.
 | `tests/common/generator.rs` | merge round, +6 −6 | the comment beside the two `break`/`skip` corpus programs, which said the goldens record a no-op |
 | `src/vm.rs` | round 4, +33 −8 | `Statement::Unless` runs its body through `run_block`; `declare_module` stops at a pending signal, publishes nothing when one is left, and unregisters the module — the same rollback its failure path already had |
 | `src/bytecode/vm.rs` | round 4, +54 −13 | `module` records the loop the declaration is written inside; `unwind_frames_above` rolls a module body back; `abandon_handlers` finishes the frames above each handler's own frame before running that handler's `finally`, with `finish_top_frame` split out of `unwind_frames_above`'s loop; `discard_frames_above` drops the abandoned body's own declaration and only its own |
+| `src/vm.rs` | round 6 (resumed), +4 −1 | `Statement::Try`'s `!has_catch` arm propagates the body's failure only when the cleanup left no signal pending, so a `finally` that raises a `break` or a `skip` drops the failure the way a failing cleanup already did — and the two engines answer the same |
+| `tests/loop_control_test.rs` | round 6 (resumed), +333 | three tests for that rule and the cap accounting of a jump raised in a cleanup, plus `capped_say_lines_of` / `capped_bytecode_say_lines` |
+| `tests/test_control_flow.rb` | round 6 (resumed), +53 | two `test` blocks for the same rule, so the differential runs both shapes on both engines |
+| `SPEC.md`, `docs/GRAMMAR.md` | round 6 (resumed) | "Finally" says what a cleanup that fails and what a cleanup that leaves its region do to the failure the body had, with the worked example and its output taken from the interpreter |
 | `SPEC.md`, `docs/GRAMMAR.md`, `docs/BYTECODE.md` | round 4 | the loop a statement is written inside now says `module` (and an `unless` body) beside `catch`, `finally`, `test` and `object`; a module body is in the loop it is written in and inherits the function-body exemption from a function it is written in; the crossed-block ordering, and what finishing a module body leaves behind, are written down for a second VM to match |
 | `tests/loop_control_test.rs` | round 4, +9 tests | `unless` bodies × `break`/`skip` × `for each`/`while`, and the module-body matrix: the two jumps, the abandoned module, the two refusals and the `finally` ordering — the last two compared on **both** VMs |
 | `tests/object_model_test.rs` | round 4, +4 tests | a declaration opened by a `has` default, abandoned by a `catch` and by success, and the two ends of the registration rule FINDINGS §9 asks about |
@@ -686,6 +690,107 @@ round.
 both are about a cap a program cannot lower from inside itself, which is why the
 corpus never saw them.
 
+## Resumed round 3 — a `finally` that leaves the region: the two engines disagreed
+
+The tree arrived with every runnable gate green (821 tests, `rb test` 332, all
+examples and modules exit 0), so this round began by sweeping the two engines
+against each other across jump-in-block shapes rather than by re-reading the code:
+`break` and `skip` written in every block that can appear inside a loop — `if`,
+`unless`, `catch`, `finally`, `test`, `object` body, `module` body, and inside
+loops nested in those — crossed with the region each block sits in. About forty
+programs later one shape came out **DIFFER**, and it was a real disagreement, not
+a formatting one: both programs exited 0 and printed different answers.
+
+```
+$ cat target/tmp/sweep/g3.rb
+for each i in [1, 2, 3]
+    try
+        try
+            set bad to 1 + "one"
+        finally
+            if i is 2 then break end
+        end
+    catch error
+        say "outer caught"
+    end
+end
+say "reached the end"
+
+$ ./target/debug/rb run target/tmp/sweep/g3.rb          # tree
+outer caught
+outer caught
+reached the end
+
+$ ./target/debug/rb compile target/tmp/sweep/g3.rb -o target/tmp/sweep/g3.rbc
+$ ./target/debug/rb vm target/tmp/sweep/g3.rbc          # bytecode
+outer caught
+reached the end
+```
+
+The `finally` is told to abandon the turn, and the two engines disagree about
+what happens to the failure the body had:
+
+| Engine | Turn 2 | Why |
+|---|---|---|
+| tree-walking | ran the enclosing `catch` (`outer caught`), *then* broke out of the loop | `Statement::Try`'s `!has_catch` arm returned `Err(failure)` above whatever the cleanup raised, so the failure was propagated even though the cleanup had already left the region |
+| bytecode | ended the loop; the `catch` never ran | `handle_failure` returns `true` — the failure is spent — when a `catch` or `finally` raised a jump (`src/bytecode/vm.rs:2595`) |
+
+The bytecode answer is the one that is right, and it is the answer the tree
+already gives in the neighbouring case: **a `finally` that fails replaces the
+failure the body had** (`tests/test_control_flow.rb`, "a failing finally still
+leaves the outer try to catch the failure"). A `finally` that leaves its region
+abruptly is the same replacement with a jump in place of a failure — the region
+was left by the `break`, so there is nothing for a `catch` written around it to
+handle. The tree's own code already said as much about the region's *own*
+`catch` (`src/vm.rs:1108-1112`, "an abrupt exit from the protected region is not a
+failure: the catch does not run, the finally does"); it just never read that one
+step out to the `catch` written *around* the `try`.
+
+| # | Defect | Fix |
+|---|---|---|
+| 1 | **BLOCKER** `src/vm.rs` `Statement::Try`, `!has_catch` arm — a `finally` that raised a `break` or a `skip` did not stop the body's failure being propagated, so the tree-walking VM ran an enclosing `catch` after being told to leave the loop, and printed an answer the bytecode VM did not. Two engines, one program, both exit 0. | `+4 −1`: after `run_finally_body`, the failure is propagated only when no signal is pending. The guard is exact, not approximate: a body that raised a signal instead of failing never reaches this arm, so a pending signal here was raised by the cleanup. |
+
+Watched red with the fix stashed (`git stash push -- src/vm.rs`):
+`edge_a_finally_that_leaves_the_region_replaces_the_failure_it_was_owed` (tree
+answered `fcbc` where `fcb` is correct), `edge_a_jump_raised_in_a_cleanup_is_charged_one_turn`
+(the `break` half: the `catch` ran on the breaking turn), and both new
+`test` blocks in `tests/test_control_flow.rb` (`fcbc` against `fcb`, and `fcbcfcb`
+against `fcbfcb`).
+
+`edge_a_cleanup_that_runs_to_its_end_still_reports_the_failure_it_was_owed` is the
+other half of the rule and passes on **both** sides of the fix, which is the point
+of writing it: without it the fix would also pass by never reporting anything,
+since a `finally` containing a `break` is on the same path as the one that does
+not.
+
+Three neighbouring shapes were swept and found to agree already, so nothing was
+changed for them: a `catch` that raises the jump (the region's own `catch`, which
+the rule has always covered), a `finally` that raises the jump where the `try`
+*has* a `catch` (the failure was already handled, so there is nothing to replace),
+and a `finally` around a loop the jump leaves. The `object`-body, `module`-body,
+`test`-body, `unless`-body, `catch`-inside-`catch` and nested-loop versions of the
+same shape were each run on both engines and agree, so the one-line rule covers
+all of them and none of them needed a fix of its own.
+
+`SPEC.md`'s "Finally" section said "the failure is reported after it, not instead
+of it" with nothing qualifying it, and `docs/GRAMMAR.md` repeated it — so the two
+sentences that were in conflict are now one rule, stated in both files, with the
+worked example and its output taken from the interpreter rather than written by
+hand.
+
+### Tests added
+
+| Test | Edge class covered | Fails without |
+|---|---|---|
+| `edge_a_finally_that_leaves_the_region_replaces_the_failure_it_was_owed` | **asserts a failure is produced and then dropped**: `break` and `skip` in a cleanup around a failing body, with an enclosing `catch`, across `for each` / `while` / `repeat`. Asserts the exact lines on **both** engines — the tree `fcbc` where `fcb` is correct — rather than only that they agree, so a golden agreed on wrongly fails | the `!has_catch` arm's `return Err(failure)` |
+| `edge_a_cleanup_that_runs_to_its_end_still_reports_the_failure_it_was_owed` | **asserts a failure**: a body that fails on a turn whose cleanup runs to its end has still failed, with `break`/`skip` on a *later* turn. Keeps the rule above from being read as "a `finally` containing a `break` discards every failure". Both engines stop with `Cannot add non-numbers` | nothing — this is the guard, and it is green on both sides of the fix |
+| `edge_a_jump_raised_in_a_cleanup_is_charged_one_turn` | **boundary / resource_limit**: a jump that travels out through a cleanup costs what an uninterrupted turn costs. `skip` in a cleanup over `for each` / `while` / `repeat` at caps of 2, 3 and 5 — each cap is exactly that many turns on **both** engines, naming itself — and `break` in a cleanup stops the loop on its own turn on both. Needed because §16 moved this charge between instructions once and §17 found the off-by-one the other way, and a wrong count is invisible at the published cap of a million | the `!has_catch` arm (the `break` half); the `skip` half is the statement of the rule both engines already kept |
+| `tests/test_control_flow.rb` — 2 `test` blocks | the same rule in Redblue, so `tests/differential_test.rs` runs both shapes on **both** engines | the same |
+| `capped_say_lines_of` / `capped_bytecode_say_lines` (`tests/loop_control_test.rs`) | not a test: the cap helpers the third row needs, the same shape as `tree_walk_capped` / `bytecode_capped` in `tests/bytecode_vm_test.rs` | — |
+
+`tests/loop_control_test.rs` is 64 tests, up from 61. `cargo test --all-targets` is
+824, up from 821. `rb test` is 334, up from 332.
+
 ## Gates
 
 Re-run after this round's fix, on the tree as it now stands.
@@ -693,7 +798,7 @@ Re-run after this round's fix, on the tree as it now stands.
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
-| `cargo test --all-targets` | **821 passed, 0 failed, 0 ignored** (31 binaries) |
+| `cargo test --all-targets` | **824 passed, 0 failed, 0 ignored** (31 binaries) |
 | `./rbops/verify.sh phase-025` | **not run — `rbops/` is not in this checkout** |
 
 `rbops/` is absent from the working directory (`ls` shows `AGENTS.md`, `SPEC.md`,
@@ -705,17 +810,22 @@ prompt:
 
 | Check | Result |
 |---|---|
-| `rb test` (every `.rb` under `tests/`) | 332 run, 332 passed, 0 failed |
+| `rb test` (every `.rb` under `tests/`) | 334 run, 334 passed, 0 failed |
 | `./target/debug/rb run examples/*.rb` | 6/6 exit 0 |
 | `./target/debug/rb run modules/*.rb` | 2/2 exit 0 (`MathUtils.rb` passes as well) |
 | `tests/loop_bounds_test.rs` | 22 passed, 0 failed |
-| `tests/loop_control_test.rs` | 61 passed, 0 failed |
+| `tests/loop_control_test.rs` | 64 passed, 0 failed |
 | `tests/bytecode_vm_test.rs` (the both-VMs differential) | 60 passed, 0 failed, over a corpus of 411 programs |
 | `tests/object_model_test.rs` | 39 passed, 0 failed |
 | `tests/differential_test.rs` | 81 passed, 0 failed |
 | `tests/for_range_test.rs` | 31 passed, 0 failed |
 | `cargo test --doc` | 1 passed, 0 failed |
 | the reproduction, through the binary | `break` prints `1`, `skip` prints `1` then `3`, `repeat` stops at 3, a `break` in no loop exits 1 with `'break' is only valid inside a loop` |
+| the phase's definition of done, program by program | `for each` prints `1`; `skip` prints `1` then `3`; the same in `repeat` (stops at 3) and `while` (stops at 4, prints `1 3 4 5 6 7 8 9`); a `break` in a nested `for each` leaves the outer loop counting to 3 |
+
+This round's three tests are the difference between 821 and 824, all in
+`tests/loop_control_test.rs` (61 → 64); the two `test` blocks in
+`tests/test_control_flow.rb` are the difference between 332 and 334 in `rb test`.
 
 This round's two tests are the difference between 819 and 821, both in
 `tests/bytecode_vm_test.rs` (58 → 60). `rb test` is unchanged at 332: both
@@ -894,9 +1004,15 @@ this phase is unverified on that axis.
   of exactly its own turn count does — it finishes — and what one turn short does,
   which is the cap that stops it. Round 6's test could not see this because every
   case in it ran until the cap stopped it, and a loop that never reaches the
-  boundary cannot disagree about it. `edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each`
+  boundary cannot disagree about it.   `edge_a_break_and_a_skip_in_a_while_cost_exactly_one_turn_each`
   is the same boundary for the two jumps separately, since they reach the cap by
-  different instructions.
+  different instructions. The resumed round adds the boundary for a jump that
+  travels out through a `finally` rather than being raised in the turn's own last
+  statement — `edge_a_jump_raised_in_a_cleanup_is_charged_one_turn`, which asks
+  each loop form what a cap of 2, 3 and 5 allows when every turn is skipped from a
+  cleanup (each cap is exactly that many turns on both engines) and where a `break`
+  in a cleanup stops the loop (on the turn the cleanup was written in).
+
 - **out_of_bounds** — N/A. `break` and `skip` are statements that take no
   operand and index nothing, so they have no out-of-range case of their own. The
   nearest thing — the ends of a `for each` — is the empty-list and final-iteration
@@ -946,7 +1062,15 @@ this phase is unverified on that axis.
   `edge_both_vms_advance_the_loop_for_a_skip_in_a_test_or_an_object_body` and the two
   corpus programs beside it, and the round-5 BLOCKER's nesting of its own: a `catch`
   body inside a function body inside a `try` (`try/a-catch-inside-a-function-body-leaves-the-calls-own-scope-alone`,
-  on both VMs).
+  on both VMs). The resumed round adds a sixth block: a `finally` inside a `try`
+  inside an enclosing `try`, which is where the jump and the failure the region was
+  owed meet — `edge_a_finally_that_leaves_the_region_replaces_the_failure_it_was_owed`
+  (an enclosing `catch` that must *not* run) and its guard
+  `edge_a_cleanup_that_runs_to_its_end_still_reports_the_failure_it_was_owed`.
+  `object`-body, `module`-body, `test`-body, `unless`-body, `catch`-inside-`catch`
+  and loop-nested-in-`finally` versions of the same shape were run on both engines
+  during the sweep and agree, so the rule covers them without a test of its own each.
+
 - **duplicate_missing_keys** — N/A. `break` and `skip` read no record field, bind
   no name and write no record, so there is no key to duplicate or miss. Record
   key handling is `tests/record_order_test.rs`, untouched by this change.
@@ -991,7 +1115,12 @@ this phase is unverified on that axis.
   itself for both engines, and the nesting case with it: a `while` in a `while`
   under a cap of two must get two turns per loop, not four — the shape that caught
   the second defect, where a `while` that ended on its condition kept its entry and
-  so was charged once per turn of the loop around it.
+  so was charged once per turn of the loop around it. The resumed round adds the
+  same question for a jump that leaves the turn through a `finally`
+  (`edge_a_jump_raised_in_a_cleanup_is_charged_one_turn`): a loop whose every turn
+  is skipped from a cleanup is stopped by the cap at exactly the cap, on both
+  engines, so a cleanup the jump passed through cannot be charged twice or not at
+  all.
 
 ## Invariants touched
 
@@ -1086,6 +1215,15 @@ this phase is unverified on that axis.
 
 ## Known gaps / follow-ups
 
+- A `finally` that leaves its region abruptly now drops the failure the body had,
+  which is a **previously-different answer becoming the same one** rather than a
+  behaviour change on either engine alone — but on the tree-walking VM it does mean
+  a program that used to run an enclosing `catch` and continue now leaves instead.
+  That is the fix, and it is the rule `SPEC.md`'s "Finally" now states. What the
+  specification still does not say, and this round did not decide, is what a
+  `finally` is owed when the `catch` that handles a failure *itself* fails —
+  recorded as FINDINGS §14, where both engines already agree, so changing it needs
+  its own phase and its own three decisions.
 - A `repeat … until` loop does not exist in the parser, so there is no fifth
   loop form to wire up. `SPEC.md:412-417` documents it; it belongs to a phase
   that adds the statement, not this one.

@@ -816,7 +816,7 @@ end
 The `finally` needs no `catch` beside it, and it is owed however its region is
 left — including by a failure, which is the case the cleanup above exists for.
 The `finally` runs on the way out and the failure is reported after it, not
-instead of it:
+instead of it, unless the cleanup itself ends the region — see below:
 
 ```redblue
 try
@@ -834,6 +834,42 @@ RuntimeError: ...
 A `try` with no `catch` is not a handler and never was one: the failure belongs
 to whatever is written around it, so a `catch` there takes it, and a program with
 nothing around it stops with it as its own.
+
+Two things in a `finally` are not that failure being reported. A `finally` that
+*fails* replaces it, so the failure that reaches the `try` around this one is the
+cleanup's own. And a `finally` that leaves its region abruptly — a `break` or a
+`skip` — drops it: the region was left by the jump rather than by the failure, so
+there is nothing for a `catch` written around this `try` to handle, and the
+statements after the `finally` do not run.
+
+```redblue
+set log to ""
+for each name in ["ada", "bob", "cleo"]
+    try
+        try
+            set size to 1 + name
+        finally
+            if name is "bob" then skip end
+            set log to log + "read " + name + "\n"
+        end
+    catch error
+        set log to log + "missing " + name + "\n"
+    end
+end
+say log
+```
+
+```
+read ada
+missing ada
+read cleo
+missing cleo
+```
+
+`bob` contributes neither line. The cleanup was told to abandon that turn, and
+the turn was abandoned: the `catch` around the `try` did not run for it. Before
+this rule, the tree-walking VM ran that `catch` anyway and the bytecode VM did
+not — the same program, two answers, both exiting 0.
 
 ### Raising Errors
 

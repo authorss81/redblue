@@ -865,3 +865,104 @@ runs five loop shapes — `while`, `while` with a `skip`, `repeat`, `for each`, 
 `while` in a `while`. Both were watched failing against the pre-fix code, and the
 nesting case was watched failing again with only the entry-dropping half of the fix
 put back, so neither half is carried by the other.
+
+## 18. A `finally` that leaves its region abruptly did not drop the failure it was owed — fixed
+
+Found in the resumed round, by sweeping the two engines against each other across
+jump-in-block shapes rather than by reading round 6's `finally` work. About forty
+programs later, one shape came out DIFFER with both engines exiting 0 and printing
+different answers.
+
+```
+$ cat target/tmp/sweep/g3.rb
+for each i in [1, 2, 3]
+    try
+        try
+            set bad to 1 + "one"
+        finally
+            if i is 2 then break end
+        end
+    catch error
+        say "outer caught"
+    end
+end
+say "reached the end"
+
+$ ./target/debug/rb run target/tmp/sweep/g3.rb          # tree:      outer caught / outer caught / reached the end
+$ ./target/debug/rb vm target/tmp/sweep/g3.rbc          # bytecode:  outer caught / reached the end
+```
+
+Round 6 established two rules that meet here and did not meet:
+
+- a `try` with no `catch` runs its `finally` and hands the failure on (§16), and
+- a `finally` that **fails** replaces the failure the body had — the failure that
+  reaches the enclosing `try` is the cleanup's own
+  (`tests/test_control_flow.rb`, "a failing finally still leaves the outer try to
+  catch the failure"; both engines agreed on it before this round).
+
+What neither said is what a `finally` that leaves its region **abruptly** does to a
+failure the body had. The two engines answered differently:
+
+- the tree-walking VM propagated it. `Statement::Try`'s `!has_catch` arm returned
+  `Err(failure)` above whatever `run_finally_body` raised, so an enclosing `catch`
+  ran *after* the cleanup had been told to leave the loop — and then the signal
+  still ended the turn, so the `catch` ran and its statements after the `try` did
+  not. The observable answer was a `catch` that ran on a turn the program had been
+  told to abandon.
+- the bytecode VM did not. `handle_failure` returns `Ok(true)` when a `catch` or a
+  `finally` raised a jump (`src/bytecode/vm.rs:2595`), which spends the failure.
+
+The bytecode answer is right, and it is the answer the tree already gives for the
+neighbouring case: the region was left by the `break`, not by the failure, so the
+failure is not the one leaving it and a `catch` written around the `try` has nothing
+to handle. A `finally` that fails replaces the failure because the cleanup's own
+failure is the one leaving the region; a `finally` that breaks replaces it for the
+same reason with a jump in place of a failure. `src/vm.rs:1108-1112` already said
+as much about the region's *own* `catch` — "an abrupt exit from the protected region
+is not a failure: the catch does not run, the finally does, and the signal stays
+pending for the loop" — it just never read that one step out to the `catch` written
+*around* the `try`.
+
+Fixed in `src/vm.rs` by propagating the failure only when no signal is pending:
+
+```rust
+if !has_catch {
+    self.run_finally_body(finally_body)?;
+    if self.loop_control.is_none() {
+        return Err(failure);
+    }
+    return Ok(Value::Nothing);
+}
+```
+
+The guard is exact rather than approximate. A body that raised a signal instead of
+failing never reaches this arm — `run_block` stops at the first signal and returns
+`Ok` — so a pending signal here was raised by the cleanup and by nothing else. That
+is worth stating because the alternative guard (a flag saying "the cleanup raised
+one") would be a second source of truth for something `loop_control` already knows,
+and would go stale the moment `run_finally_body`'s hold-and-restore rule changes.
+
+Three neighbouring shapes were swept and found to agree already, which is what says
+the rule is one rule and not four: a `catch` that raises the jump, a `finally` that
+raises the jump where the `try` *has* a `catch` (the failure was already handled, so
+there is nothing to replace), and a `finally` written around a loop the jump leaves.
+The `object`-body, `module`-body, `test`-body, `unless`-body, `catch`-inside-`catch`
+and loop-nested-inside-`finally` versions of the disputed shape were each run on both
+engines and agree.
+
+Pinned by `edge_a_finally_that_leaves_the_region_replaces_the_failure_it_was_owed`
+(`break` and `skip` across `for each` / `while` / `repeat`, asserting the exact lines
+on both engines rather than only that they agree),
+`edge_a_cleanup_that_runs_to_its_end_still_reports_the_failure_it_was_owed` (the
+other half: a turn whose cleanup runs to its end has still failed, which keeps the
+rule from being read as "a `finally` containing a `break` discards every failure"),
+`edge_a_jump_raised_in_a_cleanup_is_charged_one_turn` (a jump that travels out through
+a cleanup costs what an uninterrupted turn costs, at caps of 2, 3 and 5 on both
+engines), and the two `test` blocks this round added to `tests/test_control_flow.rb`.
+Taking the fix back out turns the first and third red and both `test` blocks red; the
+second is green on both sides of it, which is what it is for.
+
+`SPEC.md`'s "Finally" section said "the failure is reported after it, not instead of
+it" with nothing qualifying it, and `docs/GRAMMAR.md` repeated it — so the two
+sentences that were in conflict are now one rule in both files, with a worked example
+whose output was taken from the interpreter rather than written by hand.
