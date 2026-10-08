@@ -34,14 +34,19 @@ second half.
 
 ## What changed
 
+Line counts below are `git diff --numstat 84b1c44..HEAD` measured on the resume
+round, so they cover every round of the phase rather than the first attempt only.
+
 | File | Lines | What |
 |---|---|---|
-| src/repl/mod.rs | +196 −65 | `handle_command` now `match`es on `ReplCommand::parse` instead of re-parsing the command word against its own copy of the table — the second table is deleted, not relocated. `history: Vec<String>` → `ReplHistory` (with `HISTORY_LIMIT`, `src/repl/mod.rs:22`); `save_session` writes through `ReplHistory::save_to_file`, which is the same format `load_from_file` reads, instead of `join("\n")`+`write`; the read loop breaks on `Ok(0)` so EOF terminates; `Repl::complete` + `session_names` wire the completer into the session |
-| src/repl/commands.rs | +193 −7 | `ReplCommand::NotACommand` and `ReplCommand::MissingArgument { command, usage }` added, `#[derive(Debug, PartialEq, Eq)]`, and 6 unit tests |
-| src/repl/completer.rs | +172 | `complete_with(word, names)` merges a session's own names into the static vocabulary; `complete` delegates to it; 11 unit tests |
-| src/repl/history.rs | +252 | a `max_size == 0` guard in `push`, and 15 unit tests |
-| src/vm.rs | +19 | `Vm::user_names()` — a VM's own bindings minus the stdlib's, sorted, so completion can offer what a session defined without offering every builtin |
-| tests/repl_test.rs | +238 | 10 end-to-end tests that drive the real `rb` binary over a pipe |
+| src/repl/mod.rs | +1476 −154 | `handle_command` now `match`es on `ReplCommand::parse` instead of re-parsing the command word against its own copy of the table — the second table is deleted, not relocated. `history: Vec<String>` → `ReplHistory` (with `HISTORY_LIMIT`, `src/repl/mod.rs:21`); `save_session` writes through `ReplHistory::save_to_file`, which is the same format `load_from_file` reads, instead of `join("\n")`+`write`; the read loop breaks on `Ok(0)` so EOF terminates; `Repl::complete` + `session_names` wire the completer into the session; 38 unit tests |
+| src/repl/commands.rs | +638 −55 | the single alias table (`COMMAND_TABLE`, src/repl/commands.rs:78) with `ReplCommand::NotACommand`, `MissingArgument` and `Restore` added and `#[derive(Debug, PartialEq, Eq)]`; 14 unit tests |
+| src/repl/completer.rs | +316 −25 | `complete_with(word, names)` merges a session's own names into the static vocabulary; `complete` delegates to it; 15 unit tests |
+| src/repl/history.rs | +342 −3 | `ReplHistory` replaces the REPL's `Vec<String>`; a `max_size == 0` guard in `push`; `save_to_file`/`load_from_file` take `impl AsRef<Path>`; 18 unit tests |
+| src/parser.rs | +289 −0 | `parser::open_block_depth` (src/parser.rs:2036) — the block detector counted from tokens instead of matching the last word of a line; 10 unit tests |
+| src/analyzer.rs | +104 −0 | `Analyzer::with_bound_names` / `analyze_with_bound_names`, so a line can read a name an earlier line bound; 4 unit tests |
+| src/vm.rs | +109 −6 | `Vm::user_names` / `user_value` / `user_functions` — the bindings a session made, minus the stdlib's, so `:vars`, `:funcs`, `:inspect` and completion read the session; `get_var` delegates to a new borrowing `get_var_ref` |
+| tests/repl_test.rs | +734 −0 | 34 end-to-end tests that drive the real `rb` binary over a pipe |
 
 ### Why two new variants on `ReplCommand`
 
@@ -65,9 +70,11 @@ command", and an authority has to answer that question correctly.
 
 ## Tests added
 
-51 new tests: 41 `#[test]` functions in `src/repl/`, 10 in `tests/repl_test.rs`.
-Quota: ≥3 new `#[test]` ✔ (41), ≥1 named `edge_*` ✔ (17), ≥1 asserting a failure
-✔ (`edge_load_of_a_missing_file_is_reported_as_an_error`,
+Counted with `grep -c` on the tree at `2804ab8`: **133 new `#[test]` functions** —
+85 in `src/repl/` (commands 14, completer 15, history 18, mod 38), 34 in
+`tests/repl_test.rs`, 10 in `src/parser.rs` and 4 in `src/analyzer.rs`.
+Quota: ≥3 new `#[test]` ✔ (133), ≥1 named `edge_*` ✔, ≥1 asserting a
+failure ✔ (`edge_load_of_a_missing_file_is_reported_as_an_error`,
 `edge_load_of_a_missing_path_reports_the_failure`,
 `edge_command_missing_its_argument_is_reported_not_guessed`,
 `repl_reports_an_uncaught_error_and_stays_alive`).
@@ -96,6 +103,7 @@ Quota: ≥3 new `#[test]` ✔ (41), ≥1 named `edge_*` ✔ (17), ≥1 asserting
 | `push_evicts_the_oldest_entry_at_max_size` / `push_evicts_before_it_adds_...` | boundary — eviction order, and the limit held after the push |
 | `search_returns_the_most_recent_match` / `search_of_a_prefix_that_matches_nothing_returns_none` | empty — a hit and a miss |
 | `parse_reads_the_whole_alias_table` | the regression this phase exists to prevent: 30 aliases, one table |
+| `edge_every_command_in_the_table_names_itself` | empty — a `COMMAND_TABLE` row with no word in `names`, which would panic `parse` at `spec.names[0]` |
 | `repl_runs_commands_and_quits`, `repl_shows_the_result_of_an_expression_under_vars`, `repl_runs_a_multiline_block` | the documented surface, asserted on stdout *and* exit code |
 
 ### Determinism
@@ -112,35 +120,54 @@ otherwise pass on most runs and fail on the rest.
 
 ## Gates
 
+Re-measured on the resume round (`2804ab8`), not copied from the round before:
+
 | Gate | Result |
 |---|---|
-| `cargo fmt --all -- --check` | pass, no diff |
-| `cargo clippy --all-targets -- -D warnings` | pass, zero warnings, no `allow(` added |
-| `cargo test --all-targets` | **848 passed, 0 failed, 0 ignored** (813 after the first review round) |
-| `cargo test --doc` | pass, 1 passed |
+| `cargo fmt --all -- --check` | **pass**, no diff |
+| `cargo clippy --all-targets -- -D warnings` | **pass**, zero warnings, no `allow(` added |
+| `cargo test --all-targets` | **977 passed, 0 failed, 0 ignored**, 32 binaries green |
+| `cargo test --doc` | **pass, 1 passed** |
 | `./rbops/verify.sh phase-033` | **NOT RUN — the script is not in this checkout** |
 
-The second review round's gates, re-run after the fixes below, are the same four:
-**848 passed / 0 failed / 0 ignored**, fmt clean, clippy clean with no `allow(`
-added, doc tests 1 passed.
+Earlier rounds of this phase measured **848 passed / 0 failed / 0 ignored** (and 813
+after the first review round); the count rose because later phases added tests, not
+because this one was re-run against a bigger number.
 
-`edge_a_decoded_chunk_runs_identically_to_the_compiled_one` in
-`tests/bytecode_vm_test.rs` is flaky and is **not** fixed by either review round:
-it read the corpus out of `examples/`, `modules/` and `tests/` and round-tripped
-every `.rb` it found, and it failed on two of the runs of this round and on none
-of the nine that followed. Nothing in this phase writes into those three
-directories (every scratch file goes under `target/tmp/`), and running that test
-alone passed nine times out of nine. It is a pre-existing race in a test that
-shares a filesystem with the rest of the suite, and it is left alone rather than
-narrowed: `#[ignore]`ing it or special-casing it would hide the next failure too.
+Also re-run by hand on the resume round, since `verify.sh` normally does it:
+`./target/debug/rb run` over all 6 `examples/*.rb` and both `modules/*.rb` exits 0,
+and `./target/debug/rb test` reports `Tests run: 340 / Passed: 340 / Failed: 0`.
+
+## What the resume round added
+
+The gates were green on arrival; nothing was reverted and no existing code or test
+was removed. One gap was found by hunting for what the reviewer hunts for, and it
+was closed:
+
+- `ReplCommand::parse` reads `spec.names[0]` (src/repl/commands.rs:300) to name a
+  command back to the user when its argument is missing. That is the only indexing
+  in the phase's production code, and a row added to `COMMAND_TABLE` with an empty
+  `names` array would panic on first use — while `names()` and `bare_names()`,
+  which only flatten, would keep the two table tests green, so nothing else would
+  have said so. `edge_every_command_in_the_table_names_itself` (src/repl/commands.rs:660)
+walks the table and fails with the offending row's description.
 
 **On the fourth gate, stated plainly:** `rbops/` does not exist in the working
 directory (`ls rbops` → `No such file or directory`; `./rbops/verify.sh
 phase-033` → exit 127). The dispatcher that would run it lives outside this
 checkout and I was instructed not to inspect it. I have not run that gate and am
-not claiming it passes. The three gates I could run are green, and
-`./target/debug/rb run` over all 6 `examples/*.rb` and both `modules/*.rb`
-succeeds, plus `rb test` → `Tests run: 274 / Passed: 274 / Failed: 0`.
+not claiming it passes. The three gates I could run are green (measured above on
+the resume round), and `./target/debug/rb run` over all 6 `examples/*.rb` and both
+`modules/*.rb` succeeds, plus `rb test` → `Tests run: 340 / Passed: 340 / Failed: 0`.
+
+`edge_a_decoded_chunk_runs_identically_to_the_compiled_one` in
+`tests/bytecode_vm_test.rs` was reported flaky by the round before this one. On the
+resume round it passed eight times out of eight when run alone, and once in a full
+`cargo test --all-targets` — **9 of 9**, so the flakiness did not reproduce. It is
+still not fixed: nothing in this phase writes into `examples/`, `modules/` or
+`tests/` (every scratch file goes under `target/tmp/`), and `#[ignore]`ing it or
+special-casing it would hide the next failure too. It is not this phase's test and
+is left alone.
 
 ## What the review round fixed
 

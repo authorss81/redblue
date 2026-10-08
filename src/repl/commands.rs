@@ -650,6 +650,23 @@ mod tests {
         }
     }
 
+    /// Every entry of the table names at least one word.
+    ///
+    /// `parse` reads `spec.names[0]` to name the command back to the user when
+    /// its argument is missing, and `names()`/`bare_names()` only flatten what is
+    /// there, so a row added with an empty `names` would be invisible to the
+    /// two tests above and would panic the moment somebody typed its sigil.
+    #[test]
+    fn edge_every_command_in_the_table_names_itself() {
+        for spec in super::COMMAND_TABLE {
+            assert!(
+                !spec.names.is_empty(),
+                "{:?} takes an argument but has no word to name it by",
+                spec.description
+            );
+        }
+    }
+
     /// No word is claimed by two commands. The completer's `dedup` would hide a
     /// repeat from a user, and the parser would reach whichever entry came first,
     /// so nothing else would ever say so.

@@ -15,7 +15,7 @@ $ printf 'set caught to yes\nsay caught\n' | rb
 >>> Error: AnalyzerError: Unknown variable 'caught'
 ```
 
-`Repl::run_code` (`src/repl/mod.rs:243`) lexes, parses and analyzes each line on
+`Repl::run_code` (`src/repl/mod.rs:422`) lexes, parses and analyzes each line on
 its own, and the analyzer's scope is built from that line alone. The VM is
 reused across lines, so the *value* survives — but nothing tells the analyzer the
 name exists, so the very next line is rejected statically. The same happens to a
@@ -35,7 +35,7 @@ unknown: the check is carried across lines, not switched off.
 
 ## 2. `:vars` reports only the last result value, under `_` — `src/repl/mod.rs`
 
-`Repl::execute_code` (`src/repl/mod.rs:234`) inserts into `self.variables`
+`Repl::execute_code` (`src/repl/mod.rs:396`) inserts into `self.variables`
 exactly one key, `"_"`, and only when a line produced a non-`Nothing` value:
 
 ```
@@ -43,7 +43,7 @@ $ printf 'set x to 1 + 1\n:vars\n' | rb
 >>> No variables defined.
 ```
 
-`print_variables` (`src/repl/mod.rs:277`) is therefore reachable with either
+`print_variables` (`src/repl/mod.rs:526`) is therefore reachable with either
 nothing or a single `_` entry, and it iterates a `HashMap` to print — which is
 fine at 0 or 1 entries and nondeterministic at 2. Both halves of this should
 change together: read the session's names from the VM, and sort before printing.
@@ -59,7 +59,9 @@ with `alpha` rather than with `No variables defined.`
 
 ## 3. A stray `end` leaves the REPL stuck in continuation mode — `src/repl/mod.rs`
 
-The multi-line detector is a suffix heuristic (`src/repl/mod.rs:210`):
+The multi-line detector was a suffix heuristic (`Repl::needs_continuation`,
+`src/repl/mod.rs`, called from the read loop at `src/repl/mod.rs:144`; the heuristic
+it replaced is now `parser::open_block_depth`, src/parser.rs:2036):
 a line opens a block if it ends with `then`/`end`/`to`/`else`/`while`/`repeat`.
 Entering `..  ` mode is therefore easy and leaving it needs the exact line `end`.
 
@@ -95,7 +97,7 @@ and lose them.
 
 ## 4. `say` does not interpolate, though the REPL's own help says it does — `src/repl/mod.rs`
 
-`print_help` (`src/repl/mod.rs:251`) and `show_examples` (`src/repl/mod.rs:370`) both tell the user
+`print_help` (`src/repl/mod.rs:454`) and `show_examples` (`src/repl/mod.rs:768`) both tell the user
 `say "Hello, {{name}}!"`, and `AGENTS.md` lists `{interp}` string syntax as an
 invariant:
 
@@ -117,7 +119,9 @@ If string interpolation is wanted as a language feature it is its own phase, and
 `Expr::InterpolatedText` plus the arm in `Vm::evaluate` that already matches it are
 where it would land.
 
-## 5. `ReplHistory::save_to_file`/`load_from_file` take `&str`, not a path — `src/repl/history.rs:69`
+## 5. `ReplHistory::save_to_file`/`load_from_file` took `&str`, not a path — now `src/repl/history.rs:76`
+
+The signature as it stood when this finding was filed:
 
 ```rust
 pub fn save_to_file(&self, path: &str) -> std::io::Result<()> {
@@ -129,7 +133,7 @@ helper that lossily converted a `PathBuf` into a `&str` is gone, and a
 `#[cfg(unix)]` test round-trips a history through a file whose own *name* is not
 UTF-8 — which the `&str` signature could not express at all.
 
-## 6. There is no way to reach the completer from the binary — `src/repl/mod.rs:64`
+## 6. There is no way to reach the completer from the binary — `src/repl/mod.rs:111`
 
 `Repl::complete` exists and is tested, but `run` reads with
 `std::io::stdin().read_line`, which gives no line editing and no completion
