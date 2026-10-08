@@ -1,0 +1,33 @@
+name: release
+
+# Binaries for people without Rust installed. Triggered by pushing a version
+# tag (v0.1.0 matches Cargo.toml). Native target per runner — no cross-compile
+# toolchain juggling. Tests run first in the same job so an artifact can never
+# be cut from untested code.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bin: rb
+          - os: windows-latest
+            bin: rb.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/${{ matrix.bin }}
+          generate_release_notes: true
