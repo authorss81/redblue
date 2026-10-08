@@ -10,7 +10,7 @@ use std::process::Command;
 
 use redblue::bytecode::{
     compile_source, disassemble, Block, BlockKind, Chunk, Constant, Instruction, Opcode,
-    END_TRY_MARKER, FORMAT_VERSION, MAGIC, NO_BLOCK, NO_CONST,
+    END_TRY_MARKER, FORMAT_VERSION, MAGIC, NO_BLOCK, NO_CONST, STATEMENT_MARKER,
 };
 
 fn project_root() -> PathBuf {
@@ -327,38 +327,45 @@ fn expressions_compile_to_the_documented_instruction_sequences() {
     assert_eq!(
         names(&chunk.main),
         vec![
+            "NOP",
             "PUSH_CONST",
             "PUSH_CONST",
             "BUILD_LIST",
             "STORE",
+            "NOP",
             "LOAD",
             "PUSH_CONST",
             "INDEX",
             "SAY",
+            "NOP",
             "PUSH_CONST",
             "PUSH_CONST",
             "BUILD_RECORD",
             "STORE",
+            "NOP",
             "LOAD",
             "LOAD_PROPERTY",
             "SAY",
+            "NOP",
             "PUSH_CONST",
             "SAY",
         ],
         "expression codegen drifted from the documented shape"
     );
 
+    // Every statement begins with the `NOP` that marks it and is charged to the
+    // step budget, so the operands are one further on than the shapes above.
     assert_eq!(
-        chunk.main.code[2].arg, 2,
+        chunk.main.code[3].arg, 2,
         "BUILD_LIST carries its element count"
     );
-    assert_eq!(chunk.main.code[6].arg, 0, "INDEX carries its index");
+    assert_eq!(chunk.main.code[8].arg, 0, "INDEX carries its index");
     assert_eq!(
-        chunk.main.code[10].arg, 1,
+        chunk.main.code[13].arg, 1,
         "BUILD_RECORD carries its pair count"
     );
     assert_eq!(
-        chunk.constants[chunk.main.code[13].arg as usize],
+        chunk.constants[chunk.main.code[17].arg as usize],
         Constant::Text("a".to_string()),
         "LOAD_PROPERTY names the field through the constant pool"
     );
@@ -409,20 +416,25 @@ fn loops_and_branches_produce_jumps_inside_their_own_block() {
     assert_eq!(
         ops,
         vec![
+            "NOP",
             "PUSH_CONST",
             "PUSH_CONST",
             "BUILD_LIST",
             "GET_ITER",
             "STORE",
+            "NOP",
             "LOAD",
             "PUSH_CONST",
             "EQUAL",
             "JUMP_IF_FALSE",
+            "NOP",
             "LOAD",
             "SAY",
             "JUMP",
+            "NOP",
             "PUSH_CONST",
             "JUMP_IF_FALSE",
+            "NOP",
             "SKIP",
             "JUMP",
         ],
@@ -585,8 +597,8 @@ fn edge_a_single_statement_program_is_not_empty() {
 
     assert_eq!(
         ops(&chunk.main).len(),
-        2,
-        "`say \"only\"` is PUSH_CONST, SAY"
+        3,
+        "`say \"only\"` is the statement marker, PUSH_CONST, SAY"
     );
     assert_eq!(
         chunk.constants,
@@ -639,6 +651,11 @@ fn functions_tests_and_methods_become_named_blocks() {
         // A `has` with no `default` initialises its field to `nothing`, and
         // `DEF_FIELD` consumes that value — see
         // `a_field_default_is_compiled_before_the_declaration_that_consumes_it`.
+        //
+        // Neither declaration is marked: a field and a method are collected by
+        // the `object` declaration rather than run as statements, so the
+        // tree-walking VM charges the `object` and nothing else. See
+        // `an_object_declaration_marks_only_the_statements_it_runs`.
         vec!["PUSH_CONST", "DEF_FIELD", "DEF_METHOD"],
         "an object body initialises its fields and declares its methods"
     );
@@ -711,6 +728,81 @@ fn an_extending_object_names_its_parent_in_the_constant_pool() {
     assert!(
         lines[1].contains("extends Base"),
         "the disassembly should say which object is extended:\n{text}"
+    );
+}
+
+/// An `object` declaration's own `has` fields and `to can` methods are collected
+/// by the declaration, not run as statements — the tree-walking VM's
+/// `declare_object` takes both with a bare `evaluate`/`make_function` and charges
+/// nothing for them. So they carry no statement marker, while the `object`
+/// statement itself and the statements that follow its declarations do: the
+/// first is one step there, and the rest are run in the enclosing block.
+///
+/// The marker is where the step budget is charged, so marking these would make
+/// an object cost one step per field plus one per method more here than on the
+/// other engine — the same program stopped by the same budget at a different
+/// statement, which is what
+/// `edge_an_object_declaration_is_charged_the_same_step_on_both_engines` pins
+/// from the other side.
+#[test]
+fn an_object_declaration_marks_only_the_statements_it_runs() {
+    let chunk = compile_source(
+        "object Thing
+    has size default 1
+    to can grow(amount)
+        say amount
+    end
+    set Thing.size to 2
+end
+say Thing.size
+",
+    )
+    .expect("program should compile");
+
+    assert_eq!(
+        names(&chunk.main),
+        vec![
+            "NOP",           // the `object` statement
+            "DEF_OBJECT",    //
+            "STORE",         // Thing
+            "NOP",           // the `set` that follows the declarations
+            "LOAD",          // Thing
+            "PUSH_CONST",    // 2
+            "SET_PROPERTY",  // Thing.size
+            "NOP",           // the `say`
+            "LOAD",          // Thing
+            "LOAD_PROPERTY", // size
+            "SAY",
+        ],
+        "the declaration and the statements around it are marked"
+    );
+
+    let objects = blocks_of_kind(&chunk.main, BlockKind::Object);
+    assert_eq!(objects.len(), 1, "the object body is one block");
+    assert_eq!(
+        names(objects[0]),
+        vec![
+            "PUSH_CONST", // 1
+            "DEF_FIELD",  // size
+            "DEF_METHOD", // grow
+        ],
+        "the declarations themselves are not statements, so nothing marks them"
+    );
+    assert!(
+        !objects[0]
+            .code
+            .iter()
+            .any(|instruction| instruction.opcode == Opcode::Nop),
+        "the object body writes no NOP at all, so there is no marker to charge: {:?}",
+        objects[0].code
+    );
+
+    let methods = blocks_of_kind(&chunk.main, BlockKind::Method);
+    assert_eq!(methods.len(), 1, "the method body is a block of its own");
+    assert_eq!(
+        names(methods[0]),
+        vec!["NOP", "LOAD", "SAY"],
+        "a method's *body* is an ordinary statement list, so its statements are marked"
     );
 }
 
@@ -813,13 +905,15 @@ fn try_without_handlers_names_no_blocks() {
 }
 
 /// The end of a protected region is a `NOP` carrying the marker operand, and it
-/// is the *only* `NOP` the compiler writes.
+/// is the only `NOP` the compiler writes that means *this*.
 ///
 /// The distinction has to be in the file and not in the VM's reading of it: a
-/// `.rbc` may hold a `NOP` anywhere, and one that is not the marker is the filler
-/// the byte has always been. So the marker is a reserved value rather than a
+/// `.rbc` may hold a `NOP` anywhere, and one that is not a marker is the filler
+/// the byte has always been. So each marker is a reserved value rather than a
 /// flag the VM could infer — and a reserved value is one no pool or block list
-/// can reach, which is what the first assertion says.
+/// can reach, which is what the first assertion says. The compiler writes two
+/// kinds of marked `NOP`: one per statement, which is where the step budget is
+/// charged, and one per `try` to close its protected region.
 #[test]
 fn a_trys_region_ends_at_one_marked_nop_and_writes_no_other_filler() {
     let chunk = compile_source(
@@ -833,29 +927,51 @@ fn a_trys_region_ends_at_one_marked_nop_and_writes_no_other_filler() {
         .iter()
         .filter(|instruction| instruction.opcode == Opcode::Nop)
         .collect();
+    let region_ends: Vec<&&Instruction> = nops
+        .iter()
+        .filter(|instruction| instruction.arg == END_TRY_MARKER)
+        .collect();
+    let statement_starts: Vec<&&Instruction> = nops
+        .iter()
+        .filter(|instruction| instruction.arg == STATEMENT_MARKER)
+        .collect();
 
     assert_eq!(
         names(&chunk.main),
         vec![
+            "NOP",
             "TRY",
+            "NOP",
             "PUSH_CONST",
             "SAY",
             "NOP",
+            "NOP",
             "TRY",
+            "NOP",
             "PUSH_CONST",
             "SAY",
             "NOP"
         ],
-        "each region is its own TRY's protected code, closed by one NOP, and the \
-         compiler writes no filler"
+        "each region is its own TRY's protected code, closed by one NOP, and every \
+         other NOP is the statement marker"
     );
-    assert_eq!(nops.len(), 2, "one NOP per try, and no others");
-    for nop in &nops {
-        assert_eq!(
-            nop.arg, END_TRY_MARKER,
-            "the NOP the compiler writes is the region end, not the filler"
-        );
-    }
+    assert_eq!(
+        region_ends.len(),
+        2,
+        "one region-end NOP per try, and no others"
+    );
+    assert_eq!(
+        nops.len(),
+        region_ends.len() + statement_starts.len(),
+        "every NOP the compiler writes is one marker or the other, never a filler"
+    );
+    assert_eq!(
+        statement_starts.len(),
+        4,
+        "one statement marker per statement in this block: two `try`s and two `say`s. \
+         The `catch` and `finally` bodies are blocks of their own, so their statements \
+         carry their markers there"
+    );
 
     assert_eq!(
         END_TRY_MARKER, NO_BLOCK,
@@ -863,9 +979,23 @@ fn a_trys_region_ends_at_one_marked_nop_and_writes_no_other_filler() {
          list can reach it and it cannot be mistaken for an index"
     );
     assert_eq!(END_TRY_MARKER, NO_CONST);
+    assert_ne!(
+        STATEMENT_MARKER, END_TRY_MARKER,
+        "the two markers mean different things, so one value cannot carry both"
+    );
+    assert_ne!(
+        STATEMENT_MARKER, 0,
+        "a statement marker is a reserved value, which is what leaves a plain NOP a \
+         filler rather than a third meaning"
+    );
     assert!(
         disassemble(&chunk).contains("end of a protected region"),
         "the disassembler should say which NOP closes a region:\n{}",
+        disassemble(&chunk)
+    );
+    assert!(
+        disassemble(&chunk).contains("start of a statement"),
+        "and which one begins a statement:\n{}",
         disassemble(&chunk)
     );
     assert!(
@@ -882,24 +1012,27 @@ fn a_constant_compiles_to_its_own_instruction_not_to_a_store() {
     assert_eq!(
         names(&chunk.main),
         vec![
+            "NOP",
             "PUSH_CONST",
             "DECLARE_CONST",
+            "NOP",
             "PUSH_CONST",
             "STORE",
+            "NOP",
             "LOAD",
             "SAY"
         ],
         "a declaration and an assignment must not compile to the same instruction"
     );
 
-    let declaration = chunk.main.code[1];
+    let declaration = chunk.main.code[2];
     assert_eq!(
         chunk.constants[declaration.arg as usize],
         Constant::Text("TAU".to_string()),
         "DECLARE_CONST names the constant it binds"
     );
     assert!(
-        declaration.arg == chunk.main.code[3].arg,
+        declaration.arg == chunk.main.code[5].arg,
         "one name is one constant-pool entry, so both instructions name it"
     );
     assert!(
@@ -1000,8 +1133,10 @@ fn edge_a_version_3_file_is_refused_because_its_imports_name_no_alias() {
     );
 }
 
-/// Every file this build writes says it is version 4, and a version-3 file's
-/// bytes are the same bytes with a different version word.
+/// Every file this build writes says it is version 5, and a version-4 file's
+/// bytes are the same bytes with a different version word — refused, because a
+/// version-4 file carries no statement marker and so would be charged nothing at
+/// all.
 #[test]
 fn a_module_declaration_is_readable_only_by_the_version_that_names_it() {
     let source = "module M\n    to f\n        return 1\n    end\n    export f\nend\n";
@@ -1009,18 +1144,23 @@ fn a_module_declaration_is_readable_only_by_the_version_that_names_it() {
     let bytes = chunk.encode();
     assert_eq!(
         u16::from_le_bytes([bytes[4], bytes[5]]),
-        4,
+        FORMAT_VERSION,
         "an encoded file states the version this build writes"
     );
 
-    let mut older = bytes.clone();
-    older[4..6].copy_from_slice(&3u16.to_le_bytes());
-    let error = Chunk::decode(&older).expect_err("a version-3 file must not be accepted");
-    assert!(
-        error.message().contains("version 3"),
-        "the refusal names the file's version, got: {}",
-        error.message()
-    );
+    for older_version in [3u16, 4] {
+        let mut older = bytes.clone();
+        older[4..6].copy_from_slice(&older_version.to_le_bytes());
+        let error =
+            Chunk::decode(&older).expect_err("a file of an older version must not be accepted");
+        assert!(
+            error
+                .message()
+                .contains(&format!("version {older_version}")),
+            "the refusal names the file's version, got: {}",
+            error.message()
+        );
+    }
 }
 
 #[test]
@@ -1044,15 +1184,15 @@ fn imports_compile_to_an_import_per_item_bound_to_its_alias() {
 
     assert_eq!(
         names(&chunk.main),
-        vec!["IMPORT", "STORE", "IMPORT", "STORE"],
+        vec!["NOP", "IMPORT", "STORE", "IMPORT", "STORE"],
         "each import binds a name"
     );
     assert_eq!(
-        chunk.constants[chunk.main.code[0].arg as usize],
+        chunk.constants[chunk.main.code[1].arg as usize],
         Constant::Text("MathUtils".to_string())
     );
     assert_eq!(
-        chunk.constants[chunk.main.code[3].arg as usize],
+        chunk.constants[chunk.main.code[4].arg as usize],
         Constant::Text("net".to_string()),
         "an import binds its alias, not its module name"
     );
@@ -1482,6 +1622,7 @@ fn edge_an_interpolated_text_becomes_build_text_over_its_parts() {
     assert_eq!(
         names(&chunk.main),
         vec![
+            "NOP",
             "PUSH_CONST",
             "PUSH_CONST",
             "PUSH_CONST",
@@ -1492,7 +1633,7 @@ fn edge_an_interpolated_text_becomes_build_text_over_its_parts() {
         "an interpolated text is its parts, then BUILD_TEXT over them"
     );
     assert_eq!(
-        chunk.main.code[4].arg, 2,
+        chunk.main.code[5].arg, 2,
         "BUILD_TEXT carries its part count"
     );
     assert_eq!(

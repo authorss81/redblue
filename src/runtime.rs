@@ -295,7 +295,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         "random" => {
             use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| Error::Runtime(e.to_string(), span))?;
             Ok(Some(Value::Number((now.as_nanos() % 1000) as f64)))
         }
         // Files module
@@ -458,11 +460,12 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 }
             };
             let datetime = UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
-            let tm = chrono::DateTime::from_timestamp(
-                datetime.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-                0,
-            )
-            .ok_or_else(|| Error::Runtime("Invalid timestamp".to_string(), span))?;
+            let secs = datetime
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| Error::Runtime(e.to_string(), span))?
+                .as_secs() as i64;
+            let tm = chrono::DateTime::from_timestamp(secs, 0)
+                .ok_or_else(|| Error::Runtime("Invalid timestamp".to_string(), span))?;
             Ok(Some(Value::Text(tm.format(&format).to_string())))
         }
         "time_unix" => {
@@ -602,7 +605,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 _ => (0.0, 1.0),
             };
             use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| Error::Runtime(e.to_string(), span))?;
             let r = (now.as_nanos() % 1000000) as f64 / 1000000.0;
             // `max - min` overflows for a range as ordinary as
             // `-1e308` to `1e308`, which is a number that does not exist.
@@ -614,7 +619,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     return Ok(Some(Value::Nothing));
                 }
                 use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| Error::Runtime(e.to_string(), span))?;
                 let idx = (now.as_nanos() as usize) % items.len();
                 Ok(Some(items[idx].clone()))
             } else {
@@ -627,7 +634,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         "random_shuffle" => {
             if let Some(Value::List(mut items)) = args.first().cloned() {
                 use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| Error::Runtime(e.to_string(), span))?;
                 let seed = now.as_nanos() as usize;
 
                 for i in (1..items.len()).rev() {

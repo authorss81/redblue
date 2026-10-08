@@ -40,15 +40,15 @@ use std::sync::Arc;
 
 use crate::bytecode::format::{Block, Chunk, Constant, Instruction};
 use crate::bytecode::opcode::Opcode;
-use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST};
+use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER};
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser::{self, BinaryOp, Program, Statement, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
-    expect_range_number, finite_number, range_has_next, Captured, CapturedScope, Fields,
-    FunctionBody, FunctionValue, Value,
+    expect_range_number, expect_repeat_count, finite_number, range_has_next, Captured,
+    CapturedScope, Fields, FunctionBody, FunctionValue, Value,
 };
 use crate::vm::{qualified_member, DeclaredModule};
 use crate::vm::{
@@ -137,7 +137,9 @@ enum Sequence {
     Each { items: Vec<Value>, index: usize },
     /// `for each x from start to end by step`.
     Range { current: f64, end: f64, step: f64 },
-    /// `repeat n times`. A count that is not a number runs no times.
+    /// `repeat n times`. The count arrives already turned into a whole number of
+    /// turns by `expect_repeat_count`, which is what the tree-walking VM does
+    /// with it; a count that is not a number runs no times.
     Repeat { remaining: i64 },
 }
 
@@ -195,6 +197,25 @@ fn take(sequence: &mut Sequence, span: Span) -> Result<Option<Value>> {
             Ok(Some(Value::Nothing))
         }
     }
+}
+
+/// The failure reported when a loop's `STORE` binds its variable with no sequence
+/// to take values from.
+///
+/// A loop draws its values from the `GET_ITER` or `GET_RANGE` immediately above
+/// the `STORE` that binds its variable, so a `STORE` reached with no sequence is
+/// one a jump landed on directly. No file this compiler writes can produce it —
+/// see [`BytecodeVm::store`] — and it is an error rather than a silently
+/// exhausted loop because a decoder's rule is to refuse a file it does not
+/// understand, not to guess what it meant.
+fn no_sequence(kind: &str, span: Span) -> Error {
+    Error::Runtime(
+        format!(
+            "a '{kind}' loop bound its variable with no sequence to take values from: the \
+             instruction that draws the loop's values did not run"
+        ),
+        span,
+    )
 }
 
 /// A `catch` body paired with the name its handler binds.
@@ -680,6 +701,20 @@ impl BytecodeVm {
         vm
     }
 
+    /// Builds a VM with both limits set at once, ignoring the environment.
+    ///
+    /// Neither [`BytecodeVm::with_max_iterations`] nor
+    /// [`BytecodeVm::with_max_steps`] can be followed by the other — each builds
+    /// a VM from the defaults — and a caller that wants to know *which* of the
+    /// two stops a program has to set both. A zero is ignored, as it is for
+    /// either of them.
+    pub fn with_limits(max_iterations: usize, max_steps: usize) -> Self {
+        let mut vm = Self::new();
+        vm.max_iterations = resolve_max_iterations_from(Some(max_iterations));
+        vm.max_steps = resolve_max_steps_from(Some(max_steps));
+        vm
+    }
+
     /// Whether [`BytecodeVm::run`] prints what the program said. On by default.
     pub fn set_echo(&mut self, echo: bool) {
         self.echo = echo;
@@ -835,11 +870,15 @@ impl BytecodeVm {
 
     // -- the limits ---------------------------------------------------------
 
-    /// Charges one instruction to the step budget.
+    /// Charges one statement to the step budget.
     ///
-    /// Charged per instruction rather than per statement, which is what an
-    /// instruction-counting VM has: the budget bounds the program either way, and
-    /// an instruction is the thing actually run.
+    /// Charged where the compiler's statement marker is — once per statement,
+    /// which is the unit [`crate::vm::Vm`] charges too. Counting instructions
+    /// instead, which is what this VM used to do, made the same program reach
+    /// the budget at a different point on each engine: one statement is several
+    /// instructions, so the budget ran out inside the same loop's earlier turns
+    /// here than there, and the two engines reported different limits for the
+    /// same program.
     fn charge_step(&mut self) -> Result<()> {
         if self.steps >= self.max_steps {
             return Err(Error::Runtime(
@@ -877,22 +916,28 @@ impl BytecodeVm {
     /// Called where the loop is about to run its body, which is the same
     /// point the tree-walking VM charges: after a sequence has been found to have
     /// a value left, and after a `while`'s condition has come out true.
+    ///
+    /// The turn is charged to the step budget as well, and after the iteration
+    /// cap, so a loop that is inside its own cap never has the budget stop it
+    /// instead: the cap is the limit that says how many turns a loop takes, and
+    /// naming it is what both engines then say.
     fn charge_loop(&mut self, index: usize) -> Result<()> {
         let Some(entry) = self.loops.get_mut(index) else {
             return Ok(());
         };
-        let (iterations, kind) = (&mut entry.iterations, entry.kind);
-        if *iterations >= self.max_iterations {
+        if entry.iterations >= self.max_iterations {
             return Err(Error::Runtime(
                 format!(
                     "Maximum of {} iterations reached in a '{}' loop",
-                    self.max_iterations, kind
+                    self.max_iterations, entry.kind
                 ),
                 self.span(),
             ));
         }
-        *iterations += 1;
-        Ok(())
+        entry.iterations += 1;
+        // The borrow of the loop entry ends here, so the step charge below can
+        // reach the VM.
+        self.charge_step()
     }
 
     // -- the operand stack --------------------------------------------------
@@ -1315,9 +1360,7 @@ impl BytecodeVm {
             return Ok(());
         };
         let previous_span = std::mem::replace(&mut self.current_span, line_span(instruction.line));
-        let outcome = self
-            .charge_step()
-            .and_then(|()| self.execute(instruction, frame));
+        let outcome = self.execute(instruction, frame);
         self.current_span = previous_span;
         outcome
     }
@@ -1328,8 +1371,17 @@ impl BytecodeVm {
             Opcode::Nop => {
                 // A `NOP` is the filler and does nothing — including inside a
                 // protected region, which is what keeps a filler a file happens
-                // to contain from running an enclosing `finally` early. Only the
-                // marker operand closes a region.
+                // to contain from running an enclosing `finally` early. Only a
+                // marker operand says anything.
+                if instruction.arg == STATEMENT_MARKER {
+                    // The statement begins here, so this is where the program is
+                    // charged for it. Every instruction of a statement shares this
+                    // point, so the count is one step per statement however many
+                    // instructions the statement compiled to.
+                    self.charge_step()?;
+                    self.advance(frame);
+                    return Ok(());
+                }
                 if instruction.arg != END_TRY_MARKER {
                     self.advance(frame);
                     return Ok(());
@@ -1615,15 +1667,15 @@ impl BytecodeVm {
     /// b`, three when a step is given.
     fn start_range(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let operands = self.pop_n(instruction.aux)?;
+        let span = self.span();
         let sequence = match instruction.aux {
             1 => Sequence::Repeat {
-                remaining: match operands.first() {
-                    Some(Value::Number(n)) => *n as i64,
-                    _ => 0,
-                },
+                // The same helper the tree-walking VM reads the count through,
+                // so a count one VM refuses is a count both refuse and a
+                // fractional one truncates the same way in both.
+                remaining: expect_repeat_count(operands.first().unwrap_or(&Value::Nothing), span)?,
             },
             _ => {
-                let span = self.span();
                 let start =
                     expect_range_number(operands.first().unwrap_or(&Value::Nothing), "from", span)?;
                 let end =
@@ -1710,14 +1762,29 @@ impl BytecodeVm {
         let index = self.loop_entry(frame, site);
         // The value for this turn is taken before the turn is charged, so a loop
         // that has run out does not spend an iteration on the fact.
-        let has_next = self.loops[index].iterator.as_ref().and_then(peek).is_some();
-        if !has_next {
+        //
+        // An entry with no sequence is a file the compiler did not write. The
+        // loop's own `GET_ITER` or `GET_RANGE` draws the sequence and sits
+        // immediately above this `STORE`, so reaching the `STORE` without one
+        // means a jump landed on the `STORE` itself — the entry was created here
+        // rather than by the loop's opening instruction. Reported like every
+        // other malformed bytecode (`pop`, `constant`, `child_path`): a hostile
+        // file is a diagnostic, never a reason to abort the process.
+        let span = self.span();
+        let kind = self.loops[index].kind;
+        let Some(sequence) = self.loops[index].iterator.as_ref() else {
+            return Err(no_sequence(kind, span));
+        };
+        if peek(sequence).is_none() {
             self.leave_loop(frame, index);
             return Ok(());
         }
         self.charge_loop(index)?;
-        let span = self.span();
-        let sequence = self.loops[index].iterator.as_mut().expect("a sequence");
+        // The sequence is still there: the budget was charged against the entry,
+        // and `leave_loop` — the only thing that removes one — was not reached.
+        let Some(sequence) = self.loops[index].iterator.as_mut() else {
+            return Err(no_sequence(kind, span));
+        };
         let value = take(sequence, span)?.unwrap_or(Value::Nothing);
         self.bind(frame, &name, value);
         self.advance(frame);
@@ -1998,6 +2065,24 @@ impl BytecodeVm {
     /// A failure on the way out clears it again: a `finally` that could not run
     /// leaves the region by the failing path, and the handler that catches it
     /// carries on after its own region as it was written to.
+    ///
+    /// The loop the exit was leaving keeps whatever entry it had, and no new one
+    /// is made here. Every loop draws its entry before its body can run — a
+    /// sequence loop at its `GET_ITER` or `GET_RANGE`, a `while` at the condition
+    /// that let the turn begin — so the only way to reach this with no entry is a
+    /// `finally` on the way out that failed and was handled: handling it unwound
+    /// the loops its `try` was written inside, which is this one, and put the
+    /// frame where the program goes next. The tree-walking VM abandons a loop
+    /// whose turn fails the same way, and resumes after the `try`.
+    ///
+    /// Making an entry here regardless resurrected the abandoned loop with no
+    /// sequence to draw from, so `leave_owned_loop` found something to leave and
+    /// sent the frame to that loop's exit — over the position the handler had
+    /// just chosen. It landed back on the right instruction by accident, through
+    /// a second abandoned loop's exit, and said so only because
+    /// [`BytecodeVm::store`] refuses a loop with no sequence rather than
+    /// inventing one. [`Self::leave_owned_loop`] and [`Self::turn_over_to`] both
+    /// end at nothing when there is no entry, which is the answer here.
     fn prepare_exit(&mut self, frame: usize, owner: LoopOwner) -> Result<()> {
         let crossed = owner.frame != frame;
         let outcome = self
@@ -2007,14 +2092,6 @@ impl BytecodeVm {
             self.abrupt_exit = false;
             return Err(error);
         }
-        // The entry is created if this is the loop's first turn — a `while`
-        // draws its entry when it turns over, so a `break` in a body that runs
-        // once has nothing to leave until now. It is made *after* the frames
-        // above are finished, because finishing a frame unwinds the loops above
-        // the base that frame recorded, and an entry made before that would be
-        // dropped along with them: the loop the exit was leaving would be left
-        // running.
-        self.loop_entry(owner.frame, owner.site);
         self.abrupt_exit = crossed;
         Ok(())
     }

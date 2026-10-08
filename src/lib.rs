@@ -29,7 +29,7 @@ pub use lsp::{
 // `Value::Function` variant: a caller that matches that variant has to be able
 // to name the type it binds.
 pub use bytecode::{compile_source, Chunk, Opcode};
-pub use value::{FunctionBody, FunctionValue, Value};
+pub use value::{expect_repeat_count, FunctionBody, FunctionValue, Value};
 pub use vm::{
     resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
     run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS, MAX_ITERATIONS_ENV,

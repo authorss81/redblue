@@ -17,7 +17,7 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 
 use crate::bytecode::format::{Block, BlockKind, Chunk, Constant, Instruction, MAX_BLOCK_DEPTH};
 use crate::bytecode::opcode::Opcode;
-use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST};
+use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER};
 
 /// The name a `repeat ... times` loop counts in.
 ///
@@ -68,6 +68,24 @@ struct Decl<'a> {
     span: Span,
 }
 
+/// What a statement list is, where the answer changes what its statements cost.
+///
+/// The step budget is charged once per statement, and a statement is only
+/// something the program *runs* when the tree-walking VM runs it. Two lists are
+/// not statement lists in that sense, and the difference is the whole reason this
+/// is threaded down: see [`Compiler::statement`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyKind {
+    /// An ordinary statement list. Every statement in it is charged.
+    Statements,
+    /// The direct body of a `module` declaration: the names an `export` among
+    /// them publishes are read by the declaration rather than run.
+    Module,
+    /// The `has` fields and `to can` methods of an `object` declaration: the
+    /// declaration collects them rather than running them as statements.
+    ObjectDeclarations,
+}
+
 struct Compiler {
     constants: Vec<Constant>,
     /// Text constants already in the pool, so a name used a hundred times is
@@ -103,7 +121,19 @@ impl Compiler {
             decl.kind,
             BlockKind::Main | BlockKind::Function | BlockKind::Method
         );
-        self.statements(decl.body, &mut code, &mut blocks, depth, reads_value)?;
+        let body_kind = match decl.kind {
+            BlockKind::Module => BodyKind::Module,
+            BlockKind::Object => BodyKind::ObjectDeclarations,
+            _ => BodyKind::Statements,
+        };
+        self.statements(
+            decl.body,
+            &mut code,
+            &mut blocks,
+            depth,
+            reads_value,
+            body_kind,
+        )?;
 
         Ok(Block {
             name: decl.name.to_string(),
@@ -139,6 +169,9 @@ impl Compiler {
     /// for its enclosing block, which then left it behind in turn. Nothing
     /// noticed, because the frame that finally discarded the stack also
     /// discarded the answer to what a program was worth.
+    ///
+    /// `body_kind` says what `body` is, where that decides whether its statements
+    /// are charged a step; see [`BodyKind`] and [`Compiler::statement`].
     fn statements(
         &mut self,
         body: &[Stmt],
@@ -146,15 +179,48 @@ impl Compiler {
         blocks: &mut Vec<Block>,
         depth: usize,
         reads_value: bool,
+        body_kind: BodyKind,
     ) -> Result<()> {
         for stmt in body {
-            self.statement(stmt, code, blocks, depth, reads_value)?;
+            self.statement(stmt, code, blocks, depth, reads_value, body_kind)?;
         }
         Ok(())
     }
 
     /// `reads_value` says whether the block `stmt` is in has its value read; see
     /// [`Compiler::statements`].
+    ///
+    /// The marker goes in before the statement's own instructions and is the only
+    /// place the step budget is charged, so the file counts one step per
+    /// statement — the unit the tree-walking VM charges — instead of one per
+    /// instruction. Without it the same program reached the budget at different
+    /// points on the two engines, and so was stopped by different limits.
+    ///
+    /// The statements the tree-walking VM does *not* charge are the ones it never
+    /// runs as statements, because the declaration they belong to reads them
+    /// instead. There are two kinds, and `body_kind` is what tells them from an
+    /// ordinary statement:
+    ///
+    /// - an `export` in the direct body of a `module` declaration. That VM reads
+    ///   the names when the declaration runs and skips `execute_statement` for
+    ///   them. Charging one here made a module body cost more on this engine than
+    ///   on the other by its number of `export`s. An `export` anywhere else is
+    ///   still charged: outside a declaration the tree-walking VM runs it as an
+    ///   ordinary statement.
+    /// - a `has` field or a `to can` method inside an `object` declaration.
+    ///   `declare_object` collects both with a bare `evaluate` and
+    ///   `make_function`, so only the `object` statement itself costs a step
+    ///   there. Charging one per declaration made an object cost more here than on
+    ///   the other by its number of fields plus its number of methods, so the
+    ///   same program was stopped by the budget at a different statement — the
+    ///   divergence this phase exists to close. A `has` outside a declaration is
+    ///   still charged, and still fails at runtime on both engines.
+    ///
+    /// The statements that follow the declarations in an object body are *not* in
+    /// this list: the compiler splits that body in two (see `Statement::Object`),
+    /// and the other half compiles into the enclosing block, where every statement
+    /// of it is charged, exactly as `declare_object` charges the `run_block` it
+    /// puts them through.
     fn statement(
         &mut self,
         stmt: &Stmt,
@@ -162,8 +228,20 @@ impl Compiler {
         blocks: &mut Vec<Block>,
         depth: usize,
         reads_value: bool,
+        body_kind: BodyKind,
     ) -> Result<()> {
         let line = stmt.span.line as u32;
+        let charges_step = match body_kind {
+            BodyKind::Statements => true,
+            BodyKind::Module => !matches!(&stmt.statement, Statement::Export { .. }),
+            BodyKind::ObjectDeclarations => !matches!(
+                &stmt.statement,
+                Statement::Has { .. } | Statement::Method { .. }
+            ),
+        };
+        if charges_step {
+            emit(code, Opcode::Nop, STATEMENT_MARKER, 0, line);
+        }
 
         match &stmt.statement {
             Statement::Say(expr) => {
@@ -225,14 +303,28 @@ impl Compiler {
                 // The `end` of an `if` with no `else` is where a false
                 // condition lands, so there is one jump either way.
                 let to_else = jump(code, Opcode::JumpIfFalse, line);
-                self.statements(then_branch, code, blocks, depth, false)?;
+                self.statements(
+                    then_branch,
+                    code,
+                    blocks,
+                    depth,
+                    false,
+                    BodyKind::Statements,
+                )?;
                 if else_branch.is_empty() {
                     patch_here(code, to_else);
                 } else {
                     let to_end = jump(code, Opcode::Jump, line);
                     let else_start = code.len() as u32;
                     patch(code, to_else, else_start);
-                    self.statements(else_branch, code, blocks, depth, false)?;
+                    self.statements(
+                        else_branch,
+                        code,
+                        blocks,
+                        depth,
+                        false,
+                        BodyKind::Statements,
+                    )?;
                     patch_here(code, to_end);
                 }
             }
@@ -243,7 +335,7 @@ impl Compiler {
                 // `end` of a one-branch block is that jump's landing pad.
                 emit(code, Opcode::Not, 0, 0, line);
                 let to_end = jump(code, Opcode::JumpIfFalse, line);
-                self.statements(body, code, blocks, depth, false)?;
+                self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
                 patch_here(code, to_end);
             }
             Statement::ForEach {
@@ -256,7 +348,7 @@ impl Compiler {
                 let top = code.len() as u32;
                 let variable = self.text(variable);
                 emit(code, Opcode::Store, variable, 0, line);
-                self.statements(body, code, blocks, depth, false)?;
+                self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
                 emit(code, Opcode::Jump, top, 0, line);
             }
             Statement::ForRange {
@@ -279,7 +371,7 @@ impl Compiler {
                 let top = code.len() as u32;
                 let variable = self.text(variable);
                 emit(code, Opcode::Store, variable, 0, line);
-                self.statements(body, code, blocks, depth, false)?;
+                self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
                 emit(code, Opcode::Jump, top, 0, line);
             }
             Statement::Repeat { count, body } => {
@@ -288,14 +380,14 @@ impl Compiler {
                 let top = code.len() as u32;
                 let counter = self.text(REPEAT_COUNTER);
                 emit(code, Opcode::Store, counter, 0, line);
-                self.statements(body, code, blocks, depth, false)?;
+                self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
                 emit(code, Opcode::Jump, top, 0, line);
             }
             Statement::While { condition, body } => {
                 let top = code.len() as u32;
                 self.expr(condition, code, line)?;
                 let to_end = jump(code, Opcode::JumpIfFalse, line);
-                self.statements(body, code, blocks, depth, false)?;
+                self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
                 emit(code, Opcode::Jump, top, 0, line);
                 patch_here(code, to_end);
             }
@@ -408,7 +500,7 @@ impl Compiler {
                 emit(code, Opcode::DefObject, block, parent, line);
                 let name = self.text(name);
                 emit(code, Opcode::Store, name, 0, line);
-                self.statements(&rest, code, blocks, depth, false)?;
+                self.statements(&rest, code, blocks, depth, false, BodyKind::Statements)?;
             }
             Statement::Try {
                 body,
@@ -452,7 +544,7 @@ impl Compiler {
                     )?
                 };
                 emit(code, Opcode::Try, catch, finally, line);
-                self.statements(body, code, blocks, depth, false)?;
+                self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
                 // The marked `NOP` closes the protected region: it is where the
                 // handlers are popped and the `finally` runs, whether or not the
                 // protected code failed. See `Opcode::Nop` and
@@ -502,6 +594,7 @@ impl Compiler {
                     &mut module_body.blocks,
                     depth + 1,
                     false,
+                    BodyKind::Module,
                 )?;
                 let index = blocks.len() as u32;
                 blocks.push(module_body);

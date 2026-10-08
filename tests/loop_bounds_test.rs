@@ -541,3 +541,58 @@ fn edge_deeply_nested_loops_terminate() {
         )
     });
 }
+
+// ---------------------------------------------------------------------------
+// edge: the count of a `repeat`, read as turns
+// ---------------------------------------------------------------------------
+
+/// Edge: the count is the number of *whole* turns before the fraction, and a
+/// `break` in that body leaves it there. `repeat 2.5 times` is two turns, so the
+/// body runs once and prints one value; the third turn the fraction asks about
+/// does not exist.
+#[test]
+fn edge_a_fractional_count_is_its_whole_turns_and_a_break_leaves_one_of_them() {
+    let source = concat!(
+        "repeat 2.5 times\n",
+        "    say \"turn\"\n",
+        "    break\n",
+        "end\n",
+    );
+
+    let mut vm = Vm::new();
+    vm.run(&parse(source))
+        .expect("a fractional count must not fail the program");
+
+    assert_eq!(
+        vm.take_output(),
+        vec!["turn".to_string()],
+        "2.5 turns is two whole turns, and the break leaves the first"
+    );
+}
+
+/// Edge: a negative count runs no turns at all, and a `break` written in that
+/// body is never raised — a loop whose body cannot run cannot report that a
+/// `break` was found outside a loop. The magnitude makes no difference: a count
+/// of `-1e300` has no turn before the first one to count back to either.
+#[test]
+fn edge_a_negative_count_runs_no_turns_and_raises_no_break() {
+    for count in ["-5", "-0.5", "-1e300"] {
+        let source = format!(
+            "set n to 0\nrepeat {count} times\n    set n to n + 1\n    say n\n    break\nend\nsay n\n"
+        );
+
+        let mut vm = Vm::new();
+        vm.run(&parse(&source)).unwrap_or_else(|error| {
+            panic!(
+                "count {} must run no turns without failing: {:?}",
+                count, error
+            )
+        });
+        assert_eq!(
+            vm.take_output(),
+            vec!["0".to_string()],
+            "count {} must leave the statement after the loop as the only thing printed",
+            count
+        );
+    }
+}

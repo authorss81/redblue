@@ -185,6 +185,49 @@ pub fn expect_range_number(value: &Value, argument: &str, span: Span) -> Result<
     }
 }
 
+/// The number of turns a `repeat <count> times` loop takes.
+///
+/// A loop needs a whole number of turns, so the count — an `f64` like every
+/// number — is turned into one here rather than by the `as i64` cast each VM
+/// used with its own `_ => 0` beside it. Two engines that each narrowed a count
+/// themselves agree only by accident, and the shapes a cast cannot answer are
+/// the ones where they had least reason to:
+///
+/// - A count that is not a number is not a loop at all, and runs no times. That
+///   is the behaviour `for each x in 5` already has, and `repeat "five" times`
+///   is pinned to it.
+/// - A count is the number of *whole* turns before the fraction, so
+///   `repeat 2.5 times` runs twice and `repeat -5 times` runs no times: there is
+///   no turn before the first one for a negative count to be counted back from.
+/// - A count past [`i64::MAX`] saturates rather than refusing, because the bound
+///   on turns is [`crate::vm::MAX_ITERATIONS`] and not the width of this counter:
+///   such a loop is stopped by the iteration cap, which names the limit that
+///   stopped it, or left by a `break` on its first turn.
+/// - A count that is not finite is refused by [`finite_number`], the refusal
+///   every computed number gets. A Redblue program cannot write one — the number
+///   door refuses it before a loop ever sees it — so this is the second door, and
+///   it is here so that the first one is not the only thing between a `NaN` and
+///   a turn count.
+///
+/// Both VMs call this, so a count cannot be read two ways.
+pub fn expect_repeat_count(value: &Value, span: Span) -> Result<i64> {
+    let count = match value {
+        Value::Number(n) => *n,
+        _ => return Ok(0),
+    };
+    let count = finite_number(count, span)?;
+    // `trunc` towards zero is what leaves `-5` at zero rather than at a negative
+    // turn count, which a loop cannot have.
+    let turns = count.trunc();
+    if turns <= 0.0 {
+        return Ok(0);
+    }
+    if turns >= i64::MAX as f64 {
+        return Ok(i64::MAX);
+    }
+    Ok(turns as i64)
+}
+
 /// Whether a `for each x from current to end by step` range has another value
 /// to visit.
 ///

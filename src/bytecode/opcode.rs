@@ -22,26 +22,51 @@
 /// for one.
 pub const END_TRY_MARKER: u32 = u32::MAX;
 
+/// The `arg` that makes a [`Opcode::Nop`] the start of a statement.
+///
+/// The compiler emits exactly one of these immediately before each statement's
+/// code, so the file says where its statements are rather than leaving a reader
+/// to infer it. The step budget is charged here and nowhere else, which is what
+/// makes the bytecode VM count **one step per statement** — the unit the
+/// tree-walking VM charges — rather than one per instruction. The two then reach
+/// the same limit on the same turn of the same loop, and report it in the same
+/// words; counting instructions instead meant the two budgets were crossed at
+/// different points of the same program, so the same program was stopped by a
+/// different limit on each engine.
+///
+/// A version-4 file carries no such marker, so it would be charged nothing at
+/// all: [`FORMAT_VERSION`](super::FORMAT_VERSION) moved to 5 rather than let an
+/// old file run under a budget it does not have.
+///
+/// The value is one below [`END_TRY_MARKER`], which is the other reserved
+/// operand a `NOP` can carry. Like that one it can never be a valid index into a
+/// constant pool or a block list, so the two meanings cannot be confused.
+pub const STATEMENT_MARKER: u32 = u32::MAX - 1;
+
 /// One instruction. The byte values are stable; see [`Opcode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
     /// Does nothing.
     ///
-    /// The one exception is a `NOP` whose `arg` is [`END_TRY_MARKER`]: that one
-    /// ends the protected region of the `try` whose `TRY` is above it, popping
-    /// its handlers and running its `finally`, so the protected region is the
-    /// run of instructions between the two rather than the rest of the block.
-    /// The compiler emits exactly one such `NOP` per `try`, immediately after the
-    /// protected code. Without it a failure in a statement *after* the `try`
-    /// would be caught by that `try`, and a `finally` would never run at all on
-    /// the path where nothing failed.
+    /// The two exceptions are `NOP`s whose `arg` is a marker. A `NOP` whose `arg`
+    /// is [`END_TRY_MARKER`] ends the protected region of the `try` whose `TRY`
+    /// is above it, popping its handlers and running its `finally`, so the
+    /// protected region is the run of instructions between the two rather than
+    /// the rest of the block. The compiler emits exactly one such `NOP` per
+    /// `try`, immediately after the protected code. Without it a failure in a
+    /// statement *after* the `try` would be caught by that `try`, and a `finally`
+    /// would never run at all on the path where nothing failed.
     ///
-    /// The marker rides on this byte rather than on one of its own because the
-    /// opcode table was frozen when the marker was defined: byte 46,
+    /// A `NOP` whose `arg` is [`STATEMENT_MARKER`] begins a statement: it does
+    /// nothing itself, and is the point at which the statement is charged to the
+    /// step budget.
+    ///
+    /// The markers ride on this byte rather than on one of their own because the
+    /// opcode table was frozen when the first marker was defined: byte 46,
     /// [`Opcode::DeclareConst`], was the end of the table, so an `END_TRY` byte of
     /// its own would have had to renumber an instruction whose byte is part of the
-    /// file format. What distinguishes the two meanings is the operand, not the
+    /// file format. What distinguishes the meanings is the operand, not the
     /// byte — see [`END_TRY_MARKER`].
     Nop = 0,
     /// Pushes `constants[arg]`.

@@ -13,27 +13,43 @@ MAJOR beside it, half of which the round-6 review's BLOCKER (§16) settled — t
 other half is open. §15 is a race in the corpus harness that made the
 both-VMs gate red for reasons that had nothing to do with either VM, and is fixed
 in round 5. §16 is the round-6 review: three BLOCKERs, all fixed here, one of
-which uncovered two more. Nothing here is worked around to make a gate pass.
+which uncovered two more. §19 was found by the round-6 two-engine sweep, left open by
+that round, returned as a BLOCKER by the round-7 review, and is fixed in round 7. §20–§22
+are the round-8 review: a BLOCKER that is §19's class again, with two sections beside it —
+a MAJOR the same review found, and the defect that fix uncovered, which is a
+both-VMs-answer-identically violation in its own right. All three are fixed here. Nothing
+here is worked around to make a gate pass.
 
-## 1. `rbops/verify.sh` is not in this checkout
+## 1. ~~`rbops/verify.sh` is not in this checkout~~ — corrected, it is
 
-`./rbops/verify.sh phase-025` → `No such file or directory`. `ls -a` of the
-project root shows `.github`, `.gitignore`, `AGENTS.md`, `phases/`, `src/`,
-`tests/`, `examples/`, `modules/`, `docs/`, `tooling/` and no `rbops/`. The
-pipeline lives outside the working directory and the phase prompt forbids
-inspecting it, so the fourth gate could not be run here. The other three were,
-plus the checks the phase's definition of done names by hand:
+Recorded in round 0 and repeated in round 5, and **wrong in both**. `./rbops/verify.sh`
+is `No such file or directory` because `rbops/` is the pipeline repository and the
+project checkout is its sibling, not a child:
 
-- `cargo fmt --all -- --check` — clean
-- `cargo clippy --all-targets -- -D warnings` — clean
-- `cargo test --all-targets` — 516 passed, 0 failed, 0 ignored
-- `rb test` — 252 run, 252 passed
-- `examples/*.rb`, `modules/*.rb` — 8/8 exit 0
-- `tests/loop_bounds_test.rs` — 22 passed
-- `tests/bytecode_vm_test.rs` — 33 passed, including both differential tests
+```
+$ ls ../rbops/
+agents  baseline.json  dispatch.sh  gen-prompts.sh  phases.json  setup-deploy-key.ps1  smoke.sh  verify.sh
+$ ../rbops/verify.sh phase-025 ; echo "exit=$?"
+…
+║ VERIFY PASS — phase-025                ║
+exit=0
+```
 
-Recorded so a human can run the real gate; nothing was fabricated in its place.
-(The counts are round 0's; rounds 2 and 3 are in REPORT.md's Gates table.)
+`verify.sh` resolves `RBOPS_ROOT` from its own `BASH_SOURCE` (with an
+`RBOPS_ROOT=` override so it can be exercised against a fixture), resolves every path
+before it changes directory, and takes the project directory from
+`RBOPS_PROJECT_DIR`, which defaults to `.`. Run from the project root it therefore
+works, and it has worked in every round of this phase that ran it — the rounds that
+called it un-runnable did not run it. The full output is in REPORT.md under "Gates".
+
+What rounds that skipped it did instead is worse than a gap: they printed a hand-run
+table in the gate's place and called it the gate. A table of checks somebody chose is
+not the authority on whether the phase is real, which is why the round-6 review made
+that a BLOCKER and why the record here is a correction rather than a deletion.
+
+The numbers round 0 recorded (516 passed, 252 `rb test`, 8/8 examples) are kept as
+that round's measurements. They are not the gate's numbers and were never checked
+against it.
 
 ## 2. Corpus entry names that stated the defect
 
@@ -980,3 +996,295 @@ second is green on both sides of it, which is what it is for.
 it" with nothing qualifying it, and `docs/GRAMMAR.md` repeated it — so the two
 sentences that were in conflict are now one rule in both files, with a worked example
 whose output was taken from the interpreter rather than written by hand.
+
+## 19. A program that runs to a resource limit stops on a *different* limit on each engine — **fixed**
+
+Found by round 6's two-engine sweep (18,000 programs over every loop form crossed with
+every block that can appear inside one, then a deeper 4,000). Round 6 left it open on the
+grounds that fixing it means changing what both engines charge a step for; the round-7
+review returned it as a **BLOCKER**, because an open divergence in the words a failure
+uses is a violation of the both-VMs-answer-identically invariant whatever the reason for
+leaving it open. It is fixed.
+
+The smallest program that showed it, taken from seed 5 of that sweep:
+
+```
+$ cat target/tmp/div33.rb
+set n to 0
+say "m"
+repeat 1e300 times
+    repeat 2 times
+        set n to n + 1
+        skip
+    end
+    set n to n + 1
+end
+say n
+
+$ ./target/debug/rb run target/tmp/div33.rb; echo "exit=$?"
+m
+Error: RuntimeError: Maximum of 1000000 iterations reached in a 'repeat' loop
+  --> target/tmp/div33.rb:3:1
+exit=1
+
+$ ./target/debug/rb compile target/tmp/div33.rb -o target/tmp/div33.rbc
+$ ./target/debug/rb vm target/tmp/div33.rbc; echo "exit=$?"
+m
+Error: RuntimeError: Step budget of 10000000 reached before the program finished
+  --> 5:1
+exit=1
+```
+
+Both engines bounded the program, so INVARIANTS 5 held; what disagreed was *which* limit
+was reached first, and therefore the words and the span of the failure. The cause was the
+accounting, not the loop: the tree-walking VM charged `MAX_STEPS` per statement executed
+and the bytecode VM per instruction executed, so the same source reached a million
+statements and ten million instructions at different points in the same loop.
+
+**Fixed by charging the same unit on both engines** — one statement, plus one turn of a
+loop, which is the unit the tree already used:
+
+| Charged | Tree-walking VM | Bytecode VM |
+|---|---|---|
+| one statement | once per statement executed | the `NOP` the compiler now writes at the start of every statement |
+| one loop turn | `charge_iteration` | `charge_loop`, at the same point in the same loop |
+
+The same program now stops the same way:
+
+```
+$ ./target/debug/rb run target/tmp/div33.rb; echo "exit=$?"
+Error: RuntimeError: Maximum of 1000000 iterations reached in a 'repeat' loop
+  --> target/tmp/div33.rb:3:1
+exit=1
+
+$ ./target/debug/rb vm target/tmp/div33.rbc; echo "exit=$?"
+Error: RuntimeError: Maximum of 1000000 iterations reached in a 'repeat' loop
+  --> 3:1
+exit=1
+```
+
+(the leading `m` is absent from both because `say` is printed when the program finishes and
+this one does not finish; that is the same on both engines and is not part of the defect.)
+
+How the bytecode VM knows where a statement is, and why it is a marker rather than a
+count: the opcode table is frozen — byte 46 was the last instruction when the first `NOP`
+marker was defined — so the marker is a second *operand* a `NOP` can carry rather than an
+opcode of its own, exactly as `END_TRY_MARKER` is. `STATEMENT_MARKER` is `0xFFFFFFFE`, it
+indexes nothing, and a plain filler `NOP` stays a filler. `FORMAT_VERSION` moved 4 → 5 and
+a version-4 file is refused, because it has no marker and would be charged nothing at all.
+
+Verified rather than asserted, three ways:
+
+- `edge_both_vms_enforce_the_same_step_budget` (`tests/bytecode_vm_test.rs`) now pins both
+  orders — the cap reached first, and the budget reached first — on a multi-statement body,
+  with the exact words asserted and the turns counted. Restoring per-instruction charging
+  fails it.
+- the 700-run sweep of this round (140 loop programs × 5 pairs of lowered limits) has **0**
+  disagreements; the same sweep against the bytecode VM as it stood before this round has
+  **12**, all of this shape.
+- a loop is still stopped by its own cap rather than by the budget, which is the property
+  `published_limits_are_finite_and_positive` states and which the old accounting broke on
+  the bytecode VM: ten turns of the nested body cost ninety steps, so a hundred-step budget
+  is not spent and the cap is what reports.
+
+What is left open, and is not this: nothing. The two options this section named — same unit,
+or name the loop — are not alternatives here, because naming the loop needs the two engines
+to reach the *same point* first, which is the thing being fixed. Charging the same unit was
+therefore the only one of the two available.
+
+## 20. An `object` declaration's fields and methods cost a step each on one engine and none on the other — **fixed**
+
+Found by the round-8 review, as a **BLOCKER** and as the second instance of §19: the step
+budget is charged in the same unit on both engines now, but the two do not count the same
+*statements*, so a program with an `object` declaration in it still reaches the budget at a
+different point on each engine.
+
+`has` fields and `to can` methods are not statements either engine runs. The tree-walking
+VM's `declare_object` (`src/vm.rs:1520`) collects both with a bare `self.evaluate` and
+`self.make_function`, so only the `object` statement itself is charged. The bytecode
+compiler wrote a statement marker for them like every other statement, and each marker is
+where `charge_step` runs — so an object with *H* fields and *M* methods cost `1 + H + M +
+rest` steps on the bytecode VM and `1 + rest` on the tree.
+
+The smallest program that showed it, two fields and two methods and nothing else:
+
+```
+$ cat target/tmp/round8.rb
+object Thing
+    has size default 1
+    has label default "x"
+    to can grow(amount)
+        say amount
+    end
+    to can shrink(amount)
+        say amount
+    end
+    set Thing.size to 2
+end
+say Thing.size
+
+$ ./target/debug/rb compile target/tmp/round8.rb > /dev/null
+
+# three statements, so three steps on the tree
+$ REDBLUE_MAX_STEPS=3 ./target/debug/rb run target/tmp/round8.rb; echo "exit=$?"
+2
+exit=0
+
+# the same budget, four declarations later, on the bytecode VM
+$ REDBLUE_MAX_STEPS=3 ./target/debug/rb vm target/tmp/round8.rbc; echo "exit=$?"
+Error: RuntimeError: Step budget of 3 reached before the program finished
+  --> 4:1
+exit=1
+
+# and it takes four more steps than the tree before it agrees to run at all
+$ REDBLUE_MAX_STEPS=6 ./target/debug/rb vm target/tmp/round8.rbc; echo "exit=$?"
+Error: RuntimeError: Step budget of 6 reached before the program finished
+  --> 12:1
+exit=1
+```
+
+Both after the fix, and the second program is what says the declarations are free rather
+than merely cheaper:
+
+```
+$ REDBLUE_MAX_STEPS=3 ./target/debug/rb vm target/tmp/round8.rbc; echo "exit=$?"
+2
+exit=0
+
+$ REDBLUE_MAX_STEPS=2 ./target/debug/rb run target/tmp/round8.rb; echo "exit=$?"
+Error: RuntimeError: Step budget of 2 reached before the program finished
+  --> target/tmp/round8.rb:12:1
+exit=1
+```
+
+**Fixed in the compiler**, by not writing a marker for a declaration the declaration
+collects: `BodyKind::ObjectDeclarations` in `src/bytecode/codegen.rs` replaces the bare
+`module_body` flag, and `charges_step` is false for a `Has` or a `Method` in that body
+only. The alternative the review offered — charging a step per declaration in
+`declare_object` — was not taken, because it would make the two engines disagree the other
+way: the tree's `declare_object` charges none.
+
+The statements that *follow* the declarations in an `object` body are not in that list.
+The compiler splits such a body in two (§9), and the other half compiles into the
+enclosing block, where every statement of it is marked and charged — which is what the
+tree's `run_block(&rest)` charges. A method's *body* is likewise an ordinary statement
+list, so what it runs is still charged.
+
+Verified rather than asserted:
+
+- `an_object_declaration_marks_only_the_statements_it_runs`
+  (`tests/bytecode_test.rs`) pins the compiled shape from both ends: the object block
+  holds `PUSH_CONST`, `DEF_FIELD`, `DEF_METHOD` and *no `NOP` at all*, while the `object`
+  statement, the `set` after the declarations, the `say` and the method body are all
+  marked. Restoring `BodyKind::ObjectDeclarations => true` fails it.
+- `edge_an_object_declaration_is_charged_the_same_step_on_both_engines`
+  (`tests/bytecode_vm_test.rs`) asks the engines instead of the compiler: the program's
+  exact cost (3) runs on both, one step under it (2) stops both with the same words, and
+  an `object` with no declarations costs the same 2 as one with four. A fifth program
+  calls a method, so the body it runs is charged too — six statements' worth, asserted
+  from both sides of the budget. Restoring the marker fails it.
+- two pinned instruction sequences moved with the compiler's output and were updated to
+  the new bytes — `functions_tests_and_methods_become_named_blocks` and
+  `a_field_default_is_compiled_before_the_declaration_that_consumes_it`, the latter with
+  its five operand-index assertions. No assertion was weakened and no test was removed.
+
+## 21. A loop's `STORE` reached with no sequence to draw from was an `expect`, not a diagnostic — **fixed**
+
+Found by the round-8 review as a **MAJOR**, against `src/bytecode/vm.rs`'s `store`: the
+loop-variable path read the loop's sequence with `.expect("a sequence")`, and
+`src/bytecode/format.rs` states that a hostile file is a diagnostic rather than a panic.
+
+**The reviewer's premise was half right, and the half that was wrong is the more
+interesting half.** A hand-crafted file *cannot* reach that `expect`: `store` reads
+`has_next` first, an entry with no sequence has nothing to peek at, and the exhausted path
+leaves the loop before the `expect`. What the review could not have known is that a
+**compiled** program could reach the same state — through `prepare_exit`, which is §22.
+
+So the fix is in two parts, and both are needed:
+
+- the panic is gone. `store` reports `no_sequence(kind, span)` — a `RuntimeError` naming
+  the loop and what did not run — in the same place `pop`, `constant` and `child_path`
+  report what they cannot resolve. `edge_a_loop_variable_stored_with_no_sequence_is_an_error_not_a_panic`
+  (`tests/bytecode_vm_test.rs`) builds the file: the `PUSH_CONST` that builds a loop's
+  list is replaced by a `JUMP` onto the loop's `STORE`, the untouched file runs first so
+  the failure is about that one instruction and not about the loop's shape, and the
+  malformed one is required to fail with a message that says `no sequence`. Before the
+  fix it silently ran the rest of the block instead.
+- the state is no longer reachable from compiled source at all, which is §22.
+
+## 22. A loop abandoned by a failing `finally` was re-entered by `prepare_exit` — **fixed**
+
+Not found by the review: found by the corpus the moment §21's fix turned a masked state
+into a reported one, and the real defect underneath both.
+
+The shape is a `try` whose `finally` fails on the way out of a `break`, with an enclosing
+`catch` to take the failure. The bytecode VM handled the failure, `unwind_loops` dropped
+the loops the inner `try` was written inside — the loop the `break` was leaving — and the
+handler put the frame after the `try`. Then `prepare_exit` made an entry for that loop
+again (`self.loop_entry(owner.frame, owner.site)`, for a case that no longer arises: every
+loop draws its entry before its body can run), so `leave_owned_loop` found one to leave and
+sent the frame to *that* loop's exit — over the position the handler had just chosen.
+
+```
+$ cat target/tmp/abandoned.rb
+set log to ""
+set caught to no
+try
+    repeat 3 times
+        for each i in [1, 2]
+            try
+                break
+            finally
+                set bad to 1 + "one"
+            end
+        end
+        set log to log + "."
+    end
+catch error
+    set caught to yes
+end
+say caught
+say log
+
+$ ./target/debug/rb run target/tmp/abandoned.rb; echo "exit=$?"      # the tree: the turn ran nothing
+yes
+
+exit=0
+
+$ ./target/debug/rb vm target/tmp/abandoned.rbc; echo "exit=$?"      # before the fix
+yes
+.
+exit=0
+```
+
+The bytecode engine ran `set log to log + "."` — a statement inside the turn that failed.
+The tree-walking VM propagates the failure out of the loop, so the rest of the body and
+the loop's own back edge never run, and `log` stays empty.
+
+**Why nothing caught it**, and this is the part worth recording: the two engines landed on
+the same instruction anyway. `leave_loop` sent the frame to the inner loop's *exit*, which
+for this program is the `set log to log + "."` — and the abandoned turn then ran that
+statement, jumped to the `repeat`'s back edge, hit the `repeat`'s `STORE` with no sequence,
+and was silently left again, which is `set_ip(exit)` — the outer loop's exit, which is the
+statement after the `try`, which is exactly where the handler had put the frame. Two
+masked defects cancelled: §21's invented loop and this one's re-created one. The program's
+visible answer was right by accident, and `tests/test_loop_control.rb:394` — which is this
+program without the `set` — hid the rest, because with nothing between the inner loop and
+the `repeat`'s back edge both paths reach the same instruction.
+
+**Fixed** by not making an entry that the failure handling has already unwound:
+`prepare_exit` keeps whatever entry the loop had and makes none. Every loop draws its
+entry before its body can run — a sequence loop at its `GET_ITER` or `GET_RANGE`, a `while`
+at the condition that let the turn begin — so the only way to reach the exit with no entry
+is this one, and `leave_owned_loop` and `turn_over_to` both already end at nothing when
+there is none, which is the right answer: the loop was abandoned and the handler has
+already placed the frame.
+
+`edge_a_loop_abandoned_by_a_failing_finally_does_not_run_the_rest_of_its_body`
+(`tests/bytecode_vm_test.rs`) is the program above, asked of both engines with the output
+asserted: `yes` and an empty line, with the assertion that the `set` after the inner loop
+is inside the turn that failed. Restoring the `loop_entry` call fails it, and fails
+`a_corpus_of_programs_runs_identically_on_both_vms` and
+`edge_the_two_vms_report_the_same_failure_for_every_corpus_program` with it — which is how
+the defect was found: `tests/test_loop_control.rb` hit it through `no_sequence` before any
+test of its own existed.

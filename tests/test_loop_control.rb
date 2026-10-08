@@ -849,3 +849,47 @@ test "loop_control_edge_a_range_loop_that_runs_no_turns_is_unaffected_by_both"
     end
     expect turned to be 2
 end
+
+test "loop_control_edge_a_fractional_repeat_count_is_its_whole_turns"
+    // 2.5 turns is two turns: the fraction has no turn of its own to run.
+    set turned to 0
+    repeat 2.5 times
+        set turned to turned + 1
+    end
+    expect turned to be 2
+
+    // A `break` in that body leaves the loop after the first whole turn, and a
+    // `skip` leaves the rest of a turn out without ending the loop.
+    set broke to 0
+    repeat 2.5 times
+        set broke to broke + 1
+        break
+    end
+    expect broke to be 1
+
+    set skipped to ""
+    repeat 3.5 times
+        set skipped to skipped + "."
+        skip
+        set skipped to skipped + "x"
+    end
+    expect skipped to be "..."
+end
+
+test "loop_control_edge_a_repeat_count_with_no_turns_in_it_runs_nothing"
+    // A negative count has no turn to start from, so the loop has no body to
+    // leave: the `break` written in it is never reached, and is not a `break`
+    // outside a loop either.
+    set turned to 0
+    repeat -5 times
+        set turned to turned + 1
+        break
+    end
+    expect turned to be 0
+
+    set printed to "after"
+    repeat -1 times
+        set printed to "inside"
+    end
+    expect printed to be "after"
+end

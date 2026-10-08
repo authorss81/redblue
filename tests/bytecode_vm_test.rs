@@ -17,7 +17,7 @@ use std::process::Command;
 
 use redblue::bytecode::vm::BytecodeVm;
 use redblue::bytecode::{compile_source, Instruction, Opcode};
-use redblue::{run_isolated, Error};
+use redblue::{expect_repeat_count, run_isolated, Error, Value};
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -170,6 +170,69 @@ fn assert_agrees_capped(source: &str, max_iterations: usize) -> (Outcome, Outcom
     assert_eq!(
         tree, byte,
         "the two VMs disagree under a cap of {max_iterations}\n--- source ---\n{source}\
+         --- tree ---\n{tree:?}\n--- bytecode ---\n{byte:?}\n"
+    );
+    (tree, byte)
+}
+
+/// [`tree_walk_capped`] with the step budget lowered as well.
+///
+/// A corpus program cannot reach either published limit — a program that needs a
+/// million turns takes a million turns to run — so a disagreement about which of
+/// the two stops a program first is invisible to it. This is how such a program
+/// is asked about, with both limits brought down together so that their order is
+/// a question about the accounting and not about how long a loop takes.
+fn tree_walk_bounded(source: &str, max_iterations: usize, max_steps: usize) -> Outcome {
+    let tokens = match redblue::lexer::Lexer::tokenize(source) {
+        Ok(tokens) => tokens,
+        Err(error) => return failed(failure_of(&error)),
+    };
+    let ast = match redblue::parser::parse(tokens) {
+        Ok(ast) => ast,
+        Err(error) => return failed(failure_of(&error)),
+    };
+    if let Err(error) = redblue::analyzer::analyze(&ast) {
+        return failed(failure_of(&error));
+    }
+    let mut vm = redblue::Vm::with_limits(max_iterations, max_steps);
+    let result = vm.run(&ast);
+    Outcome {
+        output: vm.take_output(),
+        result: result
+            .map(|value| value.to_string())
+            .map_err(|error| failure_of(&error)),
+    }
+}
+
+/// [`bytecode_bounded`] through the bytecode compiler.
+fn bytecode_bounded(source: &str, max_iterations: usize, max_steps: usize) -> Outcome {
+    let chunk = match compile_source(source) {
+        Ok(chunk) => chunk,
+        Err(error) => return failed(failure_of(&error)),
+    };
+    let mut vm = BytecodeVm::with_limits(max_iterations, max_steps);
+    let result = vm.run(&chunk);
+    Outcome {
+        output: vm.take_output(),
+        result: result
+            .map(|value| value.to_string())
+            .map_err(|error| failure_of(&error)),
+    }
+}
+
+/// [`assert_agrees`] with both limits lowered, and both outcomes returned.
+#[track_caller]
+fn assert_agrees_bounded(
+    source: &str,
+    max_iterations: usize,
+    max_steps: usize,
+) -> (Outcome, Outcome) {
+    let tree = tree_walk_bounded(source, max_iterations, max_steps);
+    let byte = bytecode_bounded(source, max_iterations, max_steps);
+    assert_eq!(
+        tree, byte,
+        "the two VMs disagree under a cap of {max_iterations} iterations and a budget \
+         of {max_steps} steps\n--- source ---\n{source}\
          --- tree ---\n{tree:?}\n--- bytecode ---\n{byte:?}\n"
     );
     (tree, byte)
@@ -1011,8 +1074,39 @@ fn generated_corpus() -> Vec<(String, String)> {
         "set n to 0\nrepeat 2.5 times\n    set n to n + 1\nend\nsay n\n".to_string(),
     );
     add(
+        "flow/repeat-a-fraction-with-a-break-in-it",
+        "set n to 0\nrepeat 2.5 times\n    set n to n + 1\n    say n\n    break\nend\nsay n\n"
+            .to_string(),
+    );
+    add(
+        "flow/repeat-a-fraction-with-a-skip-in-it",
+        "set log to \"\"\nrepeat 3.5 times\n    set log to log + \".\"\n    skip\n    set log to log + \"x\"\nend\nsay log\n"
+            .to_string(),
+    );
+    add(
+        "flow/repeat-a-negative-count",
+        "set n to 0\nrepeat -5 times\n    set n to n + 1\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/repeat-a-negative-count-with-a-break-that-never-runs",
+        "set n to 0\nrepeat -1 times\n    set n to n + 1\n    break\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/repeat-a-count-too-large-to-count",
+        "set n to 0\nrepeat 1e300 times\n    set n to n + 1\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/repeat-a-count-too-large-to-count-with-a-break-in-it",
+        "set n to 0\nrepeat 99999999999999999999 times\n    set n to n + 1\n    break\nend\nsay n\n"
+            .to_string(),
+    );
+    add(
         "flow/repeat-a-non-number",
         "set n to 0\nrepeat \"three\" times\n    set n to n + 1\nend\nsay n\n".to_string(),
+    );
+    add(
+        "flow/repeat-a-non-number-with-a-break-in-it",
+        "set n to 0\nrepeat nothing times\n    set n to n + 1\n    break\nend\nsay n\n".to_string(),
     );
     add(
         "flow/repeat-one-time",
@@ -2066,7 +2160,7 @@ fn edge_the_two_vms_report_the_same_failure_for_every_corpus_program() {
 
 /// Both VMs hold the same resource limits, so a program that runs under one
 /// fails under the other rather than running forever under one and stopping
-/// under the other.
+/// under the other — and names the limit that stopped it in the same words.
 #[test]
 fn edge_both_vms_enforce_the_same_step_budget() {
     // A loop with no exit: both VMs must stop it, and both must say why.
@@ -2094,6 +2188,246 @@ fn edge_both_vms_enforce_the_same_step_budget() {
         message.contains("iterations") || message.contains("Step budget"),
         "the failure should name the limit that stopped it, said: {message}"
     );
+
+    // The same loop with a body of several statements is the case the
+    // single-statement program above cannot see. While the two engines charged
+    // the budget in different units — a statement here, an instruction there —
+    // a body long enough for the ratio between them to matter was stopped by the
+    // budget on one engine and by the cap on the other, with different words
+    // about the same program.
+    //
+    // The limits are brought down together rather than run at their published
+    // values: the loop turns a million times at those, which takes seconds, and
+    // what is being asked is *which* limit the accounting reaches first, not how
+    // long a million turns is. Ten turns of this body cost ninety steps, so a
+    // budget of a hundred is spent after the cap has been reached — on the tree,
+    // on an engine that charges instructions, and on one that charges statements.
+    let wide = concat!(
+        "set n to 0\n",
+        "repeat 1e300 times\n",
+        "    repeat 2 times\n",
+        "        set n to n + 1\n",
+        "        skip\n",
+        "    end\n",
+        "    set n to n + 1\n",
+        "end\n",
+        "say n\n",
+    );
+    let (tree, byte) = assert_agrees_bounded(wide, 10, 100);
+    assert_eq!(
+        tree.result,
+        Err("RuntimeError: Maximum of 10 iterations reached in a 'repeat' loop".to_string()),
+        "the cap, not the budget, is what stops this program, on both engines"
+    );
+    assert_eq!(byte.result, tree.result, "and both engines say so");
+
+    // The other order: a budget small enough to be spent inside the ten turns the
+    // cap allows. A body that prints turns reports how far each engine got, so
+    // an engine that counted differently could not reach the same turn.
+    let counted = concat!(
+        "set n to 0\n",
+        "repeat 100 times\n",
+        "    set n to n + 1\n",
+        "    say n\n",
+        "    skip\n",
+        "    say \"unreached\"\n",
+        "end\n",
+    );
+    let (tree, byte) = assert_agrees_bounded(counted, 100, 20);
+    assert_eq!(
+        tree.result,
+        Err("RuntimeError: Step budget of 20 reached before the program finished".to_string()),
+        "the budget is what stops this one, on both engines"
+    );
+    assert_eq!(
+        tree.output.len(),
+        byte.output.len(),
+        "and both engines stop it after the same number of turns"
+    );
+    assert!(
+        !tree.output.is_empty() && !tree.output.contains(&"unreached".to_string()),
+        "the body printed what it did and left what the budget cut off: {:?}",
+        tree.output
+    );
+}
+
+/// An `export` in a module body is the one statement the tree-walking VM does not
+/// charge a step for: the declaration reads the names and skips running them, so
+/// they cost nothing there. The bytecode compiler was marking every statement
+/// alike, so a module body cost one step more per `export` than it does on the
+/// other engine — and the same program was stopped by the budget at a different
+/// statement depending on which engine ran it.
+///
+/// The budget here is the program's exact cost on both engines, so the two have
+/// to agree about which side of it the program falls on.
+#[test]
+fn edge_a_module_export_is_charged_the_same_step_on_both_engines() {
+    let module = concat!(
+        "module M\n",
+        "    export all\n",
+        "    to one\n",
+        "        give back 1\n",
+        "    end\n",
+        "    to two\n",
+        "        give back 2\n",
+        "    end\n",
+        "end\n",
+        "import M\n",
+        "say M.one()\n",
+        "say M.two()\n",
+    );
+    assert_agrees(module);
+
+    // One step under the cost of the program: both engines stop it, and both say
+    // it was the budget rather than anything about the module.
+    let (tree, byte) = assert_agrees_bounded(module, 1000, 9);
+    assert_eq!(
+        tree.result,
+        Err("RuntimeError: Step budget of 9 reached before the program finished".to_string()),
+        "one step short is what stops this program, on both engines"
+    );
+    assert_eq!(byte.result, tree.result, "and both engines say so");
+
+    // Exactly the cost of the program: both engines run it to the end. This is
+    // the case that failed before — the tree VM finished here while the bytecode
+    // VM, one `export` later, reported the budget spent.
+    let (tree, byte) = assert_agrees_bounded(module, 1000, 10);
+    assert_eq!(
+        tree.result,
+        Ok("nothing".to_string()),
+        "the program fits in its own step count on the tree"
+    );
+    assert_eq!(byte.result, tree.result, "and on the bytecode engine");
+    assert_eq!(
+        byte.output,
+        vec!["1".to_string(), "2".to_string()],
+        "the module's members are callable through both engines alike"
+    );
+
+    // The other side of the rule: an `export` *outside* a module declaration is
+    // an ordinary statement on the tree — it publishes nothing and is run like
+    // any other — so both engines must still charge it. Counting no export at
+    // all would pass the module above and break this.
+    let bare = "export all\nsay 1\n";
+    assert_agrees(bare);
+    let (tree, byte) = assert_agrees_bounded(bare, 1000, 1);
+    assert_eq!(
+        tree.result,
+        Err("RuntimeError: Step budget of 1 reached before the program finished".to_string()),
+        "a top-level export is charged a step, on both engines"
+    );
+    assert_eq!(byte.result, tree.result, "and both engines say so");
+}
+
+/// A `has` field and a `to can` method are collected by the `object`
+/// declaration, not run as statements: the tree-walking VM's `declare_object`
+/// takes both with a bare `evaluate` and `make_function`, so only the `object`
+/// statement itself costs a step there. The bytecode compiler was marking every
+/// statement alike, so an object cost one step per field plus one per method more
+/// than it does on the other engine — and the same program, under the same
+/// budget, was stopped at a different statement with different words about it.
+///
+/// The budget here is the program's exact cost on both engines, so the two have
+/// to agree about which side of it the program falls on.
+#[test]
+fn edge_an_object_declaration_is_charged_the_same_step_on_both_engines() {
+    // Two fields and two methods, plus one statement after the declarations and
+    // one after the declaration: three steps on the tree, and three here.
+    let declared = concat!(
+        "object Thing\n",
+        "    has size default 1\n",
+        "    has label default \"x\"\n",
+        "    to can grow(amount)\n",
+        "        say amount\n",
+        "    end\n",
+        "    to can shrink(amount)\n",
+        "        say amount\n",
+        "    end\n",
+        "    set Thing.size to 2\n",
+        "end\n",
+        "say Thing.size\n",
+    );
+    assert_agrees(declared);
+
+    // One step under the cost of the program: both engines stop it, and both say
+    // it was the budget rather than anything about the object.
+    let (tree, byte) = assert_agrees_bounded(declared, 1000, 2);
+    assert_eq!(
+        tree.result,
+        Err("RuntimeError: Step budget of 2 reached before the program finished".to_string()),
+        "one step short is what stops this program, on both engines"
+    );
+    assert_eq!(byte.result, tree.result, "and both engines say so");
+
+    // Exactly the cost of the program: both engines run it to the end. This is
+    // the case that failed before — the tree VM finished here while the bytecode
+    // VM, four declarations later, reported the budget spent.
+    let (tree, byte) = assert_agrees_bounded(declared, 1000, 3);
+    assert_eq!(
+        tree.result,
+        Ok("nothing".to_string()),
+        "the program fits in its own step count on the tree"
+    );
+    assert_eq!(byte.result, tree.result, "and on the bytecode engine");
+    assert_eq!(
+        byte.output,
+        vec!["2".to_string()],
+        "the statement that follows the declarations ran on both engines alike"
+    );
+
+    // The same program with the declarations removed costs the same, which is the
+    // claim in one line: what an object declares is not what it runs.
+    let bare = "object Thing\nend\nsay 2\n";
+    assert_agrees(bare);
+    let (tree, byte) = assert_agrees_bounded(bare, 1000, 2);
+    assert_eq!(
+        tree.result,
+        Ok("nothing".to_string()),
+        "an object with no declarations and one with four cost the same on the tree"
+    );
+    assert_eq!(byte.result, tree.result, "and on the bytecode engine");
+    let (tree, _) = assert_agrees_bounded(bare, 1000, 1);
+    assert_eq!(
+        tree.result,
+        Err("RuntimeError: Step budget of 1 reached before the program finished".to_string()),
+        "and one step short of *that* stops it, on both engines"
+    );
+
+    // A method's body is an ordinary statement list, so what it runs is still
+    // charged — once the call is reached, and once per statement in the body.
+    let called = concat!(
+        "object Thing\n",
+        "    has size default 1\n",
+        "    to can grow(amount)\n",
+        "        say amount\n",
+        "        say Thing.size\n",
+        "    end\n",
+        "end\n",
+        "say Thing.grow(7)\n",
+    );
+    assert_agrees(called);
+    let (tree, byte) = assert_agrees_bounded(called, 1000, 4);
+    assert_eq!(
+        tree.result,
+        Ok("nothing".to_string()),
+        "`object`, the call's `say`, and the body's two statements: four steps on the tree"
+    );
+    assert_eq!(
+        byte.result, tree.result,
+        "and the same four on the bytecode engine"
+    );
+    assert_eq!(
+        byte.output,
+        vec!["7".to_string(), "1".to_string(), "nothing".to_string()],
+        "the body ran once, so its two statements printed once each"
+    );
+    let (tree, byte) = assert_agrees_bounded(called, 1000, 3);
+    assert_eq!(
+        tree.result,
+        Err("RuntimeError: Step budget of 3 reached before the program finished".to_string()),
+        "one statement short of the body is where three steps stops it, on both engines"
+    );
+    assert_eq!(byte.result, tree.result, "and both engines say so");
 }
 
 /// A call that recurses without end is stopped by the call-depth limit in the
@@ -2149,6 +2483,174 @@ say 2 + 2
         vec!["yes".to_string(), "4".to_string()],
         "the bytecode VM should catch the depth failure and carry on"
     );
+}
+
+/// Every shape of a `repeat` count is read through `expect_repeat_count` on both
+/// engines, so each engine's turn count is checked against the helper *itself*
+/// here rather than only against the other engine.
+///
+/// That is what makes this a pin and not a change-detector. The two engines
+/// used to narrow the count on their own, and the casts they each reached for
+/// happened to agree on every value a program can produce — so a test that only
+/// compared the two engines would have passed before the helper existed and
+/// passes now, and could not tell the two apart. Asking the helper what the
+/// turns are and then counting the turns each engine ran is a question with a
+/// different answer if either of them stops using it: a tree that read `2.5` as
+/// three turns, or a bytecode VM that read `3` as three turns and `-5` as five,
+/// fails here even though the other engine still agrees with it.
+///
+/// A `break` and a `skip` in the body are there because a turn that ends early
+/// is the only thing that can make the two disagree about *which* turn they are
+/// on, and a count with no turn in it must leave the loop without either signal
+/// being raised.
+#[test]
+fn edge_both_vms_read_a_repeat_count_the_same_way() {
+    // What the source writes, what the helper is asked about, and how many turns
+    // that comes to.
+    let counts = [
+        ("3", Value::Number(3.0), 3usize),
+        // Whole turns before the fraction, not one more than them.
+        ("2.5", Value::Number(2.5), 2),
+        ("0.5", Value::Number(0.5), 0),
+        // No turn to start from, and no turn to count back to.
+        ("-5", Value::Number(-5.0), 0),
+        ("-0.5", Value::Number(-0.5), 0),
+        // Not a count of anything, so not a loop.
+        ("\"five\"", Value::Text("five".to_string()), 0),
+        ("nothing", Value::Nothing, 0),
+    ];
+    let bodies = ["break", "skip", "set n to n + 1"];
+
+    for (count, value, turns) in counts {
+        assert_eq!(
+            expect_repeat_count(&value, redblue::Span::unknown())
+                .unwrap_or_else(|error| panic!("count {count} should be a count: {error:?}")),
+            turns as i64,
+            "the table's own expectation of count {count} is what the helper says"
+        );
+
+        for body in bodies {
+            let source = format!(
+                "set n to 0\nrepeat {count} times\n    say \"turn\"\n    {body}\n    say \"after\"\nend\nsay n\n"
+            );
+            let (tree, byte) = assert_agrees(&source);
+            // A `break` leaves after the turn it is in; a `skip` and a plain
+            // statement leave every turn of the count to run.
+            let expected = if body == "break" { turns.min(1) } else { turns };
+            let printed = tree.output.iter().filter(|line| *line == "turn").count();
+            assert_eq!(
+                printed, expected,
+                "count {count} with `{body}` should have run {expected} turn(s)"
+            );
+            assert_eq!(
+                byte.output.iter().filter(|line| *line == "turn").count(),
+                printed,
+                "and the bytecode VM ran the same turns"
+            );
+        }
+    }
+}
+
+/// A count past `i64` saturates into the largest countable count, and what stops
+/// such a loop is the iteration cap — or a `break` on its first turn. The turn
+/// count is checked against `expect_repeat_count` itself, because a cap and a
+/// `break` are reached at the same turn on both engines only if both read the
+/// count as the same number of turns; asked of the two engines alone, an engine
+/// that saturated some other way would be caught only if the other one did not.
+/// Asked with the published cap this would be a million turns of printing, so the
+/// cap is lowered to five — which is also the only way to ask the question at all.
+#[test]
+fn edge_both_vms_saturate_a_count_beyond_i64_the_same_way() {
+    for count in ["99999999999999999999", "1e300"] {
+        assert_eq!(
+            expect_repeat_count(&Value::Number(1e300), redblue::Span::unknown())
+                .unwrap_or_else(|error| panic!("a count this large is still a count: {error:?}")),
+            i64::MAX,
+            "a count past the width of a counter saturates rather than refusing, and it \
+             saturates to the largest countable count rather than to nothing"
+        );
+
+        let source = format!("set n to 0\nrepeat {count} times\n    say \"turn\"\nend\n");
+        let (tree, byte) = assert_agrees_capped(&source, 5);
+        assert!(
+            tree.result.is_err() && byte.result.is_err(),
+            "a saturated count must be a failure on both engines, got tree {:?} and bytecode {:?}",
+            tree.result,
+            byte.result
+        );
+        assert_eq!(
+            tree.result,
+            Err("RuntimeError: Maximum of 5 iterations reached in a 'repeat' loop".to_string()),
+            "count {count} must be stopped by the cap, with the same words on both engines"
+        );
+        assert_eq!(tree.output.len(), 5, "both engines print the same turns");
+        assert_eq!(byte.output.len(), 5, "and the bytecode VM agrees");
+
+        // A `break` on the first turn is the way out of a count that will not
+        // run out, on either engine, and it is the only turn the body runs.
+        let broke = format!(
+            "set n to 0\nrepeat {count} times\n    set n to n + 1\n    break\n    say \"after\"\nend\nsay n\n"
+        );
+        let (tree, byte) = assert_agrees_capped(&broke, 5);
+        assert!(
+            tree.result.is_ok(),
+            "a break on the first turn must finish, got {:?}",
+            tree.result
+        );
+        assert_eq!(
+            tree.output,
+            vec!["1".to_string()],
+            "exactly one turn ran, and the break left the rest of it out"
+        );
+        assert_eq!(byte.output, tree.output, "and both engines agree");
+    }
+}
+
+/// A count with no turn in it — negative, however large its magnitude — is not a
+/// loop on either engine, so the `break` written in its body is never raised:
+/// there is no turn to reach it, and nothing has left a loop to complain about.
+#[test]
+fn edge_both_vms_run_no_turns_of_a_count_with_no_turns_in_it() {
+    for count in ["-5", "-0.5", "-1e300"] {
+        let source = format!(
+            "set n to 0\nrepeat {count} times\n    set n to n + 1\n    say \"turn\"\n    break\nend\nsay n\n"
+        );
+
+        let (tree, byte) = assert_agrees_capped(&source, 5);
+
+        assert!(
+            tree.result.is_ok(),
+            "count {count} must not be a failure, got {:?}",
+            tree.result
+        );
+        assert_eq!(
+            tree.output,
+            vec!["0".to_string()],
+            "count {count} runs no turns, so the break in it is never raised"
+        );
+        assert_eq!(byte.output, tree.output, "and both engines agree");
+    }
+}
+
+/// A fractional count is its whole turns, and a `break` in that body leaves the
+/// loop after the first of them: the fraction does not buy a turn, and the two
+/// engines must not disagree about either half of that.
+#[test]
+fn edge_both_vms_truncate_a_fractional_count_the_same_way() {
+    let source = concat!(
+        "set n to 0\n",
+        "repeat 2.5 times\n",
+        "    set n to n + 1\n",
+        "    break\n",
+        "end\n",
+        "say n\n",
+    );
+
+    let (tree, byte) = assert_agrees(source);
+
+    let expected = vec!["1".to_string()];
+    assert_eq!(tree.output, expected, "one whole turn, then the break");
+    assert_eq!(byte.output, expected, "one whole turn, then the break");
 }
 
 /// The bytecode VM has no native stack to overflow: deeply nested *data* is
@@ -2326,6 +2828,73 @@ fn edge_a_jump_past_the_end_of_a_block_does_not_read_past_the_code() {
     );
 }
 
+/// A loop's `STORE` binds its variable by drawing from the sequence the
+/// `GET_ITER` or `GET_RANGE` above it built. No file this compiler writes can
+/// reach that `STORE` without one, but a hand-built file can: the loop is found
+/// from its backward jump, so a file whose first jump lands on the `STORE`
+/// itself looks like a loop with no values to draw.
+///
+/// That has to be reported. `src/bytecode/format.rs` says a file the compiler
+/// did not write is a diagnostic, and a diagnostic is an error message — an
+/// `expect` on the sequence turns a hostile file into a process abort, which is
+/// the one thing a VM reading untrusted bytes must not do.
+#[test]
+fn edge_a_loop_variable_stored_with_no_sequence_is_an_error_not_a_panic() {
+    let source = "for each v in [1, 2]\n    say v\nend\nsay \"done\"\n";
+    let well_formed = compile_source(source).expect("the program should compile");
+
+    // The control: the same file, untouched, loops over both values and says
+    // what came after it. So the failure below is about the one instruction this
+    // file changes and not about the shape of the loop.
+    let mut vm = BytecodeVm::new();
+    vm.run(&well_formed).expect("the untouched file should run");
+    assert_eq!(
+        vm.take_output(),
+        vec!["1".to_string(), "2".to_string(), "done".to_string()],
+        "the control file runs its loop and then the statement after it"
+    );
+
+    // The store of the loop variable: the instruction after the `GET_ITER`, and
+    // so the instruction this file's jump will land on.
+    let iterable = well_formed
+        .main
+        .code
+        .iter()
+        .position(|instruction| instruction.opcode == Opcode::GetIter)
+        .expect("the file has a GET_ITER");
+    let top = iterable + 1;
+
+    let mut malformed = well_formed.clone();
+    // The `PUSH_CONST` that builds the list becomes a jump onto the `STORE`, so
+    // the loop opens on a turn with nothing to draw from.
+    malformed.main.code[iterable - 1] = Instruction {
+        opcode: Opcode::Jump,
+        arg: top as u32,
+        aux: 0,
+        line: 1,
+    };
+
+    let mut vm = BytecodeVm::new();
+    let error = vm
+        .run(&malformed)
+        .expect_err("a loop variable bound with no sequence must fail");
+    assert_eq!(
+        error.label(),
+        "RuntimeError",
+        "a hostile file is a runtime diagnostic, not a panic and not silence"
+    );
+    assert!(
+        error.message().contains("no sequence"),
+        "the failure should say the loop had no sequence, said: {}",
+        error.message()
+    );
+    assert_eq!(
+        vm.take_output(),
+        Vec::<String>::new(),
+        "nothing before the jump printed, and nothing after the failure did"
+    );
+}
+
 /// The step budget is charged per instruction, so the bytecode VM stops a
 /// program at the same place the tree-walker does rather than at some point of
 /// its own choosing.
@@ -2490,6 +3059,58 @@ fn edge_a_failing_finally_is_the_failure_a_try_with_no_catch_reports() {
         "and nothing after the `try` runs, said: {:?}",
         tree.output
     );
+}
+
+/// A loop whose turn is unwound by a failure is *abandoned*, not resumed: the
+/// tree-walking VM propagates the failure out of the loop, so the statements
+/// after the failing statement — the rest of the body, and the loop's own
+/// back edge — never run.
+///
+/// This is the shape where the two engines disagreed. The bytecode VM handled
+/// the failure, unwound the loops the `try` was written inside, and put the
+/// frame after the `try`; `prepare_exit` then made an entry for the loop the
+/// `break` was leaving, so `leave_owned_loop` found one and sent the frame to
+/// *that* loop's exit instead — which is the statement after the inner loop, and
+/// which the abandoned turn then ran. The two landed on the same instruction by
+/// accident, through a second abandoned loop's exit, so a program with nothing
+/// after the inner loop hid it. This one has something, and both engines must
+/// agree about what it prints.
+#[test]
+fn edge_a_loop_abandoned_by_a_failing_finally_does_not_run_the_rest_of_its_body() {
+    let source = concat!(
+        "set log to \"\"\n",
+        "set caught to no\n",
+        "try\n",
+        "    repeat 3 times\n",
+        "        for each i in [1, 2]\n",
+        "            try\n",
+        "                break\n",
+        "            finally\n",
+        "                set bad to 1 + \"one\"\n",
+        "            end\n",
+        "        end\n",
+        "        set log to log + \".\"\n",
+        "    end\n",
+        "catch error\n",
+        "    set caught to yes\n",
+        "end\n",
+        "say caught\n",
+        "say log\n",
+    );
+
+    let (tree, byte) = assert_agrees(source);
+    assert_eq!(
+        tree.result,
+        Ok("nothing".to_string()),
+        "the failure is caught and the program goes on to the two `say`s"
+    );
+    assert_eq!(
+        tree.output,
+        vec!["yes".to_string(), String::new()],
+        "the abandoned turn ran nothing: the `set` after the inner loop is inside the \
+         turn that failed, and `log` is still empty"
+    );
+    assert_eq!(byte.output, tree.output, "and the bytecode engine agrees");
 }
 
 /// A `break` in a `catch` body written around a `try` with no `catch` still leaves
@@ -2909,11 +3530,9 @@ fn edge_a_frame_cannot_pop_below_its_own_stack_base() {
         .find(|instruction| instruction.opcode == Opcode::Store)
         .expect("the program stores into a name")
         .arg;
-    let mut code = Vec::new();
-    // Leave one value on the operand stack for the caller.
-    for instruction in chunk.main.code.iter().take(2) {
-        code.push(*instruction);
-    }
+    let mut code = chunk.main.code.clone();
+    // The call follows the whole of `set f to 1`, so the frame has pushed
+    // nothing and there is nothing of its own on the stack for the call to take.
     code.push(Instruction {
         opcode: Opcode::Call,
         arg: name,

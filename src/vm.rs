@@ -12,8 +12,8 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
-    expect_range_number, finite_number, range_has_next, Captured, CapturedScope, Fields,
-    FunctionBody, FunctionValue, Value,
+    expect_range_number, expect_repeat_count, finite_number, range_has_next, Captured,
+    CapturedScope, Fields, FunctionBody, FunctionValue, Value,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -383,10 +383,27 @@ impl Vm {
         vm
     }
 
+    /// Builds a VM with both limits set at once, ignoring the environment.
+    ///
+    /// Neither [`Vm::with_max_iterations`] nor [`Vm::with_max_steps`] can be
+    /// followed by the other — each builds a VM from the defaults — and a caller
+    /// that wants to know *which* of the two stops a program has to set both. A
+    /// zero is ignored, as it is for either of them.
+    pub fn with_limits(max_iterations: usize, max_steps: usize) -> Self {
+        let mut vm = Self::new();
+        vm.max_iterations = resolve_max_iterations_from(Some(max_iterations));
+        vm.max_steps = resolve_max_steps_from(Some(max_steps));
+        vm
+    }
+
     /// Charges one statement to the step budget, failing once the program has
     /// run [`Vm::max_steps`] statements. Called for every statement, including
     /// those inside a function body, so the budget bounds the program rather
     /// than one statement list.
+    ///
+    /// One turn of a loop is charged as well — see [`Vm::charge_iteration`] — so
+    /// the unit is a statement on both engines and the two reach the budget at
+    /// the same turn of the same loop.
     fn charge_step(&mut self) -> Result<()> {
         if self.steps >= self.max_steps {
             return Err(Error::Runtime(
@@ -405,7 +422,12 @@ impl Vm {
     /// owns the counter has run [`Vm::max_iterations`] times. The counter is a
     /// local of the loop statement, so the cap is per loop and nesting does not
     /// multiply it.
-    fn charge_iteration(&self, loop_iterations: &mut usize, kind: &str) -> Result<()> {
+    ///
+    /// The turn is charged to the step budget as well, and after the iteration
+    /// cap, so a loop inside its own cap is never stopped by the budget instead:
+    /// the cap is what says how many turns a loop takes, so naming it is what
+    /// both engines then say about the same program.
+    fn charge_iteration(&mut self, loop_iterations: &mut usize, kind: &str) -> Result<()> {
         if *loop_iterations >= self.max_iterations {
             return Err(Error::Runtime(
                 format!(
@@ -416,7 +438,7 @@ impl Vm {
             ));
         }
         *loop_iterations += 1;
-        Ok(())
+        self.charge_step()
     }
 
     /// Runs one iteration of a loop: binds `variable` to `value` in a fresh
@@ -1045,13 +1067,16 @@ impl Vm {
             }
             Statement::Repeat { count, body } => {
                 let count_val = self.evaluate(count)?;
-                if let Value::Number(n) = count_val {
-                    let mut loop_iterations = 0;
-                    for _ in 0..(n as i64) {
-                        self.charge_iteration(&mut loop_iterations, "repeat")?;
-                        if self.run_iteration(None, None, body)? == Some(LoopControl::Break) {
-                            break;
-                        }
+                // The turn count is the count truncated towards zero, and a
+                // count that is not a number runs no times — see
+                // `expect_repeat_count`, which the bytecode VM reads the same
+                // count through.
+                let turns = expect_repeat_count(&count_val, self.span())?;
+                let mut loop_iterations = 0;
+                for _ in 0..turns {
+                    self.charge_iteration(&mut loop_iterations, "repeat")?;
+                    if self.run_iteration(None, None, body)? == Some(LoopControl::Break) {
+                        break;
                     }
                 }
                 Ok(Value::Nothing)

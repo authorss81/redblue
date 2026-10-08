@@ -53,15 +53,16 @@ A file that does not begin with the magic is refused with
 
 ### Format version
 
-A `u16`. This build reads and writes `4`. Any other value is refused with
-`unknown bytecode format version <n>: this build reads version 4`.
+A `u16`. This build reads and writes `5`. Any other value is refused with
+`unknown bytecode format version <n>: this build reads version 5`.
 
 #### What each version changed
 
 Versions 1 and 2 changed no byte value and no record layout — only what an
 operand means, and one refusal. Versions 3 and 4 each added instructions, at
 byte values no earlier version used, so the numbers written into a file still
-mean what they meant.
+mean what they meant. Version 5 changed no byte value either: it gave the
+`NOP` a second marker operand, which is an operand a `NOP` had no use for.
 
 | Version | Change |
 |---|---|
@@ -69,6 +70,7 @@ mean what they meant.
 | 2 | `DEF_OBJECT`'s secondary operand became the constant index of the object it extends — `NO_CONST` when it extends nothing — where version 1 wrote a flag that discarded the parent's name. `DEF_FIELD` became the consumer of the value pushed immediately before it, so a field's `default` is compiled instead of dropped. The decoder refuses a constant pool that reaches the reserved index `NO_CONST`. |
 | 3 | Added `DECLARE_CONST`, which `constant NAME to <expr>` compiles to. Versions 1 and 2 compiled the same declaration to `STORE`, which does not say the name is read-only, so the file could not be told apart from a `set`. A version-2 file is refused rather than read as a program whose constants could be rebound. |
 | 4 | `IMPORT`'s secondary operand became the name it binds — the alias the source wrote, or the module's own name when it wrote none — where version 3 wrote the filler `0`. Read as version 4, a version-3 file's `IMPORT` would bind `constants[0]`, which is whichever name happened to be first in the pool rather than the one the source named. Added `MODULE` and `EXPORT`, which a `module NAME … end` declaration compiles to; version 3 compiled such a declaration's body inline and the declaration itself to nothing, so a file written then says nothing about where the module begins or what it publishes. A version-3 file is refused rather than half-read. |
+| 5 | Every statement a program *runs* begins with a `NOP` whose operand is `STATEMENT_MARKER`, and that marker is where the step budget is charged. A version-4 file has no marker, so a VM read it would charge that program nothing at all and the budget would silently not apply to it. A version-4 file is refused rather than run unbounded. |
 
 An earlier file is refused rather than half-read: the same bytes would mean
 two different things, and rule 2 above is what makes that a new version rather
@@ -171,7 +173,7 @@ always `0`.
 
 | Byte | Name | `arg` | `aux` | Stack effect |
 |---|---|---|---|---|
-| 0 | `NOP` | `END_TRY_MARKER`, or `0` for the filler | — | nothing; see below |
+| 0 | `NOP` | `STATEMENT_MARKER`, `END_TRY_MARKER`, or `0` for the filler | — | nothing; see below |
 | 1 | `PUSH_CONST` | constant index | — | pushes the constant |
 | 2 | `POP` | — | — | drops the top |
 | 3 | `LOAD` | name index | — | pushes the value of a variable |
@@ -235,24 +237,53 @@ refuses rather than publishes. The two reserved values are never compared agains
 each other — `NO_BLOCK` appears only in a block-index operand and `NO_CONST` only
 in a constant-index one.
 
-`END_TRY_MARKER` is `0xFFFFFFFF` as well, and is the one value of a `NOP`'s
-`arg` that is not the filler: it is the end of a `try`'s protected region,
-where the handlers are popped and the `finally` runs. Every other `arg` — the
-`0` a filler carries — leaves the instruction doing nothing. A `NOP`'s `arg`
-indexes nothing at all, so this third user of the reserved value is in neither of
+`END_TRY_MARKER` is `0xFFFFFFFF` as well, and is one of the two values of a
+`NOP`'s `arg` that are not the filler: it is the end of a `try`'s protected
+region, where the handlers are popped and the `finally` runs. Every other `arg` —
+the `0` a filler carries — leaves the instruction doing nothing. A `NOP`'s `arg`
+indexes nothing at all, so these users of the reserved value are in neither of
 the two operand kinds the sentence above compares.
 
-The compiler writes exactly one `NOP` per `try`, immediately after that `try`'s
-protected code, carrying `END_TRY_MARKER`. Without it a failure in a statement
-*after* the `try` would be caught by that `try`, and a `finally` would never run
-at all on the path where nothing failed. A `NOP` is one byte with two meanings
-because the table was frozen when the marker was defined: byte 46 was the last
-instruction, so an end-of-try byte of its own would have had to renumber an
-instruction whose byte value is part of the format. The operand is what tells the
-two apart, which is why a
+The compiler writes exactly one such `NOP` per `try`, immediately after that
+`try`'s protected code, carrying `END_TRY_MARKER`. Without it a failure in a
+statement *after* the `try` would be caught by that `try`, and a `finally` would
+never run at all on the path where nothing failed. A `NOP` is one byte with
+three meanings because the table was frozen when the first marker was defined:
+byte 46 was the last instruction, so an end-of-try byte of its own would have
+had to renumber an instruction whose byte value is part of the format. The
+operand is what tells them apart, which is why a
 filler `NOP` anywhere — including inside protected code — closes nothing, runs
-no `finally`, and does not shorten the region a failure skips. `rb dis` prints
-`end of a protected region` on a marked one.
+no `finally`, begins no statement, and does not shorten the region a failure
+skips. `rb dis` prints `end of a protected region` on a marked one.
+
+`STATEMENT_MARKER` is `0xFFFFFFFE`, the other reserved operand a `NOP` can
+carry, and says that a statement begins here. The compiler writes exactly one
+per statement the program runs, immediately before that statement's own
+instructions, so the file says where its statements are rather than leaving a
+reader to infer it — and, more to the point, so the step budget can be charged
+**once per statement**, which is the unit the tree-walking VM charges. Counting
+instructions instead meant one statement cost a statement's worth of budget here
+and several times that there, so the same program reached the budget at a
+different point on each engine: the same loop was stopped by the iteration cap on
+one and by the step budget on the other, with different words. `rb dis` prints
+`start of a statement` on a marked one.
+
+Two kinds of statement the file does *not* mark, and neither is a statement the
+program runs — the declaration they belong to reads them instead. An `export` in
+the direct body of a `module` declaration is published by that declaration, which
+is why the tree-walking VM skips it rather than running it. A `has` field or a
+`to can` method is collected by the `object` declaration, which the tree-walking
+VM does with a bare evaluation and a bare closure rather than by running the
+statement. Marking either would make the same program cost the bytecode VM more
+than the tree-walking one by the number of `export`s, fields or methods it wrote,
+so the same budget would stop it at a different statement on each engine. An
+`export` anywhere else, a `has` outside a declaration, and every statement that
+follows a declaration's own are ordinary statements, and are marked.
+
+A loop's own statement is marked once, before the loop opens, not once per turn:
+its back edge lands *after* the marker. What a turn costs is charged at the turn
+— where the iteration cap is charged — so the budget counts statements and turns
+on both engines in the same places.
 
 An opcode byte this table does not assign is refused with
 `unknown opcode byte <n>`.
@@ -299,6 +330,15 @@ cannot collide with a name the program declared.
 
 ## How each statement compiles
 
+Every statement a program runs begins with a `NOP` carrying `STATEMENT_MARKER`,
+and its own instructions follow. The marker is where the statement is charged to
+the step budget, so a VM counts one step per statement — the unit the tree-walking
+VM charges, and the reason the two engines stop the same program at the same place
+with the same words. The two exceptions are the statements no engine runs, both
+described under `NOP` above: an `export` in a module body's direct body, and the
+`has` and `to can` declarations of an `object` declaration. Everything below
+describes what follows the marker.
+
 `say` and `print` push their expression and then `SAY` or `PRINT`. `set x to e`
 compiles the expression then `STORE x`. `constant x to e` compiles the
 expression then `DECLARE_CONST x`, which is `STORE x` with the declaration that
@@ -334,6 +374,15 @@ a block that is still on the stack runs while that block's scope is live, and a
 in `DEF_OBJECT`'s secondary operand, interned like any other name, so the file
 says *which* object is extended rather than only that one is. `test "name"`
 compiles `TEST` naming a test block.
+
+An object body holds *only* those declarations, and none of them is marked: the
+declaration collects them rather than running them, which is why only the
+`object` statement itself is charged. The statements that follow the
+declarations in the source body do not go in the object block at all — they
+compile into the *enclosing* block, after the `STORE` that binds the name, and
+are marked and charged like any other statement. So `object Inner` written
+inside `Outer`'s body runs after `Outer` is registered and bound, which is the
+order the tree-walking interpreter's `declare_object` uses.
 
 `has f default e` compiles `e` and then `DEF_FIELD f`, which pops the value the
 expression produced; `has f` compiles a push of `nothing` and then `DEF_FIELD f`.
@@ -410,19 +459,29 @@ has to check them too when it resolves them. What the decoder does refuse is a
 structure it cannot hold: a tag it does not assign, a count past the bytes
 left, a depth past the limit.
 
+A VM refuses the same way where it resolves one, and never panics on the way: an
+operand it cannot read is a `RuntimeError` naming what was wrong, not an abort.
+A loop's `STORE` is one of these — it binds the loop's variable by drawing from
+the sequence the `GET_ITER` or `GET_RANGE` above it built, so a file that jumps
+onto the `STORE` itself has a loop with nothing to draw from and is refused. A
+`DEF_FIELD` outside an object declaration, a call with no arguments on an empty
+stack and an unknown variable are refused on the same terms.
+
 ## What `rb dis` prints
 
 ```
-; redblue bytecode v4
+; redblue bytecode v5
 ; constants: 2
 ;   [0] 1
 ;   [1] n
 
 main (main, arity 0)
-0000  PUSH_CONST       0  ; line 1: 1
-0001  STORE            1  ; line 1: n
-0002  LOAD             1  ; line 2: n
-0003  SAY                ; line 2
+0000  NOP                ; line 1: start of a statement
+0001  PUSH_CONST       0  ; line 1: 1
+0002  STORE            1  ; line 1: n
+0003  NOP                ; line 2: start of a statement
+0004  LOAD             1  ; line 2: n
+0005  SAY                ; line 2
 ```
 
 (from `rb compile` / `rb dis` on `set n to 1` + `say n`)

@@ -10,6 +10,7 @@
 
 use redblue::Error;
 use redblue::Value;
+use redblue::{expect_repeat_count, Span};
 
 /// Runs `source` through lexer → parser → VM and returns the value of its last
 /// statement.
@@ -522,5 +523,183 @@ fn edge_a_numeric_for_range_cannot_step_into_a_non_finite_number() {
             "a counter overflow should not return a value, got {:?}",
             value
         ),
+    }
+}
+
+/// A `repeat` count is a number a loop turns into a count of turns, and it is
+/// read through `expect_repeat_count`. A count that is not finite is the one shape
+/// that helper has to refuse itself: no Redblue program can produce one, because
+/// `Value::number` rejects them before a loop ever sees the value — but
+/// `Value::Number` is a public variant, so a Rust caller can hand the helper a
+/// `NaN` and the helper is the only thing between it and a turn count.
+///
+/// This asks the helper directly, which is the door that is only otherwise
+/// unreachable. The end-to-end refusal is pinned by the test below.
+#[test]
+fn edge_a_non_finite_repeat_count_is_refused_by_the_helper_that_reads_one() {
+    let cases = [
+        (f64::NAN, "NaN is not a finite number"),
+        (f64::INFINITY, "infinity is not a finite number"),
+        (f64::NEG_INFINITY, "-infinity is not a finite number"),
+    ];
+
+    for (count, expected) in cases {
+        let span = Span::new(7, 1);
+        match expect_repeat_count(&Value::Number(count), span) {
+            Err(Error::Runtime(message, reported)) => {
+                assert_eq!(message, expected, "count {count} was refused wrongly");
+                assert_eq!(
+                    reported, span,
+                    "the refusal is reported where the count was, not somewhere else"
+                );
+            }
+            Err(other) => panic!("count {count} should be a Runtime error, got {other:?}"),
+            Ok(turns) => panic!("count {count} must not become a turn count, got {turns} turns"),
+        }
+    }
+
+    // The other doors are still open for the shapes that *are* numbers, so the
+    // refusal above is a refusal of non-finiteness rather than of counts.
+    for (value, turns, why) in [
+        (Value::Number(3.0), 3i64, "a whole count is that many turns"),
+        (Value::Number(2.5), 2, "a fraction is its whole turns"),
+        (
+            Value::Number(-5.0),
+            0,
+            "a negative count has no turn to start from",
+        ),
+        (
+            Value::Text("five".to_string()),
+            0,
+            "a count that is not a number is not a loop",
+        ),
+    ] {
+        assert_eq!(
+            expect_repeat_count(&value, Span::unknown())
+                .unwrap_or_else(|error| { panic!("{why}, but it failed: {error:?}") }),
+            turns,
+            "{why}"
+        );
+    }
+}
+
+/// A `repeat` count is the one place a Redblue program cannot write a non-finite
+/// number, because nothing can put one into `Value::Number` — but `Expr::Number`
+/// holds an `f64` and is public API, so a Rust caller can hand a loop a count
+/// that is not a number at all. Both engines refuse it, and they refuse it the
+/// same way: the number is refused at the door it came through, before either
+/// reads it as a count.
+///
+/// The helper's own refusal is [`edge_a_non_finite_repeat_count_is_refused_by_the_helper_that_reads_one`]
+/// — this test reaches the engines, so it is the first door and this is what it
+/// says.
+#[test]
+fn edge_a_non_finite_number_given_as_a_repeat_count_is_refused_by_both_engines() {
+    use redblue::bytecode::compile_program;
+    use redblue::bytecode::vm::BytecodeVm;
+    use redblue::parser::{Expr, Program, Statement, Stmt};
+
+    let cases = [
+        (f64::NAN, "NaN is not a finite number"),
+        (f64::INFINITY, "infinity is not a finite number"),
+        (f64::NEG_INFINITY, "-infinity is not a finite number"),
+    ];
+
+    for (count, expected) in cases {
+        let program = Program {
+            statements: vec![Stmt {
+                span: redblue::Span::new(1, 1),
+                statement: Statement::Repeat {
+                    count: Expr::Number(count),
+                    body: vec![],
+                },
+            }],
+        };
+
+        let mut walking = redblue::Vm::new();
+        match walking.run(&program) {
+            Err(Error::Runtime(message, span)) => {
+                assert_eq!(message, expected, "count {count} was refused wrongly");
+                assert!(span.is_known(), "count {count} reported no position");
+            }
+            Err(other) => panic!("count {count} should be a Runtime error, got {other:?}"),
+            Ok(value) => panic!("count {count} should not return a value, got {value}"),
+        }
+
+        let chunk = compile_program(&program).expect("the program should compile");
+        let mut bytecode = BytecodeVm::new();
+        match bytecode.run(&chunk) {
+            Err(Error::Runtime(message, _)) => {
+                assert_eq!(
+                    message, expected,
+                    "the bytecode engine refused count {count} differently"
+                );
+            }
+            Err(other) => panic!(
+                "count {count} should be a Runtime error on the bytecode engine, got {other:?}"
+            ),
+            Ok(value) => panic!(
+                "count {count} should not return a value on the bytecode engine, got {value}"
+            ),
+        }
+    }
+}
+
+/// The count of a `repeat` is the one number a loop turns into something else:
+/// every other one is a value a program can hold, and this one is a number of
+/// turns. Every shape it can be written in is pinned here through the whole
+/// pipeline, because the shape decides how many turns the body runs and that is
+/// the one thing a `break` or a `skip` inside it cannot recover from — a body
+/// that never runs never leaves its loop. The counter is printed by the body, so
+/// what is asserted is what the loop did rather than what the count was read as.
+#[test]
+fn edge_a_repeat_count_is_a_number_of_turns_and_is_never_read_two_ways() {
+    for (count, expected) in [
+        ("0", vec![]),
+        ("1", vec!["1"]),
+        ("3", vec!["1", "2", "3"]),
+        // A fraction is the whole turns before it, not one more than them.
+        ("2.5", vec!["1", "2"]),
+        ("0.5", vec![]),
+        // A negative count has no turn to start from, however large its
+        // magnitude: there is nothing before the first turn to count back to.
+        ("-5", vec![]),
+        ("-1e300", vec![]),
+        // A count that is not a number is not a loop, which is what
+        // `for each x in 5` does.
+        ("\"five\"", vec![]),
+    ] {
+        let source =
+            format!("set n to 0\nrepeat {count} times\n    set n to n + 1\n    say n\nend\n");
+        let tokens = redblue::lexer::Lexer::tokenize(&source).expect("source should lex");
+        let ast = redblue::parser::parse(tokens).expect("source should parse");
+        let mut vm = redblue::Vm::new();
+        vm.run(&ast).expect("the loop should run");
+        let lines = vm.take_output();
+        assert_eq!(
+            lines, expected,
+            "count {count} should have taken the turns its body counted"
+        );
+    }
+
+    // A count past `i64` saturates rather than refusing, and the iteration cap
+    // is what stops it — the published limit is a million turns, so a count
+    // beyond the width of a counter is not the number that bounds a loop.
+    let source = "repeat 1e300 times\n    set n to 1\nend\n";
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("source should lex");
+    let ast = redblue::parser::parse(tokens).expect("source should parse");
+    let mut vm = redblue::Vm::with_max_iterations(5);
+    let error = vm.run(&ast).expect_err(
+        "a saturated count must be stopped by the cap, not run to the end of a million turns",
+    );
+    match error {
+        Error::Runtime(message, span) => {
+            assert_eq!(
+                message, "Maximum of 5 iterations reached in a 'repeat' loop",
+                "a saturated count must be stopped by the cap, naming it"
+            );
+            assert!(span.is_known(), "the cap reported no position");
+        }
+        other => panic!("a saturated count should be a Runtime error, got {other:?}"),
     }
 }

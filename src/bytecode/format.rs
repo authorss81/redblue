@@ -28,6 +28,15 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 /// Changing anything that an older file would decode differently must bump
 /// this.
 ///
+/// Version 5 changed one thing a version-4 file reads differently, so a
+/// version-4 file is refused rather than half-understood:
+///
+/// - every statement begins with a `NOP` whose operand is
+///   [`STATEMENT_MARKER`](super::STATEMENT_MARKER), and that marker is where the
+///   step budget is charged. A version-4 file has no marker, so it would be
+///   charged nothing at all and a budget this build applies to every other file
+///   would silently not apply to it.
+///
 /// Version 4 changed three things a version-3 file reads differently, so a
 /// version-3 file is refused rather than half-understood:
 ///
@@ -63,7 +72,7 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 ///   flag that discarded the parent's name.
 /// - `DefField` consumes the value pushed immediately before it, so a field's
 ///   `default` is compiled instead of being dropped.
-pub const FORMAT_VERSION: u16 = 4;
+pub const FORMAT_VERSION: u16 = 5;
 
 /// The operand that says "there is no block here".
 ///
