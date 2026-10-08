@@ -239,6 +239,19 @@ pub fn run_cli() {
                 process::exit(1);
             }
         }
+        // `rb run <file> [args...]` — whatever follows the path belongs to the
+        // program, and `sys.argv()` is how the program reads it. Without this a
+        // Redblue program had no way to be told what to do: `rb run` took a path
+        // and nothing else, so a compiler written in Redblue could not be given
+        // a file to compile. A program that asks for no arguments is unaffected
+        // — `sys.argv()` is then an empty list, as it is everywhere else.
+        n if n >= 4 && args[1] == "run" => {
+            let path = args[2].clone();
+            runtime::set_program_args(args[3..].to_vec());
+            if let Err(rendered) = run_file_with_diagnostic(&path) {
+                report(&rendered);
+            }
+        }
         4 => {
             let cmd = &args[1];
             if cmd == "format" && args[2] == "--check" {
