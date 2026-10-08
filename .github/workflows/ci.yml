@@ -52,7 +52,7 @@ jobs:
       - name: corpus count matches README
         shell: bash
         run: |
-          n=$(ls corpus/*.rb | wc -l)
+          n=$(ls corpus/*.rb | wc -l | tr -d ' ')
           readme=$(grep -oE '[0-9]+ programs run on both' README.md | grep -oE '[0-9]+')
           echo "corpus programs: $n, README says: $readme"
           [ "$n" = "$readme" ] || { echo "::error::corpus has $n programs but README says $readme"; exit 1; }
