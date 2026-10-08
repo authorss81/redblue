@@ -786,3 +786,220 @@ fn edge_the_bytecode_vm_reports_a_bad_invocation_as_a_failure() {
         too_many.stdout
     );
 }
+
+/// Ladder stage **S3**: the compiler, compiled by itself, still emits the same
+/// bytes.
+///
+/// `stage1.rbc` is `bootstrap/compiler.rb` compiled by stage 1. Running that
+/// `.rbc` under `rb vm` makes it stage 2 the long way round — no Rust fast path,
+/// no tree-walker, nothing but the bytecode VM executing Redblue that compiles
+/// Redblue. Its output for a program must equal what stage 1 wrote for the same
+/// program, byte for byte.
+///
+/// This could not run at all before `push_loop` recorded a loop's `stack_base`
+/// one below the height its body ran at: leaving a `for each` truncated a value
+/// the enclosing frame had pushed, so `apply_patches` — a `while` containing a
+/// `for each`, with a call after them — lost an operand and died with `bytecode
+/// asked for 2 values its frame never pushed`.
+///
+/// The corpus here is a *sample* of each family, not the whole corpus, because a
+/// stage-2 run is a program of ~2 700 lines running on a bytecode VM and the
+/// whole corpus does not fit in a test's budget. The full-corpus comparison is
+/// the shell loop in `phases/phase-021/REPORT.md`; `edge_stage3_is_byte_identical_on_a_sample_of_every_family`
+/// pins the same invariant over a fixed, named sample so a regression is caught
+/// by `cargo test` and not only by hand.
+fn stage3(name: &str, path: &Path) -> Stage2 {
+    let output = scratch(&format!("stage3-{name}.rbc"));
+    let _ = fs::remove_file(&output);
+
+    let run = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("vm")
+        .arg(stage1_of_the_compiler())
+        .arg(path)
+        .arg(&output)
+        .output()
+        .expect("the rb binary runs");
+
+    Stage2 {
+        bytes: fs::read(&output).unwrap_or_default(),
+        stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
+        succeeded: run.status.success(),
+    }
+}
+
+/// `bootstrap/compiler.rb` compiled by stage 1 — the self-hosted compiler, built
+/// once per test process so the S3 tests do not each pay for it.
+fn stage1_of_the_compiler() -> PathBuf {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = scratch("stage1.rbc");
+        let bytes = stage1("bootstrap/compiler.rb", &compiler_contents());
+        fs::write(&path, bytes).expect("stage 1 writes the compiler's .rbc");
+        path
+    })
+    .clone()
+}
+
+/// The source of `bootstrap/compiler.rb`.
+fn compiler_contents() -> String {
+    fs::read_to_string(compiler()).expect("bootstrap/compiler.rb is UTF-8")
+}
+
+/// One program per corpus family, named. A fixed sample rather than a slice, so
+/// a change to which files exist cannot silently change what this covers.
+const STAGE3_SAMPLE: &[(&str, &str)] = &[
+    ("arithmetic", "corpus/arithmetic-0000.rb"),
+    ("control-flow", "corpus/control-flow-0000.rb"),
+    ("functions", "corpus/functions-0000.rb"),
+    ("lists", "corpus/lists-0000.rb"),
+    ("loop-forms", "corpus/loop-forms-0000.rb"),
+    ("nesting", "corpus/nesting-0000.rb"),
+    ("numeric-boundary", "corpus/numeric-boundary-0000.rb"),
+    ("objects", "corpus/objects-0000.rb"),
+    ("records", "corpus/records-0000.rb"),
+    ("stdlib", "corpus/stdlib-0000.rb"),
+    ("text-ops", "corpus/text-ops-0000.rb"),
+    ("unicode", "corpus/unicode-0000.rb"),
+    ("value-tails", "corpus/value-tails-0000.rb"),
+];
+
+/// The S3 fixed point, over one program from every corpus family stage 2
+/// compares.
+///
+/// Byte-identical output is the only claim this makes. A stage 2 that runs,
+/// writes a plausible `.rbc` and differs in one byte fails it.
+#[test]
+fn edge_stage3_is_byte_identical_on_a_sample_of_every_family() {
+    let mut checked = 0usize;
+    for (family, relative) in STAGE3_SAMPLE {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        assert!(
+            path.is_file(),
+            "the {family} sample {} is missing, so the S3 sample no longer \
+             covers the family it names",
+            relative
+        );
+        let source = fs::read_to_string(&path).expect("a corpus program is UTF-8");
+        if redblue::compile_source(&source).is_err() {
+            panic!("{relative} is refused by the frontend, so it has no bytes to compare");
+        }
+
+        let expected = stage1(relative, &source);
+        let actual = stage3(relative, &path);
+        assert!(
+            actual.succeeded,
+            "stage 2 did not compile {relative} when run as bytecode:\n{}",
+            actual.stderr
+        );
+        assert!(
+            !actual.bytes.is_empty(),
+            "stage 2 wrote no output for {relative}"
+        );
+        assert_eq!(
+            actual.bytes, expected,
+            "the self-hosted compiler emitted different bytes than stage 1 for {relative}"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked,
+        STAGE3_SAMPLE.len(),
+        "the S3 sample did not run every family it names"
+    );
+}
+
+/// The S3 fixed point on the compiler's own source — the one program large
+/// enough to have held the loop bug.
+///
+/// It is also the only assertion that would notice a regression in the *large*
+/// case: the sampled corpus programs are tens of lines, and this is 2 748. It
+/// is slow (minutes, not seconds) because it is 2 700 lines of Redblue running
+/// on a bytecode VM compiling 2 700 lines of Redblue again, and that cost is
+/// accepted here rather than mocked, because a mocked self-compilation proves
+/// nothing.
+#[test]
+fn edge_stage3_recompiles_the_compiler_byte_identically() {
+    let path = compiler();
+    let expected = stage1("compiler", &compiler_contents());
+    let actual = stage3("compiler", &path);
+
+    assert!(
+        actual.succeeded,
+        "stage 2 did not compile bootstrap/compiler.rb when run as bytecode:\n{}",
+        actual.stderr
+    );
+    assert!(
+        !actual.bytes.is_empty(),
+        "stage 2 wrote no output for bootstrap/compiler.rb"
+    );
+    assert_eq!(
+        actual.bytes.len(),
+        expected.len(),
+        "stage 2 wrote {} bytes where stage 1 wrote {}",
+        actual.bytes.len(),
+        expected.len()
+    );
+    assert_eq!(
+        actual.bytes, expected,
+        "bootstrap/compiler.rb compiled by itself must be byte-identical to \
+         bootstrap/compiler.rb compiled by stage 1"
+    );
+}
+
+/// A stage-2 run that fails has to say so, and has to write nothing.
+///
+/// The fixed point above is a comparison of bytes; a stage 2 that exits non-zero
+/// after writing a plausible file would satisfy nothing, and one that exits zero
+/// after failing would report a compiler that works. So both halves are pinned:
+/// a refused program produces no `.rbc` at all, and a bad invocation to the
+/// self-hosted compiler is a non-zero exit rather than a silent success.
+#[test]
+fn edge_stage3_reports_a_failure_rather_than_writing_a_file() {
+    // A program the frontend refuses. Stage 2 must not invent bytes for it.
+    let broken = scratch("stage3-broken.rb");
+    fs::write(&broken, "say \"unterminated\n").expect("the broken program is written");
+    let output = scratch("stage3-broken.rbc");
+    let _ = fs::remove_file(&output);
+
+    let run = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("vm")
+        .arg(stage1_of_the_compiler())
+        .arg(&broken)
+        .arg(&output)
+        .output()
+        .expect("the rb binary runs");
+
+    assert!(
+        !run.status.success(),
+        "compiling an unterminated string must be a failure, not an exit 0"
+    );
+    assert!(
+        !output.exists(),
+        "a refused program must leave no output file behind, so a stale one \
+         cannot be mistaken for a fresh compile"
+    );
+
+    // And a path that is not Redblue source at all — a bytecode file — must be
+    // refused by the same invocation, rather than being read as text.
+    let not_source = scratch("stage3-not-source.rb");
+    fs::write(&not_source, stage1("tiny", "say 1\n")).expect("the .rbc is written");
+    fs::remove_file(&output).ok();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("vm")
+        .arg(stage1_of_the_compiler())
+        .arg(&not_source)
+        .arg(&output)
+        .output()
+        .expect("the rb binary runs");
+
+    assert!(
+        !run.status.success(),
+        "handing the compiler a .rbc must be a failure"
+    );
+    assert!(
+        !output.exists(),
+        "a refused input must leave no output file behind"
+    );
+}

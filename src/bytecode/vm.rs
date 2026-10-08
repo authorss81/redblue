@@ -1711,7 +1711,14 @@ impl BytecodeVm {
             self.advance(frame);
             return;
         };
-        let stack_base = self.stack.len().saturating_sub(1);
+        // The height to put the operand stack back to when this loop ends, which
+        // is the height the loop body runs at: `GET_ITER`/`GET_RANGE` have
+        // already popped the sequence they were given, so there is no
+        // placeholder left on the stack for the loop to keep. Recording one
+        // lower made leaving the loop truncate a value the enclosing frame had
+        // pushed before the loop — a call's own argument — which the callee
+        // then never received.
+        let stack_base = self.stack.len();
         self.loops.push(Loop {
             kind: site.kind,
             iterator: sequence,
@@ -2044,11 +2051,12 @@ impl BytecodeVm {
         // turn. Nothing is charged here: charging it as well is what made a
         // `skip` cost two turns, and stopped a `while` of N turns at a cap of N.
 
-        // The operand stack goes back to the height this loop began at. A
-        // sequence loop keeps the value its variable is drawn from, which sits on
-        // the base; a `while` has none, so its base is the height itself.
-        self.stack
-            .truncate(if owner.site.iterator { base + 1 } else { base });
+        // The operand stack goes back to the height this loop began at, which
+        // is `base` for both loop shapes: `GET_ITER`/`GET_RANGE` popped the
+        // sequence, so a sequence loop keeps nothing on the stack either. A
+        // `skip` that kept `base + 1` here would leave a stray value behind
+        // that the next turn pushed on top of.
+        self.stack.truncate(base);
         self.set_ip(owner.frame, top as usize);
         Ok(())
     }

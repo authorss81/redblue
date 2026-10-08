@@ -4267,3 +4267,103 @@ fn edge_a_version_3_file_is_refused_before_its_imports_name_an_alias() {
         "an aliased import still reaches the function"
     );
 }
+
+/// A sequence loop must put the operand stack back exactly where it found it
+/// when the sequence runs out.
+///
+/// `GET_ITER` leaves the sequence sitting on the operand stack so the loop body
+/// sees the stack height the file expects, and `push_loop` records the height to
+/// return to. If that height is recorded one too low, leaving the loop truncates
+/// a value the *enclosing* frame had already pushed — here the `push` call's
+/// own first argument, which the callee then never receives.
+///
+/// The shape is a sequence loop inside a function called as one argument of a
+/// call, so there is a live operand-stack value underneath the loop for the bad
+/// truncation to eat.
+#[test]
+fn edge_leaving_a_sequence_loop_does_not_eat_the_callers_operands() {
+    let source = r#"
+to total(list)
+    set out to 0
+    for each x in list
+        set out to out + x
+    end
+    give back out
+end
+say push(["kept"], total([1, 2, 3]))
+"#;
+
+    let (tree, byte) = assert_agrees(source);
+    assert_eq!(
+        tree.output,
+        vec!["[kept, 6]".to_string()],
+        "the loop's own answer is the sum of the list"
+    );
+    assert_eq!(
+        byte.output, tree.output,
+        "the bytecode VM must keep the caller's first operand across the loop"
+    );
+}
+
+/// The same truncation, reached through a loop *nested* in another loop, which is
+/// the shape `bootstrap/compiler.rb`'s `apply_patches` has: a `while` whose body
+/// is a `for each`, both in one function, with a call after them.
+///
+/// The inner loop leaves by running out of values, and the outer `while` leaves
+/// through its own condition, so both recorded heights have to be right for the
+/// `push` after them to still receive two operands.
+#[test]
+fn edge_a_sequence_loop_nested_in_a_while_returns_the_outer_stack() {
+    let source = r#"
+to first_of_each(code)
+    set out to []
+    set i to 0
+    while i < length(code)
+        for each entry in code
+            set out to push(out, entry)
+        end
+        set i to i + 1
+    end
+    give back out
+end
+say push(["kept"], first_of_each([[1], [2]]))
+"#;
+
+    let (tree, byte) = assert_agrees(source);
+    // The `while` has two turns, and each turn walks the whole of `code`, so
+    // every element is appended once per turn.
+    assert_eq!(
+        tree.output,
+        vec!["[kept, [[1], [2], [1], [2]]]".to_string()],
+        "both elements are visited once on each of the two turns"
+    );
+    assert_eq!(byte.output, tree.output);
+}
+
+/// A loop that is never entered because its sequence is empty still has to leave
+/// the caller's operands alone.
+///
+/// The empty sequence takes the `leave_loop` path on the *first* turn, before
+/// the body has run once, which is the boundary between the two ways a sequence
+/// loop ends.
+#[test]
+fn edge_an_empty_sequence_loop_leaves_the_callers_operands_alone() {
+    let source = r#"
+to nothing_at_all(list)
+    set out to 0
+    for each x in list
+        set out to out + x
+    end
+    give back out
+end
+say push(["kept"], nothing_at_all([]))
+"#;
+
+    let (tree, byte) = assert_agrees(source);
+    assert_eq!(
+        tree.output,
+        vec!["[kept, 0]".to_string()],
+        "an empty sequence sums to zero and the caller's operand survives"
+    );
+    assert_eq!(byte.output, tree.output);
+}
