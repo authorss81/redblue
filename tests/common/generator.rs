@@ -810,12 +810,12 @@ const LOOP_FORMS: &[&str] = &[
     "for each x in [[1, 2], [3, 4]]\n    for each y in x\n        say y\n    end\nend\n",
     "for each x in [1, 2]\n    if x is 2 then\n        say \"two\"\n    end\nend\n",
     "set total to 0\nfor each x in [1, 2, 3, 4]\n    set total to total + x\nend\nsay total\n",
-    // `break` and `skip`: both are parsed and neither does anything
-    // (`FINDINGS.md` §5). Their goldens record the no-op's output, so they are
-    // named in `corpus::KNOWN_DEFECT_PROGRAMS` and asserted on both engines by
-    // `edge_a_break_and_a_skip_are_pinned_as_the_defect_they_are` — a golden that
-    // records a defect as a success is read as coverage by the next reader
-    // unless something says otherwise.
+    // `break` and `skip`: both engines act on them (phase-025). These two goldens
+    // used to record the no-op's output, which is why they are named in
+    // `corpus::BREAK_AND_SKIP_PROGRAMS` and asserted on both engines by
+    // `edge_a_break_and_a_skip_leave_the_loop_on_both_engines` — the table pins the
+    // lines the fix produced, so a golden quietly edited back to a defect is a
+    // failing test rather than passing coverage.
     "for each x in [1, 2, 3]\n    if x is 2 then\n        say \"found\"\n    end\n    break\nend\nsay \"after\"\n",
     "for each x in [1, 2, 3]\n    if x is 2 then\n        say x\n    end\n    skip\nend\nsay \"after\"\n",
     "set out to \"\"\nfor each x in [\"a\", \"b\"]\n    set out to out + x\nend\nsay out\n",
