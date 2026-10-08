@@ -1,5 +1,37 @@
 # Phase 034 — Add the function literal `to (x) ... end` as an expression
 
+## Re-dispatch on 2026-10-08 — the finding is stale; no code changed
+
+This phase was dispatched a second time with `HEAD = 03bfa06`, its own commit.
+The finding no longer reproduces: `Expr::FunctionLiteral` is at
+`src/parser.rs:67`, and both of the finding's repro programs exit 0 with the
+documented output (`42`, and `[2, 4, 6]`). Per the phase prompt's instruction
+for a stale finding, this run changed no production code, added no test and did
+not edit `src/` — inventing a change to satisfy `must_touch` would be a
+fabrication, and `must_touch` is satisfied by the phase's own commit `03bfa06`.
+See `FINDINGS.md` § 0, which also asks the auditor why a completed phase was
+re-selected.
+
+The gates were re-measured on this `HEAD`, and the numbers differ from the
+table below by two tests that were added after the original run wrote it:
+
+| Gate | Result, re-measured 2026-10-08 at `03bfa06` |
+|---|---|
+| `cargo fmt --all -- --check` | pass, no diff, exit 0 |
+| `cargo clippy --all-targets -- -D warnings` | pass, 0 warnings, 0 errors, exit 0 |
+| `cargo test --all-targets` | pass — 33 test binaries, **1008 passed, 0 failed, 0 ignored** (the table below says 1006; that count was taken before the last two tests landed) |
+| `./rbops/verify.sh phase-034` | **not runnable** — `ls rbops` → `No such file or directory` in this checkout; the pipeline that owns it lives outside the project and was not inspected |
+
+Also re-measured: `tests/closure_capture_test.rs` is 26 passed / 0 failed and
+`tests/loop_bounds_test.rs` is 24 passed / 0 failed. Neither file is touched by
+`03bfa06` (`git show 03bfa06 --stat -- tests/closure_capture_test.rs
+tests/loop_bounds_test.rs` shows an empty diff), so both are unchanged. All 6
+`examples/*.rb` and both `modules/*.rb` exit 0. Every `edge_*` test the
+definition of done names is present in `tests/function_literal_test.rs` and
+passes: zero parameters at line 267, parameter shadowing at 298, three nested
+literals at 314, reassigned name at 361, wrong argument count at 413,
+unterminated literal at 444, literal nested inside itself at 488.
+
 ## Reproducing the finding
 
 Reproduced on `ca6bd7d` (phase-033) before any edit, both with the binary and

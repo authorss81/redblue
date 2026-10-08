@@ -1,5 +1,46 @@
 # FINDINGS — phase-034
 
+## 0. Re-dispatch on 2026-10-08 after `03bfa06`: the phase finding is stale
+
+phase-034 was dispatched a second time with `HEAD = 03bfa06`, which is the
+phase's own commit. Its finding does not reproduce on that `HEAD`. Per the
+phase prompt's own instruction ("a stale phase must never be 'fixed' by
+inventing a change"), this run changed **no production code**.
+
+Both halves of the finding's evidence, re-run against `HEAD`:
+
+```
+$ printf 'set double to to (x) give back x * 2\nsay double(21)\n' > target/tmp/a.rb
+$ cargo run --quiet --bin rb -- run target/tmp/a.rb; echo "exit=$?"
+42
+exit=0
+
+$ printf 'say [1,2,3].map(to (x) give back x * 2)\n' > target/tmp/b.rb
+$ cargo run --quiet --bin rb -- run target/tmp/b.rb; echo "exit=$?"
+[2, 4, 6]
+exit=0
+```
+
+`src/parser.rs:67` now carries `Expr::FunctionLiteral { params, body }`, which
+is exactly what the finding said was absent from `Expr`. The two
+`ParserError: Unexpected token To` outputs quoted in `REPORT.md` are what the
+parser emitted on `ca6bd7d`; they are not emitted on `03bfa06`.
+
+The audit trail says the dispatcher moved here while the phase was already in a
+terminal-looking state — `03bfa06` is `rbops: phase-034`, the commit the
+dispatcher itself writes on a successful run, and the working tree was clean at
+`HEAD` with no `.running`, `.deferred`, `.blocked` or `.starved` marker in
+`phases/phase-034/` (only `FINDINGS.md` and `REPORT.md`, which is a `.done`
+shape). **The auditor should check why a completed phase was re-selected**;
+if the phase is `.done`, re-dispatching it will keep producing this same
+outcome, and if it is not `.done`, the marker that records which state it is in
+is not being committed.
+
+Also stale in the phase prompt, for whoever regenerates it: it states
+`tests/loop_bounds_test.rs` has **22** tests. It has had **24** since at least
+`ca6bd7d` (`git show ca6bd7d:tests/loop_bounds_test.rs | grep -c '#\[test\]'` →
+24), and phase-034 did not touch that file. All 24 pass.
+
 Defects found while adding the function literal that this phase did **not** fix,
 because fixing them is not "make `to (x) ... end` an expression". Each is
 anchored to a line read during this phase and is a candidate for the auditor to
