@@ -6,63 +6,68 @@
 **Redblue** is a programming language designed to be as readable as plain English. Write code that reads like natural sentences while maintaining the power of modern programming languages.
 
 ```redblue
-// Hello World
-say "Hello, World!"
-
-// Functions - readable and clear
-to greet(name)
-    say "Hello, {name}!"
+try
+    say 1 / 0
+catch
+    say "recovered"
 end
 
-// Control flow - no cryptic symbols
-if count is greater than 10
-    say "Large count!"
-else
-    say "Small count!"
-end
-
-// Objects - simple and intuitive
-object Person
-    has name
-    has age
-    
-    to introduce()
-        say "I'm {this.name}"
+test "division by zero is caught, not fatal"
+    set caught to no
+    try
+        say 1 / 0
+    catch
+        set caught to yes
     end
+    expect caught to be yes
 end
 ```
 
-## Why Redblue?
+Errors are values you catch. Tests live beside the code and must assert something that can fail. That is the whole philosophy in fifteen lines.
 
-| Feature | Redblue | Python | JavaScript |
-|---------|---------|--------|------------|
-| Keywords | 32 | 35 | 50+ |
-| Readability | ★★★★★ | ★★★★☆ | ★★★☆☆ |
-| Plain English syntax | Yes | No | No |
+## What it can do
 
-- **32 keywords** vs Python's 35 and JavaScript's 50+
-- Code reads like instructions you'd give a person
-- No cryptic symbols: `end` not `}`, `each` not `for...of`
+**Readable control flow.** No braces, no semicolons — blocks close with `end`:
 
-## Installation
-
-### Windows
-1. Download Rust: https://win.rustup.rs-x86_64.exe
-2. Run the installer
-3. Restart terminal
-
-### macOS / Linux
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```redblue
+set total to 0
+for each n in [1, 2, 3]
+    if n is 2 then
+        skip
+    end
+    set total to total + n
+end
+say total
 ```
 
-### Build from Source
-```bash
-git clone https://github.com/authorss81/redblue.git
-cd redblue
-cargo build --release
-./target/release/rb --version
+**Errors that don't lie.** Every error carries a source span, failures are catchable, and a bare `catch` runs even with no name binding:
+
+```redblue
+set empty to []
+try
+    set x to empty[0]
+catch err
+    say err
+end
 ```
+
+**Testing built in, not bolted on.** Test blocks use `expect ... to be ...` and every test must be able to fail:
+
+```redblue
+test "empty list index is an error"
+    set empty to []
+    try
+        set x to empty[0]
+    catch error
+        set caught to yes
+    end
+    expect caught to be yes
+end
+```
+
+**Values that behave.** Numbers are 64-bit floats and always finite — `1 / 0` is a clean runtime error, never infinity. Text is fully Unicode. Records keep insertion order. Objects support inheritance and method dispatch, closures capture lexically.
+
+**Two engines that must agree.** Programs run on the tree-walking interpreter or compile to versioned bytecode (`.rbc`). A differential harness runs hundreds of programs on both and compares outcomes — if the engines ever disagree, it's a bug, and there's a test proving it.
 
 ## Quick Start
 
@@ -96,9 +101,9 @@ set name to "Alice"
 set age to 30
 set fruits to ["apple", "banana", "orange"]
 
-say "Hello, {name}!"
-say "Age: {age}"
-say "First fruit: {fruits at 0}"
+say name
+say age
+say fruits
 ```
 
 ```redblue
@@ -122,10 +127,34 @@ set content to files.read("output.txt")
 say content
 ```
 
+## Language at a glance
+
+| Form | Meaning |
+|---|---|
+| `set x to <expr>` | assignment |
+| `say <expr>` | print |
+| `if … then … else … end` | conditional |
+| `for each x in <list> … end` | iteration |
+| `for each i from A to B … end` | range loop |
+| `while … end`, `repeat … until …` | loops |
+| `break` / `skip` | leave / skip one iteration |
+| `unless … end` | negated conditional |
+| `to name(params) … end` | function declaration |
+| `to (x) … end` | function literal |
+| `object Name … has x … to f() … end` | object with fields and methods |
+| `Child extends Parent` | inheritance |
+| `test "name" … end` | test block |
+| `expect a to be b` | assertion |
+| `try … catch [err] … finally … end` | catchable errors |
+| `import Mod`, `import a, b as c` | modules |
+| `constant PI to 3.14159` | module-level constant |
+
+Full grammar: [`docs/GRAMMAR.md`](docs/GRAMMAR.md). Design rationale: [`PHILOSOPHY.md`](PHILOSOPHY.md). Specification: [`SPEC.md`](SPEC.md).
+
 ## Standard Library
 
 ### Files
-```redblue
+```
 files.read(path)      // Read file as text
 files.write(path, content)
 files.append(path, content)
@@ -135,24 +164,40 @@ files.delete(path)
 ```
 
 ### Time
-```redblue
-time.now()           // Get current timestamp
+```
+time.now()             // Get current timestamp
 time.sleep(seconds) // Sleep for N seconds
-time.format(ts, format)
+time.format(timestamp, "format")
 time.unix("YYYY-MM-DD HH:MM:SS")
 ```
 
 ### Network
-```redblue
+```
 network.get(url)     // HTTP GET
 network.post(url, body)
 ```
 
 ### Formats
-```redblue
+```
 json.parse(text)     // Parse JSON to record
 json.stringify(value)
 csv.parse(text)     // Parse CSV to list of lists
+```
+
+### Math
+```
+PI, E                    // Constants
+abs(x), floor(x), ceil(x)
+round(x), sqrt(x), pow(x, y)
+sin(x), cos(x), tan(x)
+log(x), exp(x)
+```
+
+### Text
+```
+uppercase("text"), lowercase("text"), trim("text")
+split("text", by), join(list, by)
+contains("text", sub)
 ```
 
 ## Project Structure
@@ -165,12 +210,12 @@ redblue/
 │   ├── lexer.rs         # Tokenizer
 │   ├── parser.rs        # AST builder
 │   ├── analyzer.rs      # Semantic analysis
-│   ├── vm.rs            # Virtual machine
+│   ├── vm.rs            # Tree-walking interpreter
+│   ├── bytecode/        # Bytecode format, compiler, disassembler, VM
 │   ├── stdlib.rs        # Standard library
 │   ├── formatter.rs     # Code formatter
 │   ├── linter.rs        # Code linter
 │   ├── lsp.rs           # Language server
-│   ├── bytecode/        # Bytecode format, compiler, disassembler, VM
 │   ├── repl/            # REPL
 │   └── testing/         # Test harness
 ├── tests/               # Rust + Redblue test suites
@@ -207,6 +252,7 @@ cargo clippy
 - [x] Bytecode compiler + VM (`rb compile`, `rb dis`, `rb vm`)
 - [ ] IDE extensions (in progress)
 - [ ] Package manager (planned)
+- [ ] Self-hosting: the compiler rewritten in Redblue, then compiling itself (in progress — see ROADMAP.md)
 
 ## License
 

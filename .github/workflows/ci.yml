@@ -18,3 +18,32 @@ jobs:
       - run: cargo build --verbose
       - run: cargo test
       - run: cargo clippy -- -D warnings
+      # Docs that can't go stale: every ```redblue block in README.md is a real
+      # program and must exit 0. Reference-style fences (no language tag) are
+      # illustrative API listings and are not executed. Each block runs in its
+      # own temp dir so file-writing examples can't dirty the tree.
+      - name: README examples run green
+        run: |
+          python3 - <<'EOF'
+          import re, os, subprocess, sys, tempfile
+          text = open('README.md', encoding='utf-8').read()
+          fence = chr(96) * 3
+          parts = text.split(fence + 'redblue\n')
+          blocks = [p.split(fence)[0] for p in parts[1:]]
+          assert len(blocks) >= 5, 'expected >=5 runnable README blocks, found %d' % len(blocks)
+          rb = os.path.join('target', 'debug', 'rb')
+          if os.name == 'nt':
+              rb += '.exe'
+          failed = 0
+          for i, b in enumerate(blocks):
+              d = tempfile.mkdtemp(prefix='rbdoc')
+              p = os.path.join(d, 'ex%02d.rb' % i)
+              open(p, 'w', encoding='utf-8', newline='\n').write(b)
+              r = subprocess.run([rb, 'run', p], capture_output=True, text=True)
+              print('README block %02d: exit=%d' % (i, r.returncode), flush=True)
+              if r.returncode != 0:
+                  print(r.stdout[-1500:])
+                  print(r.stderr[-1500:])
+                  failed += 1
+          sys.exit(1 if failed else 0)
+          EOF

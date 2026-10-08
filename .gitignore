@@ -1,5 +1,11 @@
 # Build outputs
 /target/
+*.rbc
+a.out
+
+# Stray debug outputs - never commit these
+err.txt
+errors.txt
 Cargo.lock
 
 # IDE
