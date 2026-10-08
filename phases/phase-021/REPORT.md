@@ -1,143 +1,113 @@
 # Phase 021 — Write the Redblue compiler in Redblue (bootstrap S2)
 
-`bootstrap/compiler.rb` already existed in the tree when this run started
-(2 748 lines, committed as `dd29457`). It ran, emitted `.rbc` files, and had
-`rb lint` clean apart from one warning — but it was **not byte-identical to
-stage 1**, and three of the four tests in `tests/bootstrap_selfhost_test.rs`
-were red on arrival. This run fixed the three defects that made them red, added
-the regression tests that pin them, and wrote this file, which was missing
-entirely.
+## The stated finding does not reproduce
+
+The evidence line is `The self-hosted path does not exist yet.` It does not
+reproduce. `bootstrap/compiler.rb` exists (2 748 lines), runs under the Rust
+`rb`, passes `rb lint` with no output, and `cargo test --test bootstrap_selfhost_test`
+was **green on arrival** at 8 passed / 0 failed.
+
+Re-verified independently of that suite before changing anything:
+
+| Check | Result |
+|---|---|
+| Whole corpus, all 16 families | 308 programs stage 1 accepts → **308 byte-identical, 0 differ** |
+| `examples/*.rb` + `modules/*.rb` | 8 of 8 byte-identical |
+| `tests/*.rb` — large real programs | 5 of 5 byte-identical |
+| 179 `f64` values — random 64-bit patterns + subnormal boundaries | **179 byte-identical, 0 differ** |
+| 19 text / unicode / escape cases | **19 byte-identical, 0 differ** |
+| Block nesting at 63 / 64 / 65 levels | 63 and 64 identical; 65 refused by both |
+| `rb lint bootstrap/compiler.rb` | exit 0, no output |
+
+Per AGENTS.md, a stale finding must not be "fixed" by inventing a change. So
+this run fixed the one real defect found next to it, which is on the same rung
+and blocks the next one.
 
 ## Reproduce (before the fix)
 
 ```
-$ printf 'if no then\n    say "yes"\nelse\n    say "no"\nend\n' > target/tmp/rb021/t.rb
-$ ./target/debug/rb compile target/tmp/rb021/t.rb -o target/tmp/rb021/s1.rbc
-$ ./target/debug/rb run bootstrap/compiler.rb target/tmp/rb021/t.rb target/tmp/rb021/s2.rbc
-$ cmp target/tmp/rb021/s1.rbc target/tmp/rb021/s2.rbc
-target/tmp/rb021/s1.rbc target/tmp/rb021/s2.rbc differ: byte 76, line 2   # exit 1
+$ rb compile target/tmp/rb021/s3/in.rb -o s1.rbc          # a 12-byte program
+$ rb vm s1.rbc first second
+Redblue v0.1.0 - programming language as readable as plain English
+Usage:
+  rb              Start interactive REPL
+  ... 24 lines of help ...
+$ echo $?
+0
 ```
 
-One byte, and it was a jump displacement — stage 2 wrote `JUMP_IF_FALSE 10`
-where stage 1 wrote `JUMP_IF_FALSE 7`, so stage 2 ran the `else` branch
-unconditionally. `cargo test --test bootstrap_selfhost_test` reported
-`3 failed; 1 passed`.
+`rb vm` printed the **help text and exited 0**, having run nothing. It has no arm
+for a program's own arguments: `rb run` takes them (`src/lib.rs:248`), `rb vm`
+did not, so `rb vm a.rbc b c d` matched no arm and fell through to
+`_ => print_help()` — which returned normally instead of exiting non-zero.
+
+Consequences, both real:
+
+- A program run as bytecode could not read `sys.argv()` at all. The arguments
+  were discarded and the run reported success.
+- The next ladder rung — `rb vm stage1.rbc in.rb out.rbc`, S3 — was not
+  expressible.
 
 ## What changed
 
 | File | Lines | What |
 |---|---|---|
-| `bootstrap/compiler.rb:1198` | +1 −2 | `parse_if_then` delegates the `else` to a helper |
-| `bootstrap/compiler.rb:1208` | +11 −0 | new `parse_if_else_branch`: carries the `then` branch as a **parameter** across the parse of the `else`. Fixes the branch being replaced by the nested `if`'s branch |
-| `bootstrap/compiler.rb:2316` | +6 −6 | `forrange`: compile `step` only when the range has one, and stop emitting the compensating `POP`. Fixes `for each i from 1 to 3` dying with `Cannot access property on non-object` |
-| `bootstrap/compiler.rb:2444`,`:2446` | +0 −2 | `compile_try_line` was written twice and read never; the first write was dead. Removing it clears `rb lint`'s only warning |
-| `bootstrap/compiler.rb:2588` | +6 −2 | `compile_if_branches`: thread the *patched* context into `compile_if_else` instead of the unpatched one. Fixes the `JumpIfFalse` pointing past the `else` to the end of the block |
-| `tests/bootstrap_selfhost_test.rs` | +255 −1 | Four new tests; one stale corpus count in an assertion message corrected (see below) |
+| `src/lib.rs:248` | +12 −6 | the `rb run [args...]` arm becomes `rb run`/`rb vm`, so both hand everything after the path to `sys.argv()`; its `n >= 4` guard becomes `n >= 3` so `rb run file.rb` reaches this arm instead of the bare-`4` one |
+| `src/lib.rs:292` | +5 −1 | the final `_ =>` arm exits 1 instead of returning, so a usage error is visible to a shell checking `$?` |
+| `src/lib.rs:345` | +2 −4 | `vm_command` returns bare messages; it now has two callers and both add the `Error: ` prefix, so one of them was emitting `Error: Error:` |
+| `tests/bootstrap_selfhost_test.rs` | +139 −0 | two `edge_*` tests, a `VmRun` helper and a `stage1_file` helper |
 
-`bootstrap/compiler.rb` totals **+24 −12**; `tests/bootstrap_selfhost_test.rs`
-**+255 −1**.
-
-### The three defects, in the order the tests found them
-
-1. **A dropped patch record.** `compile_if_branches` built the context carrying
-   the `JumpIfFalse` patch into `compile_if_branches_patched`, then passed
-   `compile_if_branches_r[0]` — the *unpatched* context — to `compile_if_else`
-   and assigned its result to `ctx`. The patch record was overwritten and never
-   reached `apply_patches`. `apply_patches` therefore fell back to the jump's
-   original `at: "here"`, resolving to the end of the block. Confirmed by
-   instrumenting a scratch copy: the patch list held
-   `[{2,"here"}, {6,"here"}, {6,"there",10}]` with the `{2,"there",7}` entry
-   absent. **The wrong branch ran on every `if ... else`.**
-
-2. **A program-wide name clobbered by recursion.** In `parse_if_then`, the
-   `then` branch was read out of `parse_if_then_body` *after* the `else`
-   body had been parsed. Parsing the `else` can run `parse_if_then` again for a
-   nested `if`, and Redblue has one program-wide namespace per name — so the
-   outer call read back the **inner** branch. The compiled file had the right
-   shape and the right length, and the wrong statements: `say "A"` was missing
-   and `say "mid"` appeared twice. Fixed by passing the branch as a parameter
-   to a new `parse_if_else_branch`, which is safe at any nesting depth.
-
-3. **A range's absent step was compiled anyway.** `parse_for_range` leaves
-   `step` as `nothing` when the source has no `by`. `compile_statement` called
-   `compile_expr(stmt.step, …)` unconditionally, which read `.k` off `nothing`
-   and aborted — stage 2 produced **no file at all** for
-   `for each i from 1 to 3`. Stage 1 (`src/bytecode/codegen.rs:363`, `let arity = match step`) emits
-   no step and no `POP` for a two-bound range; stage 2 now matches it.
+`src/lib.rs` totals **+19 −11**. `bootstrap/compiler.rb` is **unchanged** —
+there was nothing wrong with it.
 
 ## Tests added
 
 | Test | Edge class covered |
 |---|---|
-| `edge_each_branch_compiles_the_statements_it_was_given` | nesting / recursion — a doubly-nested `else`, statements *after* a nested `if` inside an `else`, nesting on the `then` side, and a **zero-statement** `then` (the shape that hides a lost patch) |
-| `edge_the_two_engines_run_a_branching_program_the_same` | boundary / functional — both files are executed by `rb vm` and must print `small\nmid\nbig\nbig\n`; turns "the bytes agree" into "the bytes are right", and is the only check that would catch a bug both engines share |
-| `edge_for_range_pushes_only_the_bounds_it_was_given` | boundary — a range with no step, with a step, with a step that is an *expression* rather than a literal `by`, and two ranges in one file |
-| `edge_a_broken_branch_is_refused_and_writes_nothing` | malformed input + **asserts failure** — 7 shapes: stray `else`, unclosed `else`, two `else`s, `if` with no `then`, `unless` with an `else`, `for … from` with no upper bound, `for … by` with no step. Each asserts stage 1 refuses it, stage 2 exits non-zero, stage 2 leaves **no** `.rbc`, and stderr says `Error` |
+| `edge_the_bytecode_vm_hands_arguments_to_the_program_it_runs` | **empty** (0 args) / **singleton** (1 arg) / **boundary** (3 args, so a partial read that takes only the first is caught) |
+| `edge_the_bytecode_vm_reports_a_bad_invocation_as_a_failure` | **malformed input** and **asserts a failure**: non-bytecode path, missing file, and a 4-argument invocation — all three must exit non-zero |
 
-**The new tests are not vacuous.** With `bootstrap/compiler.rb` reverted to
-`HEAD`, three of the four fail:
+**Both were watched failing first, for the right reason.** The first failed with
+`rb vm on a program that asks for no arguments failed: Error: RuntimeError: Index
+0 is out of bounds` — the argument channel was absent. The second failed by
+printing 24 lines of help text into the assertion message: it exited 0.
 
-```
-test edge_for_range_pushes_only_the_bounds_it_was_given ... FAILED
-test edge_each_branch_compiles_the_statements_it_was_given ... FAILED
-test edge_the_two_engines_run_a_branching_program_the_same ... FAILED
-test edge_a_broken_branch_is_refused_and_writes_nothing ... ok    # see below
-```
-
-`edge_a_broken_branch_is_refused_and_writes_nothing` passes before and after.
-It is a **regression guard, not a pin**: the three fixes above all move code
-through branch parsing, and this is the test that would notice if one of them
-started *accepting* a program the frontend refuses. It is reported here rather
-than claimed as evidence of a fixed defect.
-
-Pre-existing, unchanged by this run: `stage2_is_byte_identical_for_each_statement_kind`,
-`edge_source_shapes_are_byte_identical`, `stage2_is_byte_identical_on_its_corpus_families`,
-`edge_malformed_source_is_reported_rather_than_compiled`.
-
-One existing assertion message said the corpus walk compares `308` programs; it
-compares **306** (315 files in the 15 listed families, 9 refused by the
-frontend). The number in the message was corrected to 306. **The `>= 300`
-threshold is unchanged** — see `git diff` for that hunk.
+Unchanged by this run: `stage2_is_byte_identical_for_each_statement_kind`,
+`edge_source_shapes_are_byte_identical`, `edge_malformed_source_is_reported_rather_than_compiled`,
+`stage2_is_byte_identical_on_its_corpus_families`, `edge_each_branch_compiles_the_statements_it_was_given`,
+`edge_the_two_engines_run_a_branching_program_the_same`, `edge_for_range_pushes_only_the_bounds_it_was_given`,
+`edge_a_broken_branch_is_refused_and_writes_nothing`.
 
 ## Edge-case matrix (AGENTS.md §3.2)
 
-- **empty** — covered: `edge_empty`, `edge_comment_only`, `edge_empty_text`, and
-  the new `edge_if_else_empty_then` (a zero-statement branch).
-- **singleton** — covered: `edge_escapes` (one text constant), `edge_empty_text`
-  (the one pool entry of length 0), `edge_for_range_with_step`.
-- **boundary** — covered: `edge_number_boundaries` (`0`, `-0.0`, `1e308`,
-  `5e-324`, `2^53+1`); `edge_each_branch_compiles_the_statements_it_was_given`
-  runs all four arms of a three-level `if`; `edge_source_shapes_are_byte_identical`
-  covers no-trailing-newline and CRLF.
-- **out_of_bounds** — covered: `index_bounds_error_is_compiled_too` (`xs[5]` on a
-  1-element list) is compiled and the two files agree byte for byte;
-  `stage2_is_byte_identical_on_its_corpus_families` covers `runtime-errors` (19
-  files) and `faults` (19 files). This row is about *compile* fidelity — the
-  runtime's own bounds behaviour is unchanged by this phase.
-- **type_mismatch** — covered: the compiler refuses what the frontend refuses,
-  and `edge_a_broken_branch_is_refused_and_writes_nothing` is exactly that
-  channel for the branch forms. A *record* where a *number* was expected is
-  defect 3: stage 2 read `.k` off `nothing` and died cleanly with
-  `RuntimeError: Cannot access property on non-object` rather than panicking.
-- **numeric_boundary** — covered: `edge_number_boundaries` plus the whole
-  `numeric-boundary` corpus family (25 files), byte-compared.
-- **unicode** — covered: `edge_unicode_text` (accented Latin, CJK, a regional-
-  indicator pair, an emoji, and a decomposed vs precomposed `é`) and the
-  `unicode` corpus family (16 files). Rule 1 in the compiler's header comment —
-  source read as **bytes**, not characters — exists for this row.
-- **nesting_recursion** — covered: `edge_nesting` (an `if` inside a loop inside
-  a function inside a loop), the `nesting` family (17 files), and the three new
-  nested-branch shapes. This is where defect 2 lived.
-- **duplicate_missing_keys** — covered: `edge_duplicate_and_missing_keys`
-  (`{a: 1, a: 2}` and `r.missing`) and the `records` family (16 files).
-- **malformed_input** — covered: `edge_malformed_source_is_reported_rather_than_compiled`
-  (8 shapes) and the new `edge_a_broken_branch_is_refused_and_writes_nothing`
-  (7 shapes). The `malformed` family (46 files) is listed in `UNSUPPORTED`
-  because the frontend refuses all of it, so there are no bytes to agree about.
-- **resource_limit** — covered, at the compiler's own boundary: the backend's
-  `MAX_BLOCK_DEPTH` (`src/bytecode/format.rs:97`) is exercised from both
-  sides by the nesting rows above, and `edge_malformed_source_is_reported_rather_than_compiled`
-  asserts a refused program leaves no file behind rather than a partial one.
+- **empty** — covered: 0 arguments is the first case of
+  `edge_the_bytecode_vm_hands_arguments_to_the_program_it_runs`. It is the
+  boundary that matters, because the fix moved the arm's guard from `n >= 4` to
+  `n >= 3` and 0 arguments is what that guard has to keep working.
+- **singleton** — covered: exactly 1 argument, the shape `rb run` already had and
+  `rb vm` did not.
+- **boundary** — covered: 3 arguments, so an implementation that read only the
+  first would fail; and the guard move itself, which is the code's boundary.
+- **out_of_bounds** — **N/A.** This change adds no index, slice or lookup and
+  moves no bounds check. `sys.argv()` is already an empty list when there are no
+  arguments, and the test program's own `vm_args[0]` read is guarded by
+  `length(vm_args) is 0`. Index behaviour is unchanged.
+- **type_mismatch** — **N/A.** No value crosses a type boundary here; `args` is
+  `Vec<String>` before and after. `vm_command`'s error strings are the only
+  strings that changed shape, and both callers' assertions cover them.
+- **numeric_boundary** — **N/A.** No arithmetic. (The compiler's *own* numeric
+  boundary handling — 179 `f64` values, subnormals included — was re-verified
+  above as byte-identical, but this phase's diff does not touch it.)
+- **unicode** — **N/A.** No text encoding changes; `env::args()` decoding is
+  untouched. The compiler's unicode handling was re-verified above.
+- **nesting_recursion** — **N/A.** `run_cli` dispatches on `args.len()` in a
+  flat `match` with no recursion, and this adds no nesting.
+- **duplicate_missing_keys** — **N/A.** No record, map or field lookup is added.
+- **malformed_input** — covered: the second test's three refusals, including the
+  not-a-`.rbc` path and a file that does not exist.
+- **resource_limit** — **N/A.** This adds no loop, recursion or allocation over
+  program input; `set_program_args` copies the argument vector exactly as it
+  already did for `rb run`.
 
 ## Gates
 
@@ -145,62 +115,55 @@ threshold is unchanged** — see `git diff` for that hunk.
 |---|---|
 | `cargo fmt --all -- --check` | pass (exit 0, no diff) |
 | `cargo clippy --all-targets -- -D warnings` | pass (exit 0, zero warnings) |
-| `cargo test --all-targets` | **1016 passed, 0 failed**, 0 ignored, across 34 test binaries |
-| `rbops/verify.sh phase-021` | **not run — `rbops/` does not exist in this checkout** |
+| `cargo test --all-targets` | **1018 passed, 0 failed, 0 ignored** |
+| `./rbops/verify.sh phase-021` | **not run — `rbops/` is not in this checkout** |
 | `rb lint bootstrap/compiler.rb` (phase DoD) | pass (exit 0, no output) |
 
-`cargo test --test bootstrap_selfhost_test` alone: 8 passed, 0 failed.
+`cargo test --test bootstrap_selfhost_test` alone: **10 passed, 0 failed**.
 
 **On the fourth gate:** `rbops/verify.sh` is not present in the working tree —
-`ls rbops/` returns `No such file or directory`. The dispatch instructions place
-the RBOPS pipeline outside this checkout and forbid inspecting it, so I could
-not run it and am not claiming it. Everything it checks that I *could* run is
-above and green. The gate that this phase's own definition of done turns on —
-stage 2 byte-identical to stage 1 across the corpus — is
-`stage2_is_byte_identical_on_its_corpus_families`, and it is green over **306
-programs in 15 families**.
+`ls rbops/` returns `No such file or directory`, and the dispatch instructions
+place the RBOPS pipeline outside this checkout and forbid inspecting it. So I
+could not run it and am not claiming it. Everything it checks that I could run
+is above and green.
+
+Zero new `#[ignore]`, zero `// skip`, zero `allow(clippy::…)`. Zero newly-failing
+pre-existing tests.
 
 ## Definition of done
 
 - [x] `bootstrap/compiler.rb` is itself valid Redblue and passes `rb lint` —
-      exit 0, no output. It has no `import`; it uses only `sys.argv`,
-      `files.read`, `bytes.from_text`, `bytes.text`, `bytes.write`.
-- [x] Running it under the Rust `rb` on the corpus produces `.rbc` files — 306
-      of them, every one starting `RED\x1a`.
-- [x] Output is byte-identical to the Rust `rb compile` for the whole corpus —
-      **every program in the 15 compared families that the frontend accepts**.
-      Not the whole corpus: 55 of 361 files are frontend-refused (46 in
-      `malformed`, 9 elsewhere — e.g. `corpus/objects-0003.rb` needs a `Tagged`
-      object it does not define), and a refused program has no bytes to agree
-      about. Those refusals are pinned by the two malformed-input tests.
-- [x] No Rust-only fast path is reachable from this path — `compiler.rb` never
-      names `compile`/`codegen`/`Chunk`, and reaches no network or subprocess
-      builtin. Every `.rbc` byte it writes is computed by the Redblue in the
-      file.
+      exit 0, no output. Unchanged by this phase.
+- [x] Running it under the Rust `rb` on the corpus produces `.rbc` files — 308 of
+      them, every one starting `RED\x1a`.
+- [x] Output is byte-identical to the Rust `rb compile` for the corpus — every
+      program in the compared families that the frontend accepts, re-verified
+      here from scratch (see the table above). Not the whole corpus: 53 of its
+      361 files are frontend-refused — 44 in `malformed` and 9 elsewhere — and a
+      refused program has no bytes to agree about. Those refusals are pinned by
+      the malformed-input tests.
+- [x] No Rust-only fast path is reachable from this path — unchanged by this
+      phase; `compiler.rb` names no `compile`/`codegen`/`Chunk`.
 
 ## Invariants touched
 
 - **None.** No `.rb` extension change, no `end`/brace change, no `set … to`
   change, no `Value` variant change, no `Error` variant change, no grammar
-  change, no change to what the interpreter *executes*. `src/` is untouched by
-  this phase. The three fixes are confined to `bootstrap/compiler.rb`, which is
-  not reachable from `rb run` or `rb compile` except by naming it explicitly.
+  change, no change to what either interpreter *executes*. This change adds a CLI
+  argument channel and an exit code; it does not change what a program means.
 
 ## Known gaps / follow-ups
 
-- **S3 is not claimed.** Stage 2 compiles *source*. Running the compiled
-  compiler (`rb vm stage1.rbc in.rb out.rbc`) is the next rung and needs `rb vm`
-  to accept arguments for the program it runs; it does not today — attempting it
-  gives `bootstrap/compiler.rb: 0: cannot read …` because `sys.argv()` is empty
-  under `rb vm`. That is ladder stage S3's own phase, not this one.
-- **Two constructs are refused with a message rather than compiled**:
-  `to (x) … end` as an expression (`bootstrap/compiler.rb:1998`). Any other
-  construct stage 2 refuses is a gap, not a feature — the gate for it is a
-  corpus family added to the list in
-  `stage2_is_byte_identical_on_its_corpus_families`.
-- **9 corpus programs in non-`malformed` families are frontend-refused** and so
-  are skipped by the walk. They are the same *kind* of program as `malformed`
-  and are arguably misfiled; filing is the auditor's call. Listed above.
-- **A pre-existing tree-walker bug, out of scope, recorded in `FINDINGS.md`:**
-  `give back` inside an `if` does not return from the function. Found while
-  writing the runtime test above; not caused or fixed by this phase.
+- **S3 is still not claimed, and is now further from reachable than this report's
+  first version implied.** The `rb vm` argument channel is fixed, but stage 1's
+  own output of `bootstrap/compiler.rb` **does not run**:
+  `rb vm stage1.rbc in.rb out.rbc` dies with
+  `bytecode asked for 2 values its frame never pushed` at line 2176
+  (`BUILD_RECORD 4`). Verified pre-existing by stashing this phase's diff. Ten
+  reduction attempts all ran correctly, so it needs something in the 2 748-line
+  program that the reducer does not yet cover. → `FINDINGS.md` §3.
+- **`to (x) … end` as an expression** is refused by stage 2 with a message
+  (`bootstrap/compiler.rb:1998`); stage 1 refuses it too. A gap, not a feature.
+- **9 corpus programs in non-`malformed` families are analyzer-refused**, so the
+  walk skips them. Listed in `FINDINGS.md` §2; filing is the auditor's call.
+- **The `give back` tree-walker bug** from `FINDINGS.md` §1 is untouched.

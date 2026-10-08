@@ -647,3 +647,142 @@ fn edge_a_broken_branch_is_refused_and_writes_nothing() {
         );
     }
 }
+
+/// Runs `rb vm <file.rbc> [args...]` and reports what it did.
+struct VmRun {
+    stdout: String,
+    stderr: String,
+    succeeded: bool,
+}
+
+/// `rb vm` over a compiled program, with the arguments after the path handed to
+/// the program itself.
+fn vm(args: &[&str]) -> VmRun {
+    let run = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("vm")
+        .args(args)
+        .output()
+        .expect("the rb binary runs");
+    VmRun {
+        stdout: String::from_utf8_lossy(&run.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
+        succeeded: run.status.success(),
+    }
+}
+
+/// Compiles `source` with stage 1 and returns the `.rbc` path, so a test can
+/// hand a real bytecode file to `rb vm`.
+fn stage1_file(name: &str, source: &str) -> PathBuf {
+    let path = scratch(&format!("{name}.rbc"));
+    fs::write(&path, stage1(name, source)).expect("stage 1 writes its .rbc");
+    path
+}
+
+/// The next ladder rung is `rb vm stage1.rbc in.rb out.rbc`, and the only thing
+/// standing in front of it is that `rb vm` took no arguments: `rb run` hands
+/// everything after the path to `sys.argv()`, and `rb vm` fell through to the
+/// usage arm instead. So the arguments a program run as bytecode could not be
+/// read were dropped on the floor, and `rb vm` reported success having run
+/// nothing at all.
+///
+/// This pins the argument channel and nothing else. It does not claim S3: the
+/// program below is small enough to compile in test time, and it is the *shape*
+/// of the S3 invocation, not the self-compilation that rung would need.
+#[test]
+fn edge_the_bytecode_vm_hands_arguments_to_the_program_it_runs() {
+    // A program that reports exactly what it was given, so the assertion is
+    // about the channel and not about the bytecode VM's own output. It reads
+    // index 0 only when the list is non-empty, so the empty case is a report
+    // rather than an out-of-bounds error.
+    let source = "set vm_args to sys.argv()\n\
+                  say length(vm_args)\n\
+                  if length(vm_args) is 0 then\n\
+                  \x20   say \"no arguments\"\n\
+                  else\n\
+                  \x20   say vm_args[0]\n\
+                  end\n";
+    let program = stage1_file("edge_vm_args", source);
+    let path = program.to_string_lossy().into_owned();
+
+    // Empty: a program that asks for nothing is unaffected by the arm that
+    // hands arguments over — the boundary between "no arguments" and "some".
+    let none = vm(&[&path]);
+    assert!(
+        none.succeeded,
+        "rb vm on a program that asks for no arguments failed:\n{}",
+        none.stderr
+    );
+    assert_eq!(
+        none.stdout, "0\nno arguments\n",
+        "a program run with no arguments should see an empty list"
+    );
+
+    // Singleton: exactly one argument, which is the shape `rb run` already had
+    // and `rb vm` did not.
+    let one = vm(&[&path, "first"]);
+    assert!(
+        one.succeeded,
+        "rb vm dropped the program's own arguments and failed:\n{}",
+        one.stderr
+    );
+    assert_eq!(
+        one.stdout, "1\nfirst\n",
+        "rb vm did not hand 'first' to the program; it ran it with no arguments"
+    );
+
+    // More than one, so a partial read — taking only the first — is caught too.
+    let three = vm(&[&path, "in.rb", "out.rbc", "extra"]);
+    assert!(
+        three.succeeded,
+        "rb vm failed with three arguments:\n{}",
+        three.stderr
+    );
+    assert_eq!(
+        three.stdout, "3\nin.rb\n",
+        "rb vm did not hand every argument after the path to the program"
+    );
+}
+
+/// `rb vm` reaching the usage arm is a refusal, and a refusal has to be visible:
+/// it printed the help text and exited **0**, so a shell checking `$?` could
+/// not tell "ran the program" from "understood nothing of what you asked".
+#[test]
+fn edge_the_bytecode_vm_reports_a_bad_invocation_as_a_failure() {
+    // A path with no `.rbc` extension: `rb vm` refuses it by extension, so the
+    // refusal has to arrive before anything is read.
+    let not_bytecode = vm(&["edge_vm_not_a_file.txt"]);
+    assert!(
+        !not_bytecode.succeeded,
+        "rb vm on a file that is not bytecode exited 0"
+    );
+    assert!(
+        not_bytecode.stderr.contains("not a bytecode file"),
+        "rb vm did not say why it refused:\n{}",
+        not_bytecode.stderr
+    );
+
+    // A missing file: an `IoError` has to reach the shell as a non-zero status.
+    let missing = vm(&["edge_vm_absent.rbc"]);
+    assert!(
+        !missing.succeeded,
+        "rb vm on a missing file exited 0, having printed:\n{}",
+        missing.stdout
+    );
+    assert!(
+        missing.stderr.contains("Error"),
+        "rb vm on a missing file did not report the failure:\n{}",
+        missing.stderr
+    );
+
+    // Four arguments. This is the invocation S3 needs — `rb vm stage1.rbc in.rb
+    // out.rbc` — and it matched neither the `compile -o` arm nor the `run` arm
+    // nor the bare-`4` arm, so it fell through to `_ => print_help()`, which
+    // returns normally. It printed the help text and exited **0**: a shell
+    // could not tell it had done nothing.
+    let too_many = vm(&["edge_vm_extra.rbc", "in.rb", "out.rbc", "four"]);
+    assert!(
+        !too_many.succeeded,
+        "rb vm with arguments exited 0, having printed:\n{}",
+        too_many.stdout
+    );
+}
