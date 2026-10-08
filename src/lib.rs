@@ -245,10 +245,20 @@ pub fn run_cli() {
         // and nothing else, so a compiler written in Redblue could not be given
         // a file to compile. A program that asks for no arguments is unaffected
         // — `sys.argv()` is then an empty list, as it is everywhere else.
-        n if n >= 4 && args[1] == "run" => {
+        // `rb vm` takes its arguments the same way, for the same reason: the
+        // next rung of the ladder is `rb vm stage1.rbc in.rb out.rbc`, and a
+        // `rb vm` that dropped the arguments could not reach it. Before this
+        // arm existed `rb vm a.rbc b c d` matched nothing, fell through to
+        // `_ => print_help()` and exited 0 having run nothing at all.
+        n if n >= 3 && (args[1] == "run" || args[1] == "vm") => {
             let path = args[2].clone();
             runtime::set_program_args(args[3..].to_vec());
-            if let Err(rendered) = run_file_with_diagnostic(&path) {
+            let outcome = if args[1] == "run" {
+                run_file_with_diagnostic(&path)
+            } else {
+                vm_command(&path)
+            };
+            if let Err(rendered) = outcome {
                 report(&rendered);
             }
         }
@@ -279,7 +289,13 @@ pub fn run_cli() {
                 process::exit(1);
             }
         }
-        _ => print_help(),
+        // Reaching here is a usage error — a command with arguments no arm
+        // claimed — and it exits non-zero. It used to return normally, so the
+        // help text was printed and the shell was told the command succeeded.
+        _ => {
+            print_help();
+            process::exit(1);
+        }
     }
 }
 
@@ -327,10 +343,10 @@ fn dis_command(path: &str) -> Result<(), String> {
 /// caret `rb run` draws: a bytecode file has no text to draw them from. The
 /// gap is in `phases/phase-019/FINDINGS.md`.
 fn vm_command(path: &str) -> Result<(), String> {
+    // The message carries no `Error: ` prefix of its own: both callers of this
+    // function put one there, and one of them is now `report`, which adds it.
     if !path.ends_with(".rbc") {
-        return Err(format!(
-            "Error: {path} is not a bytecode file; compile it first"
-        ));
+        return Err(format!("{path} is not a bytecode file; compile it first"));
     }
     let bytes = fs::read(path).map_err(|e| Error::Io(e.to_string()).to_string())?;
     let chunk = bytecode::Chunk::decode(&bytes).map_err(|e| e.to_string())?;
