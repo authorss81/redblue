@@ -187,6 +187,112 @@ fn edge_the_shipped_compiler_agrees_with_the_frontend_on_a_corpus_family() {
     );
 }
 
+/// The shipped compiler handles non-ASCII source, byte for byte.
+///
+/// Non-ASCII is the one place a byte-oriented compiler and a character-oriented
+/// one can agree on every test that uses ASCII and disagree on a real program,
+/// because the length fields in the format are byte counts and the constant
+/// pool holds UTF-8. `bootstrap/compiler.rb` is itself ASCII, so the fixed point
+/// — the strongest claim this file makes — cannot see it: stage 1 and stage 2
+/// would agree about the compiler whether it handled a CJK string or not.
+///
+/// `stages 2 and 3` cover this for the ladder; this covers it for **the S4
+/// path specifically**, which runs the shipped file rather than re-running
+/// `compiler.rb` over itself. If a future change gave `src/bootstrap.rs` its
+/// own VM or its own file writing, this is the test that notices.
+#[test]
+fn edge_the_shipped_compiler_agrees_with_the_frontend_on_non_ascii_source() {
+    let build = release();
+    let sample = scratch("non-ascii.rb");
+    // Every shape that changes a byte count or a character count: a CJK string,
+    // an RTL string whose last character is a combining mark, two astral-plane
+    // emoji, a string holding an escape and a backslash, and a string with no
+    // non-ASCII in it next to one that has — so a length field that counts
+    // characters where the format counts bytes shows up as a diff.
+    fs::write(
+        &sample,
+        "// Non-ASCII source: byte counts and character counts must not be\n\
+         // confused, because the format stores lengths.\n\
+         set greeting to \"日本語 — redblue\"\n\
+         set rtl to \"مرحبا\"\n\
+         set emoji to \"👋🇬🇧\"\n\
+         set combining to \"e\u{0301}gal\"\n\
+         set escapes to \"quote: \\\" backslash: \\\\ tab:\"\n\
+         set plain to \"ascii\"\n\
+         say greeting\n\
+         say rtl\n\
+         say emoji\n\
+         say combining\n\
+         say escapes\n\
+         say plain\n",
+    )
+    .expect("the sample program is written");
+
+    let source = fs::read_to_string(&sample).expect("the sample is readable");
+    assert!(
+        source.len() > source.chars().count(),
+        "the sample is ASCII, so this test cannot see a byte count confused \
+         with a character count"
+    );
+
+    let frontend = redblue::compile_source(&source)
+        .expect("the frontend accepts the sample")
+        .encode();
+
+    let chunk = redblue::Chunk::decode(&build.shipped).expect("the shipped compiler decodes");
+    let written = scratch("non-ascii.rbc");
+    let _ = fs::remove_file(&written);
+
+    let outcome = redblue::bootstrap::run_compiler_on(&chunk, &sample, &written);
+    assert!(
+        outcome.is_ok(),
+        "the shipped compiler refused a non-ASCII program the frontend accepts: \
+         {outcome:?}"
+    );
+
+    assert_eq!(
+        fs::read(&written).expect("the shipped compiler wrote a file"),
+        frontend,
+        "the shipped compiler disagrees with the Rust frontend about a program \
+         holding CJK, RTL, emoji and a combining mark"
+    );
+}
+
+/// An empty program compiles to the same bytes from both compilers.
+///
+/// The singleton of the family above: one statement, no text, nothing but the
+/// constant pool and a return. A compiler that appended nothing at all for it —
+/// or that treated "no constants" as "no output" — would pass every family
+/// member above and fail here.
+#[test]
+fn edge_the_shipped_compiler_agrees_with_the_frontend_on_an_empty_program() {
+    let build = release();
+    let sample = scratch("empty-program.rb");
+    fs::write(&sample, "").expect("the empty program is written");
+
+    let frontend = redblue::compile_source("")
+        .expect("the frontend accepts an empty program")
+        .encode();
+    assert!(
+        !frontend.is_empty(),
+        "an empty program encodes to nothing, so there is no artifact to compare"
+    );
+
+    let chunk = redblue::Chunk::decode(&build.shipped).expect("the shipped compiler decodes");
+    let written = scratch("empty-program.rbc");
+    let _ = fs::remove_file(&written);
+
+    bootstrap::run_compiler_on(&chunk, &sample, &written)
+        .unwrap_or_else(|error| panic!("the shipped compiler refused an empty program: {error:?}"));
+
+    assert_eq!(
+        fs::read(&written).expect("the shipped compiler wrote a file"),
+        frontend,
+        "the shipped compiler disagrees with the Rust frontend about a program \
+         with no statements in it"
+    );
+}
+
 /// A stage 2 that is not the fixed point is refused, and ships nothing.
 ///
 /// This is the failure the whole ladder exists to catch, so it is tested by

@@ -301,6 +301,15 @@ fn rendered(error: Error, text: &str, compiler_path: &Path) -> Error {
 /// [`runtime::builtin`], a free function with no VM to hang arguments off; giving
 /// it a VM-scoped argument list is a change to the stdlib call path, which is a
 /// bigger change than the bug needs.
+///
+/// **What this does not do: it does not make the global safe to read at an
+/// arbitrary moment.** It serialises *runs* — one publish-and-restore pair at a
+/// time, so no two runs can be inside their window together. A bare
+/// [`runtime::take_program_args`] from another thread can still land inside that
+/// window and take a run's paths as "what was there before", and the restore
+/// will then correctly put back the process default. Anything that reads the
+/// global across a call another thread can also make has to hold this lock too,
+/// which is why `argv_while_no_run_is_publishing` in the tests below does.
 static STAGE2: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Runs `chunk` — a compiled Redblue compiler — over `input_path`, writing a
@@ -480,6 +489,16 @@ mod tests {
         let dir = scratch("refused");
         let _ = fs::remove_dir_all(&dir);
 
+        // A compiler that is really on disk. `build_with` reads the source
+        // before it consults the stage 2 it was handed, so this test used to be
+        // handed `Path::new("unused")` — a file that does not exist — and
+        // satisfied both of its assertions on the *missing file*: `read_compiler`
+        // refused, and nothing was written because nothing ran. `verify` was
+        // never called, so the test passed with `verify` answering `Ok(())` to
+        // every pair, which is the only claim it exists to pin.
+        let compiler = scratch("refused-compiler.rb");
+        fs::write(&compiler, "say 1\n").expect("the compiler is written");
+
         let stage1 = compile_source("say 1\n").expect("the frontend accepts the program");
         let stage1 = stage1.encode();
         let mut tampered = stage1.clone();
@@ -489,17 +508,40 @@ mod tests {
             .expect("the program is not empty");
         tampered[last] ^= 0xff;
 
-        let outcome = build_with(Path::new("unused"), &dir, Stage2::Bytes(tampered));
-        // The compiler path is read before the stage 2 is consulted, so a build
-        // handed bytes still has to be handed a real source.
+        let outcome = build_with(&compiler, &dir, Stage2::Bytes(tampered));
+
+        let error = match outcome {
+            Ok(build) => panic!(
+                "a build handed a stage 2 that is not the fixed point shipped {} \
+                 bytes instead of refusing",
+                build.shipped.len()
+            ),
+            Err(error) => error,
+        };
+
+        // The refusal is the *fixed point* check and it says where. Without the
+        // offset the test would accept a refusal for any reason, which is what
+        // the missing-file path demonstrated.
+        let message = error.to_string();
         assert!(
-            outcome.is_err(),
-            "a build handed a stage 2 that is not the fixed point returned a \
-             compiler to ship instead of refusing"
+            message.contains("the fixed point does not hold"),
+            "the refusal does not name the fixed point, so it may have refused \
+             for some other reason entirely: {message}"
         );
+        assert!(
+            message.contains(&format!("byte {last}")),
+            "the refusal does not name byte {last}, which is the byte that was \
+             flipped: {message}"
+        );
+
         assert!(
             !Build::shipped_path(&dir).exists(),
             "a build that refused to ship wrote a shipped compiler anyway"
+        );
+        assert!(
+            !dir.join(STAGE1_NAME).exists(),
+            "a build that refused to ship wrote stage 1 anyway, so the directory \
+             holds a half-finished build that looks like a successful one"
         );
     }
 
@@ -566,6 +608,27 @@ mod tests {
         );
     }
 
+    /// `sys.argv()` read at a moment when no stage-2 run is publishing into it.
+    ///
+    /// `PROGRAM_ARGS` is a process-global and [`STAGE2`] is what makes a
+    /// publish-and-restore pair atomic against another *run*. It does nothing
+    /// for a bare read: a thread that calls [`runtime::take_program_args`]
+    /// while another thread is inside its publish-and-restore window takes that
+    /// run's input and output as "what was there before", and the restore then
+    /// correctly puts back the process default — so the two disagree and the
+    /// only way to tell which is wrong is to lose a race in CI.
+    ///
+    /// That is exactly what happened: this module ran the sample bare, and two
+    /// tests in this binary share one thread pool, so
+    /// `a_stage_two_run_restores_the_arguments_it_published` failed with
+    /// another run's paths on one side and `[]` on the other.
+    fn argv_while_no_run_is_publishing() -> Vec<String> {
+        let _guard = STAGE2
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime::take_program_args()
+    }
+
     /// A stage-2 refusal keeps the VM's kind and position.
     ///
     /// `run_compiler_on` re-wrapped every failure as `Runtime(message,
@@ -577,7 +640,11 @@ mod tests {
     /// `Runtime` rather than an unpositioned one.
     #[test]
     fn a_stage_two_refusal_keeps_its_kind_and_position() {
-        let program = scratch("boom.rb");
+        // A name no other test in this binary uses. These tests run in parallel
+        // threads, and `run_compiler_on` *deletes* its output before it runs —
+        // so two tests sharing one scratch path delete each other's input while
+        // the other's VM is mid-run. `boom.rb`/`boom.rbc` were each used twice.
+        let program = scratch("out-of-bounds.rb");
         fs::write(
             &program,
             "// Reads past the end of a list, which is a positioned runtime\n\
@@ -623,7 +690,7 @@ mod tests {
     /// skipped on the failure path.
     #[test]
     fn a_stage_two_run_restores_the_arguments_it_published() {
-        let before = runtime::take_program_args();
+        let before = argv_while_no_run_is_publishing();
 
         // A "compiler" that reads the paths out of argv and writes a file, so the
         // success path both reads the arguments it published and writes the file
@@ -639,11 +706,11 @@ mod tests {
         let _ = fs::remove_file(&ok_out);
         run_compiler_on(&chunk, &input, &ok_out).expect("the compiler succeeds");
 
-        let boom = scratch("argv-boom.rb");
+        let boom = scratch("argv-out-of-bounds.rb");
         fs::write(&boom, "set xs to [1]\nsay xs[9]\n").expect("the failing program is written");
         let boom_chunk = compile_source(&fs::read_to_string(&boom).expect("readable"))
             .expect("the frontend accepts the failing program");
-        let boom_out = scratch("argv-boom.rbc");
+        let boom_out = scratch("argv-out-of-bounds.rbc");
         let _ = fs::remove_file(&boom_out);
         assert!(
             run_compiler_on(&boom_chunk, &boom, &boom_out).is_err(),
@@ -651,7 +718,7 @@ mod tests {
         );
 
         assert_eq!(
-            runtime::take_program_args(),
+            argv_while_no_run_is_publishing(),
             before,
             "a stage-2 run left its input and output paths in sys.argv()"
         );
@@ -661,6 +728,123 @@ mod tests {
         assert!(
             ok_out.exists(),
             "the successful run wrote no file, so its argv was never read either"
+        );
+    }
+
+    /// [`verify`] accepts one file and refuses every other, at every boundary.
+    ///
+    /// `verify` is the ladder's whole rule and it is what `build` calls before
+    /// it writes anything, so the shapes of "not equal" it has to tell apart are
+    /// the shapes a compiler disagreement arrives in. Two are missed by a
+    /// comparison that only zips: a shorter stage 2, and a longer one, where
+    /// every byte they share agrees and the first difference is one past the
+    /// end of the shorter file. The reported offset is asserted for each, so a
+    /// refusal that says "the fixed point does not hold" and nothing else is a
+    /// failure here rather than a pass.
+    #[test]
+    fn edge_the_fixed_point_comparison_names_the_offset_that_differs() {
+        // empty, and singleton: the two sizes at which a comparison that
+        // indexes rather than iterates would go out of bounds.
+        assert!(
+            verify(&[], &[]).is_ok(),
+            "two empty files are one file and the fixed point holds"
+        );
+        assert!(
+            verify(b"a", b"a").is_ok(),
+            "two one-byte files that agree are the fixed point"
+        );
+
+        let cases: &[(&str, &[u8], &[u8], &str)] = &[
+            ("differing first byte", b"ab", b"bb", "byte 0"),
+            ("differing last byte", b"ab", b"ac", "byte 1"),
+            ("singleton against empty", b"", b"x", "byte 0"),
+            ("empty against singleton", b"x", b"", "byte 0"),
+            // The two a zip cannot see: every shared byte agrees, and the files
+            // differ only in length.
+            ("stage 2 a prefix of stage 1", b"abc", b"ab", "byte 2"),
+            ("stage 1 a prefix of stage 2", b"ab", b"abc", "byte 2"),
+        ];
+
+        for (why, stage1, stage2, offset) in cases {
+            let error = match verify(stage1, stage2) {
+                Ok(()) => panic!("{why}: the fixed point was accepted"),
+                Err(error) => error,
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains(offset),
+                "{why}: the refusal does not name {offset}, so a disagreement \
+                 at the end of a file is reported as one with no position: \
+                 {message}"
+            );
+        }
+
+        // And the offset is the *first* difference, not merely one of them.
+        let error = verify(b"axyz", b"axzz").expect_err("the pair disagrees");
+        assert!(
+            error.to_string().contains("byte 2"),
+            "the refusal names a difference that is not the first one: {error}"
+        );
+    }
+
+    /// A stage-2 run that exits cleanly without producing bytecode is refused.
+    ///
+    /// `run_compiler_on`'s contract is that it wrote a `.rbc`, and a run that
+    /// merely succeeded is not that: an empty Redblue program exits zero having
+    /// done nothing, and a compiler whose output file is written empty exits
+    /// zero having produced no compiler. `build` catches the second by way of
+    /// `verify`, but `run_compiler_on` is public and is what a caller reads the
+    /// compiler through, so both refusals are checked here against the three
+    /// shapes directly — nothing written, an empty file written, and a file with
+    /// bytes in it — so the last one shows the checks are not a blanket refusal.
+    #[test]
+    fn edge_a_stage_two_run_that_writes_no_bytecode_is_refused() {
+        let cases: &[(&str, &str)] = &[
+            // Wrote nothing at all.
+            (
+                "said something and wrote nothing",
+                "say \"nothing to compile\"\n",
+            ),
+            // Wrote a file with no bytes in it.
+            ("wrote an empty file", "files.write(sys.argv()[1], \"\")\n"),
+        ];
+
+        for (why, source) in cases {
+            let chunk = compile_source(source).expect("the frontend accepts the program");
+            let input = scratch("writes-nothing-in.rb");
+            fs::write(&input, source).expect("the program is written");
+            let out = scratch("writes-nothing-out.rbc");
+            let _ = fs::remove_file(&out);
+
+            let error = match run_compiler_on(&chunk, &input, &out) {
+                Ok(()) => panic!("{why}: the run reported a compiler it did not write"),
+                Err(error) => error,
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains("the compiler wrote no"),
+                "{why}: the refusal does not say what is missing: {message}"
+            );
+            assert!(
+                message.contains(&out.display().to_string()),
+                "{why}: the refusal does not name the file that is missing: {message}"
+            );
+        }
+
+        // The same path, writing bytes, is accepted — so the two refusals above
+        // are the absence of a compiler rather than a refusal of everything.
+        let source = "files.write(sys.argv()[1], \"say 1\")\n";
+        let chunk = compile_source(source).expect("the frontend accepts the program");
+        let input = scratch("writes-bytes-in.rb");
+        fs::write(&input, source).expect("the program is written");
+        let out = scratch("writes-bytes-out.rbc");
+        let _ = fs::remove_file(&out);
+        run_compiler_on(&chunk, &input, &out)
+            .unwrap_or_else(|error| panic!("a compiler that wrote bytes was refused: {error}"));
+        assert_eq!(
+            fs::read(&out).expect("the compiler wrote a file"),
+            b"say 1".to_vec(),
+            "the run accepted a compiler but did not leave what it wrote"
         );
     }
 }
