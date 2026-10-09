@@ -197,6 +197,13 @@ pub struct Vm {
     /// them above its caller's frames — see [`Vm::call_user_function`].
     locals: Vec<CapturedScope>,
     output: Vec<String>,
+    /// How many `break` statements have been evaluated, including one that was
+    /// then refused for being outside every loop. See
+    /// [`Vm::loop_control_counts`].
+    break_statements: usize,
+    /// How many `skip` statements have been evaluated, on the same terms as
+    /// [`Vm::break_statements`].
+    skip_statements: usize,
     /// The module programs already run, by the name the `import` that loaded
     /// them goes by. An entry is what makes a second import of the same module a
     /// no-op rather than a second binding of the same names.
@@ -379,6 +386,8 @@ impl Vm {
             constants: HashSet::new(),
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
+            break_statements: 0,
+            skip_statements: 0,
             modules: HashMap::new(),
             module_aliases: HashMap::new(),
             importing: Vec::new(),
@@ -595,6 +604,19 @@ impl Vm {
     /// what each printed without capturing a process's stdout.
     pub fn take_output(&mut self) -> Vec<String> {
         std::mem::take(&mut self.output)
+    }
+
+    /// How many `break` and `skip` statements this VM has evaluated, as
+    /// `(breaks, skips)`.
+    ///
+    /// The printed lines say what a `break` *did*; this says whether the
+    /// statement was reached at all, which is the half the output cannot
+    /// distinguish. A `break` that was decoded and dropped and a `break` that
+    /// ended a loop print the same lines in a loop that would have ended anyway.
+    /// The bytecode VM counts the same two things over its opcodes, through
+    /// [`crate::bytecode::vm::BytecodeVm::loop_control_counts`].
+    pub fn loop_control_counts(&self) -> (usize, usize) {
+        (self.break_statements, self.skip_statements)
     }
 
     /// The names this VM has bound that the standard library did not: what a
@@ -1244,10 +1266,12 @@ impl Vm {
                 Ok(Value::Nothing)
             }
             Statement::Break => {
+                self.break_statements += 1;
                 self.raise_loop_control("break", LoopControl::Break)?;
                 Ok(Value::Nothing)
             }
             Statement::Skip => {
+                self.skip_statements += 1;
                 self.raise_loop_control("skip", LoopControl::Skip)?;
                 Ok(Value::Nothing)
             }

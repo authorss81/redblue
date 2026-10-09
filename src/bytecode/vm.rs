@@ -601,6 +601,13 @@ pub struct BytecodeVm {
     pending_objects: Vec<ObjectPending>,
     /// What the last frame to finish produced.
     outcome: Value,
+    /// How many `BREAK` instructions have been dispatched, including one that
+    /// was then refused for having no loop around it. See
+    /// [`BytecodeVm::loop_control_counts`].
+    break_instructions: usize,
+    /// How many `SKIP` instructions have been dispatched, on the same terms as
+    /// [`BytecodeVm::break_instructions`].
+    skip_instructions: usize,
     call_depth: usize,
     max_call_depth: usize,
     steps: usize,
@@ -668,6 +675,8 @@ impl BytecodeVm {
             pending_objects: Vec::new(),
             outcome: Value::Nothing,
             call_depth: 0,
+            break_instructions: 0,
+            skip_instructions: 0,
             max_call_depth: resolve_max_call_depth(),
             steps: 0,
             max_steps: resolve_max_steps(),
@@ -769,6 +778,19 @@ impl BytecodeVm {
     /// the printing.
     pub fn take_output(&mut self) -> Vec<String> {
         std::mem::take(&mut self.output)
+    }
+
+    /// How many `BREAK` and `SKIP` instructions this VM has dispatched, as
+    /// `(breaks, skips)`.
+    ///
+    /// Counted when the opcode is decoded and dispatched, so an instruction that
+    /// is then refused for having no loop around it is counted too: the refusal
+    /// is the handler having run. What a program printed says what a `break` did;
+    /// this says whether one was ever reached, which is the half the output
+    /// cannot distinguish. The tree-walking VM counts the same two things over
+    /// its statements, through [`crate::interpreter::Vm::loop_control_counts`].
+    pub fn loop_control_counts(&self) -> (usize, usize) {
+        (self.break_instructions, self.skip_instructions)
     }
 
     // -- the block tree -----------------------------------------------------
@@ -1547,8 +1569,14 @@ impl BytecodeVm {
             Opcode::Call => self.call(instruction, frame),
             Opcode::CallMethod => self.call_method(instruction, frame),
             Opcode::Return => self.return_value(frame),
-            Opcode::Break => self.break_loop(frame),
-            Opcode::Skip => self.skip_loop(frame),
+            Opcode::Break => {
+                self.break_instructions += 1;
+                self.break_loop(frame)
+            }
+            Opcode::Skip => {
+                self.skip_instructions += 1;
+                self.skip_loop(frame)
+            }
             Opcode::Jump => self.jump(instruction, frame),
             Opcode::JumpIfFalse => {
                 let target = instruction.arg as usize;
