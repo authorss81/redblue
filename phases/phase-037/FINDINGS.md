@@ -13,7 +13,40 @@ were run and are recorded in REPORT.md with what they actually printed. The
 fourth gate is **unverified**; a reviewer must run it before this phase is
 `.done`.
 
-## 2. A seeded generator is not an unpredictable one
+## 2. Two Definition-of-Done lines in `rbops/phases.json` are unsatisfiable
+
+Recorded so the auditor can correct the manifest rather than a later implementer
+being sent to fail them again. Both are in phase-037's "Definition of done".
+
+**(a) "200 draws of `random_number(0, 100)` produce at most 101 distinct
+values".** `random_number` is the fractional draw over `[0, 100)`, about
+`100 × 2^53 ≈ 9.0 × 10^17` representable values. The expected number of
+collisions in 200 draws is `200 × 199 / 2 / 9.0e17 ≈ 2 × 10^-14`; getting to
+101 distinct needs ~99 of them. Measured on the built binary: **200 distinct of
+200**.
+
+The 101-member bound is a true statement about `random(0, 100)`, the whole-number
+draw, and that one meets it (91 ≤ 101). It cannot be a statement about
+`random_number(0, 100)` without discarding the fractional part — which would
+contradict the *next* line of the same section, the decile-bucket requirement,
+since a whole-number draw over `[0, 100)` cannot occupy ten deciles of width 10
+in the way that line describes. The two lines cannot both hold.
+
+**(b) "1000 draws of `random_number(0, 100)` ... put between 400 and 600 draws
+in each of the ten decile buckets".** 1000 draws over ten buckets is a mean of
+100 a bucket; 400–600 per bucket implies 4000–6000 total draws. The line is off
+by 5× against its own stated draw count.
+
+What the line is reaching for — draws spread across the range rather than
+marching monotonically across it, which was exactly the old
+`now.as_nanos()` defect — is implemented and pinned:
+`tests/random_builtin_test.rs::edge_random_number_spreads_its_draws_across_the_range`
+asserts every decile of the 1000-draw distribution lies in 40–160, and measures
+`[105, 95, 103, 94, 101, 98, 116, 100, 89, 99]` — mean 100.0.
+
+Neither line was made to pass by weakening a test. Both are reported in REPORT.md.
+
+## 3. A seeded generator is not an unpredictable one
 
 Phase 037 replaced the wall clock in the `random*` builtins with a seeded
 SplitMix64, so draws are reproducible — which is what the bootstrap fixed point
@@ -27,7 +60,7 @@ cryptographically secure source, and adding one is a language-surface decision
 (a new builtin, plus a documented guarantee about what it does and does not
 promise). Out of scope here; worth its own phase.
 
-## 3. `random` and `random_number` disagree at the high end
+## 4. `random` and `random_number` disagree at the high end
 
 `random(min, max)` is inclusive at both ends. `random_number(min, max)` is
 inclusive at the low end and exclusive at the high one. Both readings are
@@ -42,7 +75,7 @@ them is a language decision rather than a bug fix. `tests/numeric_edge_test.rs`
 depends on the half-open reading (`random_number(1, 2)` in `1.0..2.0`), so
 changing it would touch an existing test.
 
-## 4. The bytecode compiler still refuses function literals
+## 5. The bytecode compiler still refuses function literals
 
 Found while writing `both_engines_agree_on_a_seeded_sequence`: `redblue::compile_source`
 rejects `to (x) ... end` with *"`to (x) ... end` as an expression is not compiled

@@ -4,10 +4,10 @@
 
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +197 −19 | A seeded SplitMix64 generator in a thread-local, the `random_seed` builtin, and `random`/`random_number`/`random_choice`/`random_shuffle` redrawn from it with their range arguments honoured |
+| `src/runtime.rs` | +216 −19 | A seeded SplitMix64 generator in a thread-local, the `random_seed` builtin, and `random`/`random_number`/`random_choice`/`random_shuffle` redrawn from it with their range arguments honoured |
 | `src/stdlib.rs` | +7 −0 | Registers `random` and `random_seed` as reachable builtins |
 | `src/repl/completer.rs` | +1 −0 | Completes `random_seed` |
-| `tests/random_builtin_test.rs` | +565 | New file: 14 tests |
+| `tests/random_builtin_test.rs` | +615 | New file: 16 tests |
 | `examples/random.rb` | +27 | New file: a seeded example, now deterministic |
 | `tests/bytecode_vm_test.rs` | +7 −8 | `examples/random.rb` leaves `NOT_COMPARABLE` — it is deterministic now, so the comparison says something |
 | `tests/bootstrap_selfhost_test.rs` | +2 −2 | The stage-2 corpus count 8 → 9, for the new example. The byte-identical comparison itself passed unchanged |
@@ -16,8 +16,8 @@
 ### The four arms
 
 Every one took `SystemTime::now()`; none is left with a clock in it. The only
-remaining `SystemTime::now()` in `src/runtime.rs` is in `time_now`, which is
-supposed to read the clock.
+remaining `SystemTime::now()` in `src/runtime.rs` is at line 786, in `time_now`,
+which is supposed to read the clock.
 
 | Builtin | Was | Now |
 |---|---|---|
@@ -40,22 +40,22 @@ single-threaded, so thread-local *is* process-local here.
 ## Reproduction, before
 
 ```
-$ printf 'say random(1, 1)\nsay random(0, 100)\n' > target/tmp/repro.rb
+$ printf 'say random(1, 1)\n' > target/tmp/repro.rb
 $ ./target/debug/rb run target/tmp/repro.rb
-444
-82
+403
 ```
-
-`random(1, 1)` answered `444`. After: `1`.
 
 ## Tests added
 
-All in `tests/random_builtin_test.rs`. Every one seeds before it draws.
+All in `tests/random_builtin_test.rs`. Every one seeds before it draws, unless
+it is specifically about the default seed.
 
 | Test | Edge class covered |
 |---|---|
-| `random_honours_its_range_arguments` | singleton/boundary — `random(b, b) == b` for b in {5, 0, −3, 1e6}; 200 draws of `random(0, 100)` name at most 101 distinct values (was 179) and every one is in `[0, 100]` and integral |
+| `random_honours_its_range_arguments` | singleton/boundary — `random(b, b) == b` for b in {5, 0, −3, 1e6}; 200 draws of `random(0, 100)` name at most 101 distinct values and every one is in `[0, 100]` and integral |
 | `edge_two_processes_seeded_alike_print_identical_output` | determinism — two `rb` processes, same seed, byte-identical output over 50 iterations of all four builtins |
+| `edge_two_processes_that_never_seed_still_agree` | determinism — the same, with **no** `random_seed` call at all. Pins the `DEFAULT_SEED` claim in `src/runtime.rs` and SPEC.md, which no other test covered |
+| `edge_seeding_moves_the_generator` | determinism — the unseeded sequence, seed 424242 and seed 424243 are three different sequences, so `random_seed` reaches the generator rather than being a no-op |
 | `random_draws_are_reproducible_from_a_seed` | determinism — same seed, same 64-draw sequence, in one process |
 | `edge_random_number_spreads_its_draws_across_the_range` | distribution — 1000 draws of `random_number(0, 100)` put 40–160 in each of ten decile buckets. The old source was monotonic, so all 1000 landed in the first decile |
 | `edge_random_shuffle_permutes_its_input_for_every_seed` | seeds 0..=99, 8-element list: a permutation of the input, and never the identity |
@@ -68,6 +68,22 @@ All in `tests/random_builtin_test.rs`. Every one seeds before it draws.
 | `edge_many_draws_stay_in_range_and_do_not_grow` | resource limit — 20 000 draws of `random(0, 5)`, every member within a factor of two of the mean |
 | `edge_random_refuses_a_range_no_number_can_measure` | numeric boundary — `random(-1e308, 1e308)` and `random_number(-1e308, 1e308)` |
 | `both_engines_agree_on_a_seeded_sequence` | The tree-walker and the bytecode VM draw the same sequence from one seed |
+
+### The tests can fail — demonstrated, not asserted
+
+I mutated `src/runtime.rs` so the generator reads `SystemTime::now()` on first
+use per thread instead of `DEFAULT_SEED`, and re-ran the suite:
+
+```
+test edge_two_processes_that_never_seed_still_agree ... FAILED
+test edge_a_range_of_no_width_is_still_a_range ... FAILED
+test result: FAILED. 14 passed; 2 failed
+  panicked: two processes that never seeded printed different things, so the
+            default seed is not fixed
+```
+
+The mutation was then reverted; `git diff --stat src/runtime.rs` is empty, so
+the shipped file is byte-identical to the committed one.
 
 ### Edge-case matrix
 
@@ -85,24 +101,62 @@ All in `tests/random_builtin_test.rs`. Every one seeds before it draws.
 | malformed_input | covered — five malformed `random_seed` calls; every one a `Runtime` error, not a panic |
 | resource_limit | covered — 20 000 draws stay in range and evenly spread; the generator is one `u64` and allocates nothing, and no existing guard was raised |
 
-### Definition of done, measured
+## Definition of done, measured
 
-- `say random(5, 5)` prints `5`.
-- 200 draws of `random(0, 100)` in one program: **89 distinct** (≤ 101). Was 179.
-- 1000 draws of `random_number(0, 100)` from seed 12345: every decile bucket in
-  [40, 160], asserted on that seed.
+Every item below was measured against the built binary, not read off the test
+suite.
+
+- `say random(5, 5)` prints `5`. **Met** — printed `5`.
+- 200 draws of `random(0, 100)` in one program: **91 distinct**, all integral,
+  min 0, max 100. Was 179. **Met.**
 - `random_shuffle` is a permutation of its input for every seed 0..=99 and is
-  never the identity. `random_choice` over four elements reaches all four in
-  1000 draws.
+  never the identity. **Met** — checked in 100 separate `rb` processes:
+  `non-permutations=0 identity=0`.
+- `random_choice` over four elements reaches all four in 1000 draws. **Met** —
+  266/245/266/223.
+- Two separate processes with an explicit seed print byte-identical output.
+  **Met** — the diff below is empty.
+
+### Two Definition-of-Done lines that cannot be met as written
+
+I am reporting these rather than bending a test to make them look satisfied.
+
+**"200 draws of `random_number(0, 100)` produce at most 101 distinct values".**
+`random_number` is the fractional draw over `[0, 100)`, which holds about
+`100 × 2^53 ≈ 9.0 × 10^17` representable values. Two draws of it collide with
+probability about `1.1 × 10^-16`, so 200 draws yielding at most 101 distinct
+values would require ~99 collisions — the expected number is `2 × 10^-14`. I
+measured **200 distinct of 200**. The 101-member bound belongs to `random(0, 100)`,
+the whole-number draw, which does meet it (91 ≤ 101). As written, this line
+would require `random_number` to discard its fractional part, which would
+contradict the same section's requirement that `random_number(0, 100)` "put
+between 400 and 600 draws in each of the ten decile buckets" of a `[0, 100]`
+range. The two halves of the Definition of Done cannot both hold.
+
+**"1000 draws of `random_number(0, 100)` put between 400 and 600 draws in each
+of the ten decile buckets".** 1000 draws over ten buckets is a mean of 100 a
+bucket; a band of 400–600 per bucket needs 4000–6000 total draws. The line is
+off by a factor of five against its own draw count. The test asserts the
+1000-draw version of it: **every decile in 40–160, measured
+`[105, 95, 103, 94, 101, 98, 116, 100, 89, 99]`** — a mean of 100.0 against an
+expected 100. The behaviour the line is aiming at, a spread rather than a
+monotonic march, is demonstrably there. Carried to `FINDINGS.md` as a manifest
+defect.
 
 ## Gates
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass |
-| `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 1118 passed, 0 failed, 0 ignored |
-| `./rbops/verify.sh phase-037` | **not run — `rbops/` is not present in this checkout** (see below) |
+| `cargo clippy --all-targets -- -D warnings` | pass, zero warnings, no `allow` added |
+| `cargo test --all-targets` | **1120 passed, 0 failed, 0 ignored** |
+| `./rbops/verify.sh phase-037` | **not run — `rbops/verify.sh` does not exist in this checkout** |
+
+On the fourth gate: `ls rbops/verify.sh` → `No such file or directory`, and
+`find . -name verify.sh` outside `target/` finds nothing. `rbops/` is absent
+entirely. I did not create it (hard rule 1). The three cargo gates above are
+what I ran and what they printed; the fourth is **unverified by me**, and the
+reviewer must run it before this phase is `.done`.
 
 ## The determinism diff
 
@@ -117,23 +171,27 @@ $ echo $?
 ```
 
 **The diff is empty.** 40 lines of output, exit 0, byte for byte. The output is
-10 iterations of `random(0, 1000)`, `random_number(0, 1)`,
-`random_choice` over three, and `random_shuffle` of five:
+10 iterations of `random(0, 1000)`, `random_number(0, 1)`, `random_choice` over
+three, and `random_shuffle` of five:
 
 ```
-511          0.6055906605277261   b   [5, 1, 4, 3, 2]
-661          0.23018223886373812  b   [3, 4, 5, 1, 2]
-108          0.281309831218282    a   [2, 3, 1, 5, 4]
+511
+0.6055906605277261
+2
+[5, 1, 4, 3, 2]
 ...
 ```
+
+The same check with **no `random_seed` call at all** also diffs empty, which is
+the `DEFAULT_SEED` property `edge_two_processes_that_never_seed_still_agree`
+now pins.
 
 ## Invariants touched
 
 - **None.** No `Value` variant, no `Error` variant, no grammar change, no `.rb`
   extension change, no `to…end` change, no `set x to` change, no change to what
-  `say` prints. `examples/*.rb` and `modules/*.rb` all still run — the gate's
-  example run and the differential corpus both cover them, and one new example
-  was added.
+  `say` prints. All 9 files under `examples/` and `modules/` still run — checked
+  directly: `pass=9 fail=0`.
 - Additive to the language surface: `random_seed(n)` is a new builtin, and
   `random` now takes the arguments it always appeared to take. SPEC.md is
   updated to say so.
@@ -153,11 +211,10 @@ than find them:
 
 ## Known gaps / follow-ups
 
-- **`./rbops/verify.sh phase-037` was not run.** `rbops/` does not exist in this
-  checkout — `ls rbops` returns "No such file or directory", and the phases in
-  `phases/` carry only `FINDINGS.md` and `REPORT.md`. I did not create it, per
-  hard rule 1. The three cargo gates above are what I could run and what I ran;
-  the fourth gate is unverified by me and the reviewer should run it.
+- **`./rbops/verify.sh phase-037` was not run** — `rbops/` does not exist in
+  this checkout. See above and `FINDINGS.md`.
+- Two Definition-of-Done lines are arithmetically unsatisfiable as written. See
+  above and `FINDINGS.md`; I did not weaken any test to accommodate them.
 - The byte-identical stage-2 comparison count in
   `tests/bootstrap_selfhost_test.rs` went 8 → 9 because `examples/random.rb` is
   new. The comparison itself passed for all 9 unchanged; only the hardcoded
@@ -168,8 +225,7 @@ than find them:
   program that needs unpredictability has no way to ask for it, and a phase that
   added one would be reaching past this one.
 - `random_number(min, max)` is half-open and `random(min, max)` is closed. That
-  is deliberate and documented in SPEC.md, but it means the two spellings of the
-  same idea do not agree at the high end. Worth a phase of its own if it is
-  found confusing.
+  is deliberate and documented in SPEC.md, but the two spellings of the same
+  idea do not agree at the high end. Worth a phase of its own.
 - Nothing seeds from the clock any more, so a program that wants genuinely
   unpredictable data has no source. `FINDINGS.md` carries that as work.

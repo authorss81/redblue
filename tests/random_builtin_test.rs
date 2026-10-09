@@ -49,8 +49,15 @@ fn eval_err(source: &str) -> Error {
 /// so what is asserted is what a Redblue program would see.
 #[track_caller]
 fn draws(expr: &str, count: usize) -> Vec<f64> {
+    draws_from(&format!("random_seed({SEED})\n"), expr, count)
+}
+
+/// The same, under a caller-supplied preamble, so a test can seed differently
+/// or not at all.
+#[track_caller]
+fn draws_from(preamble: &str, expr: &str, count: usize) -> Vec<f64> {
     let source = format!(
-        "random_seed({SEED})\n\
+        "{preamble}\
          set xs to []\n\
          for each i from 1 to {count}\n    \
              append(\"xs\", {expr})\n\
@@ -151,6 +158,57 @@ fn edge_two_processes_seeded_alike_print_identical_output() {
     assert_eq!(
         first, second,
         "two processes given the same seed printed different things:\n--- first\n{first}\n--- second\n{second}"
+    );
+}
+
+/// A program that never calls `random_seed` is reproducible too.
+///
+/// This is the claim `src/runtime.rs` and SPEC.md both make: draws come from a
+/// fixed `DEFAULT_SEED` rather than from the clock, so Redblue's output is
+/// reproducible *by default* and a program has to ask for variation it cannot
+/// reproduce. Two processes that never seed must therefore agree.
+///
+/// Without this test the determinism would hold only for programs that remember
+/// to seed, which is the weaker and less useful half of the property — and the
+/// failure it guards is silent: nothing goes wrong, output just stops being
+/// reproducible.
+#[test]
+fn edge_two_processes_that_never_seed_still_agree() {
+    let source = "for each i from 1 to 50\n    \
+                     say random(0, 1000)\n    \
+                     say random_number(0, 1)\n    \
+                     say random_choice([\"a\", \"b\", \"c\", \"d\"])\n    \
+                     say random_shuffle([1, 2, 3, 4, 5])\n\
+                 end";
+    let first = run_process("unseeded_a", source);
+    let second = run_process("unseeded_b", source);
+    assert!(
+        first.lines().count() > 100,
+        "the unseeded program printed {} lines, so this proves nothing",
+        first.lines().count()
+    );
+    assert_eq!(
+        first, second,
+        "two processes that never seeded printed different things, so the default \
+         seed is not fixed:\n--- first\n{first}\n--- second\n{second}"
+    );
+}
+
+/// Seeding twice is not the same as never seeding: `random_seed` has to move the
+/// generator, or a program that sets the seed to the documented default could
+/// not tell seeded from unseeded and the two would be indistinguishable.
+#[test]
+fn edge_seeding_moves_the_generator() {
+    let unseeded = draws("random_number(0, 1)", 16);
+    let seeded = draws_from("random_seed(424242)\n", "random_number(0, 1)", 16);
+    let other = draws_from("random_seed(424243)\n", "random_number(0, 1)", 16);
+    assert_ne!(
+        unseeded, seeded,
+        "seeding with 424242 produced the default sequence, so `random_seed` did not move the generator"
+    );
+    assert_ne!(
+        seeded, other,
+        "two different seeds produced the same sequence, so `random_seed` is not reaching the generator"
     );
 }
 
