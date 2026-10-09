@@ -435,7 +435,27 @@ assignment_expr  = conditional
 
 ```
 expression       = assignment_expr
-                 | 'might fail' expression            // error propagation
+                | 'might fail' call                  // error propagation
+```
+
+`might fail` is two words. Neither half is the guard on its own: `might f()` and
+`fail f()` are `ParserError`s, because the pair is the form.
+
+The guarded operand is a **call** — a function call or a method call. A prefix
+that took any expression would accept `might fail 1 + 1`, whose right-hand side
+cannot fail at all and which would read as though discarding a failure were
+something a number could do, so anything that is not a call is a `ParserError`
+naming the operand that is not one. `docs/GRAMMAR.md` previously wrote
+`'might fail' expression` here, which claimed the general prefix; that was wrong
+and is corrected above.
+
+A guarded call is an expression, so it may be an argument, a record value, the
+operand of an operator when parenthesized, or a statement of its own:
+
+```redblue
+set report to {body: might fail files.read("config.txt")}
+say (might fail files.read("config.txt")) is nothing
+might fail files.write("output.txt", body)
 ```
 
 ---

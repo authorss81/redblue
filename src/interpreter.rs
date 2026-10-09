@@ -247,6 +247,13 @@ pub struct Vm {
     /// single map read and cannot walk a cyclic parent chain.
     objects: HashMap<String, ObjectType>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
+    /// How many test assertions have failed on this run. The count of failures
+    /// rather than whether one is recorded: `might fail` has to tell a failure of
+    /// its own expression from a test result that expression recorded, and once a
+    /// first result exists "is one recorded?" answers yes for every later failure
+    /// too — including ones that are not test results at all. See
+    /// [`Expr::MightFail`].
+    assertions_failed: usize,
     current_span: Span,
     call_depth: usize,
     max_call_depth: usize,
@@ -396,6 +403,7 @@ impl Vm {
             qualified_members: HashSet::new(),
             objects: HashMap::new(),
             expectation_failure: None,
+            assertions_failed: 0,
             current_span: Span::unknown(),
             call_depth: 0,
             max_call_depth: resolve_max_call_depth(),
@@ -457,7 +465,7 @@ impl Vm {
     /// the same turn of the same loop.
     fn charge_step(&mut self) -> Result<()> {
         if self.steps >= self.max_steps {
-            return Err(Error::Runtime(
+            return Err(Error::Limit(
                 format!(
                     "Step budget of {} reached before the program finished",
                     self.max_steps
@@ -480,7 +488,7 @@ impl Vm {
     /// both engines then say about the same program.
     fn charge_iteration(&mut self, loop_iterations: &mut usize, kind: &str) -> Result<()> {
         if *loop_iterations >= self.max_iterations {
-            return Err(Error::Runtime(
+            return Err(Error::Limit(
                 format!(
                     "Maximum of {} iterations reached in a '{}' loop",
                     self.max_iterations, kind
@@ -1563,20 +1571,35 @@ impl Vm {
             }
             // The guarded call's own failure is discarded and becomes `nothing`.
             //
-            // Two things are not "its own failure" and are re-raised rather than
+            // Three things are not "its own failure" and are re-raised rather than
             // discarded. A `break` or a `skip` inside the call is not a failure at
             // all, so a guarded call that leaves the loop still leaves the loop.
             // A failed `expect` is a test result rather than an error, and the
             // harness reads it off this VM rather than off the returned error — so
             // discarding it here would report a red test green, which is the one
-            // thing a guard must never do.
+            // thing a guard must never do. A resource limit is the host refusing
+            // to keep going rather than this call going wrong: a recursion stopped
+            // at the call-depth limit has not "carried on", and yielding `nothing`
+            // for it would report the limit as a successful value and leave the
+            // program running against a bound it has already reached.
             Expr::MightFail(inner) => {
-                let asserted_before = self.expectation_failure.is_some();
+                let assertions_before = self.assertions_failed;
                 match self.evaluate(inner) {
                     Ok(value) => Ok(value),
                     Err(failure) => {
-                        let asserted_now = self.expectation_failure.is_some() && !asserted_before;
-                        if self.loop_control.is_some() || asserted_now {
+                        // A count rather than a yes/no, because once one failed
+                        // `expect` is recorded the yes/no form cannot tell a
+                        // later failure that is a test result from one that is
+                        // not: a second failing `expect` inside a guard written
+                        // after the first would be discarded as "already
+                        // asserted", reporting a red test green. Only a count
+                        // that has gone up names a result this expression
+                        // recorded.
+                        let asserted_now = self.assertions_failed > assertions_before;
+                        if self.loop_control.is_some()
+                            || asserted_now
+                            || failure.is_resource_limit()
+                        {
                             return Err(failure);
                         }
                         Ok(Value::Nothing)
@@ -1590,6 +1613,7 @@ impl Vm {
                     Ok(()) => Ok(Value::Nothing),
                     Err(failure) => {
                         self.expectation_failure = Some(failure.clone());
+                        self.assertions_failed += 1;
                         Err(Error::Runtime(failure.to_string(), self.span()))
                     }
                 }
@@ -1893,7 +1917,7 @@ impl Vm {
         args: &[Value],
     ) -> Result<Value> {
         if self.call_depth >= self.max_call_depth {
-            return Err(Error::Runtime(
+            return Err(Error::Limit(
                 format!(
                     "Maximum call depth of {} reached while calling '{}'",
                     self.max_call_depth, name

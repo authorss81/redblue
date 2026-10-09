@@ -886,6 +886,68 @@ the turn was abandoned: the `catch` around the `try` did not run for it. Before
 this rule, the tree-walking VM ran that `catch` anyway and the bytecode VM did
 not — the same program, two answers, both exiting 0.
 
+### `might fail`
+
+`might fail <call>` discards a failure of that call and produces `nothing`, so
+the program carries on where it would otherwise have stopped:
+
+```redblue
+set config to might fail files.read("config.rb")
+if config is nothing
+    say "using defaults"
+end
+```
+
+It is two words. Neither half is the guard alone — `might read("x")` and
+`fail read("x")` are errors — and the guarded operand is a call. A number or a
+list literal cannot fail, so accepting one would read as though discarding a
+failure were something it could do; `might fail 1 + 1` is an error naming the
+operand that is not a call.
+
+It is an expression, so it works anywhere a value is taken: as an argument, a
+list element, a record value, or a parenthesized operand.
+
+```redblue
+set report to {body: might fail files.read("config.rb")}
+might fail files.write("output.txt", report body)
+```
+
+#### What a guard does not discard
+
+Three things are not a failure of the guarded call, and a `might fail` passes them
+on rather than turning them into `nothing`:
+
+- **A loop control.** A `break` or a `skip` inside the guarded call is not a
+  failure at all, so a guarded call that leaves the loop still leaves the loop.
+- **A failed `expect`.** An `expect` that fails is a test result, and the test
+  harness reads it as one. A guard that discarded it would report a red test
+  green.
+- **A resource limit.** The step budget, the call-depth limit, and a loop's
+  iteration cap are the host refusing to keep going, not the call going wrong. A
+  program stopped at the call-depth limit has not carried on — it has been
+  stopped — so reporting `nothing` for it would turn a runaway recursion into a
+  successful value and leave the program running against a bound it has already
+  reached:
+
+```redblue
+to endless(n)
+    give back endless(n + 1)
+end
+
+set stopped to might fail endless(1)
+```
+
+```
+RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
+```
+
+The limit stops it either way; `might fail` is not an escape hatch from it. A
+failure of the call itself is still discarded:
+
+```redblue
+set stopped to might fail files.read("config.rb")   // -> nothing
+```
+
 ### Raising Errors
 
 ```redblue

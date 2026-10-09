@@ -1589,11 +1589,12 @@ impl Parser {
     /// failure is discarded rather than ending the program.
     ///
     /// The lexer gives `might` and `fail` the same token, so the two-word spelling
-    /// arrives as two of them; one is consumed here and a second immediately
-    /// after is consumed as the pair's other half. Both `might fail f()` and the
-    /// one-word `might f()` therefore parse, and a third `might` in a row is a
-    /// prefix applied to nothing, which is the refusal below rather than a
-    /// silent success.
+    /// arrives as two of them, and both halves are required here. The single-word
+    /// spellings `might f()` and `fail f()` are *not* the form: they are refused
+    /// rather than read as the guard, because the pair is what every documented
+    /// example writes and a prefix that silently accepted either half would make a
+    /// program that means something else by it — `might` as a variable name, say —
+    /// a guard instead of a refusal.
     ///
     /// Only a call may be guarded. A prefix that took any expression would accept
     /// `might fail 1 + 1`, whose right-hand side cannot fail at all, and would
@@ -1601,10 +1602,17 @@ impl Parser {
     /// the shape is refused at parse time, with the position of the expression
     /// that is not a call.
     fn parse_might_fail(&mut self) -> Result<Expr> {
-        self.advance(); // consume 'might' or 'fail'
-        if self.current().map(|t| &t.kind) == Some(&TokenKind::MightFail) {
-            self.advance(); // consume the other half of 'might fail'
+        let first = self.span();
+        self.advance(); // consume 'might'
+        if self.current().map(|t| &t.kind) != Some(&TokenKind::MightFail) {
+            return Err(Error::Parser(
+                "`might` is half of the guard on its own: the form is `might fail \
+                 <call>`, not `might <call>` and not `fail <call>`"
+                    .to_string(),
+                first,
+            ));
         }
+        self.advance(); // consume 'fail', the pair's other half
 
         if !self.is_expression_start() {
             return Err(Error::Parser(

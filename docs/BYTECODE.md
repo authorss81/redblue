@@ -224,7 +224,16 @@ always `0`.
 | 46 | `DECLARE_CONST` | name index | — | pops into a variable as a constant: the name may not be bound again, and no `STORE` writes it |
 | 47 | `MODULE` | module body block index | — | starts a module declaration; the block holds what it publishes and its body, and its name is the module's |
 | 48 | `EXPORT` | published name index | `NO_CONST` when the declaration does not define that name | nothing: data the `MODULE` that entered the block has already read |
-| 49 | `MIGHT_FAIL` | recovery target | — | guards the instructions that follow against failure: a failure before the `NOP` carrying `MIGHT_FAIL_END_MARKER` is discarded and execution continues at the target with `nothing` on the stack |
+| 49 | `MIGHT_FAIL` | recovery target | — | guards the instructions that follow against failure: a failure before the `NOP` carrying `MIGHT_FAIL_END_MARKER` is discarded and execution continues at the target, which pushes the `nothing` the expression yields |
+
+A recovery target names an instruction, so an offset of `len` or more — the block's
+own length, one past its last instruction — is a malformed file and is reported
+rather than clamped to the end of the block.
+
+What a guard does *not* discard is what `might fail` does not discard either: loop
+control, a failed `expect`, and a resource limit. A step budget or a call-depth
+limit reached inside the guarded region is reported, not turned into a `nothing`,
+because the host refusing to keep going is not a failure of the guarded call.
 
 `NO_BLOCK` is `0xFFFFFFFF`, the operand that says "this handler is not there".
 A `try` with no `catch` and no `finally` writes it in both fields and creates

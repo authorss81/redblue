@@ -224,7 +224,7 @@ pub enum Opcode {
     ///
     /// This is the bytecode of the expression `might fail <call>`. The region is
     /// the instructions between this one and the [`Opcode::Nop`] carrying
-    /// [`END_MIGHT_FAIL_MARKER`], which closes it on the path where nothing
+    /// [`MIGHT_FAIL_END_MARKER`], which closes it on the path where nothing
     /// failed; the recovery code the operand names is compiled after that marker
     /// and reached only by jumping to it. `arg` is the offset of that recovery
     /// code, so it is patched once the rest of the expression is compiled.

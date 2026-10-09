@@ -326,10 +326,17 @@ struct Guard {
     /// The offset the instruction pointer continues at when the guarded code
     /// fails: the recovery code, which leaves `nothing` on the stack.
     target: u32,
-    /// Whether a test assertion had already failed when the guard was
-    /// installed, which is how a failure of the guarded code is told from a
-    /// test result it recorded. See [`BytecodeVm::handle_guard`].
-    asserted_before: bool,
+    /// How many test assertions had failed when the guard was installed.
+    ///
+    /// A count rather than a yes/no, because the question the guard has to answer
+    /// is whether the failure in hand is a test result *this guard's expression
+    /// recorded* — and a boolean cannot say that once one has been recorded
+    /// already. With a boolean, a second failing `expect` inside a guard that was
+    /// installed after a first one failed compared equal to "already asserted",
+    /// so the guard took the failure and reported a red test green. Comparing
+    /// counts tells the two apart: a count that has gone up is a new result.
+    /// See [`BytecodeVm::handle_guard`].
+    assertions_before: usize,
 }
 
 /// One `object` declaration being assembled. Its body declares the fields and
@@ -611,6 +618,15 @@ pub struct BytecodeVm {
     /// [`BytecodeVm::import`].
     importing: Vec<String>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
+    /// How many test assertions have failed on this run.
+    ///
+    /// The *count* of failures rather than whether one is recorded, because a
+    /// guard has to tell a failure of its own expression from a test result that
+    /// expression recorded — and once a first result exists, "is one recorded?"
+    /// answers yes for every later failure too, including ones with nothing to do
+    /// with it. The count goes up once per failed `expect`, so a guard can tell
+    /// whether *this* region recorded a new one. See [`Guard::assertions_before`].
+    assertions_failed: usize,
     current_span: Span,
     /// The operand stack. Every block is entered with an empty one; the bases
     /// live in [`Frame`].
@@ -703,6 +719,7 @@ impl BytecodeVm {
             module_depth: 0,
             importing: Vec::new(),
             expectation_failure: None,
+            assertions_failed: 0,
             current_span: Span::unknown(),
             stack: Vec::new(),
             frames: Vec::new(),
@@ -944,7 +961,7 @@ impl BytecodeVm {
     /// same program.
     fn charge_step(&mut self) -> Result<()> {
         if self.steps >= self.max_steps {
-            return Err(Error::Runtime(
+            return Err(Error::Limit(
                 format!(
                     "Step budget of {} reached before the program finished",
                     self.max_steps
@@ -989,7 +1006,7 @@ impl BytecodeVm {
             return Ok(());
         };
         if entry.iterations >= self.max_iterations {
-            return Err(Error::Runtime(
+            return Err(Error::Limit(
                 format!(
                     "Maximum of {} iterations reached in a '{}' loop",
                     self.max_iterations, entry.kind
@@ -1239,11 +1256,20 @@ impl BytecodeVm {
         // that installed one is its innermost frame: a guard left pointing at a
         // frame that has finished is unreachable and is dropped here rather than
         // being searched for later.
+        //
+        // `finished` is the length *after* the pop, so the frame that just
+        // finished is at index `finished` and a guard it owns is at `finished`
+        // too. The bound is therefore `>=`: `>` kept the guard the finished frame
+        // had installed, and because a guard's frame is only ever the innermost
+        // one, that stale entry sat above every live guard where
+        // [`Self::pop_guard`] — which checks only the top — could no longer pop it.
+        // The region it guarded was gone, so it went on swallowing failures raised
+        // long afterwards, in whatever frame was entered next.
         let finished = self.frames.len();
         while self
             .guards
             .last()
-            .is_some_and(|guard| guard.frame > finished)
+            .is_some_and(|guard| guard.frame >= finished)
         {
             self.guards.pop();
         }
@@ -1716,6 +1742,7 @@ impl BytecodeVm {
                     }
                     Err(failure) => {
                         self.expectation_failure = Some(failure.clone());
+                        self.assertions_failed += 1;
                         Err(Error::Runtime(failure.to_string(), self.span()))
                     }
                 }
@@ -2577,7 +2604,7 @@ impl BytecodeVm {
             ));
         };
         if self.call_depth >= self.max_call_depth {
-            return Err(Error::Runtime(
+            return Err(Error::Limit(
                 format!(
                     "Maximum call depth of {} reached while calling '{}'",
                     self.max_call_depth, function.name
@@ -2722,7 +2749,13 @@ impl BytecodeVm {
     /// been compiled — so the target is known only here at run time, and a file
     /// naming an offset outside its own block is refused rather than trusted.
     fn push_guard(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
-        if instruction.arg as usize > self.code_len(frame) {
+        // A recovery offset names an instruction, and the last instruction of a
+        // block is at `len - 1`, so an offset of `len` is already outside it. The
+        // bound is `>=` rather than `>` because accepting `len` here would only
+        // move the refusal to [`BytecodeVm::set_ip`], which clamps the target to
+        // `len` and runs the guard's region to its end instead of reporting the
+        // malformed file.
+        if instruction.arg as usize >= self.code_len(frame) {
             return Err(Error::Runtime(
                 format!(
                     "a `might fail` names recovery at {} which is outside its block's {} \
@@ -2740,7 +2773,7 @@ impl BytecodeVm {
             loop_base: self.loops.len(),
             handler_base: self.handlers.len(),
             target: instruction.arg,
-            asserted_before: self.expectation_failure.is_some(),
+            assertions_before: self.assertions_failed,
         });
         self.advance(frame);
         Ok(())
@@ -2793,7 +2826,14 @@ impl BytecodeVm {
     /// instruction pointer moves, so the recovery code — which is the rest of the
     /// expression, and may itself be guarded — is not charged to a guard that has
     /// already been satisfied.
-    fn handle_guard(&mut self, index: usize) -> Result<bool> {
+    ///
+    /// The value is produced by the recovery code the instruction pointer is moved
+    /// to, which is a `PushConst Nothing` the compiler emitted: pushing one here
+    /// as well would leave two values where the guarded expression leaves one, and
+    /// the extra would be consumed by whoever reads the expression's result rather
+    /// than by the expression — growing the operand stack without bound in a loop
+    /// of failing guarded calls.
+    fn handle_guard(&mut self, index: usize, error: &Error) -> Result<bool> {
         let Some(guard) = self.guards.get(index).copied() else {
             return Ok(false);
         };
@@ -2802,7 +2842,29 @@ impl BytecodeVm {
         // here would report a red test green. The guard does not take it, and the
         // failure is offered to a `try` outside the guard or leaves the program —
         // which is what the tree-walking VM's `might fail` does.
-        if self.expectation_failure.is_some() && !guard.asserted_before {
+        //
+        // Asked as a count, not as "is a result recorded?": a result recorded
+        // *before* this guard was installed says nothing about the failure in
+        // hand, and once one exists the yes/no form answers yes for a failure that
+        // is not a test result at all — taking it would report a red test green
+        // the moment a program failed an `expect` and then guarded something else.
+        // Only a count that has gone up names a result this region recorded.
+        if self.assertions_failed > guard.assertions_before {
+            return Ok(false);
+        }
+        // A resource limit is the host refusing to keep going, not the guarded
+        // expression going wrong: a program stopped at its step budget or its call
+        // depth has not "carried on", it has been stopped, and yielding `nothing`
+        // for it would report a resource error as a successful value. The guard
+        // passes these on exactly as it passes a failed `expect` on, and the
+        // tree-walking VM's `might fail` does the same.
+        //
+        // Asked as a count rather than of the failure, because the failure does
+        // not say: a `RuntimeError` from the budget and a `RuntimeError` from the
+        // expression are the same variant carrying a string, and telling them
+        // apart by the wording made the guard's behaviour a property of how the
+        // three limit messages happen to be spelled.
+        if error.is_resource_limit() {
             return Ok(false);
         }
         // Every guard above this one was installed by code that has now failed,
@@ -2817,7 +2879,6 @@ impl BytecodeVm {
         if self.frames.is_empty() {
             return Ok(true);
         }
-        self.stack.push(Value::Nothing);
         self.set_ip(guard.frame, guard.target as usize);
         Ok(true)
     }
@@ -2866,25 +2927,41 @@ impl BytecodeVm {
     /// A handler body that fails itself leaves that failure in place, which is what
     /// the tree-walking VM does — the second `?` — so an error in a `catch` is not
     /// swallowed by the `try` that caught it.
-    fn handle_failure(&mut self, _error: &Error) -> Result<bool> {
-        // A `might fail` inside the region that is failing gets the failure
-        // first, which is why this is asked at the top of every turn rather than
-        // once: a handler below may be asked first and pass the failure on, and
-        // the guard written inside it is then the one that takes it. Asking per
-        // turn is also what makes the ordering right — a guard is inner exactly
-        // when it is in a deeper frame, or in the same frame at a later offset
-        // than the innermost handler's `TRY`.
-        if let Some(index) = self.inner_most_guard() {
-            if self.guard_is_inner(index) {
-                return self.handle_guard(index);
-            }
-        }
-        // Looped, because a handler is not obliged to handle anything: a `try`
-        // with no `catch` runs its `finally` and passes the failure on, so the
-        // search continues from what is left rather than the failure leaving the
-        // region and the program at once. Each turn pops a handler, so the
-        // search cannot run for ever — it ends when nothing is left to ask.
+    fn handle_failure(&mut self, error: &Error) -> Result<bool> {
+        // Looped, because neither a handler nor a guard is obliged to handle
+        // anything: a `try` with no `catch` runs its `finally` and passes the
+        // failure on, so the search continues from what is left rather than the
+        // failure leaving the region and the program at once. Each turn pops a
+        // handler, so the search cannot run for ever — it ends when nothing is
+        // left to ask.
         loop {
+            // The guard is asked at the top of every turn rather than once before
+            // the loop: a handler below may be asked first and pass the failure on
+            // without handling it, and a guard written inside that handler is then
+            // the innermost region and the one that takes it. Asking per turn is
+            // also what makes the ordering right — a guard is inner exactly when it
+            // is in a deeper frame, or in the same frame at a later offset than the
+            // innermost handler's `TRY`, and a turn that has popped a handler has
+            // changed which of those it is.
+            if let Some(index) = self.inner_most_guard() {
+                if self.guard_is_inner(index) && self.handle_guard(index, error)? {
+                    return Ok(true);
+                }
+                // A guard that declined leaves the failure where it was, and the
+                // search carries on from what is left rather than the failure
+                // leaving the region and the program at once. Declining is not
+                // the same as not being asked: a resource limit and a failed
+                // `expect` are both passed on by a guard rather than taken, and
+                // both belong to whatever is written *around* it — an enclosing
+                // guard, a `try`, or the program. Returning here instead would
+                // report a failure the enclosing `catch` was written to handle as
+                // the program failing, which is what the tree-walking VM's `?`
+                // does not do.
+                //
+                // Asking the same guard again on a later turn is harmless: a turn
+                // is only reached by a handler having been popped, so the search
+                // still makes progress towards its answer.
+            }
             // The handler is the innermost frame's only when the failure happened in
             // the frame that installed it. A failure inside a call made by the
             // protected code is caught by the caller's `try` instead, which is what
