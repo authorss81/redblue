@@ -509,8 +509,8 @@ fn stage2_is_byte_identical_on_the_examples_and_the_modules() {
     }
 
     assert_eq!(
-        checked, 8,
-        "{checked} of the examples and modules were compared, not all 8; the language's \
+        checked, 9,
+        "{checked} of the examples and modules were compared, not all 9; the language's \
          specification by example is what this test exists to check"
     );
 }
