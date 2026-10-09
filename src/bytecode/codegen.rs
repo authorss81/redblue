@@ -17,7 +17,9 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 
 use crate::bytecode::format::{Block, BlockKind, Chunk, Constant, Instruction, MAX_BLOCK_DEPTH};
 use crate::bytecode::opcode::Opcode;
-use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER};
+use crate::bytecode::{
+    END_TRY_MARKER, MIGHT_FAIL_END_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER,
+};
 
 /// The name a `repeat ... times` loop counts in.
 ///
@@ -727,6 +729,24 @@ impl Compiler {
                 self.expr(actual, code, line)?;
                 self.expr(expected, code, line)?;
                 emit(code, Opcode::Expect, 0, 0, line);
+            }
+            // `might fail <call>`: a guard, the call, the marker that takes the
+            // guard away again on the path where nothing failed, a jump over the
+            // recovery, and the recovery itself — which pushes `nothing` and is
+            // where the guard sends the instruction pointer when the call failed.
+            //
+            // The recovery is compiled here rather than in a block of its own
+            // because it is one instruction and needs none of a frame's scope.
+            Expr::MightFail(inner) => {
+                let guard = jump(code, Opcode::MightFail, line);
+                self.expr(inner, code, line)?;
+                emit(code, Opcode::Nop, MIGHT_FAIL_END_MARKER, 0, line);
+                let over = jump(code, Opcode::Jump, line);
+                let recovery = code.len() as u32;
+                let nothing = self.constant(Constant::Nothing);
+                emit(code, Opcode::PushConst, nothing, 0, line);
+                patch_here(code, over);
+                patch(code, guard, recovery);
             }
             // A literal needs a block of its own, and a block is compiled by the
             // statement path: `expr` has no block pool to add one to. Rather

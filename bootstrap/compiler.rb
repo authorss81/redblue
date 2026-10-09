@@ -310,7 +310,7 @@ end
 to encode(chunk)
     set G_BYTES to []
     put([82, 69, 68, 26])
-    put([5, 0])
+    put([6, 0])
     put(u32_le(length(chunk.p)))
     for each each_entry in chunk.p
         put([each_entry.t])

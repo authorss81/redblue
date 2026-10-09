@@ -40,7 +40,9 @@ use std::sync::Arc;
 
 use crate::bytecode::format::{Block, Chunk, Constant, Instruction};
 use crate::bytecode::opcode::Opcode;
-use crate::bytecode::{END_TRY_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER};
+use crate::bytecode::{
+    END_TRY_MARKER, MIGHT_FAIL_END_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER,
+};
 use crate::error::{Error, Result, Span};
 use crate::interpreter::{qualified_member, DeclaredModule};
 use crate::interpreter::{
@@ -296,6 +298,38 @@ struct Handler {
     /// is protected code the jump goes past, so its handler does not.
     frame: usize,
     start: u32,
+}
+
+/// One `might fail` whose guarded code is still running.
+///
+/// A guard is the bytecode of `might fail <call>`: a failure inside the region
+/// is discarded and the value `nothing` is produced at the recovery offset
+/// instead of leaving the program. It is a stack of its own rather than a
+/// [`Handler`] because it has no `catch` and no `finally` to run — the only
+/// thing a failure does here is stop, and the compiler emits the recovery code
+/// as ordinary instructions the instruction pointer is moved to.
+#[derive(Clone, Copy)]
+struct Guard {
+    /// The frame the guarded code runs in, and the offset of the guard itself,
+    /// so a guard is only reachable while its own frame is still on the stack.
+    frame: usize,
+    start: u32,
+    /// The operand stack height before the guarded expression's own operands
+    /// were pushed, which the partial values of a failure are dropped back to.
+    stack_base: usize,
+    /// How many loops were running when the guard was installed, so a failure
+    /// does not inherit a sequence the guarded code left half drawn.
+    loop_base: usize,
+    /// How many handlers were installed, so a failure is handed to a `try`
+    /// written outside the guard rather than to one it has already left.
+    handler_base: usize,
+    /// The offset the instruction pointer continues at when the guarded code
+    /// fails: the recovery code, which leaves `nothing` on the stack.
+    target: u32,
+    /// Whether a test assertion had already failed when the guard was
+    /// installed, which is how a failure of the guarded code is told from a
+    /// test result it recorded. See [`BytecodeVm::handle_guard`].
+    asserted_before: bool,
 }
 
 /// One `object` declaration being assembled. Its body declares the fields and
@@ -587,6 +621,8 @@ pub struct BytecodeVm {
     loops: Vec<Loop>,
     /// The `try` handlers currently installed, innermost last.
     handlers: Vec<Handler>,
+    /// The `might fail` guards currently installed, innermost last.
+    guards: Vec<Guard>,
     /// The `object` declarations the open object bodies are assembling,
     /// outermost first.
     ///
@@ -672,6 +708,7 @@ impl BytecodeVm {
             frames: Vec::new(),
             loops: Vec::new(),
             handlers: Vec::new(),
+            guards: Vec::new(),
             pending_objects: Vec::new(),
             outcome: Value::Nothing,
             call_depth: 0,
@@ -755,6 +792,7 @@ impl BytecodeVm {
         self.frames.clear();
         self.loops.clear();
         self.handlers.clear();
+        self.guards.clear();
         self.stack.clear();
         self.pending_objects.clear();
         self.locals.truncate(1);
@@ -1197,6 +1235,18 @@ impl BytecodeVm {
         let Some(frame) = self.frames.pop() else {
             return Ok(());
         };
+        // A guard is installed and dropped inside one expression, so the frame
+        // that installed one is its innermost frame: a guard left pointing at a
+        // frame that has finished is unreachable and is dropped here rather than
+        // being searched for later.
+        let finished = self.frames.len();
+        while self
+            .guards
+            .last()
+            .is_some_and(|guard| guard.frame > finished)
+        {
+            self.guards.pop();
+        }
         if frame.module_body.is_some() {
             // Published before the module's own scope is taken away, because a
             // member is what the module's scope holds. See
@@ -1424,6 +1474,10 @@ impl BytecodeVm {
                     self.advance(frame);
                     return Ok(());
                 }
+                if instruction.arg == MIGHT_FAIL_END_MARKER {
+                    self.pop_guard(frame);
+                    return Ok(());
+                }
                 if instruction.arg != END_TRY_MARKER {
                     self.advance(frame);
                     return Ok(());
@@ -1630,6 +1684,7 @@ impl BytecodeVm {
                 Ok(())
             }
             Opcode::Try => self.push_handler(instruction, frame),
+            Opcode::MightFail => self.push_guard(instruction, frame),
             Opcode::Import => self.import(instruction, frame),
             Opcode::Module => self.module(instruction, frame),
             // The run of `EXPORT`s at the head of a module body is data the
@@ -2658,6 +2713,115 @@ impl BytecodeVm {
         self.child_block_name(frame, instruction.arg)
     }
 
+    // -- might fail ---------------------------------------------------------
+
+    /// `MIGHT_FAIL`: guards the instructions that follow it against failure.
+    ///
+    /// The operand names the recovery code, which the compiler emits after the
+    /// region and patches into this instruction once the guarded expression has
+    /// been compiled — so the target is known only here at run time, and a file
+    /// naming an offset outside its own block is refused rather than trusted.
+    fn push_guard(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
+        if instruction.arg as usize > self.code_len(frame) {
+            return Err(Error::Runtime(
+                format!(
+                    "a `might fail` names recovery at {} which is outside its block's {} \
+                     instructions",
+                    instruction.arg,
+                    self.code_len(frame)
+                ),
+                self.span(),
+            ));
+        }
+        self.guards.push(Guard {
+            frame,
+            start: self.frames[frame].ip as u32,
+            stack_base: self.stack.len(),
+            loop_base: self.loops.len(),
+            handler_base: self.handlers.len(),
+            target: instruction.arg,
+            asserted_before: self.expectation_failure.is_some(),
+        });
+        self.advance(frame);
+        Ok(())
+    }
+
+    /// A `NOP` whose operand is [`MIGHT_FAIL_END_MARKER`]: the guarded code ran
+    /// to here without failing, so the guard is taken away again.
+    ///
+    /// The guard is popped rather than left for the next failure to meet, which
+    /// is the whole point of the marker: without it a guard would outlive the
+    /// expression it guarded and swallow the program's next failure too. A
+    /// marker with no guard above it is a file the compiler did not write and
+    /// does nothing.
+    fn pop_guard(&mut self, frame: usize) {
+        if self.guards.last().is_some_and(|guard| guard.frame == frame) {
+            self.guards.pop();
+        }
+        self.advance(frame);
+    }
+
+    /// The innermost guard whose frame is still on the stack, if there is one.
+    fn inner_most_guard(&self) -> Option<usize> {
+        self.guards
+            .iter()
+            .rposition(|guard| guard.frame < self.frames.len())
+    }
+
+    /// Whether the guard at `index` is written inside the innermost handler, and
+    /// so is reached before it.
+    ///
+    /// Both stacks are ordered innermost-last, so only their tops can be inner,
+    /// and a guard is inner when it is in a deeper frame or in the same frame
+    /// after the handler's `TRY`. Two regions at the same offset cannot both be
+    /// innermost, so the handler wins that tie: it is the one that was there
+    /// first.
+    fn guard_is_inner(&self, index: usize) -> bool {
+        let Some(guard) = self.guards.get(index) else {
+            return false;
+        };
+        match self.handlers.last() {
+            Some(handler) => (guard.frame, guard.start) > (handler.frame, handler.start),
+            None => true,
+        }
+    }
+
+    /// Runs the innermost guard's recovery, discarding the failure.
+    ///
+    /// The partial operands the failing expression had pushed are dropped rather
+    /// than handed to the recovery, and the guard is popped before the
+    /// instruction pointer moves, so the recovery code — which is the rest of the
+    /// expression, and may itself be guarded — is not charged to a guard that has
+    /// already been satisfied.
+    fn handle_guard(&mut self, index: usize) -> Result<bool> {
+        let Some(guard) = self.guards.get(index).copied() else {
+            return Ok(false);
+        };
+        // A failed `expect` is a test result, not an error: the harness reads it
+        // off this VM rather than off the failure a run returns, so discarding it
+        // here would report a red test green. The guard does not take it, and the
+        // failure is offered to a `try` outside the guard or leaves the program —
+        // which is what the tree-walking VM's `might fail` does.
+        if self.expectation_failure.is_some() && !guard.asserted_before {
+            return Ok(false);
+        }
+        // Every guard above this one was installed by code that has now failed,
+        // so none of them is still protecting anything.
+        self.guards.truncate(index);
+        self.discard_frames_above(guard.frame);
+        self.unwind_loops(guard.loop_base);
+        self.stack.truncate(guard.stack_base);
+        // A `try` written inside the guarded expression has been left along with
+        // it, so its handlers go too: the region is over.
+        self.handlers.truncate(guard.handler_base);
+        if self.frames.is_empty() {
+            return Ok(true);
+        }
+        self.stack.push(Value::Nothing);
+        self.set_ip(guard.frame, guard.target as usize);
+        Ok(true)
+    }
+
     // -- try ----------------------------------------------------------------
 
     /// `TRY`: installs the handlers the rest of this block runs under.
@@ -2703,6 +2867,18 @@ impl BytecodeVm {
     /// the tree-walking VM does — the second `?` — so an error in a `catch` is not
     /// swallowed by the `try` that caught it.
     fn handle_failure(&mut self, _error: &Error) -> Result<bool> {
+        // A `might fail` inside the region that is failing gets the failure
+        // first, which is why this is asked at the top of every turn rather than
+        // once: a handler below may be asked first and pass the failure on, and
+        // the guard written inside it is then the one that takes it. Asking per
+        // turn is also what makes the ordering right — a guard is inner exactly
+        // when it is in a deeper frame, or in the same frame at a later offset
+        // than the innermost handler's `TRY`.
+        if let Some(index) = self.inner_most_guard() {
+            if self.guard_is_inner(index) {
+                return self.handle_guard(index);
+            }
+        }
         // Looped, because a handler is not obliged to handle anything: a `try`
         // with no `catch` runs its `finally` and passes the failure on, so the
         // search continues from what is left rather than the failure leaving the
@@ -2807,6 +2983,12 @@ impl BytecodeVm {
     /// handed to whoever catches it — the tree-walking VM drops them with the
     /// frames when `?` leaves a call.
     fn discard_frames_above(&mut self, keep: usize) {
+        // A guard lives inside the expression it guards, so it cannot outlive the
+        // frame it was installed in: everything above `keep` is going, and a
+        // guard pointing into it is not a guard any more.
+        if let Some(base) = self.guards.iter().position(|guard| guard.frame > keep) {
+            self.guards.truncate(base);
+        }
         while self.frames.len() > keep + 1 {
             let Some(frame) = self.frames.pop() else {
                 break;

@@ -33,4 +33,5 @@ pub use format::{
 };
 pub use opcode::Opcode;
 pub use opcode::END_TRY_MARKER;
+pub use opcode::MIGHT_FAIL_END_MARKER;
 pub use opcode::STATEMENT_MARKER;

@@ -769,6 +769,12 @@ impl Formatter {
                 }
                 self.write("}");
             }
+            // A guarded call prints as it is written, so the output reads back
+            // as the guard rather than as the bare call it wraps.
+            Expr::MightFail(inner) => {
+                self.write("might fail ");
+                self.format_expression(inner);
+            }
             Expr::Expect { actual, expected } => {
                 self.write("expect ");
                 self.format_expression(actual);

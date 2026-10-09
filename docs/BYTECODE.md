@@ -53,16 +53,17 @@ A file that does not begin with the magic is refused with
 
 ### Format version
 
-A `u16`. This build reads and writes `5`. Any other value is refused with
-`unknown bytecode format version <n>: this build reads version 5`.
+A `u16`. This build reads and writes `6`. Any other value is refused with
+`unknown bytecode format version <n>: this build reads version 6`.
 
 #### What each version changed
 
 Versions 1 and 2 changed no byte value and no record layout — only what an
-operand means, and one refusal. Versions 3 and 4 each added instructions, at
+operand means, and one refusal. Versions 3, 4 and 6 each added instructions, at
 byte values no earlier version used, so the numbers written into a file still
-mean what they meant. Version 5 changed no byte value either: it gave the
-`NOP` a second marker operand, which is an operand a `NOP` had no use for.
+mean what they meant. Versions 5 and 6 apart, version 5 changed no byte value:
+it gave the `NOP` a second marker operand, which is an operand a `NOP` had no
+use for.
 
 | Version | Change |
 |---|---|
@@ -71,6 +72,7 @@ mean what they meant. Version 5 changed no byte value either: it gave the
 | 3 | Added `DECLARE_CONST`, which `constant NAME to <expr>` compiles to. Versions 1 and 2 compiled the same declaration to `STORE`, which does not say the name is read-only, so the file could not be told apart from a `set`. A version-2 file is refused rather than read as a program whose constants could be rebound. |
 | 4 | `IMPORT`'s secondary operand became the name it binds — the alias the source wrote, or the module's own name when it wrote none — where version 3 wrote the filler `0`. Read as version 4, a version-3 file's `IMPORT` would bind `constants[0]`, which is whichever name happened to be first in the pool rather than the one the source named. Added `MODULE` and `EXPORT`, which a `module NAME … end` declaration compiles to; version 3 compiled such a declaration's body inline and the declaration itself to nothing, so a file written then says nothing about where the module begins or what it publishes. A version-3 file is refused rather than half-read. |
 | 5 | Every statement a program *runs* begins with a `NOP` whose operand is `STATEMENT_MARKER`, and that marker is where the step budget is charged. A version-4 file has no marker, so a VM read it would charge that program nothing at all and the budget would silently not apply to it. A version-4 file is refused rather than run unbounded. |
+| 6 | Added `MIGHT_FAIL` at byte 49, which is what `might fail <call>` compiles to, and gave the `NOP` a third marker operand, `MIGHT_FAIL_END_MARKER`, which is where that guard is taken away again on the path where nothing failed. |
 
 An earlier file is refused rather than half-read: the same bytes would mean
 two different things, and rule 2 above is what makes that a new version rather
@@ -222,6 +224,7 @@ always `0`.
 | 46 | `DECLARE_CONST` | name index | — | pops into a variable as a constant: the name may not be bound again, and no `STORE` writes it |
 | 47 | `MODULE` | module body block index | — | starts a module declaration; the block holds what it publishes and its body, and its name is the module's |
 | 48 | `EXPORT` | published name index | `NO_CONST` when the declaration does not define that name | nothing: data the `MODULE` that entered the block has already read |
+| 49 | `MIGHT_FAIL` | recovery target | — | guards the instructions that follow against failure: a failure before the `NOP` carrying `MIGHT_FAIL_END_MARKER` is discarded and execution continues at the target with `nothing` on the stack |
 
 `NO_BLOCK` is `0xFFFFFFFF`, the operand that says "this handler is not there".
 A `try` with no `catch` and no `finally` writes it in both fields and creates
@@ -237,7 +240,7 @@ refuses rather than publishes. The two reserved values are never compared agains
 each other — `NO_BLOCK` appears only in a block-index operand and `NO_CONST` only
 in a constant-index one.
 
-`END_TRY_MARKER` is `0xFFFFFFFF` as well, and is one of the two values of a
+`END_TRY_MARKER` is `0xFFFFFFFF` as well, and is one of the three values of a
 `NOP`'s `arg` that are not the filler: it is the end of a `try`'s protected
 region, where the handlers are popped and the `finally` runs. Every other `arg` —
 the `0` a filler carries — leaves the instruction doing nothing. A `NOP`'s `arg`
@@ -267,6 +270,14 @@ and several times that there, so the same program reached the budget at a
 different point on each engine: the same loop was stopped by the iteration cap on
 one and by the step budget on the other, with different words. `rb dis` prints
 `start of a statement` on a marked one.
+
+`MIGHT_FAIL_END_MARKER` is `0xFFFFFFFD`, the third reserved operand a `NOP` can
+carry, and says a `might fail` region ends here. The compiler writes exactly one
+per guarded expression, immediately after the guarded call and before the jump
+that steps over the recovery code. Without it the guard would outlive the
+expression it guarded and discard the program's next failure as well, which is
+the opposite of what `might fail` promises. `rb dis` prints `end of a
+`might fail` region` on a marked one.
 
 Two kinds of statement the file does *not* mark, and neither is a statement the
 program runs — the declaration they belong to reads them instead. An `export` in

@@ -1084,8 +1084,13 @@ fn edge_the_module_instructions_take_bytes_no_earlier_version_used() {
         "EXPORT took the byte after MODULE"
     );
     assert_eq!(
+        Opcode::MightFail.to_byte(),
+        49,
+        "MIGHT_FAIL took the byte after EXPORT, which was the end of the table"
+    );
+    assert_eq!(
         Opcode::ALL.len(),
-        Opcode::Export.to_byte() as usize + 1,
+        Opcode::MightFail.to_byte() as usize + 1,
         "the table is indexed by byte value, so it ends at the last instruction"
     );
     for opcode in Opcode::ALL {
@@ -1133,7 +1138,7 @@ fn edge_a_version_3_file_is_refused_because_its_imports_name_no_alias() {
     );
 }
 
-/// Every file this build writes says it is version 5, and a version-4 file's
+/// Every file this build writes says it is the current version, and an older file's
 /// bytes are the same bytes with a different version word — refused, because a
 /// version-4 file carries no statement marker and so would be charged nothing at
 /// all.
