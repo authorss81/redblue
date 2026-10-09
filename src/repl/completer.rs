@@ -86,6 +86,7 @@ impl ReplCompleter {
                 "filter".to_string(),
                 "reduce".to_string(),
                 "random".to_string(),
+                "random_seed".to_string(),
                 "uppercase".to_string(),
                 "lowercase".to_string(),
                 "trim".to_string(),
