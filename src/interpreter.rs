@@ -45,7 +45,30 @@ pub const MAX_ITERATIONS_ENV: &str = "REDBLUE_MAX_ITERATIONS";
 /// [`MAX_ITERATIONS`] bounds one loop; this bounds the program, because
 /// unboundedness can also be written as many short loops rather than one long
 /// one. It is what a test harness lowers to bound a run deterministically.
-pub const MAX_STEPS: usize = 10_000_000;
+///
+/// It was 10 000 000, and that is below what the project needs its own compiler
+/// to be allowed to do. Ladder stage S3 — `bootstrap/compiler.rb` compiled by
+/// itself, run as bytecode — takes **16 062 500** steps on this repository's
+/// `bootstrap/compiler.rb` (measured by bisecting `REDBLUE_MAX_STEPS` until the
+/// run stopped being refused), and `rb vm stage1.rbc bootstrap/compiler.rb
+/// stage2.rbc` is the command the ladder is named for. At 10 000 000 it died
+/// with `Step budget of 10000000 reached before the program finished` after
+/// doing most of the work, which is the worst of both: the guard spent its time
+/// and the program produced nothing.
+///
+/// 32 000 000 is about twice what the self-compilation needs, so the compiler can
+/// grow before the budget is the reason it stops, and it is still a bound: a
+/// program that runs away is stopped in seconds of release-build time rather
+/// than never, and `REDBLUE_MAX_STEPS` still lowers it for anyone who wants a
+/// tighter one. Nothing else about the guard moved — [`MAX_ITERATIONS`] still
+/// caps a single loop at a million iterations, which is what catches the ordinary
+/// runaway loop before this budget does.
+///
+/// `edge_the_self_hosted_compiler_compiles_itself_byte_identically` is what pins
+/// this: it runs the self-compilation with no environment override at all, so
+/// the default either admits the compiler or the fixed point is not a fixed
+/// point.
+pub const MAX_STEPS: usize = 32_000_000;
 
 /// The environment variable that overrides [`MAX_STEPS`].
 pub const MAX_STEPS_ENV: &str = "REDBLUE_MAX_STEPS";
@@ -1577,14 +1600,18 @@ impl Vm {
             ));
         };
 
-        self.apply_map(&**items, &function)
+        self.apply_map(items, function)
     }
 
     /// Applies `function` to every element of `items`, in order.
     fn apply_map(&mut self, items: &[Value], function: &FunctionValue) -> Result<Value> {
         let mut mapped = Vec::with_capacity(items.len());
         for item in items {
-            mapped.push(self.call_user_function(ANONYMOUS_FUNCTION, function, &[item.clone()])?);
+            mapped.push(self.call_user_function(
+                ANONYMOUS_FUNCTION,
+                function,
+                std::slice::from_ref(item),
+            )?);
         }
 
         Ok(Value::list(mapped))

@@ -291,7 +291,7 @@ pub fn append_through(
 }
 
 /// The name `append` grows, and the refusal for a call that did not give one.
-pub fn append_target<'a>(span: Span, args: &'a [Value]) -> Result<&'a str> {
+pub fn append_target(span: Span, args: &[Value]) -> Result<&str> {
     match (args.first(), args.len()) {
         (Some(Value::Text(name)), 2) => Ok(name),
         _ => Err(Error::Runtime(

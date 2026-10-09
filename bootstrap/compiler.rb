@@ -45,16 +45,21 @@ constant NO_CONST to 4294967295
 constant STATEMENT_MARKER to 4294967294
 constant END_TRY_MARKER to 4294967295
 
-// The five lists the code generator accumulates into, and the reason they are
-// names rather than a record threaded through every call is in the code
-// generation section below. They are bound here, at the top level, so that every
-// function below reaches the same five lists by name: a Redblue binding is
-// program-wide, and `append` grows the list a name holds.
+// The fifth is the code generator's last accumulator, the sixth and seventh are
+// the lexer's and the patcher's, and all seven are named for the same reason:
+// a Redblue binding is program-wide, and `append` grows the list a name holds.
 set G_POOL to []
 set G_INTERN to []
 set G_CODE to []
 set G_JUMPS to []
 set G_BLOCKS to []
+// The seventh is not the code generator's: it is the file being written, and it
+// is named for the same reason. `G_BYTES` is emptied by `encode` and read once.
+set G_BYTES to []
+// And these two are the lexer's token list and one block's patched code. Each is
+// emptied by the function that fills it and read there.
+set G_TOKENS to []
+set G_PATCHED to []
 
 // ---------------------------------------------------------------------------
 // Entry
@@ -245,9 +250,11 @@ end
 // The encoding
 // ---------------------------------------------------------------------------
 
-// Two byte lists joined. Redblue's `+` adds numbers and joins texts — it does
-// not concatenate lists — so the one operation the encoder cannot do without is
-// written here, once, in terms of `push`.
+// Two short byte lists joined. Redblue's `+` adds numbers and joins texts — it
+// does not concatenate lists — so the encoder needs this for the two- and
+// three-part names it builds. It is `push` in a loop, which is fine for four
+// bytes and a dotted name and is *not* fine for a whole file: that is what
+// `put` below is for.
 to cat(first, second)
     set cat_out to 0
     set cat_out to first
@@ -255,6 +262,22 @@ to cat(first, second)
         set cat_out to push(cat_out, each_byte)
     end
     give back cat_out
+end
+
+// One byte at a time, onto the list `G_BYTES` names.
+//
+// The file used to be built with `cat(out, more)`, which grew a local with
+// `push` and handed the whole file back: a `.rbc` of `n` bytes cost `n` copies
+// of a list that grew to `n` elements, so encoding was quadratic and the cost
+// fell on the *file* rather than on the program. Compiling this file into its
+// own `.rbc` means encoding 162 139 bytes, and 162 139 copies of a list that
+// reaches 162 139 elements is most of six minutes — the compiler could not be
+// run on the compiler. `append` grows the list a name holds in place, so every
+// byte written here costs one push and nothing else.
+to put(bytes)
+    for each each_byte in bytes
+        append("G_BYTES", each_byte)
+    end
 end
 
 // Four little-endian bytes of `v`, for `0 <= v < 2^32`. Each step divides by
@@ -278,47 +301,54 @@ end
 // A `.rbc`: the magic, the format version, the constant pool, then the block
 // tree in the order a depth-first walk visits it. `Chunk::encode` in
 // `src/bytecode/format.rs` is the specification of that layout.
+//
+// The bytes go onto `G_BYTES` rather than through a value that is threaded
+// back out of every call, because the layout is written in one order — this
+// header, the pool, then each block record followed by its children — and a
+// single buffer written in that order is the same bytes for a fraction of the
+// work.
 to encode(chunk)
-    set encode_out to 0
-    set encode_out to [82, 69, 68, 26]
-    set encode_out to cat(encode_out, [5, 0])
-    set encode_out to cat(encode_out, u32_le(length(chunk.p)))
+    set G_BYTES to []
+    put([82, 69, 68, 26])
+    put([5, 0])
+    put(u32_le(length(chunk.p)))
     for each each_entry in chunk.p
-        set encode_out to cat(encode_out, [each_entry.t])
+        put([each_entry.t])
         // A text constant is the one each_entry with a length in front of it.
         if each_entry.t is 3 then
-            set encode_out to cat(encode_out, u32_le(length(each_entry.b)))
+            put(u32_le(length(each_entry.b)))
         end
-        set encode_out to cat(encode_out, each_entry.b)
+        put(each_entry.b)
     end
-    give back encode_block(encode_out, chunk.main)
+    encode_block(chunk.main)
+    give back G_BYTES
 end
 
 // One block record, then its children: preorder, which is what
 // `write_block_tree` writes — it pops `main` first and pushes each block's
 // children in reverse, so they come out first-to-last.
-to encode_block(out, block)
-    set out to cat(out, [block.k])
-    set out to cat(out, u32_le(block.a))
-    set out to cat(out, u32_le(length(block.ps)))
+to encode_block(block)
+    put([block.k])
+    put(u32_le(block.a))
+    put(u32_le(length(block.ps)))
     for each each_param in block.ps
-        set out to cat(out, u32_le(length(each_param)))
-        set out to cat(out, each_param)
+        put(u32_le(length(each_param)))
+        put(each_param)
     end
-    set out to cat(out, u32_le(length(block.n)))
-    set out to cat(out, block.n)
-    set out to cat(out, u32_le(length(block.code)))
+    put(u32_le(length(block.n)))
+    put(block.n)
+    put(u32_le(length(block.code)))
     for each each_instruction in block.code
-        set out to cat(out, [each_instruction.o])
-        set out to cat(out, u32_le(each_instruction.a))
-        set out to cat(out, u32_le(each_instruction.x))
-        set out to cat(out, u32_le(each_instruction.l))
+        put([each_instruction.o])
+        put(u32_le(each_instruction.a))
+        put(u32_le(each_instruction.x))
+        put(u32_le(each_instruction.l))
     end
-    set out to cat(out, u32_le(length(block.b)))
+    put(u32_le(length(block.b)))
     for each each_child in block.b
-        set out to encode_block(out, each_child)
+        encode_block(each_child)
     end
-    give back out
+    give back 0
 end
 
 // ---------------------------------------------------------------------------
@@ -382,12 +412,16 @@ to char_width(b)
 end
 
 to lex(src)
-    set lex_tokens to 0
     set lex_pos to 0
     set lex_line to 0
     set lex_c to 0
     set lex_r to 0
-    set lex_tokens to []
+    // The token list grows by `append` rather than by `set ... to push(...)`.
+    // `push` copies the list it is given, so a file of `n` tokens cost `n` copies
+    // of a list that grew to `n` entries — and lexing this file produces 18 205
+    // of them, which is most of the seconds the compiler used to spend reading
+    // itself. `append` grows `G_TOKENS` in place and costs one push a token.
+    set G_TOKENS to []
     set lex_pos to 0
     set lex_line to 1
     while lex_pos < length(src)
@@ -402,11 +436,12 @@ to lex(src)
             set lex_pos to lex_r[1]
             set lex_line to lex_line + lex_r[2]
             if lex_r[0] is not "skip" then
-                set lex_tokens to push(lex_tokens, lex_r[0])
+                append("G_TOKENS", lex_r[0])
             end
         end
     end
-    give back push(lex_tokens, {k: "eof", l: lex_line})
+    append("G_TOKENS", {k: "eof", l: lex_line})
+    give back G_TOKENS
 end
 
 // One step of the loop: returns `[token, next position, newlines]`, or
@@ -2218,11 +2253,15 @@ end
 // code here, because that is the only code this list is applied to — the block
 // that recorded a patch has already had the enclosing block's instructions cut
 // away from in front of them.
+// The list is built by `append`, for the reason `lex` gives: `push` would copy
+// a list that grows to the length of the block's code once per instruction.
+// `G_PATCHED` is emptied here rather than bound as a local, and no two of these
+// run at once — every caller patches one block and hands the result straight to
+// the record that becomes it.
 to apply_patches(code, patches, start)
-    set apply_patches_out to 0
     set apply_patches_i to 0
     set apply_patches_arg to 0
-    set apply_patches_out to []
+    set G_PATCHED to []
     set apply_patches_i to 0
     while apply_patches_i < length(code)
         set apply_patches_arg to code[apply_patches_i].a
@@ -2235,10 +2274,10 @@ to apply_patches(code, patches, start)
                 end
             end
         end
-        set apply_patches_out to push(apply_patches_out, {o: code[apply_patches_i].o, a: apply_patches_arg, x: code[apply_patches_i].x, l: code[apply_patches_i].l})
+        append("G_PATCHED", {o: code[apply_patches_i].o, a: apply_patches_arg, x: code[apply_patches_i].x, l: code[apply_patches_i].l})
         set apply_patches_i to apply_patches_i + 1
     end
-    give back apply_patches_out
+    give back G_PATCHED
 end
 
 // The intern table. A name used a hundred times is one entry, so the pool is
@@ -2621,14 +2660,30 @@ to compile_loop_body(stmt, depth, top, line)
 
 // `while` compiles its condition first and jumps back to it, so its head is the
 // length of the code before the condition rather than after it.
+//
+// The slot of that `JumpIfFalse` travels to `compile_while_body` as a parameter
+// for the reason `compile_if_branches`'s does: a name a Redblue function
+// assigns is one program-wide name, so a `while` inside this loop's body runs
+// `compile_while` again and would overwrite the slot this loop is holding. It
+// did, and the loop then patched the *inner* loop's jump with the outer one's
+// exit and left its own to default to the end of the block. Only compiling the
+// compiler found it: `lex_text` has a `while` inside a `while`, and every
+// corpus program it reached had one or the other.
 to compile_while(stmt, depth, top)
     compile_expr(stmt.c, stmt.l)
-    set compile_while_r to emit_jump_at(35, stmt.l)
+    set compile_while_slot to emit_jump_at(35, stmt.l)
+    compile_while_body(stmt, depth, top, compile_while_slot)
+    end
+
+// The body of a `while` and the two patches that close it: the condition's
+// `JumpIfFalse` out of the loop, and the jump at the end of the body back to the
+// condition.
+to compile_while_body(stmt, depth, top, slot)
     compile_statements(stmt.t, depth, no, "statements")
-    set compile_while_back to length(G_CODE)
+    set compile_while_body_back to length(G_CODE)
     emit(34, top, 0, stmt.l)
-    patch_at(compile_while_r, length(G_CODE))
-    patch_at(compile_while_back, top)
+    patch_at(slot, length(G_CODE))
+    patch_at(compile_while_body_back, top)
     end
 
 // The two branches of an `if`, once its `JumpIfFalse` has been emitted. `slot`

@@ -1469,3 +1469,396 @@ fn edge_stage3_reports_a_failure_rather_than_writing_a_file() {
         "a refused input must leave no output file behind"
     );
 }
+
+// ---------------------------------------------------------------------------
+// S3 — the fixed point
+// ---------------------------------------------------------------------------
+
+/// Three self-compilations, made once per test process and read by the two tests
+/// below.
+///
+/// The definition of done asks for the fixed point *and* for three consecutive
+/// runs, and those are three runs of the same expensive thing, so they are made
+/// once here and read twice. A `OnceLock` rather than a file: the bytes are in
+/// memory, and two tests in one process must not race for them.
+///
+/// They run at the same time rather than one after another, because one
+/// self-compilation is minutes in a test build and three of them in series is a
+/// gate nobody reads. Nothing is shared but the already-written `stage1.rbc`,
+/// which no run writes, and each run writes a file of its own — so what runs
+/// beside what cannot change a byte, which is exactly the claim
+/// `edge_three_consecutive_self_compilations_are_byte_identical` makes about them.
+fn self_compilations() -> &'static [Stage2; 3] {
+    static RUNS: std::sync::OnceLock<[Stage2; 3]> = std::sync::OnceLock::new();
+    RUNS.get_or_init(|| {
+        let running: Vec<std::process::Child> = (0..3)
+            .map(|run| self_compile(run).expect("the rb binary starts"))
+            .collect();
+
+        let runs: Vec<Stage2> = running
+            .into_iter()
+            .zip(0..3)
+            .map(|(child, run)| {
+                let executed = child.wait_with_output().unwrap_or_else(|error| {
+                    panic!("self-compilation {run} could not be waited on: {error}")
+                });
+                Stage2 {
+                    bytes: read_output(&scratch(&format!("stage3-self-{run}.rbc"))),
+                    stderr: String::from_utf8_lossy(&executed.stderr).into_owned(),
+                    succeeded: executed.status.success(),
+                }
+            })
+            .collect();
+
+        let mut runs = runs.into_iter();
+        [
+            runs.next().expect("three runs were made"),
+            runs.next().expect("three runs were made"),
+            runs.next().expect("three runs were made"),
+        ]
+    })
+}
+
+/// Starts one self-compilation and leaves it running.
+///
+/// `bootstrap/compiler.rb`, compiled by itself, run as bytecode. Stage 1 is the
+/// Rust `rb compile`. This is stage 2 obtained the long way round: the *same*
+/// Redblue compiler, but its `.rbc` executed by the bytecode VM instead of its
+/// source executed by the tree-walker. Nothing here reads
+/// `stage1_of_the_compiler()`'s own output — the input and the output are two
+/// different files, and the run writes only the output.
+///
+/// It returns the child rather than a result because the point is to have three
+/// of these running at once; `self_compilations` waits for them.
+fn self_compile(run: usize) -> io::Result<std::process::Child> {
+    let output = scratch(&format!("stage3-self-{run}.rbc"));
+    clear_output(&output);
+
+    Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("vm")
+        .arg(stage1_of_the_compiler())
+        .arg(compiler())
+        .arg(&output)
+        // Piped, not inherited: `spawn` inherits both by default, and a run that
+        // fails then says why to the test log instead of to the assertion that
+        // reports which of the three runs it was.
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+}
+
+/// Ladder stage **S3**: `stage1.rbc == stage2.rbc`.
+///
+/// `stage1.rbc` is `bootstrap/compiler.rb` compiled by the Rust frontend.
+/// `stage2.rbc` is the same source compiled by that very file, running as
+/// bytecode. The two must be one file, byte for byte — which is the only
+/// statement the ladder makes about stage 3, and the only one that cannot be
+/// faked by a compiler that happens to be right about small programs.
+#[test]
+fn edge_the_self_hosted_compiler_compiles_itself_byte_identically() {
+    let stage1_bytes = fs::read(stage1_of_the_compiler()).expect("stage 1's file is readable");
+    let stage2 = &self_compilations()[0];
+
+    assert!(
+        stage2.succeeded,
+        "the self-hosted compiler did not compile itself when run as bytecode:\n{}",
+        stage2.stderr
+    );
+    assert!(
+        !stage2.bytes.is_empty(),
+        "the self-hosted compiler wrote no file for itself"
+    );
+
+    // The file that came back has to be a bytecode file this build reads, not
+    // merely something the right length: `stage2.rbc == stage1.rbc` is a
+    // statement about two `.rbc` files.
+    let decoded = redblue::Chunk::decode(&stage2.bytes).unwrap_or_else(|error| {
+        panic!(
+            "stage 2's file for the compiler does not decode, so it is not a \
+             bytecode file: {error:?}"
+        )
+    });
+    assert_eq!(
+        decoded.encode(),
+        stage1_bytes,
+        "stage 2's file for the compiler decodes to a different chunk than stage 1 wrote"
+    );
+
+    // And the bytes themselves, which is the claim.
+    assert_eq!(
+        stage2.bytes.len(),
+        stage1_bytes.len(),
+        "stage 2 wrote {} bytes for the compiler where stage 1 wrote {}",
+        stage2.bytes.len(),
+        stage1_bytes.len()
+    );
+    assert_eq!(
+        stage2.bytes, stage1_bytes,
+        "the compiler compiled by itself is not the compiler: stage 1 and stage 2 \
+         disagree about its bytecode"
+    );
+}
+
+/// Three consecutive self-compilations, byte for byte.
+///
+/// Determinism is a separate claim from the fixed point: a compiler that is
+/// self-consistent but reads a hash map in whatever order it happens to hold,
+/// or a pool that a run fills in a different order from the last, agrees with
+/// itself only sometimes. Three runs is the definition of done's number.
+///
+/// The first is the run `edge_the_self_hosted_compiler_compiles_itself_byte_identically`
+/// already made, so this test makes the other two and compares all three.
+#[test]
+fn edge_three_consecutive_self_compilations_are_byte_identical() {
+    let runs = self_compilations();
+    let first = &runs[0];
+    assert!(
+        first.succeeded,
+        "the first self-compilation did not finish:\n{}",
+        first.stderr
+    );
+    assert!(
+        !first.bytes.is_empty(),
+        "the first self-compilation wrote no file, so nothing was compared"
+    );
+
+    for (index, run) in runs.iter().enumerate().skip(1) {
+        assert!(
+            run.succeeded,
+            "self-compilation {index} did not finish:\n{}",
+            run.stderr
+        );
+        assert_eq!(
+            run.bytes.len(),
+            first.bytes.len(),
+            "self-compilation {index} wrote {} bytes where run 0 wrote {}",
+            run.bytes.len(),
+            first.bytes.len()
+        );
+        assert_eq!(
+            run.bytes, first.bytes,
+            "self-compilation {index} emitted different bytes than run 0, so the \
+             compiler is not deterministic"
+        );
+    }
+}
+
+/// The step budget is a real guard, and the fixed point is a real program run
+/// under it.
+///
+/// Ladder stage S3 needs one self-compilation to finish inside the published
+/// per-program step budget, which is why `MAX_STEPS` had to be measured against
+/// it. This pins the other half: the budget still refuses a program that
+/// outlasts it, and it refuses it by failing rather than by writing a truncated
+/// `.rbc` that a later run could mistake for a compile.
+#[test]
+fn edge_the_self_compilation_still_obeys_the_step_budget() {
+    let output = scratch("stage3-starved.rbc");
+    clear_output(&output);
+
+    // A budget the compiler cannot possibly finish inside. It is set on the
+    // child process only: the point is what `rb vm` does when a run is starved,
+    // not what this process's own limits are.
+    let run = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("vm")
+        .arg(stage1_of_the_compiler())
+        .arg(compiler())
+        .arg(&output)
+        .env("REDBLUE_MAX_STEPS", "1000")
+        .output()
+        .expect("the rb binary runs");
+
+    assert!(
+        !run.status.success(),
+        "a run starved of steps exited 0, so the step budget is not a bound"
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("Step budget"),
+        "a starved run failed without naming the budget:\n{stderr}"
+    );
+    assert!(
+        !output.exists(),
+        "a run stopped by the step budget left a {} byte .rbc behind, which a \
+         later run could read as a finished compile",
+        output.metadata().map(|m| m.len()).unwrap_or(0)
+    );
+}
+
+/// The shape stage 2 gets wrong: a `while` loop whose body holds another one.
+///
+/// `compile_while` used to keep the slot of its own `JumpIfFalse` in a name
+/// across the call that compiles its body — and a name a Redblue function
+/// assigns is one program-wide name, so the inner loop's `compile_while` took
+/// the outer loop's slot and patched the wrong jump. The compiler's own lexer
+/// has exactly this shape, which is why nothing but compiling the compiler
+/// found it: the outer loop then pointed at the end of its block instead of the
+/// instruction after itself, and `bootstrap/compiler.rb` came back 15 bytes
+/// longer than stage 1 wrote for it.
+///
+/// Each `while` is one statement, so the shape is reproduced here with nested
+/// `while`s of different lengths, and the assertion is the whole `.rbc`.
+#[test]
+fn edge_a_while_loop_nested_in_another_patches_its_own_jump() {
+    let shapes: &[(&str, &str)] = &[
+        // The smallest shape that has the defect: an outer loop whose body ends
+        // in an inner loop, and a statement after the outer `end` so that "one
+        // past the loop" and "end of the block" are different offsets.
+        (
+            "nested_while",
+            "to count(n)\n\
+             \x20   set total to 0\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       set j to 0\n\
+             \x20       while j < i\n\
+             \x20           set total to total + j\n\
+             \x20           set j to j + 1\n\
+             \x20       end\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             \x20   give back total\n\
+             end\n\
+             say count(4)\n",
+        ),
+        // Three deep, because the third loop's slot is the one the second took
+        // and the second's is the one the first took.
+        (
+            "three_nested_while",
+            "to count(n)\n\
+             \x20   set total to 0\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       set j to 0\n\
+             \x20       while j < i\n\
+             \x20           set k to 0\n\
+             \x20           while k < j\n\
+             \x20               set total to total + k\n\
+             \x20               set k to k + 1\n\
+             \x20           end\n\
+             \x20           set j to j + 1\n\
+             \x20       end\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             \x20   give back total\n\
+             end\n\
+             say count(4)\n",
+        ),
+        // An `if` inside the inner loop: the branch's own jump is patched too,
+        // so a body that is not only a loop is covered as well.
+        (
+            "while_with_if_inside",
+            "to count(n)\n\
+             \x20   set total to 0\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       set j to 0\n\
+             \x20       while j < i\n\
+             \x20           if j is 1 then\n\
+             \x20               set total to total + 10\n\
+             \x20           else\n\
+             \x20               set total to total + j\n\
+             \x20           end\n\
+             \x20           set j to j + 1\n\
+             \x20       end\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             \x20   give back total\n\
+             end\n\
+             say count(4)\n",
+        ),
+        // A `while` inside a `for each`: the other loop form, whose body is
+        // compiled by `compile_loop_body` and reaches the same `compile_while`.
+        (
+            "while_inside_for_each",
+            "set total to 0\n\
+             for each n in [1, 2, 3]\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       set total to total + i\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             end\n\
+             say total\n",
+        ),
+        // The boundary the fix turns on: "the instruction after this loop" and
+        // "the end of the block" are the same offset only when nothing follows
+        // the loop. An *empty* body puts the condition's `JumpIfFalse` one
+        // instruction from the jump back to the top, so a patch that is off by
+        // one instruction is visible here and nowhere else.
+        (
+            "nested_while_with_empty_bodies",
+            "to count(n)\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       set j to 0\n\
+             \x20       while j < 0\n\
+             \x20       end\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             \x20   give back i\n\
+             end\n\
+             say count(3)\n",
+        ),
+        // The same shape reached through a branch rather than straight down: the
+        // inner loop is inside the `else` of an `if`, so two jumps and one loop
+        // exit are patched in the order they were recorded.
+        (
+            "while_in_else_containing_while",
+            "to count(n)\n\
+             \x20   set total to 0\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       if i is 0 then\n\
+             \x20           set total to total + 1\n\
+             \x20       else\n\
+             \x20           set j to 0\n\
+             \x20           while j < i\n\
+             \x20               set total to total + j\n\
+             \x20               set j to j + 1\n\
+             \x20           end\n\
+             \x20       end\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             \x20   give back total\n\
+             end\n\
+             say count(4)\n",
+        ),
+        // A `while` whose body holds no loop, so the slot survives: the case
+        // that already worked, pinned so the fix cannot be "always take the
+        // end of the block".
+        (
+            "while_with_plain_body",
+            "to count(n)\n\
+             \x20   set total to 0\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       set total to total + i\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             \x20   give back total\n\
+             end\n\
+             say count(4)\n",
+        ),
+        // One loop, in a block that is nothing but that loop: the exit offset
+        // and the end of the block are then the same number, so the two answers
+        // the patch could give are indistinguishable. It is here so that a fix
+        // which *always* used one of them would still be caught by the cases
+        // above rather than passing because of this one.
+        (
+            "lone_while_filling_its_block",
+            "to count(n)\n\
+             \x20   set i to 0\n\
+             \x20   while i < n\n\
+             \x20       set i to i + 1\n\
+             \x20   end\n\
+             \x20   set i to 0\n\
+             end\n\
+             say count(3)\n",
+        ),
+    ];
+
+    for (name, source) in shapes {
+        assert_identical(name, source);
+    }
+}
