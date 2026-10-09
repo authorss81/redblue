@@ -43,6 +43,17 @@ pub const END_TRY_MARKER: u32 = u32::MAX;
 /// constant pool or a block list, so the two meanings cannot be confused.
 pub const STATEMENT_MARKER: u32 = u32::MAX - 1;
 
+/// The `arg` that makes a [`Opcode::Nop`] the end of a `might fail` region.
+///
+/// The guard [`Opcode::MightFail`] installs is popped here on the path where
+/// nothing failed, which is the same shape [`END_TRY_MARKER`] has for a `try`'s
+/// protected region and for the same reason: the guard has to be taken away
+/// again, and there is nowhere else in the instruction stream to say so.
+///
+/// The value is one below [`STATEMENT_MARKER`], so it can never be confused with
+/// that marker or with the filler `0` the same byte carries everywhere else.
+pub const MIGHT_FAIL_END_MARKER: u32 = u32::MAX - 2;
+
 /// One instruction. The byte values are stable; see [`Opcode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -207,6 +218,17 @@ pub enum Opcode {
     /// run is data the [`Opcode::Module`] that entered the block has already
     /// read: executing one does nothing.
     Export,
+    /// Guards the instructions that follow against failure: a failure raised
+    /// before the region closes is discarded, and execution continues at
+    /// `arg` with `nothing` on the operand stack.
+    ///
+    /// This is the bytecode of the expression `might fail <call>`. The region is
+    /// the instructions between this one and the [`Opcode::Nop`] carrying
+    /// [`END_MIGHT_FAIL_MARKER`], which closes it on the path where nothing
+    /// failed; the recovery code the operand names is compiled after that marker
+    /// and reached only by jumping to it. `arg` is the offset of that recovery
+    /// code, so it is patched once the rest of the expression is compiled.
+    MightFail,
 }
 
 impl Opcode {
@@ -263,6 +285,7 @@ impl Opcode {
         Opcode::DeclareConst,
         Opcode::Module,
         Opcode::Export,
+        Opcode::MightFail,
     ];
 
     /// The opcode a byte stands for, or `None` when the byte is not assigned.
@@ -328,6 +351,7 @@ impl Opcode {
             Opcode::DeclareConst => "DECLARE_CONST",
             Opcode::Module => "MODULE",
             Opcode::Export => "EXPORT",
+            Opcode::MightFail => "MIGHT_FAIL",
         }
     }
 

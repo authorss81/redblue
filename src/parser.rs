@@ -74,6 +74,13 @@ pub enum Expr {
         actual: Box<Expr>,
         expected: Box<Expr>,
     },
+
+    // might fail <call> — a call whose failure is discarded, yielding `nothing`
+    // instead of ending the program. The right-hand side is required to be a
+    // call, so this is the expression-position form of a fallible operation
+    // rather than a general "ignore any failure" prefix; `docs/GRAMMAR.md`
+    // § 5.11 and SPEC.md § Error Handling.
+    MightFail(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -1565,11 +1572,63 @@ impl Parser {
                 | Some(TokenKind::Not)
                 | Some(TokenKind::Minus)
                 | Some(TokenKind::To)
+                // `might fail f()` is an expression in its own right, so a
+                // statement may begin with one and an argument list may hold one.
+                | Some(TokenKind::MightFail)
         )
     }
 
     fn parse_expression(&mut self) -> Result<Expr> {
+        if self.current().map(|t| &t.kind) == Some(&TokenKind::MightFail) {
+            return self.parse_might_fail();
+        }
         self.parse_or()
+    }
+
+    /// Parses `might fail <call>` — the expression form of a fallible call, whose
+    /// failure is discarded rather than ending the program.
+    ///
+    /// The lexer gives `might` and `fail` the same token, so the two-word spelling
+    /// arrives as two of them; one is consumed here and a second immediately
+    /// after is consumed as the pair's other half. Both `might fail f()` and the
+    /// one-word `might f()` therefore parse, and a third `might` in a row is a
+    /// prefix applied to nothing, which is the refusal below rather than a
+    /// silent success.
+    ///
+    /// Only a call may be guarded. A prefix that took any expression would accept
+    /// `might fail 1 + 1`, whose right-hand side cannot fail at all, and would
+    /// read as though discarding a failure were something a number could do — so
+    /// the shape is refused at parse time, with the position of the expression
+    /// that is not a call.
+    fn parse_might_fail(&mut self) -> Result<Expr> {
+        self.advance(); // consume 'might' or 'fail'
+        if self.current().map(|t| &t.kind) == Some(&TokenKind::MightFail) {
+            self.advance(); // consume the other half of 'might fail'
+        }
+
+        if !self.is_expression_start() {
+            return Err(Error::Parser(
+                "Expected a call after `might fail`".to_string(),
+                self.span(),
+            ));
+        }
+
+        let operand_span = self.span();
+        self.enter_nesting()?;
+        let operand = self.parse_expression()?;
+        self.leave_nesting(1);
+
+        match operand {
+            Expr::Call { .. } | Expr::MethodCall { .. } => {}
+            _ => {
+                return Err(Error::Parser(
+                    "`might fail` must be followed by a call, which this is not".to_string(),
+                    operand_span,
+                ))
+            }
+        }
+
+        Ok(Expr::MightFail(Box::new(operand)))
     }
 
     fn parse_or(&mut self) -> Result<Expr> {

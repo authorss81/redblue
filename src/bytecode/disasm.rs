@@ -15,7 +15,7 @@
 use std::fmt::Write as _;
 
 use crate::bytecode::format::{Block, Chunk, Constant, Instruction, NO_BLOCK, NO_CONST};
-use crate::bytecode::opcode::{Opcode, END_TRY_MARKER, STATEMENT_MARKER};
+use crate::bytecode::opcode::{Opcode, END_TRY_MARKER, MIGHT_FAIL_END_MARKER, STATEMENT_MARKER};
 
 /// The width the mnemonic column is padded to.
 ///
@@ -195,6 +195,9 @@ fn describe(chunk: &Chunk, block: &Block, instruction: &Instruction) -> String {
     }
     if instruction.opcode == Opcode::Nop && instruction.arg == STATEMENT_MARKER {
         clauses.push("start of a statement".to_string());
+    }
+    if instruction.opcode == Opcode::Nop && instruction.arg == MIGHT_FAIL_END_MARKER {
+        clauses.push("end of a `might fail` region".to_string());
     }
 
     if matches!(instruction.opcode, Opcode::Jump | Opcode::JumpIfFalse) {

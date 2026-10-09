@@ -490,6 +490,7 @@ impl Analyzer {
                 self.analyze_deferred_body(body);
                 self.pop_scope();
             }
+            Expr::MightFail(inner) => self.analyze_expr(inner, span),
             Expr::Expect { .. } => {}
         }
     }

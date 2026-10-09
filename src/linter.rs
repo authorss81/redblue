@@ -397,6 +397,7 @@ impl Linter {
                 self.analyze_expr(actual);
                 self.analyze_expr(expected);
             }
+            Expr::MightFail(inner) => self.analyze_expr(inner),
             // A literal has no name to report as defined and no unused-variable
             // bookkeeping of its own; only the scope it opens is new.
             Expr::FunctionLiteral { params, body } => {

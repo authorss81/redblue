@@ -72,7 +72,13 @@ pub const MAGIC: [u8; 4] = *b"RED\x1a";
 ///   flag that discarded the parent's name.
 /// - `DefField` consumes the value pushed immediately before it, so a field's
 ///   `default` is compiled instead of being dropped.
-pub const FORMAT_VERSION: u16 = 5;
+///
+/// Version 6 added `MIGHT_FAIL`, at byte 49, which no earlier version used, so
+/// the numbers written into a file still mean what they meant. A version-5 file
+/// carrying one is refused by the decoder as an unknown instruction — but the
+/// version word is bumped as well, so the refusal names the version rather than
+/// the instruction.
+pub const FORMAT_VERSION: u16 = 6;
 
 /// The operand that says "there is no block here".
 ///

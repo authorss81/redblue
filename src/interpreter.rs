@@ -1561,6 +1561,28 @@ impl Vm {
             Expr::FunctionLiteral { params, body } => {
                 Ok(self.make_function(ANONYMOUS_FUNCTION, params, body))
             }
+            // The guarded call's own failure is discarded and becomes `nothing`.
+            //
+            // Two things are not "its own failure" and are re-raised rather than
+            // discarded. A `break` or a `skip` inside the call is not a failure at
+            // all, so a guarded call that leaves the loop still leaves the loop.
+            // A failed `expect` is a test result rather than an error, and the
+            // harness reads it off this VM rather than off the returned error — so
+            // discarding it here would report a red test green, which is the one
+            // thing a guard must never do.
+            Expr::MightFail(inner) => {
+                let asserted_before = self.expectation_failure.is_some();
+                match self.evaluate(inner) {
+                    Ok(value) => Ok(value),
+                    Err(failure) => {
+                        let asserted_now = self.expectation_failure.is_some() && !asserted_before;
+                        if self.loop_control.is_some() || asserted_now {
+                            return Err(failure);
+                        }
+                        Ok(Value::Nothing)
+                    }
+                }
+            }
             Expr::Expect { actual, expected } => {
                 let a = self.evaluate(actual)?;
                 let e = self.evaluate(expected)?;
