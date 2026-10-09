@@ -146,7 +146,37 @@ impl Analyzer {
     /// called rather than where it is written — when the program binds it later
     /// than the walk has reached.
     fn name_is_bound(&self, name: &str) -> bool {
-        self.lookup(name) || (self.deferred_depth > 0 && self.bound_later(name))
+        self.lookup(name)
+            || self.builtin_global(name)
+            || (self.deferred_depth > 0 && self.bound_later(name))
+    }
+
+    /// Whether `name` is a builtin global that the program has not shadowed.
+    ///
+    /// A builtin is bound by definition — `stdlib::builtins` puts it in scope for
+    /// every program — so a *method receiver* naming one is not an unknown
+    /// variable, which is what `PI.times(..)` and SPEC.md's Properties example
+    /// need and what the bare-name path already allowed.
+    ///
+    /// The shadowing test is what keeps this honest. A program may declare its
+    /// own `constant PI`, and reading that name *before* the declaration is an
+    /// error the language means: `edge_constant_used_before_declaration_is_an_error`
+    /// pins it. So a builtin global only answers when nothing in the program has
+    /// claimed the name, and a claimed one is left to the ordinary scope rules.
+    fn builtin_global(&self, name: &str) -> bool {
+        if !(stdlib::is_builtin(name) || stdlib::is_global(name)) {
+            return false;
+        }
+        !self.shadows(name)
+    }
+
+    /// Whether this program declares a binding of its own called `name`.
+    ///
+    /// `LaterNames` is the set of every `constant` and every name an `import`
+    /// brings in, collected before the walk begins — which is exactly "this
+    /// program claims the name somewhere".
+    fn shadows(&self, name: &str) -> bool {
+        self.later.bound(name)
     }
 
     fn add_error(&mut self, msg: &str, span: Span) {

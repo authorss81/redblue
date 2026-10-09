@@ -1,4 +1,3 @@
-#label RuntimeError
-#position 1:1
-#value nothing
-#message Unknown function 'uppercase'
+#label none
+#position none
+#value text:A

@@ -2379,7 +2379,9 @@ impl BytecodeVm {
             self.advance(frame);
             return Ok(());
         }
-        if let Some(value) = runtime::builtin(self.span(), name, args)? {
+        // The same single resolver the tree-walker uses, so the two engines
+        // cannot disagree about which names exist. See `stdlib::builtin`.
+        if let Some(value) = crate::stdlib::builtin(self.span(), name, args)? {
             self.push(value);
             self.advance(frame);
             return Ok(());
@@ -2443,7 +2445,17 @@ impl BytecodeVm {
                 .cloned()
                 .unwrap_or_else(|| object_name.to_string());
             let qualified = qualified_member(&module, method);
-            if self.get_var(&qualified).is_none() && self.is_module_name(&module) {
+            // A module member that names a documented builtin is answerable even
+            // when the global table holds no `module_member` entry for it:
+            // `text.uppercase` is stored as nothing and resolves through
+            // `stdlib::resolve` to `uppercase`. Refusing it here named a
+            // function that exists, so the walker and this engine disagreed
+            // about whether `text.uppercase` is in the language at all.
+            let answered_by_builtin = crate::stdlib::module_member_name(&qualified).is_some();
+            if self.get_var(&qualified).is_none()
+                && !answered_by_builtin
+                && self.is_module_name(&module)
+            {
                 return Err(Error::Runtime(
                     format!("Module '{module}' has no function '{method}'"),
                     self.span(),

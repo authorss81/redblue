@@ -1568,15 +1568,31 @@ impl Vm {
             runtime::append_through(span, target, self.get_var_mut(target), args[1].clone())?;
             return Ok(Value::Nothing);
         }
-        if let Some(value) = runtime::builtin(self.span(), name, args)? {
-            return Ok(value);
+        // `stdlib::builtin` is the one place a builtin name resolves, so a name
+        // answered here cannot be missing from the bytecode VM. `runtime::builtin`
+        // alone answers only the names that need a `Result`; the rest are
+        // `stdlib::builtin_function`'s, and until this call existed they were
+        // registered in the global table and answered by nothing.
+        // `map` is excluded here and answered by this walker's `map_builtin` below: it
+        // is registered as a builtin name but has to *call* a Redblue function,
+        // which the shared resolver cannot do. Asking it first would turn a
+        // working higher-order call into a refusal.
+        if !matches!(name, "map" | "list_map") {
+            if let Some(value) = stdlib::builtin(self.span(), stdlib::resolve(name), args)? {
+                return Ok(value);
+            }
         }
 
+        // `map` is registered as a builtin name but has to *call* a Redblue function,
+        // which the free `runtime::builtin` cannot do, so it is answered by this
+        // walker's `map_builtin` below. It must be asked for before the shared
+        // resolver, which would otherwise claim the name and refuse it as one it
+        // cannot use — turning a working higher-order call into an error.
+        if matches!(name, "map" | "list_map") {
+            return self.map_builtin(args);
+        }
         match self.get_var(name) {
             Some(Value::Function(function)) => self.call_user_function(name, &function, args),
-            // `map` is registered as a builtin name but has to *call* a
-            // Redblue function, which the free `runtime::builtin` cannot do.
-            _ if matches!(name, "map" | "list_map") => self.map_builtin(args),
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),
@@ -1679,7 +1695,15 @@ impl Vm {
                     .cloned()
                     .unwrap_or_else(|| name.clone());
                 let qualified = qualified_member(&module, method);
-                if self.get_var(&qualified).is_none() && self.is_module_name(&module) {
+                // See the bytecode VM's identical check: a documented builtin
+                // spelled as a module member is answerable through
+                // `stdlib::resolve` whether or not the table holds the
+                // `module_member` name.
+                let answered_by_builtin = stdlib::module_member_name(&qualified).is_some();
+                if self.get_var(&qualified).is_none()
+                    && !answered_by_builtin
+                    && self.is_module_name(&module)
+                {
                     return Err(Error::Runtime(
                         format!("Module '{module}' has no function '{method}'"),
                         self.span(),

@@ -706,7 +706,7 @@ object Circle
     has color default "white"
     
     to area()
-        give back math.PI * this.radius * this.radius
+        give back PI * this.radius * this.radius
     end
 end
 ```
@@ -959,11 +959,19 @@ set joined to text.join(["a", "b", "c"], by ",")  // "a,b,c"
 ### math
 
 ```redblue
-set pi to math.PI
+set pi to PI
+set e to E
 set sqrt2 to math.sqrt(2)
-set rand to math.random(1, 100)
 set rounded to math.round(3.7)  // 4
+set powered to math.pow(2, 10)  // 1024
+set floored to math.floor(1.7)  // 1
 ```
+
+`PI` and `E` are globals, not module members: a module has functions, so
+`math.PI` is not a name in the language.
+
+`math.random` is not implemented. The random builtins are `random_number`,
+`random_choice` and `random_shuffle`, spelled flat.
 
 ### files
 
@@ -980,9 +988,11 @@ end
 
 ```redblue
 set doubled to list.map([1, 2, 3], to (x) give back x * 2)
-set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)
-set sum to list.reduce([1, 2, 3], 0, to (acc, x) give back acc + x)
 ```
+
+`list.filter` and `list.reduce` are registered but not implemented. `list.map`
+is the only higher-order builtin, and it works in all three spellings:
+`map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`.
 
 ### network
 
@@ -991,13 +1001,16 @@ set response to wait network.get("https://api.example.com")
 set response to wait network.post("https://api.example.com", data)
 ```
 
-### formats
+### json and csv
 
 ```redblue
-set obj to formats.parse_json('{"name": "Alice"}')
-set json to formats.to_json(obj)
-set csv to formats.parse_csv("name,age\nAlice,30")
+set obj to json.parse('{"name": "Alice"}')
+set text to json.stringify(obj)
+set rows to csv.parse("name,age\nAlice,30")
 ```
+
+There is no `formats` module. JSON and CSV are their own modules, spelled
+`json.*` and `csv.*`.
 
 ---
 
