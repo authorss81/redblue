@@ -14,7 +14,7 @@ is about who writes it.
 | **S1** | `rb compile` — a bytecode compiler written in Rust | it emits `.rbc`, and `rb vm file.rbc` runs it |
 | **S2** | `bootstrap/compiler.rb` — the same compiler written in Redblue | `rb run bootstrap/compiler.rb in.rb out.rbc` emits the same bytes as `rb compile` does |
 | **S3** | **done** — the compiler, compiled by itself | `stage1.rbc` and `stage2.rbc` are byte-identical |
-| **S4** | The shipped `rb` is built by `rb` | not started |
+| **S4** | **done** — the shipped compiler is built by the self-hosted compiler | `rb bootstrap` writes `compiler.rbc` only when `stage1.rbc == stage2.rbc`, and `bootstrap/build.sh` re-checks it from the files on disk |
 
 Two names are used throughout, and they are always the same two files:
 
@@ -24,6 +24,53 @@ Two names are used throughout, and they are always the same two files:
 - **stage 2** is what that file writes when it is given its own source:
   `rb vm stage1.rbc bootstrap/compiler.rb stage2.rbc`. The same compiler, its
   Redblue source compiled to bytecode, executed by `rb vm`.
+
+## S4: who writes the file that ships
+
+`rb` is a Rust binary and no Redblue program emits a machine code executable, so
+"the release is built by Redblue" cannot mean the executable. It means the
+compiler the release carries: `compiler.rbc` is stage 2's bytes, written by
+`bootstrap/compiler.rb` running as bytecode, and the build refuses to write it
+unless it is byte-identical to what the Rust frontend produced.
+
+```bash
+./bootstrap/build.sh              # the release build, from a clean checkout
+./bootstrap/build.sh --rollback   # cut it from the Rust frontend instead
+```
+
+Both write the same file. That is what makes `--rollback` a rollback rather than
+a second compiler, and it is checked rather than asserted: the script `cmp`s
+`stage1.rbc`, `stage2.rbc` and `compiler.rbc` after the build, from the files on
+disk rather than from the build's return value, so a `rb bootstrap` that
+reported success having written the wrong file is still caught.
+
+`.github/workflows/release.yml` runs this script before it uploads anything, and
+ships `target/release-bootstrap/compiler.rbc` alongside the binary — the
+compiler is part of the release, not something the release can be rebuilt from.
+
+`bootstrap/build.sh` runs four steps, and each one refuses rather than
+continuing:
+
+| Step | What it does | What stops it |
+|---|---|---|
+| 1 | `cargo build --release` — stage 0, and Rust | a Rust compile error |
+| 2 | `rb bootstrap` — stage 1 with the frontend, stage 2 by running stage 1 on the compiler's own source, `compiler.rbc` from stage 2 | a compiler that is missing, empty, fails to compile, writes nothing, or is not the fixed point |
+| 3 | `cmp` the three files | one differing byte |
+| 4 | run the shipped compiler over `examples/hello.rb` | a `.rbc` that is byte-correct and compiles nothing |
+
+The rollback is `--rollback`, and it is deliberately *not* a shortcut past the
+ladder. It runs the self-hosted build first and then overwrites the shipped file
+with the frontend's bytes — but only once those bytes are compared against the
+file the build just verified. A rollback reachable from a broken fixed point
+would be a way to ship the broken thing quietly, and a rollback whose bytes are
+not the file the ladder approved would be a way to ship a second compiler under
+the first one's name. Both are refusals now, not exit 0 and a message.
+
+Using what ships:
+
+```bash
+rb vm target/release-bootstrap/compiler.rbc examples/hello.rb hello.rbc
+```
 
 ## The one rule
 
@@ -108,6 +155,23 @@ Everything below runs in `cargo test`, so it runs on every push:
 | `edge_three_consecutive_self_compilations_are_byte_identical` | three consecutive runs, one file |
 | `edge_the_self_compilation_still_obeys_the_step_budget` | a run that outlasts its step budget fails, says so, and writes nothing |
 | `edge_a_while_loop_nested_in_another_patches_its_own_jump` | the nested-`while` patch, on its own, without needing the self-compilation to find it again |
+| `edge_the_release_is_built_by_the_self_hosted_compiler` | **S4** — stage 1, stage 2 and the shipped bytes are one file, and it decodes |
+| `edge_the_rollback_path_ships_the_same_file_as_the_fixed_point` | the rollback produces the file the fixed point produces |
+| `edge_the_shipped_compiler_agrees_with_the_frontend_on_a_corpus_family` | the shipped file compiles an unseen program exactly as the frontend would |
+| `edge_a_stage_two_that_is_not_the_fixed_point_is_refused_and_ships_nothing` | one flipped byte is refused, by offset, and nothing ships |
+| `edge_a_missing_empty_or_silent_compiler_is_refused_rather_than_shipped` | missing, empty, and *runs-but-writes-nothing* — the last is the one a success check alone would miss |
+| `edge_the_release_command_exits_non_zero_on_what_it_cannot_ship` | `rb bootstrap` exits non-zero and names the file; an unknown flag is a usage error |
+| `edge_bare_rb_bootstrap_is_the_command_and_not_a_file_to_run` | `rb bootstrap` with no output directory is the command, not a file to run |
+| `edge_a_frontend_refusal_keeps_its_kind_and_position` | a compiler with a syntax error comes back as a parser failure at its own line |
+| `edge_concurrent_stage_two_runs_keep_their_own_paths` | two stage-2 runs in one process do not swap each other's paths |
+| `edge_a_rollback_that_is_not_the_fixed_point_writes_nothing` | a rollback that is not the verified file refuses, and leaves the shipped compiler alone |
+| `edge_the_release_workflow_runs_the_ladder_and_ships_its_compiler` | the release runs the ladder before it uploads, and ships `compiler.rbc` |
+| `edge_the_release_workflow_uploads_the_compiler_once` | both matrix legs run the ladder, but only one publishes `compiler.rbc`, so one asset name is not published twice |
+| `a_stage_two_that_is_not_the_fixed_point_ships_nothing` (unit) | `build_with` handed a stage 2 that is not the fixed point refuses and ships nothing — the reason `Stage2::Bytes` is crate-private |
+| `a_stage_two_that_is_the_fixed_point_is_written` (unit) | the same path accepts a matching pair, so the refusal above is a comparison and not a blanket refusal |
+| `an_empty_compiler_is_refused_by_the_rollback_path_too` (unit) | `rollback` refuses an empty compiler exactly as `build` does |
+| `a_stage_two_refusal_keeps_its_kind_and_position` (unit) | a stage-2 refusal keeps the VM's variant and span instead of becoming an unpositioned `Runtime` |
+| `a_stage_two_run_restores_the_arguments_it_published` (unit) | `sys.argv()` is put back after a stage-2 run, on the success and the failure path |
 | `edge_stage3_is_byte_identical_on_every_corpus_program` | stage 2 == stage 1 for all 306 corpus programs the frontend accepts, through `rb vm` |
 | `edge_stage3_is_byte_identical_on_the_awkward_shapes` | the statement shapes the corpus families do not all reach |
 | `edge_stage3_refuses_every_malformed_corpus_program` | all 46 refusals, through `rb vm` |
@@ -125,6 +189,10 @@ cargo run --release -- vm stage1.rbc bootstrap/compiler.rb stage2.rbc
 
 # the fixed point
 cmp stage1.rbc stage2.rbc && echo fixed point
+
+# or all of it, including the check that a stage 2 that is not the fixed point
+# is not shipped
+./bootstrap/build.sh
 ```
 
 Useful while working on the compiler:

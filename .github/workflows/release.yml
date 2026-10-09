@@ -4,6 +4,13 @@ name: release
 # tag (v0.1.0 matches Cargo.toml). Native target per runner — no cross-compile
 # toolchain juggling. Tests run first in the same job so an artifact can never
 # be cut from untested code.
+#
+# `bootstrap/build.sh` runs the ladder before the binary is uploaded: stage 1
+# with the Rust frontend, stage 2 by running stage 1 on the compiler's own
+# source, the fixed point compared, and stage 2's bytes written as
+# `compiler.rbc`. It exits non-zero on any disagreement, so a release can only
+# be cut from a compiler that compiled itself — and `compiler.rbc` is shipped
+# alongside `rb`, because the compiler the release carries is part of it.
 on:
   push:
     tags: ['v*']
@@ -19,15 +26,34 @@ jobs:
         include:
           - os: ubuntu-latest
             bin: rb
+            upload_compiler: true
           - os: windows-latest
             bin: rb.exe
+            upload_compiler: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo test --locked
       - run: cargo build --release --locked
+      # The ladder: stage 1, stage 2, the fixed point, and `compiler.rbc` from
+      # stage 2's bytes. Non-zero on any disagreement, so a release cannot be
+      # cut from a compiler that did not compile itself. `shell: bash` because
+      # the Windows runner's default shell is PowerShell.
+      - run: ./bootstrap/build.sh
+        shell: bash
+      # One asset per OS for the binary, and `compiler.rbc` from one leg only.
+        # Both matrix legs building the ladder is right — each runner builds and
+        # verifies its own — but both uploading `compiler.rbc` under the same
+        # name would be two legs publishing one asset name to one release:
+        # whichever finished second overwrote the first or failed as a duplicate.
+        # The compiler is a `.rbc`, identical on both runners, so it is uploaded
+        # once; the binary is per-OS and stays per-OS.
       - uses: softprops/action-gh-release@v2
         with:
           files: target/release/${{ matrix.bin }}
           generate_release_notes: true
+      - uses: softprops/action-gh-release@v2
+        if: matrix.upload_compiler
+        with:
+          files: target/release-bootstrap/compiler.rbc

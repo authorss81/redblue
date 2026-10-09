@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod bootstrap;
 pub mod bytecode;
 mod error;
 pub mod formatter;
@@ -15,6 +16,7 @@ mod value;
 
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process;
 
 use crate::lexer::Lexer;
@@ -134,11 +136,34 @@ pub fn run_cli() {
                         println!("{}", keyword);
                     }
                 }
+                // `rb bootstrap` with no output directory. It has to be named
+                // here, in the arm that treats an unknown name as a file to
+                // run: without this arm it fell through to the file-runner,
+                // tried to read `bootstrap` — a directory in a checkout — and
+                // exited 1 with `Is a directory`, which is the exact failure the
+                // command exists to remove. The `3 if` arm below handles the
+                // one-positional form; this is the same command with the
+                // output directory defaulted to `target/bootstrap`.
+                "bootstrap" => {
+                    if let Err(message) = bootstrap_args(&[]) {
+                        eprintln!("Error: {}", message);
+                        process::exit(1);
+                    }
+                }
                 _ => {
                     if let Err(rendered) = run_file_with_diagnostic(cmd) {
                         report(&rendered);
                     }
                 }
+            }
+        }
+        // `rb bootstrap <out-dir>` — before the `3` arm, which would read the
+        // directory as a file to run. Bare `rb bootstrap` is the `bootstrap`
+        // arm in the `2` match above.
+        3 if args[1] == "bootstrap" => {
+            if let Err(message) = bootstrap_args(&args[2..]) {
+                eprintln!("Error: {}", message);
+                process::exit(1);
             }
         }
         3 => {
@@ -239,6 +264,21 @@ pub fn run_cli() {
                 process::exit(1);
             }
         }
+        // `rb bootstrap [out-dir] [--compiler <file>] [--rollback]` — matched
+        // on the command name alone rather than on an argument count, because
+        // its flags make the count arbitrary: the `4` arm below claims every
+        // four-argument invocation for `format --check` and prints the help
+        // text for the rest, so `rb bootstrap out --rollback` exited 1 having
+        // said nothing at all, and `rb bootstrap out --compiler f.rb` fell
+        // through to the usage arm. Both failures are silent — the help text
+        // goes to stdout — which is the worst way for a release command to
+        // fail.
+        n if n >= 3 && args[1] == "bootstrap" => {
+            if let Err(message) = bootstrap_args(&args[2..]) {
+                eprintln!("Error: {}", message);
+                process::exit(1);
+            }
+        }
         // `rb run <file> [args...]` — whatever follows the path belongs to the
         // program, and `sys.argv()` is how the program reads it. Without this a
         // Redblue program had no way to be told what to do: `rb run` took a path
@@ -297,6 +337,115 @@ pub fn run_cli() {
             process::exit(1);
         }
     }
+}
+
+/// `rb bootstrap [out-dir] [--compiler <file>] [--rollback]` — the S4 release
+/// build.
+///
+/// The positional is the output directory and the compiler is a flag, which is
+/// the same shape as `rb compile <file> -o <out>`: what is produced is named
+/// last. With a positional in the compiler's place a user typing
+/// `rb bootstrap target/out` — the natural spelling — had the directory read as
+/// the compiler and the build died with "cannot read the compiler
+/// target/out".
+///
+/// Three paths, and they are the whole of the ladder's operational story:
+///
+/// - the default builds stage 1 with the Rust frontend, stage 2 by running
+///   stage 1 on the compiler's own source, checks the fixed point and writes
+///   stage 2's bytes as the compiler the release carries. A stage 2 that is not
+///   the fixed point is a non-zero exit and nothing shipped;
+/// - `--rollback` cuts the release from the Rust frontend instead — `rb compile`
+///   and nothing else — for a machine that cannot afford the self-compilation.
+///   It writes the same bytes, so it is a rollback and not a second compiler.
+/// - `--rollback` alone does *not* skip the self-compilation, because the
+///   rollback path has to know the file it is rolling back to. The self-hosted
+///   build runs first, and the frontend's bytes overwrite the shipped file only
+///   once they are found to be the bytes that build verified; if the fixed point
+///   does not hold, the build has already failed and there is nothing to roll
+///   back to. That is the conservative order: a rollback that could be reached
+///   from a broken fixed point would be a way to ship the broken thing quietly,
+///   and one that wrote bytes the ladder never verified would be a way to ship
+///   a second compiler under the first one's name.
+fn bootstrap_args(rest: &[String]) -> Result<(), String> {
+    let mut rollback = false;
+    let mut compiler: Option<String> = None;
+    let mut out_dir: Option<String> = None;
+    let mut index = 0;
+    while index < rest.len() {
+        match rest[index].as_str() {
+            "--rollback" | "-r" => rollback = true,
+            "--compiler" | "-c" => {
+                index += 1;
+                compiler = Some(
+                    rest.get(index)
+                        .ok_or_else(|| "--compiler needs a file".to_string())?
+                        .clone(),
+                );
+            }
+            other if other.starts_with("--compiler=") => {
+                compiler = Some(other["--compiler=".len()..].to_string());
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("rb bootstrap does not take {other}"));
+            }
+            other => {
+                if out_dir.is_some() {
+                    return Err(format!(
+                        "rb bootstrap takes one output directory, and {other} is a second"
+                    ));
+                }
+                out_dir = Some(other.to_string());
+            }
+        }
+        index += 1;
+    }
+
+    let compiler = compiler.unwrap_or_else(|| "bootstrap/compiler.rb".to_string());
+    let out_dir = out_dir.unwrap_or_else(|| "target/bootstrap".to_string());
+    let built = bootstrap_command(&compiler, &out_dir)?;
+
+    if rollback {
+        // The frontend's bytes, written only if `bootstrap::rollback_onto` finds
+        // them to be the file the ladder just verified. Without that comparison
+        // the write is unconditional: a `--rollback` whose bytes differ from the
+        // fixed point — a frontend that has changed since the build, or one
+        // that is not deterministic — would overwrite the shipped compiler and
+        // print "Rolled back", so a release cut from it would carry a compiler
+        // the ladder never approved. `bootstrap/build.sh` catches that with a
+        // later `cmp`, but the CLI is what a person runs and it has to refuse
+        // rather than ship and let a script find out.
+        let bytes = bootstrap::rollback(Path::new(&compiler)).map_err(|e| e.to_string())?;
+        bootstrap::rollback_onto(&built, Path::new(&out_dir), &bytes)
+            .map_err(|error| error.to_string())?;
+        let target = bootstrap::Build::shipped_path(Path::new(&out_dir));
+        println!(
+            "Rolled back to the Rust frontend: {} bytes written to {}",
+            bytes.len(),
+            target.display()
+        );
+    }
+    Ok(())
+}
+
+/// The build itself, shared by `rb bootstrap` and the flag handling above.
+///
+/// Returns the [`bootstrap::Build`] so a caller that has more to do with the
+/// result — the rollback path compares the frontend's bytes against it — is
+/// working from the build's own bytes rather than from the file it wrote.
+fn bootstrap_command(compiler: &str, out_dir: &str) -> Result<bootstrap::Build, String> {
+    let built = bootstrap::build(Path::new(compiler), Path::new(out_dir))
+        .map_err(|error| error.to_string())?;
+
+    println!(
+        "Fixed point holds: stage 1 and stage 2 are one file ({} bytes)",
+        built.stage1.len()
+    );
+    println!(
+        "Shipped compiler: {}",
+        bootstrap::Build::shipped_path(Path::new(out_dir)).display()
+    );
+    Ok(built)
 }
 
 /// The `.rbc` path `rb compile <file>` writes when no `-o` is given: the
@@ -371,6 +520,9 @@ fn print_help() {
     println!("  rb compile <file> [-o out.rbc]  Compile to bytecode");
     println!("  rb dis <file.rbc>  Disassemble bytecode");
     println!("  rb vm <file.rbc>  Run bytecode");
+    println!("  rb bootstrap [out-dir]  Build the release compiler with the self-hosted compiler");
+    println!("  rb bootstrap [out-dir] --compiler <file>  Build a compiler other than bootstrap/compiler.rb");
+    println!("  rb bootstrap [out-dir] --rollback  Cut the release from the Rust frontend instead");
     println!("  rb diagnostics <file>  Report errors as JSON for editors");
     println!("  rb grammar  Print the TextMate grammar for .rb files");
     println!("  rb keywords  Print the keyword list");

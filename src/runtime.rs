@@ -893,6 +893,22 @@ pub fn set_program_args(args: Vec<String>) {
     }
 }
 
+/// The arguments [`set_program_args`] recorded, for a caller that has to put
+/// back what it found.
+///
+/// Setting them is one-way: a caller that publishes arguments of its own over
+/// someone else's — the bootstrap ladder's stage 2, which runs a compiler with
+/// an input and an output path — would otherwise leave its paths in place for
+/// whatever reads `sys.argv()` next in the same process. Reading them here is
+/// what lets it save, set, and restore.
+pub fn take_program_args() -> Vec<String> {
+    std::mem::take(
+        &mut *PROGRAM_ARGS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
 /// The whole-request timeout for `network.get` and `network.post`: connect,
 /// send, headers and body read together. It is here because
 /// `reqwest::blocking::Client::new()` has no timeout of its own, and a client
