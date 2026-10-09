@@ -241,12 +241,16 @@ fn assert_agrees_bounded(
 /// Programs read from disk that this test cannot compare, named rather than
 /// detected.
 ///
-/// A differential test is only worth anything if it is deterministic, and one of
-/// these prints the wall clock, so its two runs differ by a second however
-/// faithfully both VMs behave. They are still executed by `redblue_suite_test.rs`
-/// and by the gate's examples run, so excluding them here loses no coverage —
-/// it only keeps a comparison from being meaningless.
-const NOT_COMPARABLE: &[&str] = &["examples/time.rb", "examples/random.rb"];
+/// A differential test is only worth anything if it is deterministic, and this
+/// one prints the wall clock, so its two runs differ by a second however
+/// faithfully both VMs behave. It is still executed by `redblue_suite_test.rs`
+/// and by the gate's examples run, so excluding it here loses no coverage — it
+/// only keeps a comparison from being meaningless.
+///
+/// `examples/random.rb` was on this list for the same reason and no longer is:
+/// it seeds its draws with `random_seed`, so both runs print the same bytes and
+/// the comparison says something about the two engines again.
+const NOT_COMPARABLE: &[&str] = &["examples/time.rb"];
 
 /// The corpus the differential test runs: every program under `examples/`,
 /// `modules/` and `tests/` that [`NOT_COMPARABLE`] does not name, plus the

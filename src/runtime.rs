@@ -15,6 +15,7 @@
 //! The tree-walker is the reference: what is here is what it already did,
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
+use std::cell::Cell;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result, Span};
@@ -439,6 +440,160 @@ fn sleep_duration(seconds: f64, span: Span) -> Result<Duration> {
     })
 }
 
+// ============================================================ the seeded draws
+
+// The state the `random*` builtins draw from, per thread.
+//
+// It used to be `SystemTime::now()`. A clock is the worst possible source for
+// this: it is monotonically non-decreasing, so consecutive draws come out
+// strictly increasing rather than spread over the range, `random(1, 1)`
+// answered whatever the low digits of the instant were because it took no
+// arguments at all, and nothing a program printed was reproducible — which is
+// AGENTS.md 3.1.4 broken, and a precondition of the bootstrap fixed point with
+// it.
+//
+// `random_seed(n)` sets this. A program that never seeds gets a fixed
+// `DEFAULT_SEED` rather than a clock reading, so the language is deterministic
+// by default and a program has to *ask* for variation it cannot reproduce.
+// That is the direction the failure should be hard to get into.
+//
+// `Cell<u64>` rather than an `AtomicU64` or a mutex: the state is thread-local,
+// so `cargo test` running several tests in parallel cannot interleave two
+// tests' draws and make a pinned sequence unreproducible, and no draw pays for
+// a lock. A Redblue program is single-threaded — `crate::vm` runs one — so
+// thread-local *is* process-local here.
+thread_local! {
+    static RANDOM_STATE: Cell<u64> = const { Cell::new(DEFAULT_SEED) };
+}
+
+/// The seed a program that never calls `random_seed` draws from.
+///
+/// Fixed, not derived from anything: the default has to be as reproducible as an
+/// explicit seed, or the determinism above is only for programs that remember to
+/// ask for it. The value is arbitrary — nothing depends on it being this one,
+/// and no golden output is pinned to it.
+const DEFAULT_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The mixing function of SplitMix64: a bijection on `u64` with every input bit
+/// reaching every output bit.
+///
+/// This is the whole generator. A linear congruential step would also be short,
+/// but its low bits are the high bits of the previous step and the low bits are
+/// what `random(0, 100)` selects on, so an LCG modulo 101 walks its draw in a
+/// short cycle instead of spreading.
+const fn splitmix64(state: u64) -> u64 {
+    let mut z = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The next 64 random bits, advancing the generator.
+fn next_bits() -> u64 {
+    RANDOM_STATE.with(|state| {
+        let next = splitmix64(state.get());
+        state.set(next);
+        next
+    })
+}
+
+/// A draw in `[0, 1)`, from the top 53 bits — the most an `f64` can name without
+/// rounding, so every one of the `2^53` steps is equally likely to produce it.
+fn next_unit() -> f64 {
+    (next_bits() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+}
+
+/// Seeds this thread's draws, so everything after is reproducible from `seed`.
+pub fn seed_random(seed: u64) {
+    RANDOM_STATE.with(|state| state.set(splitmix64(seed)));
+}
+
+/// An integer draw from the inclusive range `[min, max]`.
+///
+/// Both ends are inclusive because that is what makes `random(5, 5)` answer
+/// `5`: a range with one member has one answer, and a half-open range would give
+/// `random(5, 5)` a span of zero. The width is `max - min + 1`, so `[0, 100]`
+/// has 101 members and 200 draws can name at most 101 of them.
+///
+/// A width that is exactly an integer is drawn by taking the generator modulo
+/// it, which is exact — no scaling, so no rounding can push a draw out of the
+/// range, and no endpoint is favoured. A width with a fraction in it has no
+/// whole number of members, so the draw is scaled and floored into the range;
+/// that only happens when a program wrote a fractional bound.
+///
+/// `min` above `max` is a range with no member, so it is refused rather than
+/// answered from the reversed range: silently swapping the ends would make
+/// `random(10, 1)` a working call, which is not what the program wrote.
+fn random_int(span: Span, min: f64, max: f64) -> Result<Value> {
+    if min > max {
+        return Err(Error::Runtime(
+            format!("random: the low end {min} is above the high end {max}"),
+            span,
+        ));
+    }
+    // `max - min + 1` is infinity for a range as ordinary as `-1e308` to
+    // `1e308`, and a draw out of a width no double can name is not a number this
+    // language can hold.
+    let width = max - min + 1.0;
+    if !width.is_finite() {
+        return Err(Error::Runtime(
+            "random: the range is too wide to measure in a number".to_string(),
+            span,
+        ));
+    }
+    // `2^53` is the largest width whose members are all exactly representable, so
+    // above it the modulo would be biased toward the low end by more than the
+    // language can name. Such a range is still drawn from, by scaling.
+    let draw = if width.fract() == 0.0 && width <= MAX_EXACT_WIDTH {
+        min + (next_bits() % width as u64) as f64
+    } else {
+        min + (next_unit() * width).floor().min(width - 1.0)
+    };
+    Value::number(draw, span)
+}
+
+/// The widest integer range every member of which is exactly representable as
+/// an `f64`, so that modulo over it names members evenly.
+const MAX_EXACT_WIDTH: f64 = 9_007_199_254_740_992.0; // 2^53
+
+/// A float draw from `[min, max)`, the range `random_number` has always meant.
+///
+/// `min` above `max` is refused for the same reason `random` refuses it.
+fn random_float(span: Span, min: f64, max: f64) -> Result<Value> {
+    if min > max {
+        return Err(Error::Runtime(
+            format!("random_number: the low end {min} is above the high end {max}"),
+            span,
+        ));
+    }
+    // `max - min` overflows for a range as ordinary as `-1e308` to `1e308`,
+    // which is a number that does not exist. `min + r * inf` is then infinity,
+    // or `NaN` when `r` is zero, and `Value::number` refuses both.
+    Value::number(min + next_unit() * (max - min), span)
+}
+
+/// The `min` and `max` a range builtin was given.
+///
+/// A single argument is the high end and zero is the low end, so
+/// `random_number(10)` is `[0, 10)` and `random(6)` is `[0, 6]` — the dice
+/// spelling. No arguments is the unit range for `random_number` and `[0, 100]`
+/// for `random`.
+///
+/// A non-number is refused rather than read as zero: `random("a", 1)` used to
+/// answer a draw out of `[0, 1)` because the argument was ignored, which is a
+/// working call that means nothing.
+fn random_range(span: Span, name: &str, args: &[Value], default_max: f64) -> Result<(f64, f64)> {
+    match (args.first(), args.get(1)) {
+        (None, None) => Ok((0.0, default_max)),
+        (Some(Value::Number(min)), Some(Value::Number(max))) => Ok((*min, *max)),
+        (Some(Value::Number(max)), None) => Ok((0.0, *max)),
+        _ => Err(Error::Runtime(
+            format!("{name} requires numbers, as in {name}(1, 6)"),
+            span,
+        )),
+    }
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -480,8 +635,31 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::Text(input)))
         }
         "random" => {
-            let now = since_epoch(SystemTime::now(), span)?;
-            Ok(Some(Value::Number((now.as_nanos() % 1000) as f64)))
+            let (min, max) = random_range(span, "random", args, 100.0)?;
+            random_int(span, min, max).map(Some)
+        }
+        "random_seed" => {
+            let seed = match args {
+                [Value::Number(seed)] => *seed,
+                _ => {
+                    return Err(Error::Runtime(
+                        "random_seed requires one number, as in random_seed(42)".to_string(),
+                        span,
+                    ))
+                }
+            };
+            if !seed.is_finite() {
+                return Err(Error::Runtime(
+                    format!("random_seed requires a finite number, got {seed}"),
+                    span,
+                ));
+            }
+            // A double carries 53 bits of integer and is exact up to `2^53`, so
+            // truncating loses the low bits of nothing a seed can express and
+            // wraps rather than saturating — `as u64` on a negative `f64` gives
+            // a different seed, which is the answer, not a clamp.
+            seed_random(seed.trunc() as i64 as u64);
+            Ok(Some(Value::Nothing))
         }
         // Files module
         "files_read" => {
@@ -772,24 +950,22 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         // Random module
         "random_number" => {
-            let (min, max) = match (args.first(), args.get(1)) {
-                (Some(Value::Number(min)), Some(Value::Number(max))) => (*min, *max),
-                (Some(Value::Number(max)), None) => (0.0, *max),
-                _ => (0.0, 1.0),
-            };
-            let now = since_epoch(SystemTime::now(), span)?;
-            let r = (now.as_nanos() % 1000000) as f64 / 1000000.0;
-            // `max - min` overflows for a range as ordinary as
-            // `-1e308` to `1e308`, which is a number that does not exist.
-            Value::number(min + r * (max - min), span).map(Some)
+            let (min, max) = random_range(span, "random_number", args, 1.0)?;
+            random_float(span, min, max).map(Some)
         }
         "random_choice" => {
             if let Some(Value::List(items)) = args.first() {
                 if items.is_empty() {
-                    return Ok(Some(Value::Nothing));
+                    // An empty list has no member to choose, so there is no
+                    // answer to give. `nothing` used to be handed back, which is
+                    // a value the program could not tell apart from a choice
+                    // that had not happened yet.
+                    return Err(Error::Runtime(
+                        "random_choice requires a list with at least one element".to_string(),
+                        span,
+                    ));
                 }
-                let now = since_epoch(SystemTime::now(), span)?;
-                let idx = (now.as_nanos() as usize) % items.len();
+                let idx = (next_bits() % items.len() as u64) as usize;
                 Ok(Some(items[idx].clone()))
             } else {
                 Err(Error::Runtime(
@@ -801,11 +977,13 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         "random_shuffle" => {
             if let Some(Value::List(items)) = args.first().cloned() {
                 let mut shuffled = (*items).clone();
-                let now = since_epoch(SystemTime::now(), span)?;
-                let seed = now.as_nanos() as usize;
-
+                // Fisher-Yates, drawing a fresh index at each step. It used to
+                // compute one `seed` and use `seed % (i + 1)` for every swap,
+                // which is not a shuffle at all: the permutation was a fixed
+                // function of one clock reading, the same for every input of the
+                // same length.
                 for i in (1..shuffled.len()).rev() {
-                    let j = seed % (i + 1);
+                    let j = (next_bits() % (i as u64 + 1)) as usize;
                     shuffled.swap(i, j);
                 }
                 Ok(Some(Value::list(shuffled)))
