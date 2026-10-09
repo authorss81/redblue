@@ -84,3 +84,36 @@ yet; run programs that use one with `rb run`"*.
 Not this phase's work, and the test works around it by not using one. It does
 mean no seeded-draw test can compare the two engines through `map`, and
 `examples/random.rb` cannot either.
+
+## 6. A resumed phase is not a finished phase
+
+Worth recording as process, because the phase was previously reported complete
+and its gate claims were taken at face value — and it was not complete.
+
+The seeded generator was in place and the suite was green, but `random_int` had
+a hole the existing tests could not see: when a bound was a fraction it scaled
+the raw width instead of counting the range's members.
+
+```redblue
+random(0, 100.5)   // answered 100.5 at seed 581, and 101 — outside the range
+random(0.2, 0.8)   // answered 0.2, a range holding no whole number at all
+```
+
+26 of 3000 seeds produced a fraction. `random` is the whole-number draw —
+`random_honours_its_range_arguments` asserts `value.fract() == 0.0` on every one
+of 200 draws — so the code contradicted its own passing test. The test passed
+because it only ever drew from integer bounds, where the buggy branch is not
+taken.
+
+Fixed in `src/runtime.rs`: the members of a range are its whole numbers,
+`ceil(min)..=floor(max)`, and a range with none is refused by name. Pinned by
+`edge_random_answers_a_whole_number_from_a_range_with_a_fractional_end`, which sweeps 3000
+seeds across four fractional-ended ranges and asserts every answer is whole,
+inside the range, and that every whole member is reachable.
+
+The lesson for the auditor: a phase's own green suite is evidence about the
+assertions that exist, not about the branches that do not. The previous report
+was careful about arithmetic it could check and did not notice a branch it did
+not have a test for. Coverage of the *edge* rows in AGENTS.md 3.2 is what finds
+this, and it only finds it if the edge is drawn somewhere the happy path does
+not reach.

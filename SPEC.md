@@ -987,7 +987,11 @@ draws from a fixed default seed rather than from the clock, so Redblue's output
 is reproducible by default and a program has to *ask* for variation it cannot
 reproduce. `random` answers a whole number and `random_number` a fraction; both
 refuse a range whose low end is above its high end, because such a range has no
-member. `random_choice` refuses an empty list, since it has no member to choose.
+member. `random` answers one of the whole numbers in its range, so a fractional
+bound narrows the range rather than making the draw a fraction:
+`random(0, 100.5)` answers `0` to `100`, and a range holding no whole number at
+all, such as `random(0.2, 0.8)`, is refused. `random_choice` refuses an empty
+list, since it has no member to choose.
 
 ### files
 

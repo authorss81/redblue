@@ -436,6 +436,62 @@ fn edge_a_range_of_no_width_is_still_a_range() {
     );
 }
 
+/// A fractional end still answers a whole number, from inside the range.
+///
+/// `random` is the whole-number draw: `random(0, 100)` answered only integers
+/// with 200 draws, and `random_honours_its_range_arguments` pins that. A range
+/// whose *end* is a fraction must not break it. The whole members of `[0, 100.5]`
+/// are 0..=100, so the answer is one of those 101 values — not `100.5`, which is
+/// a member of the range but not a whole number, and not `101`, which is outside
+/// it.
+///
+/// A range with no whole member in it at all — `random(0.2, 0.8)` contains no
+/// integer — has nothing for this draw to answer, so it is refused rather than
+/// answered with a fraction from a different question.
+#[test]
+fn edge_random_answers_a_whole_number_from_a_range_with_a_fractional_end() {
+    for (lo, hi) in [(0.0, 100.5), (-3.5, 2.0), (5.0, 5.5), (-10.0, -0.25)] {
+        let mut members = BTreeSet::new();
+        for seed in 0..=2999i64 {
+            let source = format!("random_seed({seed})\nrandom({lo}, {hi})");
+            let Value::Number(n) = eval(&source) else {
+                panic!("random({lo}, {hi}) should be a number for seed {seed}");
+            };
+            assert_eq!(
+                n.fract(),
+                0.0,
+                "`random` is the whole-number draw, but random({lo}, {hi}) answered the \
+                 fraction {n} for seed {seed}"
+            );
+            assert!(
+                n >= lo && n <= hi,
+                "random({lo}, {hi}) answered {n} for seed {seed}, which is outside the \
+                 range it was given"
+            );
+            members.insert(n as i64);
+        }
+        // Every whole member of the range is reachable. 3000 draws over at most
+        // 101 members is far more than enough to name all of them, so a draw that
+        // skipped the interior or answered only one value fails here.
+        let expected: BTreeSet<i64> = (lo.ceil() as i64..=hi.floor() as i64).collect();
+        assert_eq!(
+            members, expected,
+            "3000 draws from random({lo}, {hi}) named {members:?} and not the other \
+             whole members of the range ({expected:?})"
+        );
+    }
+
+    // A range holding no whole number has no answer for this draw. `[0.2, 0.8]`
+    // contains no integer, so there is nothing for a whole-number draw to name.
+    for source in ["random(0.2, 0.8)", "random(1.5, 1.9)"] {
+        let error = eval_err(source).to_string();
+        assert!(
+            error.contains("random"),
+            "`{source}` has no whole member and should be refused naming random, got: {error}"
+        );
+    }
+}
+
 /// A list whose members repeat is still a list of that length.
 ///
 /// `random_shuffle` permutes *positions*, not values, so two equal members stay

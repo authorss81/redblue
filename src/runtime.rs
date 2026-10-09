@@ -508,21 +508,28 @@ pub fn seed_random(seed: u64) {
     RANDOM_STATE.with(|state| state.set(splitmix64(seed)));
 }
 
-/// An integer draw from the inclusive range `[min, max]`.
+/// A whole-number draw from the inclusive range `[min, max]`.
 ///
 /// Both ends are inclusive because that is what makes `random(5, 5)` answer
 /// `5`: a range with one member has one answer, and a half-open range would give
-/// `random(5, 5)` a span of zero. The width is `max - min + 1`, so `[0, 100]`
-/// has 101 members and 200 draws can name at most 101 of them.
+/// `random(5, 5)` a span of zero. The members are the whole numbers in the
+/// range, so `[0, 100]` has 101 of them and 200 draws can name at most 101.
 ///
-/// A width that is exactly an integer is drawn by taking the generator modulo
-/// it, which is exact — no scaling, so no rounding can push a draw out of the
-/// range, and no endpoint is favoured. A width with a fraction in it has no
-/// whole number of members, so the draw is scaled and floored into the range;
-/// that only happens when a program wrote a fractional bound.
+/// The members are `ceil(min)..=floor(max)`, and every answer is one of them —
+/// never a fraction and never a step past the high end. That is what makes the
+/// draw whole-valued when a program writes a fractional bound: the members of
+/// `[0, 100.5]` are `0..=100`, not `0..=100.5`, so the draw is `100` and never
+/// `100.5` or `101`. Scaling the width directly got that wrong, because
+/// `0 + floor(u * 101.5)` is `101` when `u` is near 1 — outside the range, and
+/// with `min` fractional it is not even a whole number.
 ///
-/// `min` above `max` is a range with no member, so it is refused rather than
-/// answered from the reversed range: silently swapping the ends would make
+/// A range with no whole number in it — `[0.2, 0.8]` — has no member to name,
+/// so it is refused rather than answered with a fraction this draw does not
+/// promise. That is a different question from a reversed range, and both are
+/// refused by name.
+///
+/// `min` above `max` is a range with no member either, and is refused rather
+/// than answered from the reversed range: silently swapping the ends would make
 /// `random(10, 1)` a working call, which is not what the program wrote.
 fn random_int(span: Span, min: f64, max: f64) -> Result<Value> {
     if min > max {
@@ -531,23 +538,39 @@ fn random_int(span: Span, min: f64, max: f64) -> Result<Value> {
             span,
         ));
     }
-    // `max - min + 1` is infinity for a range as ordinary as `-1e308` to
-    // `1e308`, and a draw out of a width no double can name is not a number this
+    // `-1e308` to `1e308` is a perfectly ordinary range a program might write
+    // and it holds whole numbers; the width check below is about whether the
+    // *number of members* is measurable, not about whether the ends are.
+    let low = min.ceil();
+    let high = max.floor();
+    if low > high {
+        return Err(Error::Runtime(
+            format!(
+                "random: the range {min} to {max} has no whole number in it, and this \
+                 draw names whole numbers"
+            ),
+            span,
+        ));
+    }
+    // `high - low + 1` is infinity for a range as wide as `-1e308` to `1e308`, and
+    // a draw out of a member count no double can name is not a number this
     // language can hold.
-    let width = max - min + 1.0;
+    let width = high - low + 1.0;
     if !width.is_finite() {
         return Err(Error::Runtime(
             "random: the range is too wide to measure in a number".to_string(),
             span,
         ));
     }
-    // `2^53` is the largest width whose members are all exactly representable, so
-    // above it the modulo would be biased toward the low end by more than the
-    // language can name. Such a range is still drawn from, by scaling.
-    let draw = if width.fract() == 0.0 && width <= MAX_EXACT_WIDTH {
-        min + (next_bits() % width as u64) as f64
+    // `2^53` is the largest member count whose members are all exactly
+    // representable, so above it the modulo would be biased toward the low end by
+    // more than the language can name. Such a range is still drawn from, by
+    // scaling, which stays inside `[low, high]` because the width is a whole
+    // number of members and the last step is clamped to it.
+    let draw = if width <= MAX_EXACT_WIDTH {
+        low + (next_bits() % width as u64) as f64
     } else {
-        min + (next_unit() * width).floor().min(width - 1.0)
+        low + (next_unit() * width).floor().min(width - 1.0)
     };
     Value::number(draw, span)
 }
