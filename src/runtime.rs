@@ -15,6 +15,8 @@
 //! The tree-walker is the reference: what is here is what it already did,
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
@@ -301,6 +303,142 @@ pub fn append_target(span: Span, args: &[Value]) -> Result<&str> {
     }
 }
 
+/// How long `instant` is after the Unix epoch, to nanosecond precision.
+///
+/// `SystemTime::duration_since` is `Err` for any instant before
+/// 1970-01-01T00:00:00Z, which is a clock set backwards, and `Err` must not be
+/// an `unwrap`: an `unwrap` here unwinds the interpreter thread, so a Redblue
+/// program that merely called `time.now()` would abort the process instead of
+/// getting an error it could `catch`. The message names the clock rather than
+/// the underlying `SystemTimeError`, whose text ("second time provided was
+/// later than self") says nothing about what the program did.
+///
+/// The instant is a parameter rather than a `SystemTime::now()` call inside,
+/// so the pre-epoch path is reachable from a test that passes the instant
+/// directly. Without that seam the only way to exercise it is to set the
+/// machine's clock, which no test may do.
+fn since_epoch(instant: SystemTime, span: Span) -> Result<Duration> {
+    instant.duration_since(UNIX_EPOCH).map_err(|_| {
+        Error::Runtime(
+            "The system clock is set before 1970-01-01T00:00:00Z, so time cannot be read from it"
+                .to_string(),
+            span,
+        )
+    })
+}
+
+/// The whole seconds `timestamp` names, counted from the Unix epoch, for
+/// `chrono` to format.
+///
+/// `SystemTime + Duration` panics when the addition overflows, and it does so
+/// from inside `std`, past every `Result` in this crate — `time.format(1e300)`
+/// aborted the process. The range is therefore checked here, and a timestamp
+/// that is not finite, not whole, or past what a date can name is a `Runtime`
+/// error. `timestamp as u64` is not usable for the conversion: it saturates, so
+/// a negative timestamp would have quietly formatted as the epoch rather than
+/// as 1969.
+fn seconds_for_format(timestamp: f64, span: Span) -> Result<i64> {
+    if !timestamp.is_finite() {
+        return Err(Error::Runtime(
+            format!("time.format requires a finite number of seconds, got {timestamp}"),
+            span,
+        ));
+    }
+    // A timestamp with a fractional part keeps the behaviour it always had:
+    // `as` truncates toward zero, so `time.format(1.5)` is one second after the
+    // epoch. Refusing it would reject a program that used to work.
+    // `i64::MAX` seconds is far past the last instant a `SystemTime` can hold,
+    // and `chrono` cannot format one either, so the range is bounded here
+    // rather than by whichever of the two overflows first. A timestamp before
+    // the epoch is *not* out of range: 1969 is a real year, and this function
+    // hands the seconds back for `chrono` to format, so `time.format(-1)` is
+    // 1969-12-31 rather than an error.
+    const MAX_SECONDS: f64 = 253_402_300_800.0; // 10000-01-01T00:00:00Z
+    if timestamp < -MAX_SECONDS || timestamp > MAX_SECONDS {
+        return Err(Error::Runtime(
+            format!("time.format cannot represent {timestamp} seconds from 1970-01-01T00:00:00Z"),
+            span,
+        ));
+    }
+    Ok(timestamp as i64)
+}
+
+/// The epoch seconds `time.unix` reports for a date `chrono` accepted.
+///
+/// `NaiveDateTime::parse_from_str` accepts a year as low as -262143, which
+/// counts to about -8.3e12 seconds — a number `time.format` refuses, so the two
+/// builtins disagreed about whether an instant existed. The parse itself is not
+/// the panic risk this phase found elsewhere (`timestamp()` is i64 arithmetic
+/// over a `chrono`-bounded year, so it cannot overflow), but the range is
+/// checked here anyway so `time.unix` and `time.format` accept exactly the same
+/// instants, and a date outside it is a catchable `Runtime` error naming
+/// `time.unix` rather than a number no other builtin will take.
+fn seconds_for_unix(text: &str, span: Span) -> Result<i64> {
+    let parsed =
+        chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").map_err(|_| {
+            Error::Runtime(
+                "Invalid date format, use YYYY-MM-DD HH:MM:SS".to_string(),
+                span,
+            )
+        })?;
+    let seconds = parsed.and_utc().timestamp();
+    // The same window `seconds_for_format` uses, so the two agree on both sides.
+    const MAX_SECONDS: i64 = 253_402_300_800; // 10000-01-01T00:00:00Z
+    if !(-MAX_SECONDS..=MAX_SECONDS).contains(&seconds) {
+        return Err(Error::Runtime(
+            format!("time.unix cannot represent {text} as seconds from 1970-01-01T00:00:00Z"),
+            span,
+        ));
+    }
+    Ok(seconds)
+}
+
+/// How long `time.sleep` should wait, given the number the program passed.
+///
+/// `Duration::from_secs_f64` panics on a negative, NaN, infinite, or
+/// overflowing argument, and it does so from inside `core`, past every `Result`
+/// in this crate: `time.sleep(-1)` unwound the interpreter thread and replaced
+/// the program's failure with "The interpreter thread stopped unexpectedly", so
+/// a Redblue `try`/`catch error` could not catch it. That is the same defect
+/// class this phase exists to remove, one function away.
+///
+/// `Duration::try_from_secs_f64` is the same conversion reported as a `Result`,
+/// so the refusal is ordinary. The upper bound is not a guess: `try_from_secs_f64`
+/// rejects past `u64::MAX` nanoseconds' worth of seconds, and the bound below is
+/// strictly inside what it accepts, so the sleep always reaches `thread::sleep`
+/// as a real `Duration`.
+///
+/// A fractional sleep keeps the behaviour it always had — `time.sleep(0.25)`
+/// waits 250ms — so this refuses only what would panic, and says which of the
+/// three reasons it is refusing.
+fn sleep_duration(seconds: f64, span: Span) -> Result<Duration> {
+    if !seconds.is_finite() {
+        return Err(Error::Runtime(
+            format!("time.sleep requires a finite number of seconds, got {seconds}"),
+            span,
+        ));
+    }
+    if seconds < 0.0 {
+        return Err(Error::Runtime(
+            format!("time.sleep requires a number of seconds that is not negative, got {seconds}"),
+            span,
+        ));
+    }
+    const MAX_SLEEP_SECONDS: f64 = 31_536_000.0; // one year
+    if seconds > MAX_SLEEP_SECONDS {
+        return Err(Error::Runtime(
+            format!("time.sleep cannot wait {seconds} seconds, at most {MAX_SLEEP_SECONDS}"),
+            span,
+        ));
+    }
+    Duration::try_from_secs_f64(seconds).map_err(|_| {
+        Error::Runtime(
+            format!("time.sleep requires a number of seconds it can wait, got {seconds}"),
+            span,
+        )
+    })
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -342,10 +480,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::Text(input)))
         }
         "random" => {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| Error::Runtime(e.to_string(), span))?;
+            let now = since_epoch(SystemTime::now(), span)?;
             Ok(Some(Value::Number((now.as_nanos() % 1000) as f64)))
         }
         // Files module
@@ -470,10 +605,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         // Time module
         "time_now" => {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| Error::Runtime(e.to_string(), span))?;
+            let now = since_epoch(SystemTime::now(), span)?;
             let secs = now.as_secs();
             let nanos = now.subsec_nanos();
             let record = crate::value::Fields::from([
@@ -492,11 +624,10 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+            std::thread::sleep(sleep_duration(seconds, span)?);
             Ok(Some(Value::Nothing))
         }
         "time_format" => {
-            use std::time::UNIX_EPOCH;
             let (timestamp, format) = match (args.first(), args.get(1)) {
                 (Some(Value::Number(ts)), Some(Value::Text(fmt))) => (*ts, fmt.clone()),
                 (Some(Value::Number(ts)), None) => (*ts, "%Y-%m-%d %H:%M:%S".to_string()),
@@ -507,13 +638,13 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            let datetime = UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64);
-            let secs = datetime
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| Error::Runtime(e.to_string(), span))?
-                .as_secs() as i64;
-            let tm = chrono::DateTime::from_timestamp(secs, 0)
-                .ok_or_else(|| Error::Runtime("Invalid timestamp".to_string(), span))?;
+            let secs = seconds_for_format(timestamp, span)?;
+            let tm = chrono::DateTime::from_timestamp(secs, 0).ok_or_else(|| {
+                Error::Runtime(
+                    format!("time.format cannot represent {timestamp} seconds from 1970-01-01T00:00:00Z"),
+                    span,
+                )
+            })?;
             Ok(Some(Value::Text(tm.format(&format).to_string())))
         }
         "time_unix" => {
@@ -526,14 +657,8 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            let parsed =
-                chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").map_err(|_| {
-                    Error::Runtime(
-                        "Invalid date format, use YYYY-MM-DD HH:MM:SS".to_string(),
-                        span,
-                    )
-                })?;
-            Ok(Some(Value::Number(parsed.and_utc().timestamp() as f64)))
+            let seconds = seconds_for_unix(text, span)?;
+            Ok(Some(Value::Number(seconds as f64)))
         }
         // Formats module (JSON/CSV)
         "json_parse" => {
@@ -652,10 +777,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 (Some(Value::Number(max)), None) => (0.0, *max),
                 _ => (0.0, 1.0),
             };
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| Error::Runtime(e.to_string(), span))?;
+            let now = since_epoch(SystemTime::now(), span)?;
             let r = (now.as_nanos() % 1000000) as f64 / 1000000.0;
             // `max - min` overflows for a range as ordinary as
             // `-1e308` to `1e308`, which is a number that does not exist.
@@ -666,10 +788,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 if items.is_empty() {
                     return Ok(Some(Value::Nothing));
                 }
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| Error::Runtime(e.to_string(), span))?;
+                let now = since_epoch(SystemTime::now(), span)?;
                 let idx = (now.as_nanos() as usize) % items.len();
                 Ok(Some(items[idx].clone()))
             } else {
@@ -682,10 +801,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         "random_shuffle" => {
             if let Some(Value::List(items)) = args.first().cloned() {
                 let mut shuffled = (*items).clone();
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| Error::Runtime(e.to_string(), span))?;
+                let now = since_epoch(SystemTime::now(), span)?;
                 let seed = now.as_nanos() as usize;
 
                 for i in (1..shuffled.len()).rev() {
@@ -1325,5 +1441,220 @@ mod tests {
         }
         assert_eq!(json_stringify(&Value::Number(42.0)), "42");
         assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
+    }
+
+    /// A clock set before 1970 is the one host state that makes every clock
+    /// reading impossible. It must be a `Runtime` error naming the clock, not a
+    /// panic — a panic here unwinds the interpreter thread, and the program
+    /// that merely asked for the time would lose the process instead of
+    /// receiving something it could `catch`.
+    ///
+    /// The instant is passed in, so the test does not move the machine's clock.
+    #[test]
+    fn edge_a_clock_before_the_epoch_is_a_runtime_error() {
+        let one_second_before = UNIX_EPOCH - Duration::from_secs(1);
+        match since_epoch(one_second_before, Span::new(3, 9)) {
+            Err(Error::Runtime(message, span)) => {
+                assert!(
+                    message.contains("clock"),
+                    "the message must name the clock, got `{}`",
+                    message
+                );
+                assert_eq!(
+                    span,
+                    Span::new(3, 9),
+                    "the failure must be reported against the call site"
+                );
+            }
+            Ok(since) => panic!("a pre-epoch clock must fail, got {:?}", since),
+            other => panic!("expected a Runtime error, got {:?}", other),
+        }
+        // One nanosecond before the epoch is the closest pre-epoch instant there
+        // is, so the boundary is tested at its own edge rather than one second
+        // away from it.
+        let one_nanosecond_before = UNIX_EPOCH - Duration::from_nanos(1);
+        assert!(
+            since_epoch(one_nanosecond_before, Span::new(1, 1)).is_err(),
+            "one nanosecond before the epoch is still before it"
+        );
+    }
+
+    /// The epoch itself is zero seconds after itself, not an error. The two
+    /// tests above and this one are what make the conversion total: the boundary
+    /// is exactly where it is stated to be.
+    #[test]
+    fn the_epoch_boundary_is_accepted_by_the_conversion() {
+        assert_eq!(
+            since_epoch(UNIX_EPOCH, Span::new(1, 1)).expect("the epoch is an instant"),
+            Duration::ZERO,
+            "the epoch is zero seconds after itself"
+        );
+        assert_eq!(
+            since_epoch(UNIX_EPOCH + Duration::from_secs(1), Span::new(1, 1))
+                .expect("one second after the epoch is an instant"),
+            Duration::from_secs(1),
+            "one second after the epoch is one second after it"
+        );
+    }
+
+    /// A timestamp that names no instant is refused rather than saturated. The
+    /// saturating `as u64` cast this replaced turned `time.format(1e300)` into
+    /// a panic and `time.format(-1)` into `1970-01-01`, which is a wrong answer
+    /// dressed as a right one.
+    #[test]
+    fn edge_a_timestamp_naming_no_instant_is_refused() {
+        let span = Span::new(2, 5);
+        for (timestamp, what) in [
+            (-1e300, "far before any date chrono can name"),
+            (1e300, "far after any date"),
+            (253_402_300_801.0, "one second past the year 10000"),
+            (f64::NAN, "NaN, which is not a number of seconds"),
+            (f64::INFINITY, "infinity"),
+            (f64::NEG_INFINITY, "negative infinity"),
+        ] {
+            match seconds_for_format(timestamp, span) {
+                Err(Error::Runtime(message, _)) => assert!(
+                    message.contains("time.format"),
+                    "{} must be refused as a time.format error, got `{}`",
+                    what,
+                    message
+                ),
+                Ok(secs) => panic!("{} must be refused, got {} seconds", what, secs),
+                other => panic!("{} should be a Runtime error, got {:?}", what, other),
+            }
+        }
+    }
+
+    /// A timestamp before the epoch names a real date, so it is formatted and
+    /// not refused. The zero boundary is where the refusal starts, and a
+    /// conversion that answered `1970-01-01` for `1969-12-31T23:59:59Z` would
+    /// be wrong by a day and never say so.
+    #[test]
+    fn a_pre_epoch_timestamp_is_a_date_not_an_error() {
+        for (timestamp, expected, what) in [
+            (-1.0, "1969-12-31", "one second before 1970"),
+            (-86_400.0, "1969-12-31", "the whole of 1969-12-31"),
+            (-2_208_988_800.0, "1900-01-01", "the start of 1900"),
+        ] {
+            let secs = seconds_for_format(timestamp, Span::new(1, 1))
+                .unwrap_or_else(|e| panic!("{} is a real date, got {:?}", what, e));
+            assert_eq!(
+                chrono::DateTime::from_timestamp(secs, 0)
+                    .unwrap_or_else(|| panic!("{} should be formattable", what))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                expected,
+                "{} should format as the date it names",
+                what
+            );
+        }
+    }
+
+    /// A number of seconds `Duration::from_secs_f64` panics on must be refused
+    /// before it reaches `thread::sleep`. The red test was a panic in `core` at
+    /// `time.rs:962` — "cannot convert float seconds to Duration: value is
+    /// either too big or NaN" — which unwound the interpreter thread and
+    /// replaced the program's failure with "The interpreter thread stopped
+    /// unexpectedly", uncatchable by a Redblue `try`.
+    #[test]
+    fn edge_a_sleep_the_clock_cannot_wait_is_a_runtime_error() {
+        let span = Span::new(4, 12);
+        for (seconds, what) in [
+            (-1.0, "a negative number of seconds"),
+            (-0.5, "a negative fraction of a second"),
+            (f64::NEG_INFINITY, "negative infinity"),
+            (f64::NAN, "NaN, which is not a number of seconds"),
+            (f64::INFINITY, "infinity"),
+            (1e20, "a number of seconds no clock can wait"),
+            (1e300, "far longer than any clock can wait"),
+            (f64::MAX, "the widest finite number"),
+        ] {
+            match sleep_duration(seconds, span) {
+                Err(Error::Runtime(message, _)) => assert!(
+                    message.contains("time.sleep"),
+                    "{} must be refused as a time.sleep error, got `{}`",
+                    what,
+                    message
+                ),
+                Ok(duration) => panic!("{} must be refused, got {:?}", what, duration),
+                other => panic!("should be a Runtime error, got {:?}", other),
+            }
+        }
+    }
+
+    /// A sleep `time.sleep` can actually perform is not refused. A zero-second
+    /// sleep is the boundary the refusals above sit against, and a fractional
+    /// one is a wait that has always worked, so neither may become an error
+    /// here — a conversion that answered "you may not sleep" for `0` would
+    /// refuse a program that used to run.
+    #[test]
+    fn a_sleep_within_the_waitable_range_is_accepted() {
+        for (seconds, expected, what) in [
+            (0.0, Duration::ZERO, "no wait at all"),
+            (-0.0, Duration::ZERO, "negative zero is zero"),
+            (0.25, Duration::from_millis(250), "a quarter second"),
+            (1.5, Duration::from_millis(1500), "a second and a half"),
+            (10.0, Duration::from_secs(10), "ten whole seconds"),
+        ] {
+            assert_eq!(
+                sleep_duration(seconds, Span::new(1, 1))
+                    .unwrap_or_else(|e| panic!("{} must be waitable, got {:?}", what, e)),
+                expected,
+                "{} must reach thread::sleep as the duration it names",
+                what
+            );
+        }
+    }
+
+    /// `chrono` will parse a year as low as -262143, and the seconds that come
+    /// back are ones `time.format` refuses — the two builtins disagreed about
+    /// whether the instant existed. A date outside the window both accept is a
+    /// `Runtime` error naming `time.unix`, not a number nothing else will take.
+    #[test]
+    fn edge_a_date_outside_the_window_both_builtins_accept_is_refused() {
+        let span = Span::new(1, 1);
+        for (text, what) in [
+            ("-99999-01-01 00:00:00", "a year past what a date can name"),
+            ("-262143-01-01 00:00:00", "the earliest year chrono parses"),
+            (
+                "-9999-01-01 00:00:00",
+                "before the window time.format accepts",
+            ),
+        ] {
+            match seconds_for_unix(text, span) {
+                Err(Error::Runtime(message, _)) => assert!(
+                    message.contains("time.unix"),
+                    "{} must be refused as a time.unix error, got `{}`",
+                    what,
+                    message
+                ),
+                Ok(secs) => panic!("{} must be refused, got {} seconds", what, secs),
+                other => panic!("should be a Runtime error, got {:?}", other),
+            }
+        }
+    }
+
+    /// A date inside the window is a timestamp, and the same instant read back
+    /// through `time.format` must name it again. This is what makes the two
+    /// builtins agree rather than merely both return a number.
+    #[test]
+    fn a_date_inside_the_window_round_trips_through_time_format() {
+        for (text, expected) in [
+            ("1970-01-01 00:00:00", 0_i64),
+            ("1969-12-31 23:59:59", -1),
+            ("2024-01-15 12:30:00", 1_705_321_800),
+            ("9999-12-31 23:59:59", 253_402_300_799),
+        ] {
+            let seconds = seconds_for_unix(text, Span::new(1, 1))
+                .unwrap_or_else(|e| panic!("{} is a real date, got {:?}", text, e));
+            assert_eq!(seconds, expected, "{} should count from the epoch", text);
+            // The point of the shared window: what `time.unix` produces,
+            // `time.format` must accept.
+            assert!(
+                seconds_for_format(seconds as f64, Span::new(1, 1)).is_ok(),
+                "{} must produce a timestamp time.format can read back",
+                text
+            );
+        }
     }
 }
