@@ -678,9 +678,15 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ));
             }
             // A double carries 53 bits of integer and is exact up to `2^53`, so
-            // truncating loses the low bits of nothing a seed can express and
-            // wraps rather than saturating — `as u64` on a negative `f64` gives
-            // a different seed, which is the answer, not a clamp.
+            // truncating loses no low bit of anything a seed can express, and
+            // `as u64` on a negative `i64` reinterprets rather than clamps, so
+            // `random_seed(-1)` is a different seed from `random_seed(1)`.
+            //
+            // Past the ends of `i64` the cast saturates rather than wrapping, so
+            // `random_seed(1e300)` is the seed `random_seed(9223372036854775807)`
+            // names. That is a stated contract and not an accident: a seed
+            // outside the machine integer has no bits left to give, and both
+            // bounds are reproducible and distinct from each other.
             seed_random(seed.trunc() as i64 as u64);
             Ok(Some(Value::Nothing))
         }

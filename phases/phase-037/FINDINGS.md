@@ -206,3 +206,98 @@ fails naming the arithmetic-sequence symptom.
 **Generalisable for the auditor:** a Definition-of-Done line must map to a named
 test that fails when the line is violated. Where a report quotes a measurement
 with no test behind it, that line is unverified however green the suite is.
+
+## 9. Two branches of the phase's own code had no test at all
+
+The §6/§7/§8 lesson, a fourth time, and the one that says something about the
+shape of the gap rather than about one defect.
+
+The finding this phase fixes is a builtin that ignores its arguments. The fix
+therefore has three ways of being *given* a range — no argument, one argument, two
+— and every test in the inherited suite passed two arguments. Read
+`src/runtime.rs:608-617` (`random_range`) against the suite:
+
+| Branch | Reached by | Tested |
+|---|---|---|
+| `(None, None)` → `[0, default]` | `random()`, `random_number()` | **no** |
+| one argument → `[0, n]` | `random(6)`, `random_number(10)` | **no** |
+| two arguments → `[min, max]` | everything else | yes, every other test |
+
+So `random(6)` — the single most ordinary spelling of a draw in any language —
+was never executed by a test, and the code could have been reading it as
+`[0, default_max]` and nothing would have said so. The same sweep found the
+scaling path in `random_int` (`src/runtime.rs:570-574`, the branch taken above
+`2^53` members) unreachable by the whole suite: every range the tests draw from
+has at most a thousand members, and the one enormous range they do use
+(`-1e308..1e308`) is refused before the branch. An out-of-range or fractional
+answer from that path would have been invisible.
+
+Closed by two tests written on this run:
+
+- `edge_random_reads_its_range_from_every_spelling_of_the_call` — 65 seeds
+  through each spelling; `random()` reaches both ends of `[0, 100]`, `random(6)`
+  names all seven members of `[0, 6]`, `random_number()` stays in `[0, 1)`,
+  `random_number(10)` reaches the top of its range, and `random(-5)` /
+  `random("a")` are refused.
+- `edge_random_draws_from_a_range_too_wide_to_count_exactly` — 300 draws from
+  `[0, 1e16]` and 100 from `[-1e16, 1e16]`: every answer whole, inside the
+  range, distinct, and spread to both sides.
+
+Proven failable by mutating `src/runtime.rs` (reverted):
+
+```
+# dropping `.floor().min(width - 1.0)` from the scaling path
+test edge_random_draws_from_a_range_too_wide_to_count_exactly ... FAILED
+  `random` is the whole-number draw, and a range of 10000000000000000 is wider
+  than 2^53 without making the draw fractional: random(0, 10000000000000000)
+  answered 3681895156516694.5 for seed 1
+test result: FAILED. 21 passed; 1 failed
+```
+
+The other 21 tests were green under that mutation — it was the only thing in the
+suite that could see it.
+
+**Generalisable for the auditor:** when a phase fixes "the arguments were
+ignored", check every *shape* the argument list can take, not just the shape the
+tests happen to use. Ignored-arguments defects hide in the untaken arms of the
+argument parser, and a test that always writes two arguments cannot see them.
+
+## 10. The comment on the seed cast described the opposite of what it does
+
+Before this run, `src/runtime.rs:680-684` read:
+
+> truncating loses the low bits of nothing a seed can express and **wraps rather
+> than saturating**
+
+`as i64` on an `f64` in Rust saturates at the ends of the range. `random_seed(-1)`
+does reinterpret (the `i64 → u64` cast is a reinterpreting one), but
+`random_seed(1e300)` is the seed `random_seed(9223372036854775807)` names:
+
+```
+$ rb run seed-saturation.rb     # random_seed(1e300) / random_seed(2^63-1) / random_seed(-2^63)
+33283476559
+33283476559
+146969549454
+612588730794
+```
+
+Behaviour left alone — refusing an out-of-range seed would be a new error
+surface this phase was not asked for — and the comment corrected to say what the
+cast does, with the saturation stated as the contract it now is. Pinned by
+`edge_random_seed_beyond_a_machine_integer_saturates_at_the_bound`, which fails
+if the two ends ever collapse to one seed or if the bound stops saturating:
+
+```
+# mutating the cast to `seed.abs().trunc() as u64`
+test edge_random_seed_beyond_a_machine_integer_saturates_at_the_bound ... FAILED
+  random_seed(1e300) and random_seed(9223372036854775807) are both past the top
+  of an i64 and should draw the same sequence, the way a saturating cast makes
+  them
+    left: [296.0, 366.0, 899.0, 892.0, 591.0, ...]
+   right: [356.0, 529.0, 323.0, 554.0, 546.0, ...]
+```
+
+Worth recording as process: the comment was written by the same run that wrote
+the code, described an intention rather than the behaviour, and survived two
+review passes because a comment cannot fail a test. A comment that claims what
+code does should have a test beside it, or it should claim less.

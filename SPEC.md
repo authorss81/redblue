@@ -1047,13 +1047,19 @@ set mixed to random_shuffle(xs) // the same members, in a seeded order
 same sequence of draws, in one process or in two. A program that never seeds
 draws from a fixed default seed rather than from the clock, so Redblue's output
 is reproducible by default and a program has to *ask* for variation it cannot
-reproduce. `random` answers a whole number and `random_number` a fraction; both
+reproduce. A seed outside the range of a 64-bit machine integer has no bits left
+to give and takes the nearest bound, so `random_seed(1e300)` is the seed
+`random_seed(9223372036854775807)` names; the two ends are different seeds from
+each other. `random` answers a whole number and `random_number` a fraction; both
 refuse a range whose low end is above its high end, because such a range has no
-member. `random` answers one of the whole numbers in its range, so a fractional
-bound narrows the range rather than making the draw a fraction:
-`random(0, 100.5)` answers `0` to `100`, and a range holding no whole number at
-all, such as `random(0.2, 0.8)`, is refused. `random_choice` refuses an empty
-list, since it has no member to choose.
+member. A range may be written with two arguments, with one — which is the high
+end, with zero as the low end, so `random(6)` is a die numbered zero through six
+and `random_number(10)` is `[0, 10)` — or with none, which is `[0, 100]` for
+`random` and `[0, 1)` for `random_number`. `random` answers one of the whole
+numbers in its range, so a fractional bound narrows the range rather than making
+the draw a fraction: `random(0, 100.5)` answers `0` to `100`, and a range holding
+no whole number at all, such as `random(0.2, 0.8)`, is refused. `random_choice`
+refuses an empty list, since it has no member to choose.
 
 ### files
 

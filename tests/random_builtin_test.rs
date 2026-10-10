@@ -827,3 +827,234 @@ fn both_engines_agree_on_a_seeded_sequence() {
          tree-walker: {walked:?}\nbytecode:    {compiled:?}"
     );
 }
+
+/// A seed past the ends of a machine integer is accepted, and saturates there.
+///
+/// `random_seed` casts a double to an `i64` and reinterprets that as the
+/// generator's state. Reinterpreting is what keeps `random_seed(-1)` a different
+/// seed from `random_seed(1)`; the cast itself saturates at the ends of `i64`, so
+/// a seed with no machine integer left in it is the bound's seed. That is a
+/// contract and not an accident — it is deterministic, reproducible, and the two
+/// ends do not collide with each other — so it is pinned here rather than left
+/// to whichever way the cast happens to fall.
+#[test]
+fn edge_random_seed_beyond_a_machine_integer_saturates_at_the_bound() {
+    // Nothing is refused: a finite seed is a seed.
+    for seed in [
+        "1e300",
+        "-1e300",
+        "9223372036854775807",
+        "-9223372036854775808",
+    ] {
+        let Value::Nothing = eval(&format!("random_seed({seed})")) else {
+            panic!("random_seed({seed}) should be accepted and answer nothing");
+        };
+    }
+
+    // The same draws twice, so the saturation is reproducible and not a source of
+    // fresh entropy the way a clock would be.
+    let huge = draws_from("random_seed(1e300)\n", "random(0, 1000)", 16);
+    let huge_again = draws_from("random_seed(1e300)\n", "random(0, 1000)", 16);
+    assert_eq!(
+        huge, huge_again,
+        "two runs from the seed 1e300 drew different sequences, so the seed is \
+         not being held"
+    );
+
+    // It is the high bound's seed, because that is what a saturating cast gives.
+    let bound = draws_from("random_seed(9223372036854775807)\n", "random(0, 1000)", 16);
+    assert_eq!(
+        huge, bound,
+        "random_seed(1e300) and random_seed(9223372036854775807) are both past the \
+         top of an i64 and should draw the same sequence, the way a saturating \
+         cast makes them"
+    );
+
+    // The other end is a different seed, or every large seed would be one seed.
+    let low = draws_from("random_seed(-1e300)\n", "random(0, 1000)", 16);
+    assert_ne!(
+        huge, low,
+        "the two ends of the machine integer must not collapse to the same seed"
+    );
+
+    // And a seed a machine integer can hold exactly is not the same seed as the
+    // end it is near, so saturation is a bound and not a rounding of the whole.
+    let just_below = draws_from("random_seed(9000000000000000000)\n", "random(0, 1000)", 16);
+    assert_ne!(
+        huge, just_below,
+        "a seed below the bound of an i64 should not draw as the bound does"
+    );
+}
+
+/// The range a call was written with is the range it draws from, whatever shape
+/// it was written in.
+///
+/// `random` and `random_number` take three spellings of a range and each has its
+/// own reading: no argument is the built-in default, one argument is the dice
+/// spelling `[0, n]` and `[0, n)`, and two arguments are the range itself. The
+/// finding this file pins is a builtin that ignored its arguments *entirely* —
+/// `random(1, 1)` answered `403` — so every spelling has to be shown to reach the
+/// draw, not just the two-argument one the other tests use.
+#[test]
+fn edge_random_reads_its_range_from_every_spelling_of_the_call() {
+    // No argument: `random` is `[0, 100]` and `random_number` is `[0, 1)`.
+    // Sweeping seeds proves both *ends* of the default are reachable, which is
+    // what says the default is a range at all rather than a single number.
+    let mut whole: BTreeSet<i64> = BTreeSet::new();
+    let mut fraction: Vec<f64> = Vec::new();
+    for seed in 0..=64i64 {
+        if let Value::Number(n) = eval(&format!("random_seed({seed})\nrandom()")) {
+            assert!(
+                (0.0..=100.0).contains(&n),
+                "random() answered {n} for seed {seed}, outside the default range [0, 100]"
+            );
+            whole.insert(n as i64);
+        }
+        if let Value::Number(n) = eval(&format!("random_seed({seed})\nrandom_number()")) {
+            assert!(
+                (0.0..1.0).contains(&n),
+                "random_number() answered {n} for seed {seed}, outside the default \
+                 range [0, 1)"
+            );
+            fraction.push(n);
+        }
+    }
+    assert!(
+        whole.contains(&0) && whole.contains(&100),
+        "random() named {whole:?} over 65 seeds and not both of the ends of [0, 100], \
+         so the default range does not include them"
+    );
+    assert!(
+        fraction.len() == 65 && fraction.iter().all(|n| (0.0..1.0).contains(n)),
+        "random_number() should answer a fraction in [0, 1) on every one of 65 seeds"
+    );
+
+    // One argument: the high end, with zero as the low end. `random(6)` is a die
+    // numbered zero through six, so every one of those seven is reachable — a
+    // reading of `[0, 6)` would be six members and `random_number(10)` would top
+    // out below ten.
+    let mut die = BTreeSet::new();
+    for seed in 0..=64i64 {
+        if let Value::Number(n) = eval(&format!("random_seed({seed})\nrandom(6)")) {
+            assert!(
+                (0.0..=6.0).contains(&n),
+                "random(6) answered {n} for seed {seed}, outside the range [0, 6]"
+            );
+            die.insert(n as i64);
+        }
+    }
+    assert_eq!(
+        die,
+        (0..=6).collect::<BTreeSet<i64>>(),
+        "random(6) named {die:?} over 65 seeds and not all seven members of [0, 6], \
+         so the one-argument spelling is not the range it reads as"
+    );
+
+    let mut tens: Vec<f64> = Vec::new();
+    for seed in 0..=64i64 {
+        if let Value::Number(n) = eval(&format!("random_seed({seed})\nrandom_number(10)")) {
+            assert!(
+                (0.0..10.0).contains(&n),
+                "random_number(10) answered {n} for seed {seed}, outside [0, 10)"
+            );
+            tens.push(n);
+        }
+    }
+    assert!(
+        tens.len() == 65 && tens.iter().any(|n| *n >= 9.0),
+        "random_number(10) never reached the top of its range over 65 seeds: {tens:?}"
+    );
+
+    // The one-argument spelling names the *high* end, so a negative one is a
+    // range with its low end above its high end and is refused by name rather
+    // than quietly read as `[-5, 0]`. A non-number is refused here too.
+    for source in ["random(-5)", "random_number(-5)", "random(\"a\")"] {
+        let error = eval_err(source).to_string();
+        assert!(
+            error.contains("random"),
+            "`{source}` is not a range this draw can measure and should be refused \
+             naming random, got: {error}"
+        );
+    }
+}
+
+/// A range wider than a double can count exactly is still drawn from, and still
+/// answers a whole number inside it.
+///
+/// Above `2^53` members the modulo path stops being exact, so `random_int` scales
+/// the draw instead. Every range the rest of this file draws from has at most a
+/// thousand members and so never reaches that branch — and a range too wide to
+/// measure at all is refused — which leaves the scaling path with no test at all.
+/// A scaling path that returned `low + unit * width` unrounded and unclamped
+/// would answer fractions, and one that dropped the clamp could step past the high
+/// end; both are what this pins.
+#[test]
+fn edge_random_draws_from_a_range_too_wide_to_count_exactly() {
+    let wide = 1.0e16;
+    let mut values: Vec<f64> = Vec::new();
+    for seed in 0..=299i64 {
+        let Value::Number(n) = eval(&format!("random_seed({seed})\nrandom(0, {wide})")) else {
+            panic!("random(0, {wide}) should answer a number for seed {seed}");
+        };
+        assert_eq!(
+            n.fract(),
+            0.0,
+            "`random` is the whole-number draw, and a range of {wide} is wider than \
+             2^53 without making the draw fractional: random(0, {wide}) answered \
+             {n} for seed {seed}"
+        );
+        assert!(
+            (0.0..=wide).contains(&n),
+            "random(0, {wide}) answered {n} for seed {seed}, which is outside the \
+             range it was given"
+        );
+        values.push(n);
+    }
+    let distinct: BTreeSet<u64> = values.iter().map(|n| n.to_bits()).collect();
+    assert_eq!(
+        distinct.len(),
+        values.len(),
+        "300 draws from a range of {wide} named {} distinct values, so the scaling \
+         path is not drawing afresh each time",
+        distinct.len()
+    );
+    // A range this wide is only drawn from if the draw is spread over all of it,
+    // so both halves of it have to be reached and not just the one the low bits
+    // of the generator happen to favour.
+    let high = values.iter().filter(|n| **n > wide / 2.0).count();
+    assert!(
+        (100..=200).contains(&high),
+        "300 draws from [0, {wide}] put {high} of them above the midpoint, which is \
+         not spread over the range: {values:?}"
+    );
+
+    // The same path with a negative low end: the draw has to come out on both
+    // sides of zero, or the scaling is being done from the wrong end.
+    let mut signs = [0usize; 2];
+    for seed in 0..=99i64 {
+        let drawn = eval(&format!("random_seed({seed})\nrandom(-1e16, 1e16)"));
+        let Value::Number(n) = drawn else {
+            panic!("random(-1e16, 1e16) should answer a number for seed {seed}");
+        };
+        assert!(
+            (-1.0e16..=1.0e16).contains(&n),
+            "random(-1e16, 1e16) answered {n} for seed {seed}, outside its range"
+        );
+        assert_eq!(
+            n.fract(),
+            0.0,
+            "a range wider than 2^53 must still answer a whole number, it answered \
+             {n} for seed {seed}"
+        );
+        if n < 0.0 {
+            signs[0] += 1;
+        } else {
+            signs[1] += 1;
+        }
+    }
+    assert!(
+        signs[0] > 10 && signs[1] > 10,
+        "100 draws from [-1e16, 1e16] put {signs:?} on each side of zero, so the \
+         range is not being drawn from evenly"
+    );
+}
