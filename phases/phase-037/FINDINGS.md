@@ -17,38 +17,29 @@ Re-checked on the resume run, from a clean `git ls-files`: `git ls-files |
 grep verify` returns nothing and `ls verify.sh` at the root returns
 `No such file or directory`. The directory has not appeared since.
 
-## 2. Two Definition-of-Done lines in `rbops/phases.json` are unsatisfiable
+## 2. RESOLVED — the manifest was corrected, do not resend this complaint
 
-Recorded so the auditor can correct the manifest rather than a later implementer
-being sent to fail them again. Both are in phase-037's "Definition of done".
+An earlier run recorded (here) that two Definition-of-Done lines were
+arithmetically unsatisfiable: the 101-distinct bound was attached to
+`random_number`, and the decile band read 400–600 against a 1000-draw count.
 
-**(a) "200 draws of `random_number(0, 100)` produce at most 101 distinct
-values".** `random_number` is the fractional draw over `[0, 100)`, about
-`100 × 2^53 ≈ 9.0 × 10^17` representable values. The expected number of
-collisions in 200 draws is `200 × 199 / 2 / 9.0e17 ≈ 2 × 10^-14`; getting to
-101 distinct needs ~99 of them. Measured on the built binary: **200 distinct of
-200**.
+**The manifest has since been corrected and the complaint is withdrawn.** The
+101-distinct bound now attaches to `random()` only — the whole-number draw, which
+has 101 members — `random_number` carries the non-monotonicity property it can
+actually have, and the band reads 40–160.
 
-The 101-member bound is a true statement about `random(0, 100)`, the whole-number
-draw, and that one meets it (91 ≤ 101). It cannot be a statement about
-`random_number(0, 100)` without discarding the fractional part — which would
-contradict the *next* line of the same section, the decile-bucket requirement,
-since a whole-number draw over `[0, 100)` cannot occupy ten deciles of width 10
-in the way that line describes. The two lines cannot both hold.
+Re-measured against the corrected lines on this run:
 
-**(b) "1000 draws of `random_number(0, 100)` ... put between 400 and 600 draws
-in each of the ten decile buckets".** 1000 draws over ten buckets is a mean of
-100 a bucket; 400–600 per bucket implies 4000–6000 total draws. The line is off
-by 5× against its own stated draw count.
+| Line | Required | Measured |
+|---|---|---|
+| 200 draws of `random(0, 100)`, distinct | ≤ 101 | **85** |
+| 200 draws of `random_number(0, 100)`, distinct | 200 | **200** |
+| consecutive differences, 200 draws | alternate sign | 99 rises, 100 falls |
+| deciles of 1000 draws of `random_number(0, 100)` | 40–160 each | `[105, 95, 103, 94, 101, 98, 116, 100, 89, 99]` |
 
-What the line is reaching for — draws spread across the range rather than
-marching monotonically across it, which was exactly the old
-`now.as_nanos()` defect — is implemented and pinned:
-`tests/random_builtin_test.rs::edge_random_number_spreads_its_draws_across_the_range`
-asserts every decile of the 1000-draw distribution lies in 40–160, and measures
-`[105, 95, 103, 94, 101, 98, 116, 100, 89, 99]` — mean 100.0.
-
-Neither line was made to pass by weakening a test. Both are reported in REPORT.md.
+Every line is met. **An implementer who finds this complaint in a resumed context
+should re-read it against their own current PROMPT.md before acting on it** — this
+run's predecessor spent an attempt satisfying lines that no longer existed.
 
 ## 3. A seeded generator is not an unpredictable one
 
@@ -121,3 +112,60 @@ was careful about arithmetic it could check and did not notice a branch it did
 not have a test for. Coverage of the *edge* rows in AGENTS.md 3.2 is what finds
 this, and it only finds it if the edge is drawn somewhere the happy path does
 not reach.
+
+## 7. The shuffle test passed on the exact defect the phase names
+
+The same lesson, a second time, in the same phase — found on this run by mutating
+`src/runtime.rs` rather than by reading it.
+
+`edge_random_shuffle_permutes_its_input_for_every_seed` sweeps seeds 0..=99 and
+asserts each answer is a permutation of its input and is not the identity. Those
+are the two properties a shuffle must have. **The original defect passes both.**
+
+Reinstating the old shuffle — one draw reused as `seed % (i + 1)` for every swap —
+left all 17 tests green:
+
+```
+test result: ok. 17 passed; 0 failed
+```
+
+A single draw reused across the loop still yields a permutation (swaps are
+permutations, and they compose to one) and is still rarely the identity (with 840
+reachable outcomes, the chance of landing on the identity is about 1/840). So both
+assertions were satisfiable by the bug they were written for.
+
+What the defect cannot do is *reach*. With one draw reused, every `j` is
+`once % (i + 1)`, so the whole permutation is determined by
+`once % lcm(2..8)` = **840** of the `8!` = 40320 permutations. A Fisher-Yates that
+draws per step has no such ceiling. Measured on seed 12345:
+
+| | Real Fisher-Yates | One-draw defect | Ceiling |
+|---|---|---|---|
+| 2000 shuffles, 8 elements | **1969** distinct | 770 | 840 |
+| 500 shuffles, 6 elements | **359** distinct | — | 60 |
+
+New test `edge_random_shuffle_reaches_far_more_permutations_than_it_can` asserts
+each count exceeds its ceiling. Under the mutation it fails by name:
+
+```
+2000 shuffles of an eight-element list reached only 770 distinct
+permutations. Reusing one draw for every step caps the reachable set at
+lcm(2..=8) = 840, so this is the `seed % (i + 1)` computed once and reused
+for every swap — the exact shape of the original defect
+```
+
+The threshold is deliberately loose — 840 against a measured 1969, 60 against a
+measured 359 — so it survives a change of mixer without being retuned, and it
+does not name a particular permutation or compare against a golden list, which
+would encode the generator's internals.
+
+The first attempt at this test was weaker and I have written that down rather
+than quietly replacing it: it asserted that 40 consecutive shuffles differ from
+one another. That passes under the mutation too, because reusing the draw across
+*steps* still leaves each *call* with a fresh one. A variation check is not a
+reach check.
+
+**Generalisable for the auditor:** for any randomised operation, "the output is
+well-formed" and "the output varies" are both satisfiable by a one-value
+generator. What distinguishes a real draw is the size of the set it can reach.
+Any future phase that seeds a generator should pin reach, not variance.

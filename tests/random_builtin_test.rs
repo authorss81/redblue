@@ -287,6 +287,104 @@ fn edge_random_shuffle_permutes_its_input_for_every_seed() {
     }
 }
 
+/// Every step of the shuffle draws its own index.
+///
+/// The defect the phase names is specific: the old code computed one `seed` and
+/// used `seed % (i + 1)` for every swap. Reusing one draw across the loop leaves
+/// the permutation entirely determined by `seed % lcm(2..8)`, which is `840` —
+/// so out of the `8! = 40320` permutations of an eight-element list that version
+/// can reach at most 840 of them, and no number of draws will ever find the rest.
+/// A Fisher-Yates that draws per step has no such ceiling.
+///
+/// This is what the test measures, and it is how the one-draw version was caught
+/// after the simpler "the same shuffle twice" check turned out not to notice it:
+/// reusing the draw across *steps* still leaves each *call* with a fresh one, so
+/// repeated calls do differ. The reachable set is the thing that stays small.
+///
+/// Nothing here names a particular permutation or compares against a golden
+/// list. Any such check would encode the mixer's internals and break the next
+/// time the generator changes; the property is the size of the reachable set,
+/// which any correct shuffle has and the defect does not.
+#[test]
+fn edge_random_shuffle_reaches_far_more_permutations_than_it_can() {
+    const ELEMENTS: usize = 8;
+    const DRAWS: usize = 2000;
+    // `lcm(2..=8)`, the ceiling on the permutations a one-draw shuffle can reach.
+    const ONE_DRAW_CEILING: usize = 840;
+
+    let source = format!(
+        "random_seed({SEED})\n\
+         set seen to []\n\
+         for each i from 1 to {DRAWS}\n    \
+             append(\"seen\", random_shuffle([1, 2, 3, 4, 5, 6, 7, 8]))\n\
+         end\n\
+         seen"
+    );
+    let Value::List(items) = eval(&source) else {
+        panic!("the shuffle loop should answer a list");
+    };
+    assert_eq!(
+        items.len(),
+        DRAWS,
+        "the loop should have produced {DRAWS} shuffles, it produced {}",
+        items.len()
+    );
+    for (index, value) in items.iter().enumerate() {
+        let Value::List(members) = value else {
+            panic!("shuffle {index} is not a list, it is {value:?}");
+        };
+        assert_eq!(
+            members.len(),
+            ELEMENTS,
+            "shuffle {index} has {} members, so it is not a permutation",
+            members.len()
+        );
+    }
+    let distinct: BTreeSet<String> = items.iter().map(|value| value.to_string()).collect();
+    assert!(
+        distinct.len() > ONE_DRAW_CEILING,
+        "{DRAWS} shuffles of an eight-element list reached only {} distinct \
+         permutations. Reusing one draw for every step caps the reachable set at \
+         lcm(2..=8) = {ONE_DRAW_CEILING}, so this is the `seed % (i + 1)` computed \
+         once and reused for every swap — the exact shape of the original defect",
+        distinct.len()
+    );
+
+    // The same claim at a different length, because the ceiling scales with the
+    // input rather than being specific to eight elements. For six elements the
+    // one-draw ceiling is `lcm(2..=6) = 60`.
+    const SIX: usize = 6;
+    const SIX_CEILING: usize = 60;
+    let shorter = format!(
+        "random_seed({SEED})\n\
+         set seen to []\n\
+         for each i from 1 to 500\n    \
+             append(\"seen\", random_shuffle([1, 2, 3, 4, 5, 6]))\n\
+         end\n\
+         seen"
+    );
+    let Value::List(items) = eval(&shorter) else {
+        panic!("the six-element shuffle loop should answer a list");
+    };
+    for (index, value) in items.iter().enumerate() {
+        let Value::List(members) = value else {
+            panic!("shuffle {index} is not a list, it is {value:?}");
+        };
+        assert_eq!(
+            members.len(),
+            SIX,
+            "shuffle {index} lost or gained a member"
+        );
+    }
+    let distinct: BTreeSet<String> = items.iter().map(|value| value.to_string()).collect();
+    assert!(
+        distinct.len() > SIX_CEILING,
+        "500 shuffles of a six-element list reached only {} distinct permutations, \
+         which is within the {SIX_CEILING} a one-draw shuffle can reach",
+        distinct.len()
+    );
+}
+
 /// `random_choice` reaches every element of the list, not just the first few.
 ///
 /// The old source was `now.as_nanos() as usize % len`; this is the check that a
