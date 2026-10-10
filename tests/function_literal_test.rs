@@ -75,9 +75,10 @@ fn eval_err(source: &str) -> Error {
 #[track_caller]
 fn message(error: &Error) -> String {
     match error {
-        Error::Parser(message, _) | Error::Runtime(message, _) | Error::Analyzer(message, _) => {
-            message.clone()
-        }
+        Error::Parser(message, _)
+        | Error::Runtime(message, _)
+        | Error::Limit(message, _)
+        | Error::Analyzer(message, _) => message.clone(),
         other => panic!("expected a diagnostic, got {other:?}"),
     }
 }
