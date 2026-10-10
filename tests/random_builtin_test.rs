@@ -254,6 +254,58 @@ fn edge_random_number_spreads_its_draws_across_the_range() {
     }
 }
 
+/// Consecutive fractional draws do not march, and do not step.
+///
+/// The old source was `now.as_nanos()`, a monotonic nanosecond counter, so eight
+/// consecutive draws of `random_number(0, 100)` came out `4.8086, 5.8041, 6.0445,
+/// 6.2037, 6.36, 6.5312, 6.6935, 6.8537` — strictly increasing, and spaced like a
+/// clock. The bucket test above catches that too, but it measures the spread of a
+/// thousand draws; this one measures the *shape* of consecutive ones, which is
+/// what a reader of a program's output actually notices.
+///
+/// It also pins the distinction the two `random` draws turn on. `random_number`
+/// answers a fraction over `[0, 100)`, which holds about `100 * 2^53` distinct
+/// values, so 200 draws naming 200 of them is the expected outcome and a
+/// whole-number member bound is not a property it has — `random(0, 100)`, the
+/// whole-number draw, is the one with 101 members (`random_honours_its_range_
+/// arguments`). Asserting 101 here would fail against a correct implementation.
+#[test]
+fn edge_random_number_draws_are_not_a_march_and_not_an_arithmetic_sequence() {
+    let values = draws("random_number(0, 100)", 200);
+
+    let distinct: BTreeSet<u64> = values.iter().map(|value| value.to_bits()).collect();
+    assert_eq!(
+        distinct.len(),
+        values.len(),
+        "random_number(0, 100) answers a fraction over a range holding about \
+         9 * 10^17 distinct values, so 200 draws should name 200 of them; these \
+         named {}",
+        distinct.len()
+    );
+
+    let rises = values.windows(2).filter(|pair| pair[1] > pair[0]).count();
+    let falls = values.windows(2).filter(|pair| pair[1] < pair[0]).count();
+    assert!(
+        rises > 0 && falls > 0,
+        "consecutive draws stepped {rises} times up and {falls} times down over 199 \
+         steps; every step the same way means the draws are marching, which is \
+         exactly what the monotonic clock source produced"
+    );
+
+    let mut steps: Vec<u64> = values
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).to_bits())
+        .collect();
+    steps.sort_unstable();
+    steps.dedup();
+    assert!(
+        steps.len() >= 100,
+        "199 consecutive differences took only {} distinct values; a fixed \
+         arithmetic sequence has exactly one, and this one is not it",
+        steps.len()
+    );
+}
+
 /// `random_shuffle` returns a permutation, and not the input back.
 ///
 /// Both halves are pinned: a shuffle that dropped or duplicated an element would

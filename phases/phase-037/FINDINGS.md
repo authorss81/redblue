@@ -17,6 +17,10 @@ Re-checked on the resume run, from a clean `git ls-files`: `git ls-files |
 grep verify` returns nothing and `ls verify.sh` at the root returns
 `No such file or directory`. The directory has not appeared since.
 
+Re-checked again on this run: `ls rbops` → `No such file or directory`,
+`git ls-files | grep -c rbops` → **0**. No tracked file under `rbops/` exists in
+this checkout at any commit. The fourth gate remains unrunnable here.
+
 ## 2. RESOLVED — the manifest was corrected, do not resend this complaint
 
 An earlier run recorded (here) that two Definition-of-Done lines were
@@ -32,12 +36,14 @@ Re-measured against the corrected lines on this run:
 
 | Line | Required | Measured |
 |---|---|---|
-| 200 draws of `random(0, 100)`, distinct | ≤ 101 | **85** |
+| 200 draws of `random(0, 100)`, distinct | ≤ 101 | **91** at seed 12345, **85** unseeded |
 | 200 draws of `random_number(0, 100)`, distinct | 200 | **200** |
 | consecutive differences, 200 draws | alternate sign | 99 rises, 100 falls |
 | deciles of 1000 draws of `random_number(0, 100)` | 40–160 each | `[105, 95, 103, 94, 101, 98, 116, 100, 89, 99]` |
 
-Every line is met. **An implementer who finds this complaint in a resumed context
+Every line is met, and the last two are now asserted by
+`edge_random_number_draws_are_not_a_march_and_not_an_arithmetic_sequence`
+(written this run) rather than merely measured — see §8. **An implementer who finds this complaint in a resumed context
 should re-read it against their own current PROMPT.md before acting on it** — this
 run's predecessor spent an attempt satisfying lines that no longer existed.
 
@@ -169,3 +175,34 @@ reach check.
 well-formed" and "the output varies" are both satisfiable by a one-value
 generator. What distinguishes a real draw is the size of the set it can reach.
 Any future phase that seeds a generator should pin reach, not variance.
+
+## 8. A measured property in a report is not a pinned property in a test
+
+The third instance of the §6/§7 lesson, and the reason the phase was not finished
+even though everything was green.
+
+The corrected Definition of Done adds a property for `random_number` that the
+inherited suite did not assert anywhere: *consecutive draws are not monotonic and
+are not a fixed arithmetic sequence*. The inherited REPORT quoted measurements for
+it — "200 draws, 200 distinct, 99 rises / 100 falls" — but those were numbers the
+run had computed, not assertions the suite made. Nothing in
+`tests/random_builtin_test.rs` could fail on the property. The only neighbouring
+test, `edge_random_number_spreads_its_draws_across_the_range`, measures the spread
+of 1000 draws into ten deciles, which is a different question from the shape of
+consecutive draws.
+
+A test whose absence is invisible from the outside is worse than no test, because
+the report says the property holds and a reviewer checking report-against-diff
+sees a number, not a hole.
+
+Closed by `edge_random_number_draws_are_not_a_march_and_not_an_arithmetic_sequence`
+(tests/random_builtin_test.rs:266), which asserts 200 distinct draws, that
+consecutive steps include both a rise and a fall, and that the 199 consecutive
+differences take at least 100 distinct values. Proven failable twice by mutation
+(`FINDINGS.md` §3 of this report's mutations, in REPORT.md): against a monotonic
+counter it fails naming the marching symptom, and against a coarse counter it
+fails naming the arithmetic-sequence symptom.
+
+**Generalisable for the auditor:** a Definition-of-Done line must map to a named
+test that fails when the line is violated. Where a report quotes a measurement
+with no test behind it, that line is unverified however green the suite is.
