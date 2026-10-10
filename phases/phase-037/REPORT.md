@@ -1,12 +1,35 @@
 # Phase 037 — Seed the `random` builtins and honour their range arguments
 
-## What changed on this run
+## What changed on this run — merge resolution only
 
-The implementation arrived with the resume commit (`8910456 resume phase-037:
-adopt preserved work`) and its three cargo gates were green before this run
-started. This run audited that implementation for the same thing three earlier
-runs had each found — a piece of behaviour with no test behind it — found three
-such pieces, and closed them.
+This run received the previous attempt's work merged onto a newer `main` and the
+merge did not resolve cleanly. Five files carried conflict markers. Resolving
+them **was** the job; there was no implementation left to write.
+
+| File | Conflict | Resolution |
+|---|---|---|
+| `src/runtime.rs` | 1 hunk, comment-only, in the `random_seed` arm | Kept **HEAD**. HEAD's comment says the `f64 → i64` cast *saturates*; the recovery branch's said it *wraps*. Rust saturates float→int casts, so HEAD is correct and the recovery text was the wrong claim — the same defect FINDINGS.md §10 records the run before this one finding in prose. |
+| `SPEC.md` | 1 hunk, the `random` builtins section | Kept **HEAD**, a strict superset: it adds the call shapes (`random()`, `random(6)`) and the seed-saturation contract. Verified HEAD's claims against `src/runtime.rs:608-617` (`random_range` takes 0, 1 or 2 arguments) and `src/runtime.rs:696` (`seed.trunc() as i64 as u64`) before keeping them — the prose matches the code. |
+| `tests/random_builtin_test.rs` | 1 hunk; the recovery branch's side was **empty** | Kept **HEAD**. `diff <recovery> <HEAD>` shows the recovery file is a strict 829-line prefix of HEAD's 1060. |
+| `phases/phase-037/FINDINGS.md` | 1 hunk; the recovery branch's side was **empty** | Kept **HEAD** (§9, §10). |
+| `phases/phase-037/REPORT.md` | 7 hunks, both sides non-empty | Kept **HEAD** per hunk as the base, and carried across the recovery branch's unique finding §7 (see *Known gaps*). |
+
+Nothing was deleted, no test was weakened, no assertion was loosened, and no
+existing code was rewritten. `git diff --stat` against the pre-merge `HEAD` is
+empty for every file except this report, which is the record of the resolution.
+
+The merged tree was then re-gated from scratch, every Definition-of-Done line
+re-measured against the binary built from *this* tree, and the failure-assertion
+channel re-proven with a mutation. Those measurements are below, and every number
+in the rest of this file that is not attributed to an earlier run was produced by
+this run.
+
+## What the previous run changed
+
+For the record, since this run did not produce it — the implementation arrived
+with the resume commit (`8910456 resume phase-037: adopt preserved work`) and
+with `ccff5f4 rbops: phase-037`. That run audited the implementation for a piece
+of behaviour with no test behind it, found three, and closed them.
 
 | File | Lines | What |
 |---|---|---|
@@ -14,13 +37,12 @@ such pieces, and closed them.
 | `tests/random_builtin_test.rs` | +231 | Three new tests: the two spellings of a range nothing ever executed, the `> 2^53` scaling path, and the seed-saturation contract |
 | `SPEC.md` | +12 −6 | Documents the call shapes (`random()`, `random(6)`) and the seed bound that the new tests now pin |
 | `phases/phase-037/FINDINGS.md` | +95 | §9 (untaken argument-shape branches and the untested scaling path), §10 (the comment that described the opposite of the code) |
-| `phases/phase-037/REPORT.md` | rewritten | This file |
 
-`src/runtime.rs` changed by one comment. Every behaviour line in the "What
+`src/runtime.rs` changed by one comment there. Every behaviour line in the "What
 changed (whole phase)" table below came from the earlier attempts and is
 reported, not re-claimed.
 
-## What the audit found
+## What that audit found
 
 The finding this phase fixes is *a builtin that ignores its arguments*. The fix
 therefore has three ways of being given a range — none, one, two — and every
@@ -112,10 +134,19 @@ the same sequence, the way a saturating cast makes them
 | `edge_random_seed_beyond_a_machine_integer_saturates_at_the_bound` | numeric boundary — a seed past the ends of an `i64` is accepted, reproducible, equal to the bound it saturates to, different from the other end and from a seed just below the bound |
 
 The nineteen tests inherited with the implementation are listed in the previous
-report's table and are unchanged here: 19 tests, 16 of them `edge_*`, and the
-same 8 `eval_err` call sites that were asserting clean `Runtime` failures before
-this run, in the project's standard idiom for asserting a pipeline produced a
-failure.
+report's table and are unchanged here. The merged tree carries **22 tests, 19 of
+them named `edge_*`**, and **9 `eval_err` call sites** asserting clean `Runtime`
+failures in the project's standard idiom. `eval_err` panics if the program under
+test *succeeds*, so each of those nine is a real assertion that a failure was
+produced, not a call whose result is ignored.
+
+The merged tree also carries `edge_random_number_draws_are_not_a_march_and_not_an_arithmetic_sequence`
+(written by the recovery branch, which HEAD's test table had dropped). It pins
+the corrected Definition-of-Done property for `random_number` — 200 distinct
+draws, both a rise and a fall among the consecutive steps, and at least 100
+distinct consecutive differences — the exact symptom the finding reported. Its
+finding is `FINDINGS.md` §8. That test had no entry in HEAD's report at all;
+restoring it is the one substantive merge decision in the test file.
 
 ## What changed (whole phase, cumulative)
 
@@ -171,21 +202,39 @@ earlier report was written: the 101-distinct bound attaches to `random()` only,
   1
   ```
 
-- [x] **200 draws of `random(0, 100)` name at most 101 distinct values** — **85**
+- [x] **200 draws of `random(0, 100)` name at most 101 distinct values** — **91**
       distinct, 0 fractional, 0 outside `[0, 100]`. Was 179.
 
   ```
-  distinct: 85    outside: 0    fractional: 0
+  draws: 200
+  distinct: 91
+  outside [0,100]: 0
+  fractional: 0
   ```
+
+  Measured on this run at the pinned `SEED` 12345. The inherited report said
+  **85**; that is the *unseeded* figure (the recovery branch's report measured
+  91 seeded and 85 unseeded, which agrees with this run). The bound is ≤ 101
+  either way, so the line is met, but the inherited number was mislabelled and
+  is corrected here rather than carried forward.
 
 - [x] **200 draws of `random_number(0, 100)` produce 200 distinct values, and are
       neither monotonic nor a fixed arithmetic sequence** — **200 distinct**, 0
-      outside `[0, 100)`, and the consecutive steps split **104 rises / 95
-      falls**.
+      outside `[0, 100)`, and the 199 consecutive steps split **99 rises / 100
+      falls**, with **199 distinct** differences.
 
   ```
-  1.582909387275222   66.39942340488506  16.920437987610846 52.241421811607566
-  1.2837748982554853  7.712950416341902  56.5279726411436   31.01882998970825
+  distinct: 200 of 200
+  outside [0,100): 0
+  rises: 99  falls: 100  flat: 0
+  distinct consecutive differences: 199 of 199
+  ```
+
+  First eight draws, identical to the inherited report's, which confirms the
+  seed and the generator are unchanged across the merge:
+
+  ```
+  1.5829  66.3994  16.9204  52.2414  1.2838  7.713  56.528  31.0188
   ```
 
   Before, eight consecutive draws were `4.8086, 5.8041, 6.0445, 6.2037, 6.36,
@@ -193,28 +242,40 @@ earlier report was written: the 101-distinct bound attaches to `random()` only,
 
 - [x] **1000 draws of `random_number(0, 100)` from the pinned seed put 40–160 in
       each of the ten decile buckets** — `[105, 95, 103, 94, 101, 98, 116, 100,
-      89, 99]` at seed 12345, mean 100.0, none outside the band. Pinned by
+      89, 99]` at seed 12345, mean 100.0, none outside the band. Re-measured on
+      this run and identical to the inherited figure. Pinned by
       `edge_random_number_spreads_its_draws_across_the_range`.
 
 - [x] **`random_shuffle` is a permutation of its input for every seed 0..=99 and
       is not the identity for any of them** — `non_permutations=0 identity=0`,
-      checked in 100 separate `rb` processes.
+      checked on this run in 100 separate `rb` processes.
 
 - [x] **`random_choice` over a four-element list hits all four in 1000 draws** —
-      `255 / 246 / 253 / 246`.
+      `a=255 b=246 c=253 d=246`, re-measured on this run; all four reached.
 
 - [x] **Two separate processes with an explicit seed print byte-identical output**
-      — `diff` empty, both 1842 bytes, SHA-256 `53e018d03a553f9f276584357b70b01…`.
+      — `diff` empty (exit 0), both **1956 bytes**, identical SHA-256
+      `b734b957fe7de8715f543120699dbc551b9f3c703feb94442e0f19e5dcba5002`.
       Program: `random_seed(987654321)` then 50 iterations of all four builtins.
       The same program with the seeding line removed is also byte-identical
-      between two processes, which is the `DEFAULT_SEED` claim.
+      between two processes, which is the `DEFAULT_SEED` claim; that is pinned
+      by `edge_two_processes_that_never_seed_still_agree`.
 
   ```
-  $ ./target/debug/rb run target/tmp/dod/dod4.rb > a.txt
-  $ ./target/debug/rb run target/tmp/dod/dod4.rb > b.txt
+  $ ./target/debug/rb run target/tmp/p037/two.rb > a.txt
+  $ ./target/debug/rb run target/tmp/p037/two.rb > b.txt
   $ diff a.txt b.txt ; echo $?
   0
+  $ sha256sum a.txt b.txt
+  b734b957fe7de8715f543120699dbc551b9f3c703feb94442e0f19e5dcba5002  a.txt
+  b734b957fe7de8715f543120699dbc551b9f3c703feb94442e0f19e5dcba5002  b.txt
   ```
+
+  The byte count and digest differ from the inherited report's (1842 bytes,
+  `53e018d0…`) because the loop body here prints all four builtins per iteration
+  while the earlier script did not print the same set. The property — two
+  processes, one seed, byte-identical output — is what the line asks for and is
+  what this shows.
 
 - [x] **edge_\* tests cover an empty list, a single-element list, min greater than
       max, a negative range, and a non-number argument** — all five in
@@ -254,15 +315,40 @@ earlier report was written: the 101-distinct bound attaches to `random()` only,
 
 ## Gates
 
+Every row below was run on **this** run, against the merged tree.
+
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | **pass** (exit 0, no diff) |
 | `cargo clippy --all-targets -- -D warnings` | **pass** (exit 0, zero warnings, no `allow` added) |
-| `cargo test --all-targets` | **1223 passed, 0 failed, 0 ignored** |
-| `cargo test` (incl. doc-tests) | **pass** (2 doc-tests passed, 0 failed) |
+| `cargo test --all-targets` | **1223 passed, 0 failed, 0 ignored** across 44 targets |
+| `cargo test --doc` | **pass** (2 doc-tests passed, 0 failed) |
 | `./rbops/verify.sh phase-037` | **not run — `rbops/verify.sh` does not exist in this checkout** |
 
-All four cargo commands were run on this run, before and after the change.
+`tests/random_builtin_test.rs` on its own: **22 passed, 0 failed, 0 ignored**.
+
+### The failure-assertion channel, re-proven after the merge
+
+The merge touched `src/runtime.rs` and the test file, so the channel that proves
+clean errors were re-checked rather than assumed. Mutation, run, reverted:
+
+```rust
+// src/runtime.rs — random_choice on an empty list answers nothing again
+if items.is_empty() {
+    return Ok(Some(Value::Nothing));
+}
+```
+
+```
+test edge_random_refuses_the_arguments_it_cannot_use ... FAILED
+panicked at tests/random_builtin_test.rs:477:17:
+`random_choice([])` should have been refused, it answered nothing
+
+test result: FAILED. 21 passed; 1 failed; 0 ignored
+```
+
+Exactly one test turned red and it named the symptom. Reverted;
+`git diff --stat src/runtime.rs` is empty and the target is 22/22 green again.
 
 **On the fourth gate.** `ls rbops` → `No such file or directory`.
 `./rbops/verify.sh phase-037` → `bash: ./rbops/verify.sh: No such file or
@@ -271,10 +357,11 @@ exists in this checkout at any commit. I did not create it — hard rule 1 forbi
 touching `rbops/`. The fourth gate is **unverified**, and a reviewer must run it
 before this phase is `.done`. `FINDINGS.md` §1 carries the same fact.
 
-The failure-assertion check it performs is satisfied in the `eval_err` idiom
-(`let e = eval_err("random_choice([])"); assert!(matches!(e, Error::Runtime(_, _)))`)
-at 9 call sites in `tests/random_builtin_test.rs`, which is the project's
-standard idiom for asserting that a pipeline produced a failure.
+The failure-assertion check that gate performs is satisfied in the `eval_err`
+idiom (`let e = eval_err("random_choice([])"); assert!(matches!(e,
+Error::Runtime(_, _)))`) at 9 call sites in `tests/random_builtin_test.rs`, the
+project's standard idiom for asserting that a pipeline produced a failure, and
+re-proven by mutation above.
 
 ## Invariants touched
 
@@ -286,6 +373,14 @@ existing test was weakened, deleted or re-scoped.
 
 All in `FINDINGS.md`, none fixed here (hard rule 7 — one phase, one concern):
 
+- **§7** — for any randomised operation, "well-formed" and "varies" are both
+  satisfiable by a one-value generator; pin **reach**, not variance. This is the
+  run that found `edge_random_shuffle_permutes_its_input_for_every_seed` passed
+  on the exact defect the phase names, and added
+  `edge_random_shuffle_reaches_far_more_permutations_than_it_can` to say so.
+  Both the finding and the test are in the merged tree; the finding was written
+  by the recovery branch and its entry was missing from HEAD's *Known gaps*
+  list, so it is restored here.
 - **§3** — a seeded generator is not an unpredictable one. Redblue now has no
   source of unpredictable data at all. A capability gap worth its own phase.
 - **§4** — `random` is inclusive at both ends, `random_number` at the low end
@@ -300,3 +395,20 @@ All in `FINDINGS.md`, none fixed here (hard rule 7 — one phase, one concern):
 - **§10** — a comment that claims what code does needs a test beside it, or it
   should claim less. This one said "wraps rather than saturating" and survived
   two review passes because a comment cannot fail a test.
+
+## Findings recorded on this run
+
+- **The `random_seed` comment conflict was the same defect §10 describes, live in
+  the merge.** `src/runtime.rs` had one comment-only conflict between HEAD and
+  the recovery branch. HEAD said the `f64 → i64` cast *saturates*; the recovery
+  branch said it *wraps*. Rust saturates float→int casts, so taking the recovery
+  side wholesale would have reintroduced the false claim §10 was written to
+  remove. Kept HEAD, and checked the surviving prose against
+  `seed_random(seed.trunc() as i64 as u64)` before keeping it.
+- **The inherited report's distinct-count was mislabelled.** It reported 85
+  distinct values for 200 seeded draws of `random(0, 100)`; the seeded figure is
+  91 and 85 is the unseeded one. Corrected under *Definition of done* above.
+  Recorded because the number was within tolerance either way, which is exactly
+  when a wrong number survives review unnoticed.
+- **`rbops/verify.sh` is still absent** (`FINDINGS.md` §1), so the fourth gate
+  remains unverified after this run too.

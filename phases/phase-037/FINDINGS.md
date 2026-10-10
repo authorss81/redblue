@@ -301,3 +301,37 @@ Worth recording as process: the comment was written by the same run that wrote
 the code, described an intention rather than the behaviour, and survived two
 review passes because a comment cannot fail a test. A comment that claims what
 code does should have a test beside it, or it should claim less.
+
+## 11. §10 came back as a merge conflict, and §8 lost its test table entry
+
+The resumed run's merge carried the §10 defect back in, in the only form §10
+warns about: a **comment** that a test cannot fail, reintroduced by the merge
+itself.
+
+`src/runtime.rs` had one conflict hunk, in the `random_seed` arm, and it was
+comment-only. `main` said the `f64 → i64` cast *saturates*; the recovery branch
+said it *wraps rather than saturating* — the exact false claim §10 was written to
+remove from the code. Resolving that hunk by taking the recovery side wholesale
+would have silently undone §10, and nothing would have gone red: the behaviour
+was never wrong, only the description of it.
+
+Resolved by keeping `main`'s side, after reading the code it describes —
+`seed_random(seed.trunc() as i64 as u64)`, where `f64 as i64` saturates and the
+`i64 as u64` reinterprets. The two claims are not equivalent and only one of them
+is true.
+
+The same merge dropped a **test table entry**, which is the §8 lesson in a new
+place. `edge_random_number_draws_are_not_a_march_and_not_an_arithmetic_sequence`
+is in the merged tree and was written by the recovery branch, but `main`'s
+`REPORT.md` had no row for it — the test existed, the finding existed
+(FINDINGS.md §8), and the report that is supposed to say what the phase verified
+did not mention it. A gate that counts tests in the source would have called the
+phase verified; a reviewer reading only the report would have called it unverified.
+Neither is wrong on its own, which is the problem.
+
+**Generalisable for the auditor:** a merge of a resumed phase can undo a previous
+run's *correction* without touching behaviour, and can drop a report row without
+dropping a test. When resolving, check (a) which side of a comment hunk is
+*true*, not which is newer, and (b) that every test in the tree has a row in the
+report's table.
+
