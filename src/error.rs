@@ -39,20 +39,6 @@ pub enum Error {
     Parser(String, Span),
     Analyzer(String, Span),
     Runtime(String, Span),
-    /// One of the host's own resource limits — the step budget, the call-depth
-    /// limit, or a loop's iteration cap.
-    ///
-    /// A variant rather than a `Runtime` whose message happens to read like one,
-    /// because the question `might fail` asks of a failure — *is this the host
-    /// stopping the program, or the program's own expression going wrong?* — has
-    /// to be answerable from the failure itself. Matching a message prefix made
-    /// the answer depend on the wording: rewording a limit message would silently
-    /// turn every guard around a runaway program into one that swallows it, and
-    /// any failure a program produced that began the same way would be reported as
-    /// a resource error and escape the guard written for it. It renders as a
-    /// `RuntimeError` and reads exactly as one — a limit is a runtime failure — but
-    /// nothing has to agree on how it is spelled for it to be told apart.
-    Limit(String, Span),
     Io(String),
 }
 
@@ -64,8 +50,7 @@ impl Error {
             Error::Lexer(_, span)
             | Error::Parser(_, span)
             | Error::Analyzer(_, span)
-            | Error::Runtime(_, span)
-            | Error::Limit(_, span) => span,
+            | Error::Runtime(_, span) => span,
             Error::Io(_) => return None,
         };
 
@@ -86,26 +71,9 @@ impl Error {
             Error::Lexer(_, _) => "LexerError",
             Error::Parser(_, _) => "ParserError",
             Error::Analyzer(_, _) => "AnalyzerError",
-            // A limit is a runtime failure and is labelled as one, so a rendered
-            // message and an asserted `label()` do not change when this stops
-            // being spelled as a message prefix.
-            Error::Runtime(_, _) | Error::Limit(_, _) => "RuntimeError",
+            Error::Runtime(_, _) => "RuntimeError",
             Error::Io(_) => "IoError",
         }
-    }
-
-    /// Whether this failure is one of the host's resource limits — the step
-    /// budget, the call-depth limit, or a loop's iteration cap — rather than
-    /// something the program got wrong.
-    ///
-    /// The three limits are the host refusing to keep going rather than a failure
-    /// of the expression that was running: a program stopped at its step budget has
-    /// not computed a wrong answer, it has been stopped. `might fail` is defined
-    /// over a failure of its own expression and so does not take these; both VMs
-    /// ask this question so the two agree, and so does the guard written around a
-    /// call that hits a limit report the limit rather than yield `nothing`.
-    pub fn is_resource_limit(&self) -> bool {
-        matches!(self, Error::Limit(..))
     }
 
     /// The failure message on its own, with no position.
@@ -119,7 +87,6 @@ impl Error {
             | Error::Parser(msg, _)
             | Error::Analyzer(msg, _)
             | Error::Runtime(msg, _)
-            | Error::Limit(msg, _)
             | Error::Io(msg) => msg,
         }
     }
