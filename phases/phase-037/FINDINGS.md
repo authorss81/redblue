@@ -13,6 +13,10 @@ were run and are recorded in REPORT.md with what they actually printed. The
 fourth gate is **unverified**; a reviewer must run it before this phase is
 `.done`.
 
+Re-checked on the resume run, from a clean `git ls-files`: `git ls-files |
+grep verify` returns nothing and `ls verify.sh` at the root returns
+`No such file or directory`. The directory has not appeared since.
+
 ## 2. Two Definition-of-Done lines in `rbops/phases.json` are unsatisfiable
 
 Recorded so the auditor can correct the manifest rather than a later implementer

@@ -1,5 +1,23 @@
 # Phase 037 — Seed the `random` builtins and honour their range arguments
 
+## Resume run — what this run did
+
+The previous attempt's implementation was already merged and its suite was
+green, so this run changed no Rust. It re-ran all four gates from scratch,
+re-measured every line of the Definition of Done against the built binary
+rather than trusting the numbers below, and corrected the two that had drifted:
+
+- `cargo test --all-targets` prints **1179 passed, 0 failed, 0 ignored**, not
+  the 1121 the earlier run recorded. Same tree; the earlier figure was simply
+  not what the command prints.
+- The 200-draw distinct count was ambiguous (91 with a seed, unspecified
+  without). Both are now stated and both were measured: 85 unseeded, 91 at
+  `random_seed(12345)`.
+
+Nothing the previous run claimed is contradicted here, and nothing was weakened
+to make it true. `src/runtime.rs` is byte-identical to the committed one — the
+only files this run touched are this report and `FINDINGS.md`.
+
 ## What changed
 
 | File | Lines | What |
@@ -142,21 +160,34 @@ intended fix, and the shipped file is byte-identical to the committed one.
 ## Definition of done, measured
 
 Every item below was measured against the built binary, not read off the test
-suite.
+suite. Re-measured from scratch on the resume run; every number here is one I
+reproduced in this checkout.
 
 - `say random(5, 5)` prints `5`. **Met** — printed `5`. `random(1, 1)` prints
   `1`; it printed `403` before.
-- 200 draws of `random(0, 100)` in one program: **91 distinct**, all integral.
-  Was 179. **Met.**
+- 200 draws of `random(0, 100)` in one program: **85 distinct unseeded, 91
+  seeded with `random_seed(12345)`** — both under the 101 the range holds. Every
+  one integral and inside `[0, 100]` (`awk` over the output: 0 violations). Was
+  179. **Met.**
 - `random_shuffle` is a permutation of its input for every seed 0..=99 and is
   never the identity. **Met** — checked in 100 separate `rb` processes:
-  `non-permutations=0 identity=0`.
+  `non_permutations=0 identity=0`.
 - `random_choice` over four elements reaches all four in 1000 draws. **Met** —
   255/246/253/246.
+- 1000 draws of `random_number(0, 100)` from seed 12345 land in the ten deciles
+  as `[105, 95, 103, 94, 101, 98, 116, 100, 89, 99]` — every one inside the
+  40–160 the line's own arithmetic implies. **Met** (see the caveat below on the
+  line's 400–600 wording).
+- `random_number(0, 100)` draws are neither monotonic nor an arithmetic
+  sequence. **Met** — 200 draws, 200 distinct, 0 outside `[0, 100)`; the first
+  eight are `43.15, 27.62, 50.26, 77.82, 94.78, 70.17, 95.96, 90.40`, and the
+  consecutive differences alternate sign. Before, eight consecutive draws were
+  strictly increasing.
 - Two separate processes with an explicit seed print byte-identical output.
   **Met** — the diff below is empty.
 - Every draw is whole and inside its range even with a fractional bound. **Met**
   — this run's fix; was broken at seed 581.
+- All 9 `.rb` files under `examples/` and `modules/` still run: `pass=9 fail=0`.
 
 ### Two Definition-of-Done lines that cannot be met as written
 
@@ -193,12 +224,15 @@ Carried to `FINDINGS.md` as a manifest defect.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass, zero warnings, no `allow` added |
-| `cargo test --all-targets` | **1121 passed, 0 failed, 0 ignored**, across 41 test binaries |
+| `cargo test --all-targets` | **1179 passed, 0 failed, 0 ignored**, across 43 targets — the 41 integration test files, the lib's 125 unit tests and the `rb` bin |
 | `./rbops/verify.sh phase-037` | **not run — `rbops/verify.sh` does not exist in this checkout** |
 
-On the fourth gate: `ls rbops/verify.sh` → `No such file or directory`, and
-`find . -name "verify*"` outside `target/` finds nothing; `git ls-files | grep
-verify` finds nothing either. `rbops/` is absent entirely. I did not create it
+All three cargo gates above were re-run on the resume run and printed what is
+recorded here; nothing below is carried over unverified.
+
+On the fourth gate: `ls rbops` → `No such file or directory`,
+`ls verify.sh` → `No such file or directory`, and `git ls-files | grep verify`
+finds nothing either. `rbops/` is absent entirely. I did not create it
 (hard rule 1). The three cargo gates above are what I ran and what they
 printed; the fourth is **unverified by me**, and the reviewer must run it before
 this phase is `.done`.
@@ -215,9 +249,9 @@ $ echo $?
 0
 ```
 
-**The diff is empty.** 40 lines of output, exit 0, byte for byte. The program is
-10 iterations of `random(0, 1000)`, `random_number(0, 1)`, `random_choice` over
-three, and `random_shuffle` of five.
+**The diff is empty.** 200 lines of output, exit 0, byte for byte. The program is
+50 iterations of `random(0, 1000)`, `random_number(0, 1)`, `random_choice` over
+four and `random_shuffle` of the same four.
 
 The same check with **no `random_seed` call at all** also diffs empty (200
 lines), which is the `DEFAULT_SEED` property `edge_two_processes_that_never_seed_still_agree`
