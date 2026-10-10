@@ -1,0 +1,71 @@
+{
+  "set": {
+    "prefix": "set",
+    "body": [
+      "set ${1:name} to ${2:1}"
+    ],
+    "description": "Assign a value to a variable"
+  },
+  "say": {
+    "prefix": "say",
+    "body": [
+      "say ${1:\"hello\"}"
+    ],
+    "description": "Print a value"
+  },
+  "if": {
+    "prefix": "if",
+    "body": [
+      "if ${1:yes} then",
+      "    ${2:say \"then\"}",
+      "else",
+      "    ${3:say \"else\"}",
+      "end"
+    ],
+    "description": "Branch on a condition, closed with `end`"
+  },
+  "for": {
+    "prefix": "for",
+    "body": [
+      "for each ${1:item} in ${2:[1, 2, 3]}",
+      "    ${3:say item}",
+      "end"
+    ],
+    "description": "Walk a list in order, closed with `end`"
+  },
+  "test": {
+    "prefix": "test",
+    "body": [
+      "test \"${1:description}\"",
+      "    ${2:expect 1 to be 1}",
+      "end"
+    ],
+    "description": "A named test block, closed with `end`"
+  },
+  "expect": {
+    "prefix": "expect",
+    "body": [
+      "expect ${1:1 + 1} to be ${2:2}"
+    ],
+    "description": "Assert a value inside a test block"
+  },
+  "try": {
+    "prefix": "try",
+    "body": [
+      "try",
+      "    ${1:say \"work\"}",
+      "catch error",
+      "    ${2:say error}",
+      "end"
+    ],
+    "description": "Run a block and catch the failure it raises"
+  },
+  "catch": {
+    "prefix": "catch",
+    "body": [
+      "catch ${1:error}",
+      "    ${2:say error}"
+    ],
+    "description": "A catch clause; the enclosing `try` supplies the `end`"
+  }
+}

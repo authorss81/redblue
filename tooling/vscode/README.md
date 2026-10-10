@@ -1,18 +1,28 @@
 # Redblue VS Code Extension
 
 Editor support for `.rb` files. There is **no build step**: the extension is a
-folder of JSON manifests, and `cargo test` is what keeps them honest.
+folder of JSON manifests and one JavaScript entry point, and `cargo test` is
+what keeps them honest.
 
 ## What is here
 
 | File | What |
 |---|---|
-| `package.json` | Extension manifest: registers the `redblue` language and the grammar |
+| `package.json` | Extension manifest: registers the `redblue` language, the grammar, the snippets, the `redblue.run` command and its keybinding |
+| `extension.js` | Extension host entry point: registers `redblue.run` |
+| `snippets/redblue.json` | Completions for `set`, `say`, `if`, `for`, `test`, `expect`, `try`, `catch` |
 | `language-configuration.json` | Comment style, brackets, auto-closing pairs |
 | `syntaxes/redblue.tmLanguage.json` | TextMate grammar — keywords, constants, strings, numbers, comments, operators |
 
 Open this folder in VS Code (**File → Open Folder**) and `.rb` files highlight.
 Nothing is compiled, transpiled or fetched.
+
+## Running a file
+
+**Redblue: Run Redblue File** (`Ctrl+F5`, `Cmd+F5` on macOS, in a Redblue
+file) runs the active `.rb` file in a terminal as `rb run <path>`. It shells
+out to the `rb` on your `PATH` — the same binary `cargo run --bin rb` builds —
+so there is no second copy of the interpreter to keep in step.
 
 ## The grammar is generated, not hand-written
 

@@ -1,7 +1,7 @@
 {
   "name": "redblue-vscode",
   "displayName": "Redblue",
-  "description": "Syntax highlighting for the Redblue programming language",
+  "description": "Syntax highlighting, snippets and run support for the Redblue programming language",
   "version": "0.1.0",
   "publisher": "authorss81",
   "license": "MIT",
@@ -9,7 +9,13 @@
     "vscode": "^1.75.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Snippets"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:redblue",
+    "onCommand:redblue.run"
   ],
   "contributes": {
     "languages": [
@@ -30,6 +36,27 @@
         "language": "redblue",
         "scopeName": "source.redblue",
         "path": "./syntaxes/redblue.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "redblue",
+        "path": "./snippets/redblue.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "redblue.run",
+        "title": "Run Redblue File",
+        "category": "Redblue"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "redblue.run",
+        "key": "ctrl+f5",
+        "mac": "cmd+f5",
+        "when": "editorTextFocus && editorLangId == redblue"
       }
     ]
   }
