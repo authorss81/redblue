@@ -1032,8 +1032,28 @@ set floored to math.floor(1.7)  // 1
 `PI` and `E` are globals, not module members: a module has functions, so
 `math.PI` is not a name in the language.
 
-`math.random` is not implemented. The random builtins are `random_number`,
-`random_choice` and `random_shuffle`, spelled flat.
+`math.random` is not implemented. The random builtins are spelled flat: `random`,
+`random_seed`, `random_number`, `random_choice` and `random_shuffle`.
+
+```redblue
+random_seed(42)                // every draw after this is reproducible
+set n to random(1, 6)          // a whole number from 1 to 6, both ends included
+set f to random_number(0, 1)   // a number from 0 up to (not including) 1
+set one to random_choice(xs)    // one member of a list
+set mixed to random_shuffle(xs) // the same members, in a seeded order
+```
+
+`random_seed` makes the draws after it reproducible: the same seed gives the
+same sequence of draws, in one process or in two. A program that never seeds
+draws from a fixed default seed rather than from the clock, so Redblue's output
+is reproducible by default and a program has to *ask* for variation it cannot
+reproduce. `random` answers a whole number and `random_number` a fraction; both
+refuse a range whose low end is above its high end, because such a range has no
+member. `random` answers one of the whole numbers in its range, so a fractional
+bound narrows the range rather than making the draw a fraction:
+`random(0, 100.5)` answers `0` to `100`, and a range holding no whole number at
+all, such as `random(0.2, 0.8)`, is refused. `random_choice` refuses an empty
+list, since it has no member to choose.
 
 ### files
 
