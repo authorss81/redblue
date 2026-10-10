@@ -51,12 +51,39 @@ fn run_capped(source: &str, max_iterations: usize) -> Result<Value, Error> {
     vm.run(&parse(source))
 }
 
-/// The message of a `RuntimeError`, ignoring the span it carries.
+/// The message of a clean runtime error, ignoring the span it carries.
+///
+/// Only `Error::Runtime` is accepted: every failure this file reads a message
+/// from is the program's own doing, and a host guard reports `Error::Limit`. A
+/// helper that took either would let a guard stopping a runaway loop pass as the
+/// refusal this file is asserting.
 #[track_caller]
 fn runtime_message(error: &Error) -> String {
     match error {
         Error::Runtime(message, _) => message.clone(),
-        other => panic!("expected a RuntimeError, got {:?}", other),
+        other => panic!("expected a clean runtime error, not {other:?}"),
+    }
+}
+
+/// The message of a host guard that stopped the program: `Error::Limit` and
+/// nothing else, with `is_resource_limit()` answering true for it on the way
+/// past.
+///
+/// A helper taking either variant would let an iteration cap and a program's own
+/// refusal be asserted interchangeably, so the tests that name a cap are pinned
+/// to the variant that carries the predicate `might fail` asks.
+#[track_caller]
+fn limit_message(error: &Error) -> String {
+    match error {
+        Error::Limit(message, _) => {
+            assert!(
+                error.is_resource_limit(),
+                "a loop past its cap must answer is_resource_limit(), got {other:?}",
+                other = error
+            );
+            message.clone()
+        }
+        other => panic!("a host guard must stop the program as Error::Limit, got {other:?}"),
     }
 }
 
@@ -486,8 +513,8 @@ fn edge_a_skip_is_charged_as_one_iteration() {
 
     let error = run_capped(source, 4).expect_err("six turns are one past the cap");
     assert!(
-        matches!(error, Error::Runtime(..)),
-        "the cap must be a clean RuntimeError, got {:?}",
+        matches!(error, Error::Limit(..)),
+        "the cap must be a clean error, got {:?}",
         error
     );
 }
@@ -2426,13 +2453,13 @@ fn edge_a_jump_raised_in_a_cleanup_is_charged_one_turn() {
             // their spans differently and only the message is the rule.
             let tree = capped_say_lines_of(&program, cap);
             assert_eq!(
-                tree.as_ref().err().map(runtime_message).as_deref(),
+                tree.as_ref().err().map(limit_message).as_deref(),
                 Some(wanted.as_str()),
                 "a `skip` in a cleanup should cost one turn of a {name}: cap {cap}\n{source}"
             );
             let byte = capped_bytecode_say_lines(&program, cap);
             assert_eq!(
-                byte.as_ref().err().map(runtime_message).as_deref(),
+                byte.as_ref().err().map(limit_message).as_deref(),
                 Some(wanted.as_str()),
                 "the bytecode VM charged a `skip` in a cleanup differently: {name}, cap {cap}\n{source}"
             );

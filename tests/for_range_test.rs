@@ -54,7 +54,12 @@ fn eval_err(source: &str) -> Error {
         .expect_err(&format!("`{}` should have failed", source))
 }
 
-/// Runs `source` and returns the message of the `RuntimeError` it produced.
+/// Runs `source` and returns the message of the clean runtime error it produced.
+///
+/// Only `Error::Runtime` is accepted. A guard that stops the host rather than the
+/// expression reports `Error::Limit`, and a helper that took either would let a
+/// program error and a resource limit be asserted interchangeably; the tests
+/// that want a limit ask [`limit_message`] instead.
 #[track_caller]
 fn runtime_message(source: &str) -> String {
     match eval_err(source) {
@@ -71,6 +76,38 @@ fn runtime_message(source: &str) -> String {
             source, other
         ),
     }
+}
+
+/// The message of a resource limit, which is `Error::Limit` and nothing else:
+/// matching either variant would leave the guards this file is about unpinned.
+#[track_caller]
+fn limit_message(source: &str) -> String {
+    match eval_err(source) {
+        Error::Limit(message, span) => {
+            assert!(
+                error_is_resource_limit(source),
+                "`{}` stopped at a guard without answering is_resource_limit()",
+                source
+            );
+            assert!(
+                span.is_known(),
+                "`{}` was stopped by a guard without a source span",
+                source
+            );
+            message
+        }
+        other => panic!(
+            "`{}` should stop at a host guard as Error::Limit, got {}",
+            source, other
+        ),
+    }
+}
+
+/// Runs `source` a second time to ask the question `might fail` asks of a
+/// failure, so the predicate is pinned on the same program the message was.
+#[track_caller]
+fn error_is_resource_limit(source: &str) -> bool {
+    eval_err(source).is_resource_limit()
 }
 
 /// Asserts `source` fails to parse, and returns the parser's message.
@@ -359,7 +396,7 @@ fn edge_a_zero_step_stops_at_the_iteration_guard_rather_than_hanging() {
     // `by 0` never leaves `start`, so the loop is endless. It is stopped by
     // `charge_iteration` — the same guard `repeat` and `while` use — and the
     // message says which limit was reached.
-    let message = runtime_message("for each i from 1 to 3 by 0\n    say i\nend");
+    let message = limit_message("for each i from 1 to 3 by 0\n    say i\nend");
     assert_eq!(
         message,
         format!(
@@ -388,8 +425,18 @@ fn edge_a_range_longer_than_the_iteration_limit_stops_like_a_repeat_does() {
         .expect_err("a repeat past the cap should fail");
 
     let message = |error: &Error| match error {
-        Error::Runtime(message, _) => message.clone(),
-        other => panic!("expected a Runtime error, got {:?}", other),
+        Error::Limit(message, _) => {
+            assert!(
+                error.is_resource_limit(),
+                "a loop past its cap must answer is_resource_limit(), got {:?}",
+                error
+            );
+            message.clone()
+        }
+        other => panic!(
+            "a loop past its cap must stop as Error::Limit, got {:?}",
+            other
+        ),
     };
     assert_eq!(
         message(&range_error),

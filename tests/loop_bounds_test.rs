@@ -41,12 +41,29 @@ fn run_capped(source: &str, max_iterations: usize) -> Result<redblue::Value, Err
     vm.run(&parse(source))
 }
 
-/// The message of a `RuntimeError`, ignoring the span it carries.
+/// The message of a resource limit, ignoring the span it carries.
+///
+/// Only `Error::Limit` is accepted, and the error is asked `is_resource_limit()`
+/// on the way past. Both halves are load-bearing: every failure this file
+/// expects comes from one of the host's own guards, so an ordinary
+/// `Error::Runtime` here means a guard started reporting itself as a program's
+/// own failure — and a predicate that answered `false` for a limit would hand
+/// `might fail` and the guard written around a call a wrong answer.
 #[track_caller]
-fn runtime_message(error: &Error) -> String {
+fn limit_message(error: &Error) -> String {
     match error {
-        Error::Runtime(message, _) => message.clone(),
-        other => panic!("expected a RuntimeError, got {:?}", other),
+        Error::Limit(message, _) => {
+            assert!(
+                error.is_resource_limit(),
+                "Error::Limit must answer `is_resource_limit()`, got {:?}",
+                error
+            );
+            message.clone()
+        }
+        other => panic!(
+            "a host guard must stop the program as Error::Limit, not {:?}",
+            other
+        ),
     }
 }
 
@@ -86,11 +103,11 @@ fn infinite_while_loop_terminates_with_a_clean_error() {
     let error = run_capped(source, 50).expect_err("a loop past its cap must fail, not hang");
 
     assert!(
-        matches!(error, Error::Runtime(..)),
-        "a runaway loop must be a RuntimeError, got {:?}",
+        matches!(error, Error::Limit(..)),
+        "a runaway loop must be a clean error, got {:?}",
         error
     );
-    let message = runtime_message(&error);
+    let message = limit_message(&error);
     assert!(
         message.contains("50"),
         "the error must name the limit that was set, got {:?}",
@@ -106,7 +123,7 @@ fn huge_repeat_count_fails_instead_of_running_forever() {
 
     let error = run_capped(source, 100).expect_err("a repeat past the cap must fail");
 
-    let message = runtime_message(&error);
+    let message = limit_message(&error);
     assert!(
         message.contains("100"),
         "the error must name the cap, got {:?}",
@@ -227,7 +244,7 @@ fn edge_max_plus_one_iterations_fails() {
         ),
     ] {
         let error = run_capped(source, 10).expect_err("one iteration past the cap must fail");
-        let message = runtime_message(&error);
+        let message = limit_message(&error);
         assert!(
             message.contains("10"),
             "the {} loop's error must name the limit, got {:?}",
@@ -245,7 +262,7 @@ fn edge_iteration_cap_applies_to_each_loop_form() {
 
     let error = run_capped(source, 3).expect_err("a fourth iteration is over the cap");
 
-    assert!(matches!(error, Error::Runtime(..)), "got {:?}", error);
+    assert!(matches!(error, Error::Limit(..)), "got {:?}", error);
 }
 
 /// Edge: the per-loop cap is per *loop*, not per program. Nested loops each get
@@ -278,7 +295,7 @@ fn step_budget_bounds_a_program_of_many_short_loops() {
         .run(&program)
         .expect_err("the step budget must stop a program of many short loops");
 
-    let message = runtime_message(&error);
+    let message = limit_message(&error);
     assert!(
         message.contains("40"),
         "the error must name the step budget, got {:?}",
@@ -323,16 +340,111 @@ fn edge_step_budget_is_not_spent_by_unentered_loops() {
 /// The step budget is what makes a runaway loop *testable*, not merely
 /// survivable: a harness can bound a program to a few hundred steps and assert
 /// the exact error, without depending on how fast the host happens to be.
+///
+/// `count` is declared before the loop on purpose. Without it the body's very
+/// first turn fails on an unknown variable, the budget is never reached, and the
+/// assertion below is satisfied by a failure that has nothing to do with
+/// stepping — a budget that stopped firing entirely would leave this test green.
 #[test]
 fn step_budget_makes_a_runaway_loop_assertable() {
     let mut vm = Vm::with_max_steps(200);
-    let program = parse("set stopped to 0\nwhile stopped is 0\n    set count to count + 1\nend");
+    let program = parse(
+        "set count to 0\nset stopped to 0\nwhile stopped is 0\n    set count to count + 1\nend",
+    );
 
     let error = vm
         .run(&program)
         .expect_err("200 steps of an endless loop must be a clean failure");
 
-    assert!(matches!(error, Error::Runtime(..)), "got {:?}", error);
+    let message = limit_message(&error);
+    assert!(
+        message.contains("200"),
+        "the failure must be the step budget, not some other stop, got {:?}",
+        message
+    );
+}
+
+/// The budget is the *only* thing that stops this program: the per-loop cap is
+/// left at its million-turn default, so the loop is nowhere near it, and the
+/// failure names the budget of 200 rather than a loop's limit.
+#[test]
+fn edge_the_step_budget_stops_a_loop_the_iteration_cap_could_not() {
+    let mut vm = Vm::with_max_steps(200);
+    let program = parse(
+        "set count to 0\nset stopped to 0\nwhile stopped is 0\n    set count to count + 1\nend",
+    );
+
+    let error = vm
+        .run(&program)
+        .expect_err("the budget, not the iteration cap, is what stops this");
+
+    let message = limit_message(&error);
+    assert!(
+        message.starts_with("Step budget of 200"),
+        "the budget must be named as the step budget, got {:?}",
+        message
+    );
+    assert!(
+        !message.contains("iterations reached"),
+        "the per-loop cap is a million turns away and must not be what stopped it, got {:?}",
+        message
+    );
+}
+
+/// A program that gets something wrong is not a resource limit, even though the
+/// two share a `label()`. This is the question `might fail` asks of a failure, so
+/// it is pinned from both sides: the predicate on a program error, and on each
+/// of the three guards.
+#[test]
+fn edge_a_program_failure_is_not_a_resource_limit() {
+    let mut vm = Vm::new();
+    let program_failure = vm
+        .run(&parse("say undeclared_name\n"))
+        .expect_err("reading an undeclared variable must fail");
+    assert!(
+        !program_failure.is_resource_limit(),
+        "a program's own expression going wrong is not the host stopping it: {:?}",
+        program_failure
+    );
+
+    let cases: [(&str, Vm, &str); 3] = [
+        (
+            "the iteration cap",
+            Vm::with_max_iterations(5),
+            "set n to 0\nwhile 1 is 1\n    set n to n + 1\nend",
+        ),
+        (
+            "the step budget",
+            Vm::with_max_steps(5),
+            "set n to 0\nwhile 1 is 1\n    set n to n + 1\nend",
+        ),
+        (
+            "the call-depth limit",
+            Vm::with_max_call_depth(5),
+            "to boom(n)\n    boom(n + 1)\nend\nboom(0)\n",
+        ),
+    ];
+
+    for (name, mut vm, source) in cases {
+        let error = vm
+            .run(&parse(source))
+            .expect_err(&format!("{} must stop this program", name));
+        assert!(
+            error.is_resource_limit(),
+            "{} must report itself as a resource limit, got {:?}",
+            name,
+            error
+        );
+        // A limit renders as a `RuntimeError`, so a caller that reports by label
+        // says the same thing it always did.
+        assert_eq!(
+            error.label(),
+            "RuntimeError",
+            "{} renders as a RuntimeError, got {}",
+            name,
+            error
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,8 +555,8 @@ fn edge_count_beyond_i64_is_a_clean_error_not_a_panic() {
         let error = run_capped(&source, 100)
             .expect_err("a count past i64 must be bounded, not hang or panic");
         assert!(
-            matches!(error, Error::Runtime(..)),
-            "count {} produced {:?}, which is not a RuntimeError",
+            matches!(error, Error::Limit(..)),
+            "count {} produced {:?}, which is not a clean bounded error",
             count,
             error
         );
@@ -510,7 +622,7 @@ fn edge_nested_recursion_is_bounded_by_the_step_budget() {
         .run(&parse(source))
         .expect_err("ten calls to an endless loop must be bounded");
 
-    let message = runtime_message(&error);
+    let message = limit_message(&error);
     assert!(
         message.contains("2000"),
         "the step budget must be what stops the program, got {:?}",

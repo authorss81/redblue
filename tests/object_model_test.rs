@@ -73,16 +73,48 @@ fn assert_runtime_error(source: &str, expected: &str) {
     }
 }
 
-/// The message of the runtime error `source` produced.
+/// The message of the clean runtime error `source` produced.
+///
+/// Only `Error::Runtime` is accepted: a guard that stops the host reports
+/// `Error::Limit`, and a helper taking either would let the two be asserted
+/// interchangeably. The call-depth test asks [`limit_message`] instead.
 #[track_caller]
 fn runtime_message(source: &str) -> String {
     match eval_err(source) {
         Error::Runtime(message, _) => message,
         other => panic!(
-            "`{}` should fail with a Runtime error, got {:?}",
+            "`{}` should fail with a clean runtime error, got {:?}",
             source, other
         ),
     }
+}
+
+/// The message of a resource limit, which is `Error::Limit` and nothing else.
+/// The predicate `might fail` and the bytecode VM ask is checked on the way past,
+/// so a limit cannot answer `false` without this test going red.
+#[track_caller]
+fn limit_message(source: &str) -> String {
+    match eval_err(source) {
+        Error::Limit(message, _) => {
+            assert!(
+                error_is_resource_limit(source),
+                "`{}` stopped at the call-depth guard without answering is_resource_limit()",
+                source
+            );
+            message
+        }
+        other => panic!(
+            "`{}` should stop at a host guard as Error::Limit, got {:?}",
+            source, other
+        ),
+    }
+}
+
+/// Re-runs `source` to ask the predicate directly, so the answer is pinned on
+/// the same program the message was read from.
+#[track_caller]
+fn error_is_resource_limit(source: &str) -> bool {
+    eval_err(source).is_resource_limit()
 }
 
 /// A child inherits its parent's fields, and a field the child declares itself
@@ -399,11 +431,10 @@ fn edge_deep_parent_chain_resolves() {
 /// stack overflow.
 #[test]
 fn edge_mutually_recursive_methods_hit_the_call_depth_limit() {
-    let message = runtime_message(
-        "object A\n    to can ping(n)\n        give back B.pong(n + 1)\n    end\nend\n\
+    let source = "object A\n    to can ping(n)\n        give back B.pong(n + 1)\n    end\nend\n\
          object B\n    to can pong(n)\n        give back A.ping(n + 1)\n    end\nend\n\
-         set result to A.ping(0)\n",
-    );
+         set result to A.ping(0)\n";
+    let message = limit_message(source);
     assert!(
         message.starts_with("Maximum call depth of"),
         "expected the call-depth limit, got `{}`",

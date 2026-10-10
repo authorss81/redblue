@@ -75,9 +75,10 @@ fn eval_err(source: &str) -> Error {
 #[track_caller]
 fn message(error: &Error) -> String {
     match error {
-        Error::Parser(message, _) | Error::Runtime(message, _) | Error::Analyzer(message, _) => {
-            message.clone()
-        }
+        Error::Parser(message, _)
+        | Error::Runtime(message, _)
+        | Error::Limit(message, _)
+        | Error::Analyzer(message, _) => message.clone(),
         other => panic!("expected a diagnostic, got {other:?}"),
     }
 }
@@ -96,6 +97,28 @@ fn assert_fails(source: &str, expected: &str) {
     assert!(
         message.contains(expected),
         "the failure should name `{expected}`, it said: {message}\nprogram:\n{source}"
+    );
+}
+
+/// Asserts `source` is stopped by one of the host's own guards: `Error::Limit`
+/// and nothing else, with `is_resource_limit()` answering true for it. A
+/// diagnostic read through the general [`assert_fails`] would also pass if the
+/// call-depth guard started reporting itself as an ordinary program failure.
+#[track_caller]
+fn assert_hits_a_limit(source: &str, expected: &str) {
+    let error = eval_err(source);
+    match &error {
+        Error::Limit(message, _) => assert!(
+            message.contains(expected),
+            "the limit should name `{expected}`, it said: {message}\nprogram:\n{source}"
+        ),
+        other => panic!(
+            "a host guard should stop this as Error::Limit, got {other:?}\nprogram:\n{source}"
+        ),
+    }
+    assert!(
+        error.is_resource_limit(),
+        "a limit must answer is_resource_limit(), got {error:?}\nprogram:\n{source}"
     );
 }
 
@@ -486,7 +509,7 @@ fn edge_a_multiline_body_without_its_end_fails_rather_than_eating_the_file() {
 /// the process dies.
 #[test]
 fn edge_a_literal_nested_inside_itself_stops_at_the_call_depth_limit() {
-    assert_fails(
+    assert_hits_a_limit(
         "
         set loop to to ()
             give back loop()

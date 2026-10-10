@@ -83,8 +83,8 @@ fn infinite_recursion_is_a_runtime_error_not_a_stack_overflow() {
     let err = eval_err("to boom(n)\n    boom(n + 1)\nend\n\nboom(0)\n");
 
     assert!(
-        matches!(err, Error::Runtime(_, _)),
-        "expected RuntimeError, got {:?}",
+        matches!(err, Error::Limit(_, _)),
+        "expected the depth limit to be a clean error, got {:?}",
         err
     );
     let message = err.to_string();
@@ -136,8 +136,8 @@ fn mutual_recursion_across_two_functions_is_bounded() {
     let err = eval_err(source);
 
     assert!(
-        matches!(err, Error::Runtime(_, _)),
-        "expected RuntimeError, got {:?}",
+        matches!(err, Error::Limit(_, _)),
+        "expected the depth limit to be a clean error, got {:?}",
         err
     );
     let message = err.to_string();
@@ -175,7 +175,7 @@ fn edge_the_limit_itself_is_the_boundary() {
 
     let err = eval_err(&countdown(MAX_CALL_DEPTH));
     assert!(
-        matches!(err, Error::Runtime(_, _)),
+        matches!(err, Error::Limit(_, _)),
         "{} active frames should exceed a limit of {}, got {:?}",
         MAX_CALL_DEPTH + 1,
         MAX_CALL_DEPTH,
@@ -294,8 +294,8 @@ fn with_max_call_depth_bounds_a_program_without_the_environment() {
         .run(&program)
         .expect_err("a depth of 10 must exceed a limit of 4");
     assert!(
-        matches!(err, Error::Runtime(_, _)),
-        "expected RuntimeError, got {:?}",
+        matches!(err, Error::Limit(_, _)),
+        "expected the depth limit to be a clean error, got {:?}",
         err
     );
     assert!(

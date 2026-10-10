@@ -3,20 +3,21 @@
 Work that belongs to a future phase. Recorded here so the auditor can promote
 it with file:line evidence, per AGENTS.md § 1.7.
 
-## 1. 18 pre-existing test failures in the resource-limit family
+## 1. 18 pre-existing test failures in the resource-limit family — REPAIRED
 
-**Severity: major. Not caused by phase-039, and not fixed by it.**
+**Severity: major. Not caused by phase-039. Repaired by it, because the
+phase's gate was red without the repair.**
 
-Measured with the full suite on both sides of phase-039 (`git stash` for the
-"before"), the failing set is byte-identical:
+First measured with the full suite on both sides of phase-039 (a worktree of
+`HEAD~1` for the "before"), the failing set was identical:
 
 ```
-BEFORE (main):   passed=1129  failed=18  ignored=0
-AFTER  (p039):   passed=1141  failed=18  ignored=0
+BEFORE (HEAD~1):  passed=1129  failed=18  ignored=0
+AFTER  (p039):    passed=1141  failed=18  ignored=0
 ```
 
-All 18 are one kind of failure: a test that asserts `Error::Runtime` where the
-code now returns `Error::Limit`.
+All 18 were one kind of failure: a test that asserts `Error::Runtime` where
+phase-038 made the code return `Error::Limit`.
 
 | File | Count | Representative assertion |
 |---|---|---|
@@ -28,13 +29,49 @@ code now returns `Error::Limit`.
 | `tests/numeric_edge_test.rs` | 1 | `edge_nested_recursion_is_bounded_by_the_step_budget` |
 | `tests/object_model_test.rs` | 1 | `edge_mutually_recursive_methods_hit_the_call_depth_limit` |
 
-Phase-038 introduced `Error::is_resource_limit()` and the three limits now
-report `Error::Limit` rather than `Error::Runtime`. The tests were not
-updated. Fixing them means deciding whether `Error::Limit` should match a
-`matches!(err, Error::Runtime(..))` arm or whether the tests should be widened
-to `Error::Runtime | Error::Limit` — that is a design question about the
-error surface, and phase-039's mandate is the assertion library. Not done
-here.
+**The design question this listing originally deferred is now answered**, by
+reading `src/error.rs`: `Error::label()` (`src/error.rs:84`) already returns
+`"RuntimeError"` for `Error::Limit`, so `Error::Limit` *is* a runtime error as
+far as the observable contract goes — it is a distinct variant with
+`is_resource_limit()` on it (`src/error.rs:107`), not a new error class. The
+tests were matching on the variant rather than on the contract, which is why
+phase-038 broke them. Each failing site was repaired to name the variant the
+code now produces, which **narrows** the assertion rather than widening it. No
+test was deleted, relaxed or skipped, and the full suite is 1159/0.
+
+A message-extracting helper could not simply be narrowed to `Error::Limit` if
+the same file also asserts ordinary program failures through it, so each such
+helper was **split**: `runtime_message` accepts `Error::Runtime` only and
+`limit_message` accepts `Error::Limit` only and asserts `is_resource_limit()` on
+the error it was handed. Two helpers that cannot answer for each other cannot
+drift apart, and the predicate `might fail` and the bytecode VM ask is pinned by
+the same tests that read the message.
+
+### 1b. A passing test passed for the wrong reason — REPAIRED
+
+Found while repairing the above, and fixed by it.
+
+`tests/loop_bounds_test.rs::step_budget_makes_a_runaway_loop_assertable` ran
+`set stopped to 0\nwhile stopped is 0\n    set count to count + 1\nend` under
+`Vm::with_max_steps(200)` and asserted `Error::Runtime(..)`. It passed, but not
+because the step budget stopped the program: `count` was never declared, so the
+loop body failed on its first turn and the 200-step budget was never reached.
+The test therefore did not test what its name and its doc comment claimed ("the
+exact error, without depending on how fast the host happens to be"), and a
+budget that stopped firing entirely would have left it green.
+
+`count` is now declared before the loop, so the program runs until the budget
+stops it, and the assertion is `Error::Limit` plus a message naming 200 —
+a run stopped by the per-loop cap would say "Maximum of 1000000 iterations
+reached", which contains no 200. Two tests were added beside it: one that the
+message names the *step budget* rather than an iteration cap at all, and
+`edge_a_program_failure_is_not_a_resource_limit`, which pins `is_resource_limit()`
+from both sides — `false` for a program's own failure, `true` for each of the
+three guards, with `label()` still `RuntimeError` for each.
+
+Its sibling `edge_nested_recursion_is_bounded_by_the_step_budget` was checked
+and is sound — it declares `i` and its assertion does pin the budget
+(`message.contains("2000")`), so this is one test, not a family.
 
 ## 2. `assert_throws` cannot catch a panic on another thread
 
@@ -85,3 +122,23 @@ calls", names `assert_true`, `assert_false`, `assert_panics`,
 `pub fn assert_*` and 11 uncalled, none of those eight names existed, and the
 builtin arm is at `src/runtime.rs:735`. The substance held (see REPORT.md) but
 the numbers did not, so the phase prompt should not be trusted as a count.
+
+## 5. `assert_text_matches` conflated a bad pattern with a non-match — REPAIRED
+
+**Severity: major. Found by the round-1 review; fixed by it.**
+
+`assert_text_matches` read `Regex::new(pattern).map(|re| re.is_match(text))
+.unwrap_or(false)`, so a pattern that would not compile and a pattern that
+compiled and did not match both came back as the *same* `Err`, under the same
+`Text '...' does not match pattern '...'` message. The two failures are
+opposite mistakes — one is a bug in the test, the other is a bug in the program
+— and a caller reading only `Err` could not tell them apart, so a test with a
+typo in its pattern sits there passing over a string it never matched.
+
+`Regex::new`'s error is now its own `Err`, naming the pattern and saying it is
+not a valid expression, with `expected` saying what a valid one would have been
+rather than promising a match. `edge_malformed_pattern_is_reported_as_a_failure
+_not_a_panic` was extended to hold the two messages apart, and
+`edge_an_invalid_pattern_and_a_non_match_record_different_expectations` pins the
+same difference in the `expected` field, so it survives a caller that reads only
+that field.

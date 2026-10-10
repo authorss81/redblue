@@ -127,10 +127,26 @@ pub fn assert_text_contains(text: &str, substring: &str) -> Result<(), TestAsser
 }
 
 pub fn assert_text_matches(text: &str, pattern: &str) -> Result<(), TestAssertionError> {
-    if regex::Regex::new(pattern)
-        .map(|re| re.is_match(text))
-        .unwrap_or(false)
-    {
+    let re = match regex::Regex::new(pattern) {
+        Ok(re) => re,
+        Err(invalid) => {
+            // A pattern that will not compile is not a pattern that did not
+            // match. Reporting it under the "does not match" message would make
+            // a typo in the *test* indistinguishable from a failure of the
+            // *program*, and the test would sit there passing over a string it
+            // never actually matched.
+            return Err(TestAssertionError {
+                message: format!(
+                    "Pattern '{}' is not a valid expression: {}",
+                    pattern, invalid
+                ),
+                expected: Some(format!("A valid expression, got '{}'", pattern)),
+                actual: Some(text.to_string()),
+            });
+        }
+    };
+
+    if re.is_match(text) {
         Ok(())
     } else {
         Err(TestAssertionError {

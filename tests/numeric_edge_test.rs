@@ -693,13 +693,13 @@ fn edge_a_repeat_count_is_a_number_of_turns_and_is_never_read_two_ways() {
         "a saturated count must be stopped by the cap, not run to the end of a million turns",
     );
     match error {
-        Error::Runtime(message, span) => {
+        Error::Limit(message, span) => {
             assert_eq!(
                 message, "Maximum of 5 iterations reached in a 'repeat' loop",
                 "a saturated count must be stopped by the cap, naming it"
             );
             assert!(span.is_known(), "the cap reported no position");
         }
-        other => panic!("a saturated count should be a Runtime error, got {other:?}"),
+        other => panic!("a saturated count must stop at the cap as Error::Limit, got {other:?}"),
     }
 }

@@ -348,7 +348,9 @@ fn edge_unicode_text_is_matched_by_bytes_of_the_real_string() {
 #[test]
 fn edge_malformed_pattern_is_reported_as_a_failure_not_a_panic() {
     // An unparseable regex must come back as Err, never as Ok and never as a
-    // panic: the caller cannot tell a bad pattern from a non-match otherwise.
+    // panic. It must also be told *apart* from a pattern that compiled and did
+    // not match: both are Err, and a caller that reads only "Err" would sit
+    // there passing over a string it never matched at all.
     let failure = assert_text_matches("anything", "[unclosed")
         .expect_err("an invalid pattern must not be treated as a match");
     assert!(
@@ -356,8 +358,54 @@ fn edge_malformed_pattern_is_reported_as_a_failure_not_a_panic() {
         "the failure must name the pattern, got: {}",
         failure.message
     );
-    assert_eq!(failure.expected.as_deref(), Some("Matches '[unclosed'"));
     assert_eq!(failure.actual.as_deref(), Some("anything"));
+    assert!(
+        !failure.message.contains("does not match"),
+        "a pattern that will not compile never matched anything, so it must not \
+         be reported as a non-match, got: {}",
+        failure.message
+    );
+
+    let non_match = assert_text_matches("anything", r"\d+")
+        .expect_err("a valid pattern that does not match must fail");
+    assert!(
+        failure.message != non_match.message,
+        "a pattern that will not compile and a pattern that did not match must \
+         not report the same failure, both said: {}",
+        failure.message
+    );
+    assert!(
+        non_match.message.contains("does not match"),
+        "a compiled pattern that did not match says so, got: {}",
+        non_match.message
+    );
+    assert_eq!(
+        non_match.expected.as_deref(),
+        Some("Matches '\\d+'"),
+        "only a compiled pattern promises a match"
+    );
+}
+
+/// The difference is not only in the wording: the two failures record different
+/// expectations, so a caller inspecting `expected` can still tell them apart.
+#[test]
+fn edge_an_invalid_pattern_and_a_non_match_record_different_expectations() {
+    let invalid = assert_text_matches("abc", "[unclosed").expect_err("[unclosed cannot compile");
+    let non_match = assert_text_matches("abc", r"\d").expect_err("abc has no digit");
+
+    assert_ne!(
+        invalid.expected, non_match.expected,
+        "an unparseable pattern must not promise the caller a match"
+    );
+    assert!(
+        invalid
+            .expected
+            .as_deref()
+            .is_some_and(|expected| expected.contains("A valid expression")),
+        "an invalid pattern must say what a valid one would have been, got {:?}",
+        invalid.expected
+    );
+    assert!(!invalid.message.contains("does not match"));
 }
 
 // ---------------------------------------------------------------------------
