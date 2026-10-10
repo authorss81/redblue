@@ -940,6 +940,60 @@ impl Parser {
         }
     }
 
+    /// Whether the token at the cursor is the `by` that LABELS the next call
+    /// argument, as in `split("a,b", by ",")`.
+    ///
+    /// Both spellings of the token count, for the same reason
+    /// [`Parser::at_range_step_marker`] takes both: `by` is read as a word
+    /// rather than taken from the keyword table, so `TokenKind::By` is honoured
+    /// in case `by` is ever promoted to a keyword without this arm needing to
+    /// change.
+    ///
+    /// The second half of the test is what makes it a *label* rather than a
+    /// variable: the token after `by` must be one that can begin an expression,
+    /// judged by the same table [`Parser::kind_starts_expression`] judges the
+    /// token at the cursor. So `split("a,b", by ",")` labels the separator, and
+    /// `grow(by)` — where `by` is the parameter the language has always let a
+    /// program name, with `)` after it — passes a variable.
+    ///
+    /// The test is the *positive* half of that table, never a blacklist of the
+    /// tokens that do not begin an expression. A blacklist has to be kept in
+    /// step with every new token kind, and when it was not it read `f(by + 1)`
+    /// and `f(by is 1)` as labelled, dropping a `by` the program meant as a
+    /// variable and turning working code into a parse error.
+    ///
+    /// A newline after `by` is skipped on both sides of the decision: the
+    /// lookahead here walks over it and [`Parser::parse_postfix`] skips it again
+    /// after the `advance()`. Classifying the label by looking past a newline
+    /// while parsing it without would be a disagreement between the two halves.
+    fn at_argument_label(&self) -> bool {
+        if !self.at_range_step_marker() {
+            return false;
+        }
+        let mut ahead = self.pos + 1;
+        while ahead < self.tokens.len() && matches!(self.tokens[ahead].kind, TokenKind::Newline) {
+            ahead += 1;
+        }
+        self.tokens
+            .get(ahead)
+            .map(|token| Self::kind_starts_expression(&token.kind))
+            .unwrap_or(false)
+    }
+
+    /// Whether `callee` is one of the builtins SPEC.md writes an argument label
+    /// for.
+    ///
+    /// SPEC.md:1017-1018 gives the label exactly two spellings — `text.split`,
+    /// `text.join`, and their flat names — so the label is read for those and
+    /// nowhere else. A label that any call accepted would be one more way to
+    /// write a call that happens to work, and would silently swallow the `by` in
+    /// `pow(2, by 10)` for a program that meant a variable. Refusing it there
+    /// keeps `by` meaning what the specification says it means: `by` labels the
+    /// separator of `split`/`join`, and everywhere else it is an ordinary word.
+    fn callee_takes_argument_label(callee: Option<&str>) -> bool {
+        matches!(callee, Some("split") | Some("join"))
+    }
+
     /// Parses the `{ statement } 'end'` tail every loop form shares, consuming
     /// the `end`.
     fn parse_loop_body(&mut self) -> Result<Vec<Stmt>> {
@@ -1672,23 +1726,36 @@ impl Parser {
     }
 
     fn is_expression_start(&self) -> bool {
-        matches!(
-            self.current().map(|t| &t.kind),
-            Some(TokenKind::Number(_))
-                | Some(TokenKind::Text(_))
-                | Some(TokenKind::YesNo(_))
-                | Some(TokenKind::Nothing)
-                | Some(TokenKind::Identifier(_))
-                | Some(TokenKind::LeftParen)
-                | Some(TokenKind::LeftBracket)
-                | Some(TokenKind::LeftBrace)
-                | Some(TokenKind::Not)
-                | Some(TokenKind::Minus)
-                | Some(TokenKind::To)
-                // `might fail f()` is an expression in its own right, so a
-                // statement may begin with one and an argument list may hold one.
-                | Some(TokenKind::MightFail)
-        )
+        self.current()
+            .map(|token| Self::kind_starts_expression(&token.kind))
+            .unwrap_or(false)
+    }
+
+    /// Whether a token of this kind can begin an expression.
+    ///
+    /// Split out from [`Parser::is_expression_start`] so a decision made about a
+    /// token *ahead* of the cursor is taken by the same table as one made about
+    /// the token at it. A second, hand-written list would drift — and when it
+    /// drifted the wrong way it read a two-token blacklist as if it were this
+    /// set, so a variable `by` in front of an operator became a label.
+    fn kind_starts_expression(kind: &TokenKind) -> bool {
+        match kind {
+            TokenKind::Number(_)
+            | TokenKind::Text(_)
+            | TokenKind::YesNo(_)
+            | TokenKind::Nothing
+            | TokenKind::Identifier(_)
+            | TokenKind::LeftParen
+            | TokenKind::LeftBracket
+            | TokenKind::LeftBrace
+            | TokenKind::Not
+            | TokenKind::Minus
+            | TokenKind::To => true,
+            // `might fail f()` is an expression in its own right, so a
+            // statement may begin with one and an argument list may hold one.
+            TokenKind::MightFail => true,
+            _ => false,
+        }
     }
 
     fn parse_expression(&mut self) -> Result<Expr> {
@@ -2127,10 +2194,48 @@ impl Parser {
                 self.advance();
                 let mut args = Vec::new();
 
+                // The callee is known before its arguments are read, so whether a
+                // `by` labels the argument that follows is decided by the name
+                // being called rather than by whatever the call happens to be.
+                // SPEC.md:1017-1018 writes the label for `text.split` and
+                // `text.join` only, so `callee_takes_argument_label` allows
+                // exactly those; every other call reads `by` as the variable it
+                // has always been able to be.
+                let callee = match &expr {
+                    Expr::Variable(name) => Some(name.as_str()),
+                    Expr::Property { property, .. } => Some(property.as_str()),
+                    _ => None,
+                };
+                let label_allowed = Self::callee_takes_argument_label(callee);
+
                 self.enter_nesting()?;
                 while self.current().map(|t| &t.kind) != Some(&TokenKind::RightParen)
                     && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
                 {
+                    // A `by` here is an argument *label*, not a variable read:
+                    // `text.split("a,b", by ",")` is the spelling SPEC.md § text
+                    // writes (`SPEC.md:1017`), and before this arm existed the
+                    // parser read `by` as an ordinary identifier, so the
+                    // analyzer refused the program with `Unknown variable 'by'`
+                    // before it ever ran.
+                    //
+                    // It is read positionally, for the reason
+                    // [`Parser::at_range_step_marker`] gives: `by` is not a
+                    // reserved word and must not become one, or `to can grow(by)`
+                    // and `say by` would stop working (`tests/bytecode_test.rs:614`).
+                    // A label is only a label when something follows it, so
+                    // `grow(by)` — passing the variable — is untouched: the
+                    // `)` after `by` is not the start of an expression. That is
+                    // the whole disambiguation, and it is why `by` is checked
+                    // here rather than added to `KEYWORDS`.
+                    if label_allowed && self.at_argument_label() {
+                        self.advance();
+                        // The label and the value it labels may be written on
+                        // different lines. `at_argument_label` looked past the
+                        // newline to decide, so this side skips it too rather
+                        // than classifying one shape and parsing another.
+                        self.skip_newlines();
+                    }
                     args.push(self.parse_expression()?);
 
                     if let Some(Token {
