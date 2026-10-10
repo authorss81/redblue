@@ -1,11 +1,5 @@
 use crate::value::Value;
 
-pub trait Assertion<T> {
-    fn assert(self, actual: T) -> Result<(), TestAssertionError>;
-}
-
-pub struct Expected<T>(pub T);
-
 #[derive(Clone)]
 pub struct TestAssertionError {
     pub message: String,
@@ -29,89 +23,6 @@ impl std::fmt::Debug for TestAssertionError {
 impl std::fmt::Display for TestAssertionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
-    }
-}
-
-pub fn assert_that<T: std::fmt::Debug + PartialEq + Clone>(actual: T) -> AssertThat<T> {
-    AssertThat { actual }
-}
-
-pub struct AssertThat<T> {
-    actual: T,
-}
-
-impl<T: std::fmt::Debug + PartialEq + Clone> AssertThat<T> {
-    pub fn is_equal_to(&self, expected: T) -> Result<(), TestAssertionError> {
-        if self.actual == expected {
-            Ok(())
-        } else {
-            Err(TestAssertionError {
-                message: format!("{:?} should equal {:?}", self.actual, expected),
-                expected: Some(format!("{:?}", expected)),
-                actual: Some(format!("{:?}", self.actual)),
-            })
-        }
-    }
-
-    pub fn is_not_equal_to(&self, not_expected: T) -> Result<(), TestAssertionError> {
-        if self.actual != not_expected {
-            Ok(())
-        } else {
-            Err(TestAssertionError {
-                message: format!("{:?} should NOT equal {:?}", self.actual, not_expected),
-                expected: Some(format!("NOT {:?}", not_expected)),
-                actual: Some(format!("{:?}", self.actual)),
-            })
-        }
-    }
-
-    pub fn is_same_as(&self, expected: &T) -> Result<(), TestAssertionError>
-    where
-        T: PartialEq,
-    {
-        if self.actual == *expected {
-            Ok(())
-        } else {
-            Err(TestAssertionError {
-                message: "Objects should be the same".to_string(),
-                expected: None,
-                actual: None,
-            })
-        }
-    }
-
-    pub fn is_none(&self) -> Result<(), TestAssertionError> {
-        Err(TestAssertionError {
-            message: "is_none not supported for this type".to_string(),
-            expected: None,
-            actual: None,
-        })
-    }
-
-    pub fn is_some(&self) -> Result<(), TestAssertionError>
-    where
-        T: std::fmt::Debug,
-    {
-        Err(TestAssertionError {
-            message: "is_some not supported for this type".to_string(),
-            expected: None,
-            actual: None,
-        })
-    }
-
-    pub fn contains(&self, item: &T) -> Result<(), TestAssertionError>
-    where
-        T: PartialEq + std::fmt::Debug,
-    {
-        if self.actual == *item {
-            Err(TestAssertionError {
-                message: format!("{:?} should contain {:?}", self.actual, item),
-                expected: Some(format!("Contains {:?}", item)),
-                actual: Some(format!("{:?}", self.actual)),
-            })
-        } else {
-            Ok(())
-        }
     }
 }
 

@@ -742,15 +742,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            if actual != expected {
-                return Err(Error::Runtime(
-                    format!(
-                        "Assertion failed: expected {:?} but got {:?}",
-                        expected, actual
-                    ),
-                    span,
-                ));
-            }
+            // The same library call the `expect` statement and the bytecode VM
+            // use, so a failing assertion reads identically however it was
+            // reached.
+            crate::testing::assertions::assert_values_equal(&expected, &actual)
+                .map_err(|failure| Error::Runtime(failure.to_string(), span))?;
             Ok(Some(Value::Nothing))
         }
         // Console module
@@ -1654,6 +1650,130 @@ mod tests {
                 seconds_for_format(seconds as f64, Span::new(1, 1)).is_ok(),
                 "{} must produce a timestamp time.format can read back",
                 text
+            );
+        }
+    }
+}
+
+/// The `expect` / `assert` builtin must build its failure message with
+/// `crate::testing::assertions`, not with a private copy of the wording. The
+/// `expect` statement and the bytecode VM already route through that library;
+/// a private duplicate here is how the three drift apart.
+///
+/// The parser turns `expect a to be b` into the `Expect` statement, so this arm
+/// is reached through `builtin` directly rather than through a `.rb` file.
+#[cfg(test)]
+mod expect_builtin_tests {
+    use super::*;
+    use crate::testing::assertions::assert_values_equal;
+
+    fn call(name: &str, args: &[Value]) -> Result<Option<Value>> {
+        builtin(Span::new(7, 5), name, args)
+    }
+
+    #[test]
+    fn the_builtin_prints_the_message_the_assertion_library_builds() {
+        for name in ["expect", "assert"] {
+            let error = call(name, &[Value::Number(1.0), Value::Number(2.0)])
+                .expect_err("1 is not 2, so the assertion must fail");
+
+            let built = assert_values_equal(&Value::Number(2.0), &Value::Number(1.0))
+                .expect_err("1 is not 2")
+                .to_string();
+
+            match error {
+                Error::Runtime(message, span) => {
+                    assert_eq!(
+                        message, built,
+                        "`{}` must report the failure the library builds",
+                        name
+                    );
+                    assert_eq!(
+                        span,
+                        Span::new(7, 5),
+                        "the failure must be reported against the call site"
+                    );
+                }
+                other => panic!("`{}` must fail with a Runtime error, got {:?}", name, other),
+            }
+        }
+    }
+
+    #[test]
+    fn the_builtin_accepts_a_matching_pair() {
+        for name in ["expect", "assert"] {
+            let value = call(
+                name,
+                &[Value::Text("a".to_string()), Value::Text("a".to_string())],
+            )
+            .unwrap_or_else(|e| panic!("`{}` must accept equal values, got {}", name, e));
+            assert!(
+                matches!(value, Some(Value::Nothing)),
+                "`{}` returns nothing, got {:?}",
+                name,
+                value
+            );
+        }
+    }
+
+    /// The edge cases the argument list can present. Each must be a clean
+    /// `Runtime` error naming the problem — never a panic, and never a silent
+    /// pass that hides a broken assertion.
+    #[test]
+    fn edge_the_builtin_reports_its_own_argument_and_type_edges() {
+        let too_few =
+            call("expect", &[Value::Number(1.0)]).expect_err("one argument is not a pair");
+        assert!(
+            matches!(&too_few, Error::Runtime(message, _) if message.contains("two arguments")),
+            "a missing argument must be named, got {:?}",
+            too_few
+        );
+
+        // Pairs the assertion must accept.
+        for (actual, expected, what) in [
+            (Value::Nothing, Value::Nothing, "nothing"),
+            (Value::Number(0.0), Value::Number(-0.0), "signed zero"),
+            (
+                Value::Text(String::new()),
+                Value::Text(String::new()),
+                "empty text",
+            ),
+            (Value::list(vec![]), Value::list(vec![]), "empty list"),
+        ] {
+            assert!(
+                call("expect", &[actual, expected]).is_ok(),
+                "{} compares equal to itself",
+                what
+            );
+        }
+
+        // Pairs it must refuse, each with a named failure.
+        for (actual, expected, what) in [
+            (
+                Value::list(vec![]),
+                Value::Text(String::new()),
+                "empty list",
+            ),
+            (
+                Value::Text(String::new()),
+                Value::list(vec![]),
+                "empty text",
+            ),
+            (Value::YesNo(true), Value::Number(1.0), "yes/no against one"),
+            (Value::Nothing, Value::Number(0.0), "nothing against zero"),
+            (
+                Value::list(vec![]),
+                Value::list(vec![Value::Number(1.0)]),
+                "singleton list",
+            ),
+        ] {
+            let failure = call("expect", &[actual.clone(), expected.clone()])
+                .expect_err(&format!("{} must be refused", what));
+            assert!(
+                matches!(&failure, Error::Runtime(message, _) if !message.is_empty()),
+                "{} must produce a named failure, got {:?}",
+                what,
+                failure
             );
         }
     }
