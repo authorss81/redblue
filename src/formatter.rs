@@ -110,7 +110,8 @@ fn collect_comments(source: &str) -> Vec<Comment> {
 }
 
 /// A keyword of the source that closes or reopens a block — `else`, `catch`,
-/// `finally`, `end` — with the line it was written on.
+/// `finally`, `end`, and the `until` that closes a post-test loop — with the line
+/// it was written on.
 #[derive(Clone)]
 struct Closing {
     line: usize,
@@ -140,6 +141,13 @@ fn closing_lines(tokens: &[crate::lexer::Token]) -> Vec<Closing> {
                 TokenKind::Catch => TokenKind::Catch,
                 TokenKind::Finally => TokenKind::Finally,
                 TokenKind::End => TokenKind::End,
+                // `repeat ... until <condition>` has no `end`: its `until` is what
+                // closes the body, so it is a closing keyword like the others.
+                // Left out, the loop's body ran on past its own `until` and took
+                // the enclosing block's `end` as its bound — a tail comment of
+                // the body was written after the `until`, and a comment written
+                // after the `until` was pulled up into the body.
+                TokenKind::Until => TokenKind::Until,
                 _ => return None,
             };
             Some(Closing {
@@ -383,6 +391,23 @@ impl Formatter {
                 self.open_line(stmt.span.line);
                 self.format_block(body);
                 self.write_keyword_line("end");
+            }
+            Statement::RepeatUntil {
+                body, condition, ..
+            } => {
+                self.write("repeat");
+                self.open_line(stmt.span.line);
+                self.format_block(body);
+                // `format_block` left `last_line` on the `until` line — it is a
+                // closing keyword now, like `end` — so a comment written at the
+                // end of that line is still recognised. It goes after the
+                // condition rather than after the `until`, for the reason the
+                // `catch` name is written the same way: a word written after a
+                // comment lands in it.
+                self.write_indent();
+                self.write("until ");
+                self.format_expression(condition);
+                self.write_trailing_comment(self.last_line);
             }
             Statement::While { condition, body } => {
                 self.write("while ");

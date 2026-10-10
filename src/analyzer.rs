@@ -293,6 +293,23 @@ impl Analyzer {
                 }
                 self.pop_scope();
             }
+            Statement::RepeatUntil {
+                body, condition, ..
+            } => {
+                // The body runs before the condition is read, so it is walked
+                // first. A name the body binds is therefore a name the condition
+                // may read — the write lands in the program's own scope, which
+                // outlives this body, and both VMs read the condition after the
+                // body has run. Walking the condition first reported
+                // `repeat / set t to 1 / until t is 1` as an unknown variable,
+                // refusing a program the language runs on both engines.
+                self.push_scope();
+                for stmt in body {
+                    self.analyze_statement(stmt);
+                }
+                self.pop_scope();
+                self.analyze_expr(condition, &span);
+            }
             Statement::Break | Statement::Skip => {}
             Statement::Return(expr) | Statement::GiveBack(expr) => {
                 if let Some(e) = expr {
@@ -572,6 +589,7 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
             Statement::ForEach { body, .. }
             | Statement::ForRange { body, .. }
             | Statement::Repeat { body, .. }
+            | Statement::RepeatUntil { body, .. }
             | Statement::While { body, .. } => collect_later_names(body, out),
             Statement::Function { body, .. }
             | Statement::Method { body, .. }

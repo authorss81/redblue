@@ -393,6 +393,27 @@ impl Compiler {
                 emit(code, Opcode::Jump, top, 0, line);
                 patch_here(code, to_end);
             }
+            // `repeat ... until <condition>`: the body, then the condition, then a
+            // jump back to the top of the loop when the condition is false. The
+            // loop's `top` is a filler, which is what the VM charges a turn at —
+            // the same point in a turn the tree-walking VM charges, before the
+            // body runs — and what a `skip` jumps to.
+            Statement::RepeatUntil {
+                body,
+                condition,
+                condition_span,
+            } => {
+                let top = code.len() as u32;
+                emit(code, Opcode::Nop, 0, 0, line);
+                self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
+                // The condition and the jump that reads it belong to the `until`
+                // line rather than to the `repeat` above them, so both are
+                // compiled with the condition's own line and a failure in the
+                // condition is reported where it was written.
+                let condition_line = condition_span.line as u32;
+                self.expr(condition, code, condition_line)?;
+                emit(code, Opcode::JumpIfFalse, top, 0, condition_line);
+            }
             Statement::Break => emit(code, Opcode::Break, 0, 0, line),
             Statement::Skip => emit(code, Opcode::Skip, 0, 0, line),
             Statement::Return(expr) | Statement::GiveBack(expr) => {

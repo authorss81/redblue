@@ -179,6 +179,21 @@ pub enum Statement {
         body: Vec<Stmt>,
     },
 
+    // repeat ... until condition — no `end`: the `until` line closes it
+    RepeatUntil {
+        body: Vec<Stmt>,
+        condition: Expr,
+        /// Where the condition was written, which is the `until` line rather than
+        /// the `repeat` line the statement's own span names.
+        ///
+        /// The body runs before the condition is read, so the two are not at the
+        /// same place in the source, and a failure in the condition belongs on
+        /// the line its author wrote it on. The counted form's condition is on
+        /// its `while`'s keyword line, which is why every other loop's span and
+        /// this one cover the whole statement.
+        condition_span: Span,
+    },
+
     // while condition ... end
     While {
         condition: Expr,
@@ -947,6 +962,9 @@ impl Parser {
 
     fn parse_repeat(&mut self) -> Result<Option<Statement>> {
         self.advance(); // consume 'repeat'
+        if self.opens_post_test_loop() {
+            return self.parse_repeat_until();
+        }
         let count = self.parse_expression()?;
         self.expect(&TokenKind::Times)?;
         self.skip_newlines();
@@ -964,6 +982,101 @@ impl Parser {
         self.expect(&TokenKind::End)?;
 
         Ok(Some(Statement::Repeat { count, body }))
+    }
+
+    /// Whether this `repeat` opens the post-test loop rather than the counted
+    /// one.
+    ///
+    /// `repeat` opens two forms and the tokens after it are what tell them
+    /// apart. The counted form is `repeat <expression> times`, all on one line,
+    /// and the post-test form is `repeat` and a body an `until` ends — so what
+    /// follows the keyword decides between them.
+    ///
+    /// Looking for an `until` anywhere would not do: it is at the *end* of the
+    /// body, and a counted loop whose body holds a post-test loop of its own has
+    /// one too, at a nesting level this parser is nowhere near yet. So the scan
+    /// stops at the end of the line, where the counted form's `times` and the
+    /// post-test form's `until` are the two keywords that can settle it.
+    fn opens_post_test_loop(&self) -> bool {
+        match self.current().map(|token| &token.kind) {
+            // A `repeat` on a line of its own opens a body the lines after it
+            // hold; the counted form always has its count on the keyword's line.
+            Some(TokenKind::Newline) => true,
+            // Nothing at all follows the keyword, so there is no count for the
+            // counted form to read and this is a post-test loop that never got
+            // its `until`. Saying so is a better diagnostic than an expression
+            // error about a count that was never written.
+            Some(TokenKind::Eof) | None => true,
+            Some(_) => self.line_ends_in_until(),
+        }
+    }
+
+    /// Whether the first of `until` and `times` written on the current line is
+    /// an `until`.
+    ///
+    /// Only this line is looked at, for the reason
+    /// [`Parser::opens_post_test_loop`] gives: a keyword on a later line belongs
+    /// to a statement this parser has not reached. Within the line, the first of
+    /// the two wins — `repeat 3 times` is the counted form whatever follows it,
+    /// and `repeat set n to n + 1 until n is 3` is the post-test one.
+    fn line_ends_in_until(&self) -> bool {
+        let Some(first) = self.current() else {
+            return false;
+        };
+        let line = first.line;
+        for token in self.tokens[self.pos..].iter() {
+            if token.line != line {
+                return false;
+            }
+            match token.kind {
+                TokenKind::Until => return true,
+                TokenKind::Times => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// `repeat` { statement } `until` expression — the post-test loop, which is
+    /// closed by the `until` line rather than by an `end` of its own.
+    ///
+    /// Its body runs before its condition is read, so the condition is not
+    /// looked at until the body has had a turn: a `while`'s condition comes out
+    /// false and no body runs at all, and this one's comes out true and one body
+    /// has already run.
+    fn parse_repeat_until(&mut self) -> Result<Option<Statement>> {
+        self.skip_newlines();
+
+        let mut body = Vec::new();
+        while !matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::Until) | Some(TokenKind::End) | Some(TokenKind::Eof)
+        ) {
+            if let Some(stmt) = self.parse_statement()? {
+                body.push(stmt);
+            }
+            self.skip_newlines();
+        }
+
+        // The body stops at the `until`, and the loop is only written by one.
+        // Reaching here without it means the program ends first — or ends with an
+        // `end` that belongs to whatever block this loop was written inside — so
+        // the diagnostic says which keyword is missing rather than reporting the
+        // token found in its place.
+        let until = self.expect(&TokenKind::Until).map_err(|_| {
+            Error::Parser(
+                "A `repeat` loop is closed by an `until <condition>`, and this one has not got one"
+                    .to_string(),
+                self.span(),
+            )
+        })?;
+        let condition = self.parse_expression()?;
+
+        Ok(Some(Statement::RepeatUntil {
+            body,
+            condition,
+            condition_span: until.span(),
+        }))
     }
 
     fn parse_while(&mut self) -> Result<Option<Statement>> {
@@ -2255,6 +2368,13 @@ pub fn open_block_depth(tokens: &[Token]) -> i32 {
                 depth -= 1;
                 at_statement_start = false;
             }
+            // `repeat ... until <condition>` is opened by its `repeat` and closed
+            // by its `until` — it has no `end` of its own, so a REPL waiting for
+            // one would ask for a line the form is never written with.
+            TokenKind::Until => {
+                depth -= 1;
+                at_statement_start = false;
+            }
             // A branch of a block already counted rather than a statement of its
             // own, so the statement-start rule still holds after it: `else if x
             // then` opens one more block.
@@ -2294,6 +2414,32 @@ mod tests {
     fn depth_of(source: &str) -> i32 {
         let tokens = Lexer::tokenize(source).expect("the source should lex");
         open_block_depth(&tokens)
+    }
+
+    /// The post-test loop is the one block form `end` does not close, so the
+    /// depth a REPL reads to decide whether the program is finished has to be
+    /// closed by its `until` — otherwise every post-test loop typed at a prompt
+    /// asks for an `end` the form is never written with.
+    #[test]
+    fn edge_a_post_test_loop_is_closed_by_its_until_and_not_by_an_end() {
+        let cases = [
+            "repeat\nset n to 0\nuntil n is 1",
+            "repeat\nuntil yes is yes",
+            "while n is 0\nrepeat\nset n to n + 1\nuntil n is 1\nend",
+        ];
+        for source in cases {
+            assert_eq!(
+                depth_of(source),
+                0,
+                "{source:?} is a finished program, or a REPL asks for a line \
+                 that closes nothing"
+            );
+        }
+        assert_eq!(
+            depth_of("repeat\nset n to n + 1"),
+            1,
+            "a `repeat` whose `until` has not been typed yet is still open"
+        );
     }
 
     /// Every block form `docs/GRAMMAR.md` § 3.1 lists leaves a block open, and

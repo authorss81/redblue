@@ -266,6 +266,16 @@ impl Linter {
                 self.analyze_expr(condition);
                 self.analyze_body(body);
             }
+            Statement::RepeatUntil {
+                body, condition, ..
+            } => {
+                // The body runs before the condition is read, so it is walked
+                // first — the same order `src/analyzer.rs` walks it in, and for
+                // the same reason: a name the body binds is one the condition
+                // reads.
+                self.analyze_body(body);
+                self.analyze_expr(condition);
+            }
             Statement::Break | Statement::Skip => {}
             Statement::Return(expr) | Statement::GiveBack(expr) => {
                 if let Some(e) = expr {

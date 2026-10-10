@@ -1263,6 +1263,35 @@ impl Vm {
                 }
                 Ok(Value::Nothing)
             }
+            // `repeat ... until <condition>`: the body has its turn and the
+            // condition is read afterwards, so the first turn is one whatever
+            // the condition would have said before it ran. A turn is charged at
+            // the top of the loop, before the body runs, which is where the
+            // bytecode VM charges it too — the filler its `top` is.
+            //
+            // A `skip` starts the next turn without reading the condition,
+            // because "skip" means the same thing in every loop: go on to the
+            // top of this one. In a loop whose condition is at its top that
+            // reads the condition; here it goes straight back to the body.
+            Statement::RepeatUntil {
+                body,
+                condition,
+                condition_span,
+            } => {
+                let mut loop_iterations = 0;
+                loop {
+                    self.charge_iteration(&mut loop_iterations, "repeat")?;
+                    match self.run_iteration(None, None, body)? {
+                        Some(LoopControl::Break) => break,
+                        Some(LoopControl::Skip) => continue,
+                        None => {}
+                    }
+                    if self.evaluate_at(condition, *condition_span)?.is_truthy() {
+                        break;
+                    }
+                }
+                Ok(Value::Nothing)
+            }
             Statement::While { condition, body } => {
                 let mut loop_iterations = 0;
                 while self.evaluate(condition)?.is_truthy() {
@@ -1621,7 +1650,22 @@ impl Vm {
         }
     }
 
-    fn binary_op(&mut self, op: &BinaryOp, left: Value, right: Value) -> Result<Value> {
+    /// Evaluates `expr`, reporting any failure in it against `span` rather than
+    /// against the statement being executed.
+    ///
+    /// Nearly every expression is written on the line of the statement that holds
+    /// it, so [`Vm::evaluate`] answers for all of them. A `repeat ... until` is
+    /// the one place it does not: its condition is on the `until` line, at the
+    /// bottom of the loop, so a failure there belongs to the line its author wrote
+    /// it on rather than to the `repeat` that opens the loop.
+    fn evaluate_at(&mut self, expr: &Expr, span: Span) -> Result<Value> {
+        let previous_span = std::mem::replace(&mut self.current_span, span);
+        let result = self.evaluate(expr);
+        self.current_span = previous_span;
+        result
+    }
+
+    fn binary_op(&self, op: &BinaryOp, left: Value, right: Value) -> Result<Value> {
         runtime::binary_op(self.span(), op, left, right)
     }
 

@@ -433,7 +433,7 @@ struct LoopSite {
 
 /// Every loop in `block`, found from its backward jumps.
 ///
-/// A loop is the backward `JUMP` the compiler writes at the end of every loop
+/// A loop is the backward jump the compiler writes at the end of every loop
 /// body: it targets the `STORE` that binds the loop variable for `for each` and
 /// `repeat`, and the first instruction of the condition for a `while`. No other
 /// jump in the instruction set goes backwards, so that jump *is* the loop and
@@ -444,15 +444,37 @@ struct LoopSite {
 /// `repeat` count or a pair of bounds. A `while` has neither, because its `top`
 /// is its condition.
 ///
+/// A `repeat ... until` reads its condition *after* its body, so the jump that
+/// ends a turn is a conditional one — the only backward `JUMP_IF_FALSE` the
+/// compiler writes. It targets the filler at the top of the loop, which is what
+/// makes that filler the loop's `top`: a turn is charged there and a `skip` goes
+/// back to it, exactly as a `while`'s turns are charged at and skipped to its
+/// condition.
+///
 /// `exit` is where the loop is left. A sequence loop runs out at the instruction
 /// after its backward jump. A `while` leaves through its own `JUMP_IF_FALSE`, so
 /// that is the instruction sought: the one in the loop's body that jumps past the
-/// backward jump.
+/// backward jump. A post-test loop leaves by falling past its own, so it ends
+/// there like a sequence loop does.
 fn loop_sites(block: &Block) -> Vec<LoopSite> {
     let mut sites = Vec::new();
     for (index, instruction) in block.code.iter().enumerate() {
-        if instruction.opcode != Opcode::Jump || instruction.arg as usize >= index {
+        if instruction.arg as usize >= index {
             continue;
+        }
+        match instruction.opcode {
+            Opcode::Jump => {}
+            Opcode::JumpIfFalse => {
+                sites.push(LoopSite {
+                    top: instruction.arg,
+                    back_edge: index as u32,
+                    exit: index as u32 + 1,
+                    iterator: false,
+                    kind: "repeat",
+                });
+                continue;
+            }
+            _ => continue,
         }
         let top = instruction.arg;
         let back_edge = index as u32;
@@ -1020,6 +1042,57 @@ impl BytecodeVm {
         self.charge_step()
     }
 
+    /// The loop whose `top` is the filler about to run, and charges its turn.
+    ///
+    /// A `repeat ... until` has no instruction of its own at the top of a turn —
+    /// the condition is at the bottom — so the compiler puts a filler there and
+    /// this is where that filler is charged. It is the same point in a turn the
+    /// other three loops charge: before the body runs, and once per turn whatever
+    /// ends it, so a cap of N is N turns here as it is everywhere else. A filler
+    /// no loop was written at does nothing, which is every other `NOP` in a file.
+    fn charge_loop_top(&mut self, frame: usize) -> Result<()> {
+        let ip = self.frames[frame].ip as u32;
+        let Some(site) = self.frames[frame]
+            .sites
+            .iter()
+            .find(|site| site.top == ip)
+            .copied()
+        else {
+            return Ok(());
+        };
+        let index = self.loop_entry(frame, site);
+        self.charge_loop(index)
+    }
+
+    /// Gives back the entry of the post-test loop this backward `JUMP_IF_FALSE`
+    /// ends, and sends the frame on past the loop.
+    ///
+    /// A loop that ends by falling out of its own loop is given back here for the
+    /// same reason a `while` that ends on its condition is: keeping its entry
+    /// would let a later turn of an enclosing loop find a loop that has already
+    /// finished and charge it again. `leave_loop` leaves the frame at the loop's
+    /// `exit`, which is the instruction after this one, so a caller that has been
+    /// given `true` has nothing left to advance.
+    ///
+    /// `false` means there was no entry to give back, and the caller is the one
+    /// that moves the frame on.
+    fn leave_post_test_loop(&mut self, frame: usize, instruction: Instruction) -> bool {
+        let ip = self.frames[frame].ip as u32;
+        let Some(site) = self.frames[frame]
+            .sites
+            .iter()
+            .find(|site| site.top == instruction.arg && site.back_edge == ip)
+            .copied()
+        else {
+            return false;
+        };
+        let Some(index) = self.loop_index(frame, site) else {
+            return false;
+        };
+        self.leave_loop(frame, index);
+        true
+    }
+
     // -- the operand stack --------------------------------------------------
 
     fn push(&mut self, value: Value) {
@@ -1505,6 +1578,7 @@ impl BytecodeVm {
                     return Ok(());
                 }
                 if instruction.arg != END_TRY_MARKER {
+                    self.charge_loop_top(frame)?;
                     self.advance(frame);
                     return Ok(());
                 }
@@ -1660,7 +1734,23 @@ impl BytecodeVm {
             Opcode::Jump => self.jump(instruction, frame),
             Opcode::JumpIfFalse => {
                 let target = instruction.arg as usize;
+                let backwards = target <= self.frames[frame].ip;
                 let value = self.pop()?;
+                if backwards {
+                    // A `repeat ... until` reads its condition at the end of a
+                    // turn, so this jump runs backwards: false is a turn that
+                    // goes round again, true is the turn that ends the loop. The
+                    // turn was charged at the filler its `top` is, before its
+                    // body ran; a jump that goes backwards spends nothing more.
+                    if value.is_truthy() {
+                        if !self.leave_post_test_loop(frame, instruction) {
+                            self.advance(frame);
+                        }
+                    } else {
+                        self.set_ip(frame, target);
+                    }
+                    return Ok(());
+                }
                 if value.is_truthy() {
                     // A `while`'s condition is where a turn *begins*, so it is
                     // where a turn is charged — the same point the tree-walking
