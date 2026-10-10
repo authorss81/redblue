@@ -337,6 +337,12 @@ struct Guard {
     /// counts tells the two apart: a count that has gone up is a new result.
     /// See [`BytecodeVm::handle_guard`].
     assertions_before: usize,
+    /// How many resource limits had been reached when the guard was installed.
+    ///
+    /// The same counting question as [`Guard::assertions_before`, and the same
+    /// answer: a count that has gone up names something this guard's own region
+    /// did. See [`BytecodeVm::handle_guard`].
+    limits_before: usize,
 }
 
 /// One `object` declaration being assembled. Its body declares the fields and
@@ -627,6 +633,18 @@ pub struct BytecodeVm {
     /// with it. The count goes up once per failed `expect`, so a guard can tell
     /// whether *this* region recorded a new one. See [`Guard::assertions_before`].
     assertions_failed: usize,
+    /// How many of the host's own resource limits this run has reached — the
+    /// step budget, the call-depth limit, or a loop's iteration cap.
+    ///
+    /// A count, and monotonic for the life of the VM, for the same reason
+    /// [`BytecodeVm::assertions_failed`] is: a guard must not discard a limit, and
+    /// the failure does not say whether it is one — a limit is a `RuntimeError`
+    /// whose message happens to read like one, and matching the wording made the
+    /// guard's behaviour a property of how the three messages are spelled. The
+    /// count is exact where wording-matching is not, and comparing it across the
+    /// guarded region names a limit *that* region reached rather than one an
+    /// earlier expression was stopped by. See [`Guard::limits_before`].
+    limits_hit: usize,
     current_span: Span,
     /// The operand stack. Every block is entered with an empty one; the bases
     /// live in [`Frame`].
@@ -720,6 +738,7 @@ impl BytecodeVm {
             importing: Vec::new(),
             expectation_failure: None,
             assertions_failed: 0,
+            limits_hit: 0,
             current_span: Span::unknown(),
             stack: Vec::new(),
             frames: Vec::new(),
@@ -950,6 +969,17 @@ impl BytecodeVm {
 
     // -- the limits ---------------------------------------------------------
 
+    /// The failure a reached resource limit raises, counted on
+    /// [`BytecodeVm::limits_hit`].
+    ///
+    /// Every limit goes through here, so the count names them all without any of
+    /// them being spelled differently from the rest of a `RuntimeError`.
+    fn limit_reached(&mut self, message: String) -> Error {
+        let span = self.span();
+        self.limits_hit += 1;
+        Error::Runtime(message, span)
+    }
+
     /// Charges one statement to the step budget.
     ///
     /// Charged where the compiler's statement marker is — once per statement,
@@ -961,13 +991,10 @@ impl BytecodeVm {
     /// same program.
     fn charge_step(&mut self) -> Result<()> {
         if self.steps >= self.max_steps {
-            return Err(Error::Limit(
-                format!(
-                    "Step budget of {} reached before the program finished",
-                    self.max_steps
-                ),
-                self.span(),
-            ));
+            return Err(self.limit_reached(format!(
+                "Step budget of {} reached before the program finished",
+                self.max_steps
+            )));
         }
         self.steps += 1;
         Ok(())
@@ -1006,13 +1033,12 @@ impl BytecodeVm {
             return Ok(());
         };
         if entry.iterations >= self.max_iterations {
-            return Err(Error::Limit(
-                format!(
-                    "Maximum of {} iterations reached in a '{}' loop",
-                    self.max_iterations, entry.kind
-                ),
-                self.span(),
-            ));
+            // The kind is copied out because the failure it goes into needs the
+            // VM, which the borrow of the loop entry is holding.
+            let (turns, kind) = (self.max_iterations, entry.kind);
+            return Err(self.limit_reached(format!(
+                "Maximum of {turns} iterations reached in a '{kind}' loop"
+            )));
         }
         entry.iterations += 1;
         // The borrow of the loop entry ends here, so the step charge below can
@@ -1210,7 +1236,7 @@ impl BytecodeVm {
                 match self.unwind_frame() {
                     Ok(()) => continue,
                     Err(error) => {
-                        if !self.handle_failure(&error)? {
+                        if !self.handle_failure()? {
                             return Err(error);
                         }
                         continue;
@@ -1225,7 +1251,7 @@ impl BytecodeVm {
             // the flag is cleared here. See [`Self::drive`].
             self.abrupt_exit = false;
             if let Err(error) = self.step() {
-                if !self.handle_failure(&error)? {
+                if !self.handle_failure()? {
                     return Err(error);
                 }
             }
@@ -2604,13 +2630,10 @@ impl BytecodeVm {
             ));
         };
         if self.call_depth >= self.max_call_depth {
-            return Err(Error::Limit(
-                format!(
-                    "Maximum call depth of {} reached while calling '{}'",
-                    self.max_call_depth, function.name
-                ),
-                self.span(),
-            ));
+            return Err(self.limit_reached(format!(
+                "Maximum call depth of {} reached while calling '{}'",
+                self.max_call_depth, function.name
+            )));
         }
         let (chunk, path) = (chunk.clone(), path.to_vec());
         let block = self.block_of(&chunk, &path)?.clone();
@@ -2774,6 +2797,7 @@ impl BytecodeVm {
             handler_base: self.handlers.len(),
             target: instruction.arg,
             assertions_before: self.assertions_failed,
+            limits_before: self.limits_hit,
         });
         self.advance(frame);
         Ok(())
@@ -2833,7 +2857,7 @@ impl BytecodeVm {
     /// the extra would be consumed by whoever reads the expression's result rather
     /// than by the expression — growing the operand stack without bound in a loop
     /// of failing guarded calls.
-    fn handle_guard(&mut self, index: usize, error: &Error) -> Result<bool> {
+    fn handle_guard(&mut self, index: usize) -> Result<bool> {
         let Some(guard) = self.guards.get(index).copied() else {
             return Ok(false);
         };
@@ -2864,7 +2888,7 @@ impl BytecodeVm {
         // expression are the same variant carrying a string, and telling them
         // apart by the wording made the guard's behaviour a property of how the
         // three limit messages happen to be spelled.
-        if error.is_resource_limit() {
+        if self.limits_hit > guard.limits_before {
             return Ok(false);
         }
         // Every guard above this one was installed by code that has now failed,
@@ -2927,7 +2951,7 @@ impl BytecodeVm {
     /// A handler body that fails itself leaves that failure in place, which is what
     /// the tree-walking VM does — the second `?` — so an error in a `catch` is not
     /// swallowed by the `try` that caught it.
-    fn handle_failure(&mut self, error: &Error) -> Result<bool> {
+    fn handle_failure(&mut self) -> Result<bool> {
         // Looped, because neither a handler nor a guard is obliged to handle
         // anything: a `try` with no `catch` runs its `finally` and passes the
         // failure on, so the search continues from what is left rather than the
@@ -2944,7 +2968,7 @@ impl BytecodeVm {
             // innermost handler's `TRY`, and a turn that has popped a handler has
             // changed which of those it is.
             if let Some(index) = self.inner_most_guard() {
-                if self.guard_is_inner(index) && self.handle_guard(index, error)? {
+                if self.guard_is_inner(index) && self.handle_guard(index)? {
                     return Ok(true);
                 }
                 // A guard that declined leaves the failure where it was, and the

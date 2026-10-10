@@ -283,7 +283,6 @@ fn rendered(error: Error, text: &str, compiler_path: &Path) -> Error {
         Error::Parser(_, span) => Error::Parser(body, span),
         Error::Analyzer(_, span) => Error::Analyzer(body, span),
         Error::Runtime(_, span) => Error::Runtime(body, span),
-        Error::Limit(_, span) => Error::Limit(body, span),
         Error::Io(message) => Error::Io(message),
     }
 }
@@ -411,7 +410,6 @@ fn refused(error: Error, said: &str, input_path: &Path) -> Error {
         Error::Parser(_, span) => Error::Parser(message, span),
         Error::Analyzer(_, span) => Error::Analyzer(message, span),
         Error::Runtime(_, span) => Error::Runtime(message, span),
-        Error::Limit(_, span) => Error::Limit(message, span),
         Error::Io(detail) => Error::Io(format!("{message}: {detail}")),
     }
 }

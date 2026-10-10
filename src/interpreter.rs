@@ -254,6 +254,19 @@ pub struct Vm {
     /// too — including ones that are not test results at all. See
     /// [`Expr::MightFail`].
     assertions_failed: usize,
+    /// How many of the host's own resource limits this run has reached — the step
+    /// budget, the call-depth limit, or a loop's iteration cap.
+    ///
+    /// A count, and monotonic for the life of the VM, for the same reason
+    /// [`Vm::assertions_failed`] is: `might fail` must not discard a limit, and a
+    /// failure does not say whether it is one — a limit is a `RuntimeError` whose
+    /// message happens to read like a limit, and matching on the wording would make
+    /// the guard's behaviour a property of how the three messages are spelled.
+    /// Counting is exact where wording-matching is not, and comparing the count
+    /// across the guarded expression names a limit that *this* expression reached
+    /// rather than one an earlier expression was stopped by. See
+    /// [`Expr::MightFail`].
+    limits_hit: usize,
     current_span: Span,
     call_depth: usize,
     max_call_depth: usize,
@@ -404,6 +417,7 @@ impl Vm {
             objects: HashMap::new(),
             expectation_failure: None,
             assertions_failed: 0,
+            limits_hit: 0,
             current_span: Span::unknown(),
             call_depth: 0,
             max_call_depth: resolve_max_call_depth(),
@@ -455,6 +469,16 @@ impl Vm {
         vm
     }
 
+    /// The failure a reached resource limit raises, counted on [`Vm::limits_hit`].
+    ///
+    /// Every limit goes through here, so the count names them all without any of
+    /// them being spelled differently from the rest of a `RuntimeError`.
+    fn limit_reached(&mut self, message: String) -> Error {
+        let span = self.span();
+        self.limits_hit += 1;
+        Error::Runtime(message, span)
+    }
+
     /// Charges one statement to the step budget, failing once the program has
     /// run [`Vm::max_steps`] statements. Called for every statement, including
     /// those inside a function body, so the budget bounds the program rather
@@ -465,13 +489,10 @@ impl Vm {
     /// the same turn of the same loop.
     fn charge_step(&mut self) -> Result<()> {
         if self.steps >= self.max_steps {
-            return Err(Error::Limit(
-                format!(
-                    "Step budget of {} reached before the program finished",
-                    self.max_steps
-                ),
-                self.span(),
-            ));
+            return Err(self.limit_reached(format!(
+                "Step budget of {} reached before the program finished",
+                self.max_steps
+            )));
         }
         self.steps += 1;
         Ok(())
@@ -488,13 +509,10 @@ impl Vm {
     /// both engines then say about the same program.
     fn charge_iteration(&mut self, loop_iterations: &mut usize, kind: &str) -> Result<()> {
         if *loop_iterations >= self.max_iterations {
-            return Err(Error::Limit(
-                format!(
-                    "Maximum of {} iterations reached in a '{}' loop",
-                    self.max_iterations, kind
-                ),
-                self.span(),
-            ));
+            return Err(self.limit_reached(format!(
+                "Maximum of {} iterations reached in a '{}' loop",
+                self.max_iterations, kind
+            )));
         }
         *loop_iterations += 1;
         self.charge_step()
@@ -1584,6 +1602,7 @@ impl Vm {
             // program running against a bound it has already reached.
             Expr::MightFail(inner) => {
                 let assertions_before = self.assertions_failed;
+                let limits_before = self.limits_hit;
                 match self.evaluate(inner) {
                     Ok(value) => Ok(value),
                     Err(failure) => {
@@ -1596,10 +1615,8 @@ impl Vm {
                         // that has gone up names a result this expression
                         // recorded.
                         let asserted_now = self.assertions_failed > assertions_before;
-                        if self.loop_control.is_some()
-                            || asserted_now
-                            || failure.is_resource_limit()
-                        {
+                        let limited_now = self.limits_hit > limits_before;
+                        if self.loop_control.is_some() || asserted_now || limited_now {
                             return Err(failure);
                         }
                         Ok(Value::Nothing)
@@ -1917,13 +1934,10 @@ impl Vm {
         args: &[Value],
     ) -> Result<Value> {
         if self.call_depth >= self.max_call_depth {
-            return Err(Error::Limit(
-                format!(
-                    "Maximum call depth of {} reached while calling '{}'",
-                    self.max_call_depth, name
-                ),
-                self.span(),
-            ));
+            return Err(self.limit_reached(format!(
+                "Maximum call depth of {} reached while calling '{}'",
+                self.max_call_depth, name
+            )));
         }
 
         // The captured scopes go on the stack *above* the caller's frames, and
