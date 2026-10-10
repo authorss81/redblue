@@ -43,6 +43,19 @@ fn eval_err(source: &str) -> Error {
     }
 }
 
+/// Runs `source` and hands the pipeline's verdict back, error and all.
+///
+/// The same run as [`eval`] and [`eval_err`], but it does not panic on the half
+/// the caller did not ask for. That is what lets a test assert on `is_err()`
+/// and `is_ok()` directly, so the message comes from the assertion naming the
+/// call rather than from a panic inside a helper.
+#[track_caller]
+fn try_eval(source: &str) -> Result<Value, Error> {
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("source should lex");
+    let ast = redblue::parser::parse(tokens).expect("source should parse");
+    redblue::Vm::new().run(&ast)
+}
+
 /// A list of `count` numbers drawn by `expr`, one per `for` iteration.
 ///
 /// The program is whole: seeding, the loop and the list all run inside one VM,
@@ -1057,4 +1070,71 @@ fn edge_random_draws_from_a_range_too_wide_to_count_exactly() {
         "100 draws from [-1e16, 1e16] put {signs:?} on each side of zero, so the \
          range is not being drawn from evenly"
     );
+}
+
+/// Every refusal the `random*` builtins make is an `Err` — not a panic, and not
+/// a value that merely looks wrong.
+///
+/// The other failure tests here reach their refusals through `eval_err`, which
+/// panics when a call is wrongly *accepted*. This one asserts on the `Result`
+/// itself, so the two halves of each case are checked in the same breath: a
+/// `random_choice([])` that answered `nothing` again, or a `random(10, 1)`
+/// that quietly swapped its ends, fails here on `is_ok()`, and a builtin that
+/// refused *everything* fails on `is_err()`.
+#[test]
+fn edge_every_refused_random_call_is_an_err_and_every_accepted_one_is_not() {
+    for source in [
+        // An empty list has no member to choose.
+        "random_choice([])",
+        // A reversed range has no member either.
+        "random(10, 1)",
+        "random_number(10, 1)",
+        // A range holding no whole number, which is what `random` draws.
+        "random(0.2, 0.8)",
+        // A range too wide for a double to hold a member count of.
+        "random(-1e308, 1e308)",
+        "random_number(-1e308, 1e308)",
+        // Arguments of the wrong type, read as zero by the old `random`.
+        "random(\"a\", 1)",
+        "random(1, \"b\")",
+        "random_number([1])",
+        "random_choice(\"not a list\")",
+        "random_choice(7)",
+        "random_shuffle(7)",
+        "random_shuffle(\"not a list\")",
+        // A seed that is not one finite number.
+        "random_seed()",
+        "random_seed(1, 2)",
+        "random_seed(\"abc\")",
+        "random_seed([1])",
+        "random_seed(1e400)",
+    ] {
+        let result = try_eval(source);
+        assert!(
+            result.is_err(),
+            "`{source}` should have been refused, it answered {:?}",
+            result.ok()
+        );
+        assert!(
+            matches!(result, Err(Error::Runtime(_, _))),
+            "`{source}` should be a Runtime error carrying its span, it was {result:?}"
+        );
+    }
+
+    for source in [
+        "random_seed(42)",
+        "random(5, 5)",
+        "random(1, 6)",
+        "random_number(0, 1)",
+        "random_choice([1])",
+        "random_shuffle([])",
+        "random_shuffle([1, 2, 3])",
+    ] {
+        let result = try_eval(source);
+        assert!(
+            result.is_ok(),
+            "`{source}` is a call the language accepts, it was refused: {:?}",
+            result.err()
+        );
+    }
 }
