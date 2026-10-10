@@ -41,13 +41,24 @@ fn run_capped(source: &str, max_iterations: usize) -> Result<redblue::Value, Err
     vm.run(&parse(source))
 }
 
-/// The message of a `RuntimeError`, ignoring the span it carries.
+/// The message of a runtime failure, ignoring the span it carries.
+///
+/// Both variants a runtime failure is carried by are taken: a resource limit has
+/// its own so that `might fail` can tell the host stopping the program apart from
+/// the program's own expression going wrong, but it labels as a `RuntimeError`
+/// and is one, which is what these tests assert.
 #[track_caller]
 fn runtime_message(error: &Error) -> String {
     match error {
-        Error::Runtime(message, _) => message.clone(),
+        Error::Runtime(message, _) | Error::Limit(message, _) => message.clone(),
         other => panic!("expected a RuntimeError, got {:?}", other),
     }
+}
+
+/// Whether `error` is a runtime failure — an ordinary one or a resource limit.
+#[track_caller]
+fn is_runtime_error(error: &Error) -> bool {
+    error.label() == "RuntimeError"
 }
 
 /// Writes `source` to its own file inside a scratch directory and runs it in a
@@ -86,7 +97,7 @@ fn infinite_while_loop_terminates_with_a_clean_error() {
     let error = run_capped(source, 50).expect_err("a loop past its cap must fail, not hang");
 
     assert!(
-        matches!(error, Error::Runtime(..)),
+        is_runtime_error(&error),
         "a runaway loop must be a RuntimeError, got {:?}",
         error
     );
@@ -245,7 +256,7 @@ fn edge_iteration_cap_applies_to_each_loop_form() {
 
     let error = run_capped(source, 3).expect_err("a fourth iteration is over the cap");
 
-    assert!(matches!(error, Error::Runtime(..)), "got {:?}", error);
+    assert!(is_runtime_error(&error), "got {:?}", error);
 }
 
 /// Edge: the per-loop cap is per *loop*, not per program. Nested loops each get
@@ -332,7 +343,7 @@ fn step_budget_makes_a_runaway_loop_assertable() {
         .run(&program)
         .expect_err("200 steps of an endless loop must be a clean failure");
 
-    assert!(matches!(error, Error::Runtime(..)), "got {:?}", error);
+    assert!(is_runtime_error(&error), "got {:?}", error);
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +454,7 @@ fn edge_count_beyond_i64_is_a_clean_error_not_a_panic() {
         let error = run_capped(&source, 100)
             .expect_err("a count past i64 must be bounded, not hang or panic");
         assert!(
-            matches!(error, Error::Runtime(..)),
+            is_runtime_error(&error),
             "count {} produced {:?}, which is not a RuntimeError",
             count,
             error

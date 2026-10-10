@@ -55,10 +55,15 @@ fn eval_err(source: &str) -> Error {
 }
 
 /// Runs `source` and returns the message of the `RuntimeError` it produced.
+///
+/// A resource limit is accepted alongside an ordinary runtime failure: the limit
+/// has its own variant so `might fail` can tell the host stopping the program
+/// apart from the program's own expression going wrong, but it labels as a
+/// `RuntimeError` and is one, which is what this asserts.
 #[track_caller]
 fn runtime_message(source: &str) -> String {
     match eval_err(source) {
-        Error::Runtime(message, span) => {
+        Error::Runtime(message, span) | Error::Limit(message, span) => {
             assert!(
                 span.is_known(),
                 "`{}` failed at runtime without a source span",
@@ -388,7 +393,7 @@ fn edge_a_range_longer_than_the_iteration_limit_stops_like_a_repeat_does() {
         .expect_err("a repeat past the cap should fail");
 
     let message = |error: &Error| match error {
-        Error::Runtime(message, _) => message.clone(),
+        Error::Runtime(message, _) | Error::Limit(message, _) => message.clone(),
         other => panic!("expected a Runtime error, got {:?}", other),
     };
     assert_eq!(
