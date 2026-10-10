@@ -203,6 +203,11 @@ pub fn builtins() -> HashMap<String, Value> {
     );
 
     // Random module
+    globals.insert("random".to_string(), Value::Builtin("random".to_string()));
+    globals.insert(
+        "random_seed".to_string(),
+        Value::Builtin("random_seed".to_string()),
+    );
     globals.insert(
         "random_number".to_string(),
         Value::Builtin("random_number".to_string()),
@@ -607,6 +612,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "console_log",
     "console_error",
     "console_clear",
+    "random",
+    "random_seed",
     "random_number",
     "random_choice",
     "random_shuffle",
