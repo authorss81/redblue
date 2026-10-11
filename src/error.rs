@@ -8,18 +8,59 @@ use std::fmt;
 pub struct Span {
     pub line: usize,
     pub column: usize,
+    /// Where the offending thing stops, when it covers more than one line.
+    ///
+    /// A span that covers one line records no end, so a span and its position
+    /// are the same value and everything that compared the two keeps meaning
+    /// what it meant. Only a range — an unterminated string, which runs to the
+    /// end of the file — records one, because only a range has to be *drawn*.
+    pub end_line: usize,
+    pub end_column: usize,
 }
 
 impl Span {
     pub fn new(line: usize, column: usize) -> Self {
-        Self { line, column }
+        Self {
+            line,
+            column,
+            end_line: line,
+            end_column: column,
+        }
+    }
+
+    /// This span, extended to cover up to `end_line:end_column`.
+    ///
+    /// An end that is not past the start is dropped: a span that covers one line
+    /// is drawn as one line, with the same caret it has always been drawn with.
+    pub fn extended_to(self, end_line: usize, end_column: usize) -> Self {
+        if end_line <= self.line {
+            return self;
+        }
+
+        Self {
+            line: self.line,
+            column: self.column,
+            end_line,
+            end_column,
+        }
+    }
+
+    /// Whether this span covers more than one line, and so has to be rendered as
+    /// several.
+    pub fn is_multiline(&self) -> bool {
+        self.end_line > self.line
     }
 
     /// A position that is not attached to any source text. Only for failures
     /// that happen before a token exists, such as a module file that cannot be
     /// read.
     pub fn unknown() -> Self {
-        Self { line: 0, column: 0 }
+        Self {
+            line: 0,
+            column: 0,
+            end_line: 0,
+            end_column: 0,
+        }
     }
 
     pub fn is_known(&self) -> bool {
@@ -133,8 +174,9 @@ impl Error {
     }
 
     /// Renders the message, the source position, the offending source line and
-    /// a caret under the column. Falls back to the message alone when the
-    /// line is not present in `source`.
+    /// a caret under the column. A span covering more than one line renders
+    /// every line it covers. Falls back to the message alone when the line is
+    /// not present in `source`.
     pub fn render(&self, source: &str, file: Option<&str>) -> String {
         let mut out = format!("{}: {}", self.label(), self.message());
 
@@ -144,27 +186,73 @@ impl Error {
         };
 
         let span = self.span().expect("location implies a known span");
-        let line_number = span.line.to_string();
-        let gutter = " ".repeat(line_number.len());
 
         out.push_str(&format!("\n  --> {}", location));
 
-        let line_text = match source.lines().nth(span.line - 1) {
-            Some(text) => text,
-            None => return out,
-        };
+        let lines: Vec<&str> = source.lines().collect();
+        if span.line == 0 || span.line > lines.len() {
+            return out;
+        }
 
-        out.push('\n');
-        out.push_str(&format!("{} | {}", line_number, line_text));
-        out.push('\n');
-        out.push_str(&format!(
-            "{} | {}^",
-            gutter,
-            " ".repeat(span.column.saturating_sub(1))
-        ));
+        if span.is_multiline() {
+            render_range(&mut out, span, &lines);
+        } else {
+            render_single(&mut out, span, lines[span.line - 1]);
+        }
 
         out
     }
+}
+
+/// Draws one line of source and a caret under the offending column.
+fn render_single(out: &mut String, span: &Span, line: &str) {
+    let line_number = span.line.to_string();
+    let gutter = " ".repeat(line_number.len());
+
+    out.push('\n');
+    out.push_str(&format!("{} | {}", line_number, line));
+    out.push('\n');
+    out.push_str(&format!(
+        "{} | {}^",
+        gutter,
+        " ".repeat(span.column.saturating_sub(1))
+    ));
+}
+
+/// Draws every line a range covers, underlined under the column it opens at.
+///
+/// The range is clamped to the lines the source actually has: a span that runs
+/// to end of input ends one line past the last line of the file, and the lines
+/// after that are not there to be printed.
+fn render_range(out: &mut String, span: &Span, lines: &[&str]) {
+    let first = span.line;
+    let last = span.end_line.min(lines.len());
+    let width = last.to_string().len();
+
+    for number in first..=last {
+        out.push('\n');
+        out.push_str(&format!(
+            "{:>width$} | {}",
+            number,
+            lines[number - 1],
+            width = width
+        ));
+    }
+
+    // The underline runs from where the range opens to the end of the line it
+    // opens on. Where it closes is the next line's business: the lines between
+    // are shown, and underlining each of them would underline the source.
+    let opening: Vec<char> = lines[first - 1].chars().collect();
+    let start = span.column.saturating_sub(1);
+    let covered = opening.len().saturating_sub(start);
+
+    out.push('\n');
+    out.push_str(&format!(
+        "{} | {}^{}",
+        " ".repeat(width),
+        " ".repeat(start),
+        "~".repeat(covered)
+    ));
 }
 
 impl fmt::Display for Error {

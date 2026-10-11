@@ -52,7 +52,7 @@ fn test_unterminated_string_is_a_spanned_lexer_error() {
     );
     assert_eq!(
         error.span(),
-        Some(&Span::new(1, 5)),
+        Some(&Span::new(1, 5).extended_to(2, 1)),
         "the error must point at the opening quote, got: {:?}",
         error.span()
     );
@@ -73,9 +73,17 @@ fn edge_unterminated_string_reports_the_line_the_quote_opened_on() {
 
     assert_eq!(
         error.span(),
-        Some(&Span::new(2, 5)),
+        Some(&Span::new(2, 5).extended_to(4, 1)),
         "the error must name the line the quote opened on, got: {:?}",
         error.span()
+    );
+    assert!(
+        error
+            .span()
+            .expect("the error carries a span")
+            .is_multiline(),
+        "a string that ran to end of input covers every line it ran over, \
+         so the diagnostic shows all of them"
     );
 }
 

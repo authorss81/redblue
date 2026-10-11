@@ -318,9 +318,11 @@ fn diagnostics_surface_a_spanned_lexer_error() {
 
     let expected = run_source(source).expect_err("the program must fail");
     assert_eq!(
-        Some(&redblue::Span::new(1, 5)),
+        Some(&redblue::Span::new(1, 5).extended_to(2, 1)),
         expected.span(),
-        "the lexer span moved; update the pinned column"
+        "the lexer span moved; update the pinned column. The opening quote is \
+         still where it was, and the span now also records the end of input the \
+         runaway string reached"
     );
 }
 
