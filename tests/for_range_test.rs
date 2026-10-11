@@ -375,7 +375,7 @@ fn edge_a_by_before_the_to_is_a_parser_error() {
     // the `by` rather than reordering the bounds.
     assert_eq!(
         parser_error("for each i from 1 by 2 to 3\n    say i\nend"),
-        "Expected To but got Identifier(\"by\")",
+        "Expected 'to' but got Identifier(\"by\")",
         "the step marker is only read after `to`, so it cannot stand in for it"
     );
 }
@@ -384,7 +384,7 @@ fn edge_a_by_before_the_to_is_a_parser_error() {
 fn edge_a_for_each_with_neither_in_nor_from_is_a_parser_error() {
     assert_eq!(
         parser_error("for each i 3\n    say i\nend"),
-        "Expected In but got Number(3.0)",
+        "Expected 'in' but got Number(3.0)",
         "a range loop needs `in`, `from` or nothing at all"
     );
 }

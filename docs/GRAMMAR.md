@@ -58,11 +58,14 @@ A word is listed here only while the parser has a rule that reads it. A reserved
 word the parser cannot read is not a feature: it cannot be an identifier either,
 and the rejection names an internal token kind rather than the word the writer
 typed. Nine words — `are`, `ask`, `async`, `done`, `new`, `parallel`, `that`,
-`wait`, `when` — were listed and read by nothing; they are identifiers now, and
-`docs/GRAMMAR.md` §4.8 and §2.1's `when_statement` no longer describe them. The
-table is checked against `Lexer::keywords()` by
-`tests/keyword_reservation_test.rs`, so a word added here without a parser arm
-fails the suite rather than shipping.
+`wait`, `when` — were listed and read by nothing; they are identifiers now, so
+they are not listed here. The productions that once read them are kept as the
+shape a future implementation has to match, each under a **Not implemented**
+note: §4.3's `when_statement`, §4.8's `async_function` / `async_call` /
+`parallel_block`, and §7's `object_literal`. `object_literal` is therefore not an
+alternative of `primary` in §5.1. The table is checked against
+`Lexer::keywords()` by `tests/keyword_reservation_test.rs`, so a word added here
+without a parser arm fails the suite rather than shipping.
 
 ### 1.4 Literals
 
@@ -370,7 +373,6 @@ primary          = identifier
                  | list_literal
                  | record_literal
                  | function_literal
-                 | object_literal
 ```
 
 ### 5.2 Postfix Expressions
@@ -505,6 +507,14 @@ of the file as the body.
 
 ## 7. Object Literals
 
+Not implemented, and `new` is not a reserved word: it is an ordinary identifier,
+so `new Person(...)` reads as two identifiers in a row and is a parser error. The
+production is kept here as the shape a future implementation has to match;
+nothing below parses today. `object_literal` is therefore not an alternative of
+`primary` in §5.1. A declaration is its own prototype in the meantime, so the
+worked spelling is a write to the declaration — see `SPEC.md`, "Lookup order and
+shadowing".
+
 ```
 object_literal   = 'new' identifier '(' [ argument { ',' argument } ] ')'
 ```
@@ -577,9 +587,8 @@ object Person
     end
 end
 
-set person to new Person
-set name of person to "Bob"
-person.introduce()
+set Person.name to "Bob"
+Person.introduce()
 ```
 
 ### Try/Catch

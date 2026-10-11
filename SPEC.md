@@ -64,20 +64,25 @@ set 名前 to "Japanese"  // Unicode allowed
 
 ### Keywords
 
-Redblue has 32 keywords:
+Redblue reserves 47 words, each with a rule in the parser that reads it:
 
 | Category | Keywords |
 |----------|----------|
-| Variables | set, constant, to, is, are, nothing |
-| Control | if, then, else, end, when, unless |
+| Variables | set, constant, to, is, nothing, yes, no |
+| Control | if, then, else, end, unless |
 | Loops | for, each, in, from, times, while, repeat, until |
 | Jumps | break, skip, return, give back |
-| Functions | to, takes, needs, might fail |
-| Types | number, text, yes/no, list, record, object |
+| Errors | might fail, try, catch, finally |
+| Output | say, print |
 | Modules | module, import, export, as |
-| Logic | and, or, not |
-| Errors | try, catch, finally, error |
-| Objects | has, can, this, that, new, extends |
+| Logic | and, or, not, mod |
+| Tests | test, expect |
+| Objects | object, has, can, this, extends |
+
+`give back` and `might fail` are two words each, which is why 47 words make 45
+keyword forms. Every other word here is reserved on its own. A word that is not
+on this list is an ordinary identifier; see the appendix at the end for the ones
+that used to be listed and are not any more.
 
 ### Literals
 
@@ -624,27 +629,35 @@ end
 
 ### Instantiation
 
+Not implemented. There is no `new`: the word is an ordinary identifier, and
+`new Person` reads as two identifiers in a row and is a parser error. A
+declaration is its own prototype, so a program writes to the declaration where
+it would otherwise construct one — see "Lookup order and shadowing".
+
 ```redblue
-set person to new Person
-set name of person to "Alice"
-set age of person to 30
+set Person.name to "Alice"
+set Person.age to 30
 ```
 
 ### Constructor
+
+A `to create` method is a constructor written on the declaration itself, and is
+called as one. `this` is the prototype, so `give back this` hands back the
+declaration rather than a fresh copy — see "Lookup order and shadowing".
 
 ```redblue
 object Person
     has name
     has age
     
-    to create(name, age)
-        set this.name to name
-        set this.age to age
+    to create(person_name, person_age)
+        set this.name to person_name
+        set this.age to person_age
         give back this
     end
 end
 
-set person to new Person("Alice", 30)
+set person to Person.create("Alice", 30)
 ```
 
 ### Inheritance
@@ -1065,9 +1078,13 @@ is the only higher-order builtin, and it works in all three spellings:
 ### network
 
 ```redblue
-set response to wait network.get("https://api.example.com")
-set response to wait network.post("https://api.example.com", data)
+set response to network.get("https://api.example.com")
+set response to network.post("https://api.example.com", data)
 ```
+
+Both calls block until the response arrives, so there is nothing to write in
+front of them. `wait` is an ordinary identifier, and the `wait`-prefixed spelling
+this section used to carry did not parse. See "Asynchronous Programming" above.
 
 ### json and csv
 
