@@ -963,37 +963,17 @@ end
 
 ## Asynchronous Programming
 
-### Async Functions
+Not implemented. The words `async`, `wait`, `parallel` and `done` are ordinary
+identifiers: they were reserved by the lexer with no rule in the parser to read
+them, so a program written in the form below died with a parser error rather than
+running. They are names again, and the form is not part of the language until an
+interpreter arm exists for it.
 
 ```redblue
+// Not Redblue. Nothing below parses.
 async to fetch_data(url)
     set response to wait network.get(url)
-    give back formats.parse_json(response)
-end
-```
-
-### Await
-
-```redblue
-async to main()
-    set users to wait fetch_users()
-    for each user in users
-        say user.name
-    end
-end
-```
-
-### Parallel Execution
-
-```redblue
-async to load_all()
-    parallel
-        set users to wait fetch_users()
-        set posts to wait fetch_posts()
-        set comments to wait fetch_comments()
-    until done
-    
-    give back combine(users, posts, comments)
+    give back json.parse(response)
 end
 ```
 
@@ -1113,31 +1093,36 @@ See [GRAMMAR.md](GRAMMAR.md) for the complete EBNF grammar specification.
 | Keyword | Description |
 |---------|-------------|
 | set | Declare/assign variable |
-| to | Assignment or type annotation |
-| is/are | Comparison or type checking |
+| to | Assignment or function declaration |
+| is | Comparison |
 | nothing | Null value |
 | yes/no | Boolean literals |
 | if/then/else/end | Conditional statements |
-| when | Pattern matching |
 | unless | Negative condition |
 | for/each/in/from/times | Loop constructs |
 | while/repeat/until | Loop constructs |
 | break/skip | Loop control |
 | return/give back | Function return |
-| to | Function declaration |
-| takes/needs | Parameter specification |
 | might fail | Error-prone operation |
-| number/text/yes/no | Primitive types |
-| list/record/object | Complex types |
-| module/import/export | Module system |
+| constant | Declare a name that may not be rebound |
+| module/import/export/as | Module system |
 | and/or/not | Logical operators |
+| mod | Remainder |
 | try/catch/finally | Error handling |
-| error | Error type |
-| has | Object property |
-| can | Object method capability |
-| this/that | Object reference |
-| new | Object instantiation |
-| extends | Inheritance |
+| object/has/can | Object declarations, properties, methods |
+| this/extends | Reference to the receiver; inheritance |
+| say/print | Output |
+| test/expect | Test blocks |
+
+A word that is not on this list is an ordinary identifier, including `are`,
+`ask`, `async`, `done`, `new`, `parallel`, `that`, `wait` and `when`. They were
+reserved by the lexer with no rule anywhere in the parser to read them, which
+made them unusable as names as well as unimplemented; they are identifiers again
+and the four forms that used to be promised for them are not part of the
+language. `until` is reserved and belongs to the `while`/`repeat` forms above.
+`takes`, `needs`, `called`, `either`, `neither`, `every`, `error`, `number`,
+`text`, `list` and `record` have never been reserved and are ordinary
+identifiers too.
 
 ---
 

@@ -11,17 +11,24 @@ const BOM: char = '\u{FEFF}';
 /// matches through it (`Lexer::keyword`) and editor tooling highlights it
 /// (`crate::lsp::keyword_pattern`). Keeping one table is what stops the shipped
 /// TextMate grammar from drifting away from the language.
+///
+/// A word belongs here only while the parser has an arm that reads it. A word
+/// the parser cannot read is worse than a missing feature: it cannot be used as
+/// an identifier either, and the rejection names a `TokenKind` the writer has
+/// never seen. Nine words (`are`, `ask`, `async`, `done`, `new`, `parallel`,
+/// `that`, `wait`, `when`) sat here with no arm anywhere in `src/parser.rs` and
+/// were removed for that reason. `tests/keyword_reservation_test.rs` reads the
+/// table and the parser together, so adding a word here without giving the
+/// parser a rule for it fails the suite.
 pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("set", TokenKind::Set),
     ("constant", TokenKind::Constant),
     ("to", TokenKind::To),
     ("is", TokenKind::Is),
-    ("are", TokenKind::Are),
     ("if", TokenKind::If),
     ("then", TokenKind::Then),
     ("else", TokenKind::Else),
     ("end", TokenKind::End),
-    ("when", TokenKind::When),
     ("unless", TokenKind::Unless),
     ("for", TokenKind::For),
     ("each", TokenKind::Each),
@@ -40,7 +47,6 @@ pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("fail", TokenKind::MightFail),  // might fail
     ("say", TokenKind::Say),
     ("print", TokenKind::Print),
-    ("ask", TokenKind::Ask),
     ("try", TokenKind::Try),
     ("catch", TokenKind::Catch),
     ("finally", TokenKind::Finally),
@@ -61,13 +67,7 @@ pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("has", TokenKind::Has),
     ("can", TokenKind::Can),
     ("this", TokenKind::This),
-    ("that", TokenKind::That),
-    ("new", TokenKind::New),
     ("extends", TokenKind::Extends),
-    ("async", TokenKind::Async),
-    ("wait", TokenKind::Wait),
-    ("parallel", TokenKind::Parallel),
-    ("done", TokenKind::Done),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,12 +87,10 @@ pub enum TokenKind {
     To,
     By,
     Is,
-    Are,
     If,
     Then,
     Else,
     End,
-    When,
     Unless,
     For,
     Each,
@@ -109,7 +107,6 @@ pub enum TokenKind {
     MightFail,
     Say,
     Print,
-    Ask,
     Try,
     Catch,
     Finally,
@@ -126,13 +123,7 @@ pub enum TokenKind {
     Has,
     Can,
     This,
-    That,
-    New,
     Extends,
-    Async,
-    Wait,
-    Parallel,
-    Done,
 
     // Operators
     Plus,
@@ -347,6 +338,20 @@ impl Lexer {
             words.dedup();
             words
         })
+    }
+
+    /// The source word a keyword token was lexed from, or `None` for a kind no
+    /// keyword produces.
+    ///
+    /// A rejection the reader can act on names the word they wrote. `Unexpected
+    /// token If` tells them nothing they did not already know; `Unexpected token
+    /// 'if'` tells them which word to change. The table is short and this is
+    /// called on an error path, so a scan is the whole cost.
+    pub fn word_for(kind: &TokenKind) -> Option<&'static str> {
+        KEYWORDS
+            .iter()
+            .find(|(_, keyword_kind)| keyword_kind == kind)
+            .map(|(word, _)| *word)
     }
 
     pub fn tokenize(source: &str) -> Result<Vec<Token>> {

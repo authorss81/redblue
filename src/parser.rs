@@ -652,7 +652,7 @@ impl Parser {
                         items.push(ImportItem { name, alias });
                     } else {
                         return Err(Error::Parser(
-                            "Expected module name".to_string(),
+                            expected_name("module name", self.current().map(|t| &t.kind)),
                             self.span(),
                         ));
                     }
@@ -705,7 +705,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected variable name".to_string(),
+                    expected_name("variable name", self.current().map(|token| &token.kind)),
                     self.span(),
                 ))
             }
@@ -729,7 +729,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(Error::Parser(
-                        "Expected property name".to_string(),
+                        expected_name("property name", self.current().map(|t| &t.kind)),
                         self.span(),
                     ))
                 }
@@ -878,7 +878,7 @@ impl Parser {
                     }
                     _ => {
                         return Err(Error::Parser(
-                            "Expected variable name".to_string(),
+                            expected_name("variable name", self.current().map(|t| &t.kind)),
                             self.span(),
                         ))
                     }
@@ -1205,7 +1205,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected field name after 'has'".to_string(),
+                    expected_name("field name after 'has'", self.current().map(|t| &t.kind)),
                     self.span(),
                 ))
             }
@@ -1354,7 +1354,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected function name".to_string(),
+                    expected_name("function name", self.current().map(|t| &t.kind)),
                     self.span(),
                 ))
             }
@@ -1446,7 +1446,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected module name".to_string(),
+                    expected_name("module name", self.current().map(|t| &t.kind)),
                     self.span(),
                 ))
             }
@@ -2189,7 +2189,7 @@ impl Parser {
                     }
                     _ => {
                         return Err(Error::Parser(
-                            "Expected property name".to_string(),
+                            expected_name("property name", self.current().map(|t| &t.kind)),
                             self.span(),
                         ))
                     }
@@ -2279,7 +2279,7 @@ impl Parser {
                     }
                     _ => {
                         return Err(Error::Parser(
-                            "Expected function name".to_string(),
+                            expected_name("function name", self.current().map(|t| &t.kind)),
                             self.span(),
                         ));
                     }
@@ -2397,7 +2397,7 @@ impl Parser {
                         }
                         _ => {
                             return Err(Error::Parser(
-                                "Expected field name".to_string(),
+                                expected_name("field name", self.current().map(|t| &t.kind)),
                                 self.span(),
                             ))
                         }
@@ -2420,10 +2420,7 @@ impl Parser {
                 self.expect(&TokenKind::RightBrace)?;
                 Ok(Expr::Record(fields))
             }
-            _ => Err(Error::Parser(
-                format!("Unexpected token {:?}", token.kind),
-                token.span(),
-            )),
+            _ => Err(Error::Parser(unexpected_token(&token.kind), token.span())),
         }
     }
 
@@ -2575,6 +2572,30 @@ impl Parser {
             format!("Interpolated expressions nest more than {MAX_NESTING_DEPTH} levels deep"),
             span,
         )
+    }
+}
+
+/// How to name a token the parser had no rule for.
+///
+/// A keyword is named by the word the writer typed, because that is the thing
+/// they can change. Anything else keeps the `Debug` name it always had, because
+/// there is no word to offer and `Newline` is the clearest description of it.
+fn unexpected_token(kind: &TokenKind) -> String {
+    match crate::lexer::Lexer::word_for(kind) {
+        Some(word) => format!("Unexpected token '{}'", word),
+        None => format!("Unexpected token {:?}", kind),
+    }
+}
+
+/// How to name a token where a name was required.
+///
+/// `set if to 1` is refused because `if` is a keyword, and the word is what
+/// tells the writer which part of their line to change. `Expected variable name`
+/// on its own points at a line the writer thought was fine.
+fn expected_name(expected: &str, found: Option<&TokenKind>) -> String {
+    match found.and_then(crate::lexer::Lexer::word_for) {
+        Some(word) => format!("Expected {}, found reserved word '{}'", expected, word),
+        None => format!("Expected {}", expected),
     }
 }
 
