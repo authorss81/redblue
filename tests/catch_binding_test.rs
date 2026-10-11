@@ -13,6 +13,10 @@
 //! and is an `AnalyzerError` on the other is not a language feature, it is an
 //! accident of one frontend.
 
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
 use redblue::bytecode::vm::BytecodeVm;
 use redblue::{compile_source, run_isolated, Error, Value};
 
@@ -124,30 +128,30 @@ fn catch_error_name_binds_the_message() {
     );
 }
 
-/// The four spellings, one row each: a bare `catch` (README.md:11), `catch
-/// error` (README.md:64, SPEC.md:484), `catch <name>` (README.md:51), and
-/// SPEC.md:800's spelled-out `catch error <name>`. All four run, all four
+/// The four spellings, one row each: a bare `catch` (README.md:12), `catch
+/// error` (README.md:62, SPEC.md:484), `catch <name>` (README.md:50), and
+/// SPEC.md:810's spelled-out `catch error <name>`. All four run, all four
 /// handle the same failure, and the three that bind a name bind the same value.
 #[test]
 fn every_catch_spelling_handles_the_same_failure() {
     let cases: [(&str, &str, Option<&str>); 4] = [
         (
-            "bare catch (README.md:11)",
+            "bare catch (README.md:12)",
             "set seen to \"\"\ntry\n    set bad to 1 / 0\ncatch\n    set seen to \"c\"\nend\nsay seen\n",
             None,
         ),
         (
-            "catch error (README.md:64)",
+            "catch error (README.md:62)",
             "set seen to \"\"\ntry\n    set bad to 1 / 0\ncatch error\n    set seen to error\nend\nsay seen\n",
             Some("error"),
         ),
         (
-            "catch <name> (README.md:51)",
+            "catch <name> (README.md:50)",
             "set seen to \"\"\ntry\n    set bad to 1 / 0\ncatch problem\n    set seen to problem\nend\nsay seen\n",
             Some("problem"),
         ),
         (
-            "catch error <name> (SPEC.md:800)",
+            "catch error <name> (SPEC.md:810)",
             "set seen to \"\"\ntry\n    set bad to 1 / 0\ncatch error problem\n    set seen to problem\nend\nsay seen\n",
             Some("problem"),
         ),
@@ -180,6 +184,11 @@ fn every_catch_spelling_handles_the_same_failure() {
 #[test]
 fn the_binder_is_scoped_to_the_catch_body_alone() {
     let before = both_fail("say e\ntry\n    set bad to 1 / 0\ncatch error e\n    say e\nend\n");
+    assert_eq!(
+        before.label(),
+        "AnalyzerError",
+        "reading the binder before the try is a name that was never declared, got {before:?}"
+    );
     assert!(
         before.message().contains("'e'"),
         "reading the binder before the try must name it, got {:?}",
@@ -187,11 +196,56 @@ fn the_binder_is_scoped_to_the_catch_body_alone() {
     );
 
     let after = both_fail("try\n    set bad to 1 / 0\ncatch error e\n    say e\nend\nsay e\n");
+    assert_eq!(
+        after.label(),
+        "AnalyzerError",
+        "reading the binder after the end is a name that was never declared, got {after:?}"
+    );
     assert!(
         after.message().contains("'e'"),
         "reading the binder after the end must name it, got {:?}",
         after.message()
     );
+}
+
+/// The same scoping rule read from the `edge_` side: a name bound by `catch error
+/// e` is readable inside the body and nowhere else, and both of the "nowhere
+/// else" halves fail with a spanned `AnalyzerError` that names it — never a
+/// silent `nothing`, never a panic.
+#[test]
+fn edge_the_binder_is_unreadable_outside_the_catch_body() {
+    // Inside: the only place the name means anything.
+    both_print(
+        "try\n    set bad to 1 / 0\ncatch error e\n    say e\nend\n",
+        &["error"],
+    );
+
+    for (where_read, source) in [
+        (
+            "before the try",
+            "say e\ntry\n    set bad to 1 / 0\ncatch error e\n    say e\nend\n",
+        ),
+        (
+            "after the end",
+            "try\n    set bad to 1 / 0\ncatch error e\n    say e\nend\nsay e\n",
+        ),
+    ] {
+        let error = both_fail(source);
+        assert_eq!(
+            error.label(),
+            "AnalyzerError",
+            "reading the binder {where_read} is an analyzer failure, got {error:?}"
+        );
+        assert!(
+            error.message().contains("'e'"),
+            "reading the binder {where_read} must name it, got {:?}",
+            error.message()
+        );
+        assert!(
+            error.span().is_some(),
+            "reading the binder {where_read} must be spanned, got {error:?}"
+        );
+    }
 }
 
 /// A `catch error e` body is a scope of its own, so the binder shadows a
@@ -335,4 +389,109 @@ fn edge_catch_error_of_a_type_is_refused_naming_the_orphan() {
         "the orphan after the untyped binder must be named, got {:?}",
         error.message()
     );
+}
+
+/// The cost of the same-line rule, pinned: a handler whose body starts with a
+/// *bare name* on the `catch` line reads that name as the binder, because that
+/// is exactly what a binder looks like, and what is left does not parse. It is
+/// a clean spanned `ParserError` on both engines — never a mis-bound handler
+/// that runs the wrong thing, and never a panic.
+#[test]
+fn edge_a_body_starting_with_a_bare_name_on_the_catch_line_is_refused() {
+    let error = both_fail("try\n    set bad to 1 / 0\ncatch error n is 5\n    say n\nend\n");
+    assert_eq!(
+        error.label(),
+        "ParserError",
+        "the leftover words must not parse, got {error:?}"
+    );
+    assert_eq!(
+        error.span().map(|s| s.line),
+        Some(3),
+        "the failure must point at the catch line"
+    );
+}
+
+/// `SPEC.md` § Raising Errors, corrected in this phase: there is no `raise`, and
+/// `give back error "..."` reads `error` as a variable nobody declared. The form
+/// the spec now gives in its place — a function signals a failure by performing
+/// an operation that fails, and `might fail` turns it into `nothing` — works on
+/// both engines.
+#[test]
+fn edge_give_back_error_is_refused_naming_the_name_it_read() {
+    let error = both_fail(
+        "to divide(a, b)\n    if b is equal to 0 then\n        give back error \"Cannot divide by zero\"\n    end\n    give back a / b\nend\nset r to divide(1, 0)\nsay r\n",
+    );
+    assert_eq!(
+        error.label(),
+        "AnalyzerError",
+        "there is no raise to bind, so `error` is an ordinary name, got {error:?}"
+    );
+    assert!(
+        error.message().contains("'error'"),
+        "the name the spec's old example read must be named, got {:?}",
+        error.message()
+    );
+
+    both_print(
+        "to divide(a, b)\n    if b is equal to 0 then\n        give back 1 / 0\n    end\n    give back a / b\nend\nset failed to might fail divide(1, 0)\nset ok to might fail divide(6, 3)\nsay failed is nothing\nsay ok\n",
+        &["yes", "2"],
+    );
+}
+
+// --- the shipped commands ----------------------------------------------------
+
+/// A scratch directory inside `target/`, so the child processes below never
+/// write outside the project checkout.
+fn scratch_dir() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/catch-binding");
+    fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+    dir
+}
+
+/// Runs `rb` with `args` and returns its exit code, stdout and stderr.
+fn rb(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .args(args)
+        .output()
+        .expect("the rb binary should start");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+/// The phase's own program through the two shipped paths: `rb run`, and `rb vm`
+/// over the `.rbc` that `rb compile` wrote. Both print the caught text and exit
+/// 0 — a spelling that works in the library but not on the command line is not
+/// a language feature.
+#[test]
+fn catch_error_name_runs_and_compiles_through_the_cli() {
+    let dir = scratch_dir();
+    let source = dir.join("catch_error_name.rb");
+    let bytecode = dir.join("catch_error_name.rbc");
+    let _ = fs::remove_file(&bytecode);
+    fs::write(
+        &source,
+        "try\n    set x to 1 / 0\ncatch error e\n    say e\nend\n",
+    )
+    .expect("the program should be writable");
+
+    let (code, stdout, stderr) = rb(&["run", source.to_str().expect("path is utf-8")]);
+    assert_eq!(code, 0, "`rb run` must exit 0, stderr:\n{stderr}");
+    assert_eq!(stdout, "error\n", "`rb run` must print the bound message");
+
+    let out = bytecode.to_str().expect("path is utf-8");
+    let (code, _, stderr) = rb(&[
+        "compile",
+        source.to_str().expect("path is utf-8"),
+        "-o",
+        out,
+    ]);
+    assert_eq!(code, 0, "`rb compile` must exit 0, stderr:\n{stderr}");
+    assert!(bytecode.exists(), "`rb compile` wrote no bytecode file");
+
+    let (code, stdout, stderr) = rb(&["vm", out]);
+    assert_eq!(code, 0, "`rb vm` must exit 0, stderr:\n{stderr}");
+    assert_eq!(stdout, "error\n", "`rb vm` must print the bound message");
 }

@@ -15,7 +15,7 @@ phase's concern.
 - **The blocker for implementing it:** Redblue's runtime errors carry no type.
   `src/error.rs:78` `Error::{Lexer,Parser,Analyzer,Runtime,Io}` are the
   *compile-time* kinds; a caught failure binds the text `error`
-  (`src/interpreter.rs:1772`, `src/bytecode/vm.rs:3326`). There is nothing for
+  (`src/interpreter.rs:1772-1774`, `src/bytecode/vm.rs:3326`). There is nothing for
   `of <Type>` to match against without first inventing a tagged error value —
   a language-design change with its own phase, touching `Value`, the two VMs,
   `Error`, the `.rbc` format and every runtime failure site.
@@ -47,7 +47,21 @@ every example in the language writes — but a user who wrote SPEC.md's spelling
 does not get it back from `rb format`. Deliberate here: writing the longer form
 would make formatted files disagree with the spec's own examples. Not changed.
 
-## 4. Gate 4 was not run
+## 4. The same-line rule has one losing case, and it is a clean error
+
+`catch error <name>` is told apart from `catch error` by whether a second
+identifier follows `error` **on the same line** (`src/parser.rs::catch_keyword_ahead`).
+So a handler written on one line whose body starts with a *bare name* —
+`catch error n is 5` — reads `n` as the binder, and the leftover `is 5` does not
+parse: `ParserError: Unexpected token Is`, spanned at the `catch` line. It fails
+cleanly rather than mis-binding, it is the one shape the docs never write, and
+narrowing it further would need a statement-start test in the parser — more
+machinery than the ambiguity is worth. Pinned by
+`tests/catch_binding_test.rs::edge_a_body_starting_with_a_bare_name_on_the_catch_line_is_refused`
+so a future change to the rule has to move that test rather than discover the
+case later.
+
+## 5. Gate 4 was not run
 
 `rbops/` is not present in this checkout (`ls rbops` → `No such file or
 directory`), so `./rbops/verify.sh phase-048` could not be executed and nothing
