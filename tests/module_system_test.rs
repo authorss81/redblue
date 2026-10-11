@@ -303,7 +303,7 @@ fn edge_malformed_module_declarations_are_parser_errors() {
     match eval_err("module M\n    set x to 1") {
         Error::Parser(message, span) => {
             assert_eq!(
-                message, "Expected End but got Eof",
+                message, "Expected 'end' but got Eof",
                 "an unclosed module should say what it wanted"
             );
             assert!(span.is_known(), "an unclosed module failed without a span");

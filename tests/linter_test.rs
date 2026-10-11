@@ -272,7 +272,7 @@ fn a_missing_end_is_reported_as_an_error() {
     let found = errors(source);
     assert_eq!(found.len(), 1, "{:?}", found);
     assert!(
-        found[0].contains("End"),
+        found[0].contains("'end'"),
         "the error must name what is missing: {:?}",
         found
     );
@@ -762,7 +762,7 @@ fn edge_rb_lint_prints_the_line_of_a_syntax_error_and_exits_nonzero() {
     let (code, stderr) = lint_on_the_binary("say \"hi\"\nif yes then\n    say \"no\"\n");
     assert_eq!(code, 1, "a missing `end` must fail the lint: {stderr}");
     assert!(
-        stderr.contains("Error:") && stderr.contains("Expected End"),
+        stderr.contains("Error:") && stderr.contains("Expected 'end'"),
         "a missing `end` must be named as such: {stderr}"
     );
     // The parser reports at the point the `end` was due, which is end of file,

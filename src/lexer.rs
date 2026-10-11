@@ -11,17 +11,24 @@ const BOM: char = '\u{FEFF}';
 /// matches through it (`Lexer::keyword`) and editor tooling highlights it
 /// (`crate::lsp::keyword_pattern`). Keeping one table is what stops the shipped
 /// TextMate grammar from drifting away from the language.
+///
+/// A word belongs here only while the parser has an arm that reads it. A word
+/// the parser cannot read is worse than a missing feature: it cannot be used as
+/// an identifier either, and the rejection names a `TokenKind` the writer has
+/// never seen. Nine words (`are`, `ask`, `async`, `done`, `new`, `parallel`,
+/// `that`, `wait`, `when`) sat here with no arm anywhere in `src/parser.rs` and
+/// were removed for that reason. `tests/keyword_reservation_test.rs` reads the
+/// table and the parser together, so adding a word here without giving the
+/// parser a rule for it fails the suite.
 pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("set", TokenKind::Set),
     ("constant", TokenKind::Constant),
     ("to", TokenKind::To),
     ("is", TokenKind::Is),
-    ("are", TokenKind::Are),
     ("if", TokenKind::If),
     ("then", TokenKind::Then),
     ("else", TokenKind::Else),
     ("end", TokenKind::End),
-    ("when", TokenKind::When),
     ("unless", TokenKind::Unless),
     ("for", TokenKind::For),
     ("each", TokenKind::Each),
@@ -40,7 +47,6 @@ pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("fail", TokenKind::MightFail),  // might fail
     ("say", TokenKind::Say),
     ("print", TokenKind::Print),
-    ("ask", TokenKind::Ask),
     ("try", TokenKind::Try),
     ("catch", TokenKind::Catch),
     ("finally", TokenKind::Finally),
@@ -61,13 +67,7 @@ pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("has", TokenKind::Has),
     ("can", TokenKind::Can),
     ("this", TokenKind::This),
-    ("that", TokenKind::That),
-    ("new", TokenKind::New),
     ("extends", TokenKind::Extends),
-    ("async", TokenKind::Async),
-    ("wait", TokenKind::Wait),
-    ("parallel", TokenKind::Parallel),
-    ("done", TokenKind::Done),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,14 +85,11 @@ pub enum TokenKind {
     Set,
     Constant,
     To,
-    By,
     Is,
-    Are,
     If,
     Then,
     Else,
     End,
-    When,
     Unless,
     For,
     Each,
@@ -109,7 +106,6 @@ pub enum TokenKind {
     MightFail,
     Say,
     Print,
-    Ask,
     Try,
     Catch,
     Finally,
@@ -126,13 +122,7 @@ pub enum TokenKind {
     Has,
     Can,
     This,
-    That,
-    New,
     Extends,
-    Async,
-    Wait,
-    Parallel,
-    Done,
 
     // Operators
     Plus,
@@ -168,11 +158,50 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
     pub column: usize,
+    /// The word in the [`KEYWORDS`] table this token was lexed from, or `None`
+    /// for a token that came from anywhere else.
+    ///
+    /// A kind on its own does not say which word the writer typed: `give` and
+    /// `back` are both [`TokenKind::GiveBack`], `might` and `fail` both
+    /// [`TokenKind::MightFail`], and `mod` and `%` both [`TokenKind::Mod`]. A
+    /// diagnostic that named the kind would name `give` for a line that says
+    /// `back`. The lexer is the only place that still knows, so it records the
+    /// word here and a rejection names what was written.
+    pub word: Option<&'static str>,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, line: usize, column: usize) -> Self {
-        Self { kind, line, column }
+        Self {
+            kind,
+            line,
+            column,
+            word: None,
+        }
+    }
+
+    /// A token the lexer read from a word in the [`KEYWORDS`] table.
+    pub fn keyword(word: &'static str, kind: TokenKind, line: usize, column: usize) -> Self {
+        Self {
+            kind,
+            line,
+            column,
+            word: Some(word),
+        }
+    }
+
+    /// The same token at another position, keeping the word it was lexed from.
+    ///
+    /// Re-spanning a token must not cost it the word: a token that moved is
+    /// still the word the writer typed, and a diagnostic about it is still
+    /// about them.
+    pub fn at(&self, line: usize, column: usize) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            line,
+            column,
+            word: self.word,
+        }
     }
 
     /// The source position this token was lexed from.
@@ -326,14 +355,16 @@ impl Lexer {
         ident
     }
 
-    fn keyword(&self, ident: &str) -> TokenKind {
-        for (word, kind) in KEYWORDS {
-            if *word == ident {
-                return kind.clone();
-            }
-        }
-
-        TokenKind::Identifier(ident.to_string())
+    /// The keyword `ident` is, and the word it was spelled with.
+    ///
+    /// The word comes back with the kind because the kind does not always carry
+    /// it: `give` and `back` are one kind, so the table is the only place that
+    /// knows which of the two was typed.
+    fn keyword(&self, ident: &str) -> Option<(&'static str, TokenKind)> {
+        KEYWORDS
+            .iter()
+            .find(|(word, _)| *word == ident)
+            .map(|(word, kind)| (*word, kind.clone()))
     }
 
     /// The words this lexer recognises as keywords, sorted and deduplicated,
@@ -347,6 +378,43 @@ impl Lexer {
             words.dedup();
             words
         })
+    }
+
+    /// The word the keyword table spells a kind with, when one word does and
+    /// the lexer builds that kind from nothing else.
+    ///
+    /// Four kinds have no single word to answer with. `Mod` and `Not` are
+    /// produced by a symbol as well as by a word — `5 % 2` and `5 mod 2` are
+    /// the same token, as are `!` and `not` — and `GiveBack` and `MightFail`
+    /// are spelled by two words each (`give`/`back`, `might`/`fail`). For those
+    /// this is `None`, because a kind cannot say which spelling the writer
+    /// reached for: naming `give` for a line that says `back` is worse than
+    /// naming nothing.
+    ///
+    /// A caller holding the token itself does not need this. [`Token::word`]
+    /// records what the lexer actually read, and it is right for every kind
+    /// including these four.
+    pub fn word_for(kind: &TokenKind) -> Option<&'static str> {
+        let mut found: Option<&'static str> = None;
+
+        for (word, keyword_kind) in KEYWORDS {
+            if keyword_kind != kind {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(word);
+        }
+
+        // `Mod` and `Not` reach here with one table entry each, and the symbol
+        // that makes them ambiguous is not in the table — so the table alone
+        // cannot report that they have a second spelling.
+        if matches!(kind, TokenKind::Mod | TokenKind::Not) {
+            return None;
+        }
+
+        found
     }
 
     pub fn tokenize(source: &str) -> Result<Vec<Token>> {
@@ -402,8 +470,11 @@ impl Lexer {
             // Identifiers and keywords
             if c.is_alphabetic() || c == '_' {
                 let ident = lexer.read_identifier();
-                let kind = lexer.keyword(&ident);
-                tokens.push(Token::new(kind, line, column));
+                let token = match lexer.keyword(&ident) {
+                    Some((word, kind)) => Token::keyword(word, kind, line, column),
+                    None => Token::new(TokenKind::Identifier(ident), line, column),
+                };
+                tokens.push(token);
                 continue;
             }
 

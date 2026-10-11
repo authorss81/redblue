@@ -431,8 +431,17 @@ impl Parser {
             .ok_or_else(|| Error::Parser("Unexpected end of input".to_string(), self.span()))?;
 
         if &token.kind != kind {
+            // The word the writer typed, not the kind the parser expected: a
+            // rejection that reads `Expected To but got Number(5.0)` names two
+            // things the writer never wrote. `Expected 'to' but got Number(5.0)`
+            // names the one they can change, and says the same thing about what
+            // is missing.
+            let found = match name_of(&token) {
+                Some(word) => format!("'{}'", word),
+                None => format!("{:?}", token.kind),
+            };
             return Err(Error::Parser(
-                format!("Expected {:?} but got {:?}", kind, token.kind),
+                format!("Expected {} but got {}", expected_token(kind), found),
                 token.span(),
             ));
         }
@@ -652,7 +661,7 @@ impl Parser {
                         items.push(ImportItem { name, alias });
                     } else {
                         return Err(Error::Parser(
-                            "Expected module name".to_string(),
+                            expected_name("module name", self.current()),
                             self.span(),
                         ));
                     }
@@ -705,7 +714,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected variable name".to_string(),
+                    expected_name("variable name", self.current()),
                     self.span(),
                 ))
             }
@@ -729,7 +738,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(Error::Parser(
-                        "Expected property name".to_string(),
+                        expected_name("property name", self.current()),
                         self.span(),
                     ))
                 }
@@ -767,7 +776,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected constant name after 'constant'".to_string(),
+                    expected_name("constant name after 'constant'", self.current()),
                     self.span(),
                 ))
             }
@@ -878,7 +887,7 @@ impl Parser {
                     }
                     _ => {
                         return Err(Error::Parser(
-                            "Expected variable name".to_string(),
+                            expected_name("variable name", self.current()),
                             self.span(),
                         ))
                     }
@@ -932,18 +941,18 @@ impl Parser {
     /// step.
     ///
     /// `by` is read positionally rather than taken from the `KEYWORDS` table
-    /// (`src/lexer.rs:14-69`) because it is not a reserved word: reserving it
-    /// would refuse `to can grow(by)` / `say by`, a parameter name the language
-    /// has always allowed (`tests/bytecode_test.rs:602`). It means "step" in
-    /// this one place and nowhere else, which is what a positional marker buys.
-    /// `TokenKind::By` is accepted too, so the token is honoured if `by` is ever
-    /// added to the table without this arm needing to change.
+    /// because it is not a reserved word: reserving it would refuse
+    /// `to can grow(by)` / `say by`, a parameter name the language has always
+    /// allowed (`tests/bytecode_test.rs:602`). It means "step" in this one place
+    /// and nowhere else, which is what a positional marker buys.
+    ///
+    /// The match is on the identifier's text rather than on a token kind,
+    /// because there is no kind to match on: a `TokenKind::By` variant with no
+    /// `KEYWORDS` entry and no lexer arm that produces it was a variant only a
+    /// dead branch could reach. Promoting `by` to a reserved word is a change
+    /// that has to make the lexer produce a kind of its own.
     fn at_range_step_marker(&self) -> bool {
         match self.current() {
-            Some(Token {
-                kind: TokenKind::By,
-                ..
-            }) => true,
             Some(Token {
                 kind: TokenKind::Identifier(name),
                 ..
@@ -955,11 +964,9 @@ impl Parser {
     /// Whether the token at the cursor is the `by` that LABELS the next call
     /// argument, as in `split("a,b", by ",")`.
     ///
-    /// Both spellings of the token count, for the same reason
-    /// [`Parser::at_range_step_marker`] takes both: `by` is read as a word
-    /// rather than taken from the keyword table, so `TokenKind::By` is honoured
-    /// in case `by` is ever promoted to a keyword without this arm needing to
-    /// change.
+    /// Both call sites read the word rather than a keyword token, for the same
+    /// reason [`Parser::at_range_step_marker`] does: `by` is not reserved, so
+    /// there is no `TokenKind` to match and the text is what there is.
     ///
     /// The second half of the test is what makes it a *label* rather than a
     /// variable: the token after `by` must be one that can begin an expression,
@@ -1205,7 +1212,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected field name after 'has'".to_string(),
+                    expected_name("field name after 'has'", self.current()),
                     self.span(),
                 ))
             }
@@ -1354,7 +1361,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected function name".to_string(),
+                    expected_name("function name", self.current()),
                     self.span(),
                 ))
             }
@@ -1446,7 +1453,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected module name".to_string(),
+                    expected_name("module name", self.current()),
                     self.span(),
                 ))
             }
@@ -1498,7 +1505,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(Error::Parser(
-                        "Expected a name to export after 'export'".to_string(),
+                        expected_name("a name to export after 'export'", self.current()),
                         self.span(),
                     ))
                 }
@@ -1532,7 +1539,7 @@ impl Parser {
             }
             _ => {
                 return Err(Error::Parser(
-                    "Expected object name".to_string(),
+                    expected_name("object name", self.current()),
                     self.span(),
                 ))
             }
@@ -1555,7 +1562,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(Error::Parser(
-                        "Expected parent object name".to_string(),
+                        expected_name("parent object name", self.current()),
                         self.span(),
                     ))
                 }
@@ -1691,7 +1698,12 @@ impl Parser {
                 self.advance();
                 name
             }
-            _ => return Err(Error::Parser("Expected test name".to_string(), self.span())),
+            _ => {
+                return Err(Error::Parser(
+                    expected_name("test name", self.current()),
+                    self.span(),
+                ))
+            }
         };
 
         self.skip_newlines();
@@ -2189,7 +2201,7 @@ impl Parser {
                     }
                     _ => {
                         return Err(Error::Parser(
-                            "Expected property name".to_string(),
+                            expected_name("property name", self.current()),
                             self.span(),
                         ))
                     }
@@ -2279,7 +2291,7 @@ impl Parser {
                     }
                     _ => {
                         return Err(Error::Parser(
-                            "Expected function name".to_string(),
+                            expected_name("function name", self.current()),
                             self.span(),
                         ));
                     }
@@ -2397,7 +2409,7 @@ impl Parser {
                         }
                         _ => {
                             return Err(Error::Parser(
-                                "Expected field name".to_string(),
+                                expected_name("field name", self.current()),
                                 self.span(),
                             ))
                         }
@@ -2420,10 +2432,7 @@ impl Parser {
                 self.expect(&TokenKind::RightBrace)?;
                 Ok(Expr::Record(fields))
             }
-            _ => Err(Error::Parser(
-                format!("Unexpected token {:?}", token.kind),
-                token.span(),
-            )),
+            _ => Err(Error::Parser(unexpected_token(&token), token.span())),
         }
     }
 
@@ -2547,7 +2556,11 @@ impl Parser {
         };
         let tokens = tokens
             .into_iter()
-            .map(|token| Token::new(token.kind, span.line, span.column))
+            // Every token read out of an interpolation is moved onto the
+            // position of the literal, and a token that moved keeps the word
+            // it was lexed from: a rejection about one of them still has to
+            // name what the writer wrote inside the braces.
+            .map(|token| token.at(span.line, span.column))
             .collect();
         let mut inner = Parser::new(tokens);
         inner.interp_depth = Rc::clone(&self.interp_depth);
@@ -2576,6 +2589,53 @@ impl Parser {
             span,
         )
     }
+}
+
+/// How to name a token the parser had no rule for.
+///
+/// A word the writer typed is named as a word, because that is the thing they
+/// can change. Anything else keeps the `Debug` name it always had, because
+/// there is no word to offer and `Newline` is the clearest description of it.
+fn unexpected_token(token: &Token) -> String {
+    match name_of(token) {
+        Some(word) => format!("Unexpected token '{}'", word),
+        None => format!("Unexpected token {:?}", token.kind),
+    }
+}
+
+/// How to name a token where a name was required.
+///
+/// `set if to 1` is refused because `if` is a keyword, and the word is what
+/// tells the writer which part of their line to change. `Expected variable name`
+/// on its own points at a line the writer thought was fine.
+fn expected_name(expected: &str, found: Option<&Token>) -> String {
+    match found.and_then(name_of) {
+        Some(word) => format!("Expected {}, found reserved word '{}'", expected, word),
+        None => format!("Expected {}", expected),
+    }
+}
+
+/// How to name a token the writer is being asked for, as in
+/// `Expected 'end' but got Eof`.
+///
+/// [`crate::lexer::Lexer::word_for`] answers for a kind alone, so this is only
+/// used for the *expected* side of a message, where the parser picked the kind
+/// and no writer's spelling is in question.
+fn expected_token(kind: &TokenKind) -> String {
+    match crate::lexer::Lexer::word_for(kind) {
+        Some(word) => format!("'{}'", word),
+        None => format!("{:?}", kind),
+    }
+}
+
+/// The word a token was lexed from, or `None` for a token that did not come
+/// from a word.
+///
+/// The token carries it rather than the kind, because the kind cannot:
+/// `give`/`back`, `might`/`fail` and `mod`/`%` are one kind each. See
+/// [`crate::lexer::Token::word`].
+fn name_of(token: &Token) -> Option<&'static str> {
+    token.word
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program> {

@@ -39,18 +39,33 @@ digit         = '0'..'9'
 ### 1.3 Keywords (Reserved)
 
 ```
-keywords = 'set' | 'constant' | 'to' | 'is' | 'are' | 'nothing' | 'yes' | 'no'
-         | 'if' | 'then' | 'else' | 'end' | 'when' | 'unless'
+keywords = 'set' | 'constant' | 'to' | 'is' | 'nothing' | 'yes' | 'no'
+         | 'if' | 'then' | 'else' | 'end' | 'unless'
          | 'for' | 'each' | 'in' | 'from' | 'times' | 'while' | 'repeat'
-         | 'break' | 'skip' | 'return' | 'give back'
-         | 'to' | 'takes' | 'needs' | 'called' | 'might fail'
-         | 'number' | 'text' | 'yes/no' | 'list' | 'record' | 'object'
+         | 'until'
+         | 'break' | 'skip' | 'return'
+         | 'give' 'back'             // `give back <expr>` is one form
+         | 'might' 'fail'            // `might fail <call>` is one form
+         | 'say' | 'print'
          | 'module' | 'import' | 'export' | 'as'
-         | 'and' | 'or' | 'not' | 'either' | 'neither'
-         | 'try' | 'catch' | 'finally' | 'error'
-         | 'has' | 'can' | 'this' | 'that' | 'new' | 'extends' | 'every'
-         | 'async' | 'wait' | 'parallel' | 'until'
+         | 'and' | 'or' | 'not' | 'mod'
+         | 'try' | 'catch' | 'finally'
+         | 'test' | 'expect'
+         | 'object' | 'has' | 'can' | 'this' | 'extends'
 ```
+
+A word is listed here only while the parser has a rule that reads it. A reserved
+word the parser cannot read is not a feature: it cannot be an identifier either,
+and the rejection names an internal token kind rather than the word the writer
+typed. Nine words — `are`, `ask`, `async`, `done`, `new`, `parallel`, `that`,
+`wait`, `when` — were listed and read by nothing; they are identifiers now, so
+they are not listed here. The productions that once read them are kept as the
+shape a future implementation has to match, each under a **Not implemented**
+note: §4.3's `when_statement`, §4.8's `async_function` / `async_call` /
+`parallel_block`, and §7's `object_literal`. `object_literal` is therefore not an
+alternative of `primary` in §5.1. The table is checked against
+`Lexer::keywords()` by `tests/keyword_reservation_test.rs`, so a word added here
+without a parser arm fails the suite rather than shipping.
 
 ### 1.4 Literals
 
@@ -210,7 +225,9 @@ if_statement     = 'if' expression
                       { statement } ]
                     'end'
 
-// When statement (pattern matching)
+// When statement (pattern matching) — NOT IMPLEMENTED, and `when` is not a
+// reserved word: it is an ordinary identifier. Left here so the form a future
+// `when` has to parse is written down rather than invented again.
 when_statement    = 'when' expression
                     { 'case' pattern 'then' expression }
                     [ 'else' expression ]
@@ -323,6 +340,11 @@ Two things in that `finally` are not the failure being reported:
 
 ### 4.8 Async Statements
 
+Not implemented. `async`, `wait`, `parallel` and `done` are ordinary
+identifiers — the lexer reserved them with no rule in the parser to read them.
+The productions are kept here as the shape a future implementation has to match;
+nothing below parses today.
+
 ```
 async_function   = 'async' function_decl
 async_call       = 'async' set_statement
@@ -351,7 +373,6 @@ primary          = identifier
                  | list_literal
                  | record_literal
                  | function_literal
-                 | object_literal
 ```
 
 ### 5.2 Postfix Expressions
@@ -486,6 +507,14 @@ of the file as the body.
 
 ## 7. Object Literals
 
+Not implemented, and `new` is not a reserved word: it is an ordinary identifier,
+so `new Person(...)` reads as two identifiers in a row and is a parser error. The
+production is kept here as the shape a future implementation has to match;
+nothing below parses today. `object_literal` is therefore not an alternative of
+`primary` in §5.1. A declaration is its own prototype in the meantime, so the
+worked spelling is a write to the declaration — see `SPEC.md`, "Lookup order and
+shadowing".
+
 ```
 object_literal   = 'new' identifier '(' [ argument { ',' argument } ] ')'
 ```
@@ -558,9 +587,8 @@ object Person
     end
 end
 
-set person to new Person
-set name of person to "Bob"
-person.introduce()
+set Person.name to "Bob"
+Person.introduce()
 ```
 
 ### Try/Catch

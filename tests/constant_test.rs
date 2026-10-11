@@ -396,8 +396,11 @@ give back from_parameter + PI + from_loop";
 #[test]
 fn constant_syntax_errors_are_reported() {
     assert_parser_error("constant 5 to 1", "Expected constant name after 'constant'");
-    assert_parser_error("constant to 1", "Expected constant name after 'constant'");
-    assert_parser_error("constant PI", "Expected To but got Eof");
+    assert_parser_error(
+        "constant to 1",
+        "Expected constant name after 'constant', found reserved word 'to'",
+    );
+    assert_parser_error("constant PI", "Expected 'to' but got Eof");
 }
 
 /// The formatter writes `constant` the way it is spelled, and reformatting a

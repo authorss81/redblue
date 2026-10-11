@@ -268,7 +268,7 @@ fn edge_unless_without_end_is_a_spanned_parser_error() {
     ] {
         let message = assert_spanned_parser_error(&parser_error(source));
         assert!(
-            message.contains("End") || message.contains("end"),
+            message.contains("'end'"),
             "the error for {source:?} must name the missing `end`, got {message:?}"
         );
     }
@@ -278,7 +278,7 @@ fn edge_unless_without_end_is_a_spanned_parser_error() {
 fn edge_unless_with_a_missing_then_is_a_spanned_parser_error() {
     let message = assert_spanned_parser_error(&parser_error("unless no\n    say \"x\"\nend\n"));
     assert!(
-        message.contains("Then"),
+        message.contains("'then'"),
         "the error must name the missing `then`, got {message:?}"
     );
 }
@@ -291,7 +291,7 @@ fn edge_unless_rejects_else_because_its_body_has_no_alternative() {
         "unless no then\n    say \"a\"\nelse\n    say \"b\"\nend\n",
     ));
     assert!(
-        message.contains("End") || message.contains("Else"),
+        message.contains("'else'") || message.contains("'end'"),
         "the error for an `else` under `unless` must name the token it expected, got {message:?}"
     );
 }

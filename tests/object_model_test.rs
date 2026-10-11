@@ -463,8 +463,8 @@ fn edge_malformed_object_declarations_are_parse_errors() {
     // error, not an object that swallows the rest of the file.
     match parse_err("object A\n    has a\n") {
         Error::Parser(message, _) => assert!(
-            message.contains("End"),
-            "expected an error naming `End`, got `{}`",
+            message.contains("'end'"),
+            "expected an error naming `end`, got `{}`",
             message
         ),
         other => panic!("expected a Parser error, got {:?}", other),
