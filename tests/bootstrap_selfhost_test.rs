@@ -207,6 +207,13 @@ fn stage2_is_byte_identical_for_each_statement_kind() {
             "try\n    say 1 / 0\ncatch error\n    say \"caught\"\nend\n",
         ),
         (
+            // The spelled-out binder: stage 2 has to read the word `error` as the
+            // handler keyword when a second name follows it on the same line, or
+            // it would emit a different program than stage 1 does.
+            "try_catch_error_name",
+            "try\n    say 1 / 0\ncatch error problem\n    say problem\nend\n",
+        ),
+        (
             "try_finally",
             "try\n    say \"body\"\nfinally\n    say \"finally\"\nend\n",
         ),

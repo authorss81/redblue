@@ -1541,8 +1541,20 @@ end
 
 to parse_try_catch_body(tokens, pos, depth, line, body, catch_name)
     set parse_try_catch_body_out to nothing
-    if token_kind(tokens, pos) is "id" then
-        set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos + 1, depth, line, body, tokens[pos].b)
+    // `catch error <name>` — the word `error` with a second identifier after it
+    // on the same line — binds the name after it. Same rule as the Rust parser:
+    // `catch error` on its own still binds a name spelled `error`.
+    if word_at(tokens, pos) is "error" then
+        if token_kind(tokens, pos + 1) is "id" then
+            if token_line(tokens, pos + 1) is token_line(tokens, pos) then
+                set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos + 2, depth, line, body, tokens[pos + 1].b)
+            end
+        end
+    end
+    if type_of(parse_try_catch_body_out) is "nothing" then
+        if token_kind(tokens, pos) is "id" then
+            set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos + 1, depth, line, body, tokens[pos].b)
+        end
     end
     if type_of(parse_try_catch_body_out) is "nothing" then
         set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos, depth, line, body, catch_name)

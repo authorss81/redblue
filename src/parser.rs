@@ -1619,6 +1619,19 @@ impl Parser {
         }) = self.current()
         {
             self.advance();
+            // SPEC.md § Error Handling writes the handler as `catch error`, and
+            // `error` is a word to the lexer like any other — so the word after
+            // `catch` is read as the name it binds, and `catch error` binds a
+            // name spelled `error`. The spelled-out `catch error <name>` is the
+            // same handler with the binder written after the word: it is a second
+            // identifier on the *same line*, which is the only place two
+            // identifiers sit next to each other here. Reading it this way keeps
+            // `catch error` binding `error` — a `catch` followed by its body on
+            // the next line, where the body starts with a name, is not
+            // `catch error e`.
+            if self.catch_keyword_ahead() {
+                self.advance(); // consume 'error'
+            }
             if let Some(Token {
                 kind: TokenKind::Identifier(name),
                 ..
@@ -1892,6 +1905,32 @@ impl Parser {
                 kind: TokenKind::Identifier(found),
                 ..
             }) if found == word
+        )
+    }
+
+    /// Whether the current position is the `error` word of a spelled-out
+    /// `catch error <name>` rather than a name in its own right.
+    ///
+    /// It is the word `error` followed by a second identifier *on the same
+    /// line*. `catch error` alone — SPEC.md's own handler, and the spelling
+    /// every example in the language uses — is the word with nothing after it,
+    /// so it goes on binding a name spelled `error`. So does a `catch error`
+    /// whose body starts on the next line with a name: the body's first word is
+    /// on another line, so there is no second identifier here to be a binder.
+    fn catch_keyword_ahead(&self) -> bool {
+        if !self.is_word_ahead(0, "error") {
+            return false;
+        }
+        let Some(first) = self.current() else {
+            return false;
+        };
+        matches!(
+            self.tokens.get(self.pos + 1),
+            Some(Token {
+                kind: TokenKind::Identifier(_),
+                line,
+                ..
+            }) if *line == first.line
         )
     }
 
