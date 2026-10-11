@@ -394,9 +394,12 @@ fn edge_a_multibyte_line_is_underlined_by_character_and_not_by_byte() {
     );
     assert_eq!(
         error.render(source, Some("emoji.rb")),
-        format!(
-            "LexerError: Unterminated string\n  --> emoji.rb:1:5\n1 | say \"\u{1F600}\u{1F600}oops\n2 | more\n  |     ^~~~~~~~"
-        ),
+        "\
+LexerError: Unterminated string
+  --> emoji.rb:1:5
+1 | say \"\u{1F600}\u{1F600}oops
+2 | more
+  |     ^~~~~~~~",
         "the underline sits under the fifth character, not the thirty-fourth byte"
     );
 }
