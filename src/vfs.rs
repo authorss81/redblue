@@ -43,6 +43,12 @@ mod native {
         std::path::Path::new(path).exists()
     }
 
+    /// Whether `path` names a *file* — a module the `import` search opens, as
+    /// distinct from the `modules/Foo/` directory the versions live in.
+    pub fn is_file(path: &str) -> bool {
+        std::path::Path::new(path).is_file()
+    }
+
     /// `files.append`'s builder — `create(true).append(true)` — against the
     /// real filesystem.
     pub fn append(path: &str, content: &str) -> io::Result<()> {
@@ -61,7 +67,32 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{append, exists, write_bytes};
+pub use native::{append, exists, is_file, write_bytes};
+
+/// The path `relative` names inside `root`, as the one string a read takes.
+///
+/// The root is *data* rather than process state: a program at `subdir/prog.rb`
+/// resolves its `import`s against `subdir/redblue.manifest` and opens
+/// `subdir/modules/Foo.rb`, whichever directory the host happens to be in. This
+/// is where a search path that is relative to a root and a path a filesystem can
+/// be asked about become the same thing.
+///
+/// The two shapes of "no root" are spelled the way they come. An empty root is
+/// what [`Path::parent`] gives for a bare `prog.rb`, and a root of `.` is what
+/// [`Path::new`] gives for the working directory; both answer `relative` itself,
+/// without a `./` in front of it. That is not tidiness. On
+/// `wasm32-unknown-unknown` the filesystem is a map from path *text* to bytes,
+/// so the text `files.write("modules/Foo.rb", …)` wrote is the text a module
+/// loader has to look up, and `./modules/Foo.rb` would be a second name for that
+/// same file which the map has never heard of.
+pub fn rooted(root: &std::path::Path, relative: &str) -> String {
+    if root.as_os_str().is_empty() || root == std::path::Path::new(".") {
+        return relative.strip_prefix("./").unwrap_or(relative).to_string();
+    }
+    root.join(relative.strip_prefix("./").unwrap_or(relative))
+        .to_string_lossy()
+        .into_owned()
+}
 
 /// The playground's filesystem: a flat path → bytes map that lives as long as
 /// the module instance.
@@ -167,6 +198,18 @@ pub mod memory {
         files.keys().any(|stored| stored.starts_with(&prefix))
     }
 
+    /// Whether `path` names a file rather than a directory.
+    ///
+    /// The map holds only files, so a key is a file and anything else is not:
+    /// the directory `modules/Foo/` is implied by a file underneath it and is
+    /// never a key of its own, which is exactly what a `std::fs::Path::is_file`
+    /// against the equivalent tree answers. The `import` search needs the
+    /// distinction — `modules/Foo/` is where the *versions* of `Foo` are
+    /// published, and opening it is not what an import means.
+    pub fn is_file(path: &str) -> bool {
+        lock().contains_key(path)
+    }
+
     pub fn remove_file(path: &str) -> io::Result<()> {
         lock()
             .remove(path)
@@ -226,4 +269,6 @@ pub mod memory {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use memory::{append, copy, exists, read_to_string, remove_file, rename, write, write_bytes};
+pub use memory::{
+    append, copy, exists, is_file, read_to_string, remove_file, rename, write, write_bytes,
+};

@@ -151,33 +151,56 @@ pub fn resolve_max_call_depth() -> usize {
 /// can still read [`Vm::take_expectation_failure`], which is set on the VM that
 /// ran the assertions.
 pub fn run_isolated(program: &Program) -> (Vm, Result<Value>) {
-    run_isolated_with_depth(program, resolve_max_call_depth())
+    run_isolated_in(program, std::path::Path::new("."))
 }
 
-/// [`run_isolated`] with the call depth given explicitly rather than read from
-/// [`MAX_CALL_DEPTH_ENV`].
+/// [`run_isolated`] with the directory the program was found beside, which is
+/// where its `redblue.manifest` is and what its module paths are read against.
 ///
-/// Split out for the same reason [`resolve_max_iterations_from`] is: a test has
-/// to be able to ask for a stack this process cannot reserve — the case
+/// `run_isolated` is this against the working directory, which is what a program
+/// run as itself wants. A root of its own is what makes `rb run subdir/prog.rb`
+/// resolve the manifest *that program* declares rather than the one belonging to
+/// whatever directory the host was in.
+pub fn run_isolated_in(program: &Program, root: &std::path::Path) -> (Vm, Result<Value>) {
+    run_isolated_with_depth_in(program, resolve_max_call_depth(), root)
+}
+
+/// [`run_isolated_with_depth`] against `root` — see [`run_isolated_in`].
+pub fn run_isolated_with_depth(program: &Program, depth: usize) -> (Vm, Result<Value>) {
+    run_isolated_with_depth_in(program, depth, std::path::Path::new("."))
+}
+
+/// [`run_isolated_with_depth`] against `root` — see [`run_isolated_in`].
+///
+/// Split out for the same reason [`run_isolated_with_depth`] is: a test has to
+/// be able to ask for a stack this process cannot reserve — the case
 /// [`run_without_a_sized_thread`] decides — and the only way to reach it without
 /// mutating the process environment is to hand the number in. It reads a depth,
 /// not bytes: the size asked for is `depth * STACK_BYTES_PER_CALL`, so a depth
 /// past what any thread can carry asks for the impossible and the refusal is the
 /// answer under test.
-pub fn run_isolated_with_depth(program: &Program, depth: usize) -> (Vm, Result<Value>) {
+pub fn run_isolated_with_depth_in(
+    program: &Program,
+    depth: usize,
+    root: &std::path::Path,
+) -> (Vm, Result<Value>) {
     let limit = depth.max(1);
     let threaded = program.clone();
+    let root = root.to_path_buf();
     let builder = std::thread::Builder::new()
         .name("redblue-vm".to_string())
         .stack_size(limit.saturating_mul(STACK_BYTES_PER_CALL));
 
-    let joined = match builder.spawn(move || {
-        let mut vm = Vm::new();
-        let result = vm.run(&threaded);
-        (vm, result)
+    let joined = match builder.spawn({
+        let root = root.clone();
+        move || {
+            let mut vm = Vm::new_in(&root);
+            let result = vm.run(&threaded);
+            (vm, result)
+        }
     }) {
         Ok(handle) => handle.join(),
-        Err(_) => return run_without_a_sized_thread(program, limit),
+        Err(_) => return run_without_a_sized_thread(program, limit, root),
     };
 
     match joined {
@@ -209,17 +232,21 @@ pub fn run_isolated_with_depth(program: &Program, depth: usize) -> (Vm, Result<V
 /// be trusted to stop at the same depth — and it is scoped to that target
 /// rather than to "the spawn failed", because on any other target a failed
 /// spawn means the stack could not be had and the run has to be refused.
-fn run_without_a_sized_thread(program: &Program, limit: usize) -> (Vm, Result<Value>) {
+fn run_without_a_sized_thread(
+    program: &Program,
+    limit: usize,
+    root: std::path::PathBuf,
+) -> (Vm, Result<Value>) {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = limit;
-        let mut vm = Vm::new();
+        let mut vm = Vm::new_in(&root);
         let result = vm.run(program);
         (vm, result)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = program;
+        let _ = (program, root);
         (
             Vm::new(),
             Err(Error::Limit(
@@ -278,6 +305,24 @@ pub struct Vm {
     /// them goes by. An entry is what makes a second import of the same module a
     /// no-op rather than a second binding of the same names.
     modules: HashMap<String, Program>,
+    /// The directory this program's imports are resolved against: where its
+    /// `redblue.manifest` is, and what every path an `import` returns is read
+    /// against.
+    ///
+    /// Data rather than process state. A program at `subdir/prog.rb` resolves
+    /// against `subdir/redblue.manifest` and opens `subdir/modules/Foo.rb`,
+    /// whichever directory the host happens to be in — so `rb run subdir/prog.rb`
+    /// and `analyze_in(&program, "subdir")` and `BytecodeVm::new_in("subdir")`
+    /// are all answering about one program, rather than the first two consulting
+    /// the program's own manifest and the last consulting `./`.
+    root: std::path::PathBuf,
+    /// The pins of that manifest, resolved once for this run and answered to
+    /// every `import` the program has.
+    ///
+    /// Not a global cache: it is held by the thing running *this* program, so a
+    /// second program in the same process — a REPL line, a harness running files
+    /// one after another — is answered from its own manifest.
+    pins: crate::manifest::Pins,
     /// Every module name an `import` has bound, to the module it names.
     ///
     /// An alias — `import json as J` — binds `J`, and `J.parse(...)` has to
@@ -397,22 +442,25 @@ struct ObjectType {
     methods: Fields,
 }
 
-/// The paths `import <name>` looks for, in order: the version the manifest in
-/// the working directory pins the module to, then the `modules/` directory,
-/// the same directory written with a leading `./`, and the name as a path of
-/// its own.
+/// The paths `import <name>` looks for under `root`, in order: `pinned` — the
+/// version the manifest there pins the module to — then the `modules/`
+/// directory, the same directory written with a leading `./`, and the name as a
+/// path of its own.
 ///
 /// The pin comes first because it is the only one of the four that says which
 /// version the program asked for; the rest are what an import did before there
 /// was a manifest, and a program with no manifest still resolves through them.
 ///
-/// `Err` is a manifest this program cannot be resolved from — a pin nothing
-/// publishes, or a module needed at two versions. It is passed on rather than
-/// ignored, because the answer to "that module cannot be resolved" must not be
-/// an import of whichever file happens to be at `modules/<name>.rb`.
-fn module_search_paths(name: &str) -> Result<Vec<String>> {
+/// `pinned` is a parameter rather than a lookup because a program is answered
+/// from one manifest, and whoever runs it resolves that manifest once and holds
+/// the answer: the analyzer in [`crate::analyzer::analyze_in`], the tree-walking
+/// VM in [`crate::manifest::Pins`] it carries, the bytecode VM in the one it
+/// carries. Each of them is asked once per program rather than once per import,
+/// which is both the honest reading of "one manifest per program" and the only
+/// way the three agree about a program run from anywhere but its own directory.
+fn module_search_paths(pinned: Option<String>, name: &str) -> Vec<String> {
     let mut paths = Vec::new();
-    if let Some(pinned) = crate::manifest::pinned_module_path(name)? {
+    if let Some(pinned) = pinned {
         paths.push(pinned);
     }
     paths.extend([
@@ -420,44 +468,61 @@ fn module_search_paths(name: &str) -> Result<Vec<String>> {
         format!("./modules/{name}"),
         name.to_string(),
     ]);
-    Ok(paths)
+    paths
 }
 
-/// The first path the module `name` resolves to, or `None` when no path is
-/// there.
+/// The file the module `name` resolves to under `root`, reading `pinned` first,
+/// or `None` when no path is there.
+///
+/// The path it returns is **rooted** — already joined to `root` — because that
+/// is the text a filesystem is asked about: on `wasm32-unknown-unknown` the
+/// filesystem is a map from path text to bytes, and on a disk a path relative to
+/// the working directory is not a path relative to the program. Returning a
+/// rooted path is what makes "find the file by one rule and open it by another"
+/// impossible rather than merely unlikely.
 ///
 /// A directory is not a module. `modules/Fixture/` is where the versions of
 /// `Fixture` are published — see [`crate::manifest`] — so it is a path the
 /// search skips rather than one it fails to read: without a manifest naming a
 /// version, `import Fixture` has no module to import, and saying so beats
 /// `Is a directory` on a directory that was never meant to be opened.
-pub fn module_path(name: &str) -> Result<Option<String>> {
-    Ok(module_search_paths(name)?
+fn module_file_in(root: &Path, pinned: Option<&str>, name: &str) -> Option<String> {
+    module_search_paths(pinned.map(str::to_string), name)
         .into_iter()
-        .find(|path| Path::new(path).is_file()))
+        .map(|path| crate::vfs::rooted(root, &path))
+        .find(|path| crate::vfs::is_file(path))
 }
 
-/// The source of the module `name` resolves to, or `None` when no path is
-/// there. A path that is there but cannot be read is an error, not a miss: the
-/// two say different things about the import.
-pub fn module_source(name: &str) -> Result<Option<String>> {
-    let Some(path) = module_path(name)? else {
+/// The source of the module `name` resolves to under `root`, reading `pinned`
+/// first, or `None` when no path is there. A path that is there but cannot be
+/// read is an error, not a miss: the two say different things about the import.
+///
+/// Through [`crate::vfs`], for the reason [`crate::runtime::module_program`]
+/// gives — a module is a file in the same filesystem a `files.write` writes to,
+/// and a `std::fs` read here would compile, pass every native test and fail on
+/// `wasm32-unknown-unknown`.
+fn module_source(root: &Path, pinned: Option<&str>, name: &str) -> Result<Option<String>> {
+    let Some(path) = module_file_in(root, pinned, name) else {
         return Ok(None);
     };
-    let source = std::fs::read_to_string(&path)
-        .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
+    let source = crate::vfs::read_to_string(&path)
+        .map_err(|e| Error::Io(format!("Cannot load module '{path}': {e}")))?;
     Ok(Some(source))
 }
 
-/// The names `import <name>` binds into the importing program: the module's own
-/// `set` and `constant` declarations, which is everything the loader runs.
+/// The names an `import` of `name` under `root` binds into the importing
+/// program: the module's own `set` and `constant` declarations, which is
+/// everything the loader runs.
 ///
-/// Read by the analyzer, which cannot see into a separate file, so that a read
-/// of one of these names is a read of a name the program binds. A module that
-/// cannot be found, read or parsed binds nothing here — the loader still
-/// reports that at runtime, and the analyzer must not report it first.
-pub fn module_bound_names(name: &str) -> Vec<String> {
-    let Some(source) = module_source(name).unwrap_or(None) else {
+/// Read by the analyzer, which cannot see into a separate file, so that a read of
+/// one of these names is a read of a name the program binds. A module that cannot
+/// be found, read or parsed binds nothing here — the loader still reports that at
+/// runtime, and the analyzer must not report it first. Which version of the module
+/// those names come from is the manifest's answer, passed in as `pinned` because
+/// the analyzer resolved it once for the whole program: a program importing the
+/// same module at two versions is told which of the two it is reading.
+pub(crate) fn module_bound_names(root: &Path, pinned: Option<&str>, name: &str) -> Vec<String> {
+    let Ok(Some(source)) = module_source(root, pinned, name) else {
         return Vec::new();
     };
     let Ok(tokens) = Lexer::tokenize(&source) else {
@@ -478,6 +543,18 @@ pub fn module_bound_names(name: &str) -> Vec<String> {
 
 impl Vm {
     pub fn new() -> Self {
+        Self::new_in(std::path::Path::new("."))
+    }
+
+    /// A VM that resolves its imports against `root`.
+    ///
+    /// The manifest in `root` is the one that decides which version of a module
+    /// an `import` binds, and it is the manifest
+    /// [`crate::analyzer::analyze_in`] reads when it was asked about the same
+    /// program. A VM that resolved against `.` instead would load a different
+    /// file than the analyzer checked, for every program not run from its own
+    /// directory.
+    pub fn new_in(root: &std::path::Path) -> Self {
         let globals = stdlib::builtins();
         Self {
             globals,
@@ -489,6 +566,8 @@ impl Vm {
             break_statements: 0,
             skip_statements: 0,
             modules: HashMap::new(),
+            root: root.to_path_buf(),
+            pins: crate::manifest::Pins::for_running(root),
             module_aliases: HashMap::new(),
             importing: Vec::new(),
             declared_modules: HashMap::new(),
@@ -1536,7 +1615,15 @@ impl Vm {
                         ));
                     }
 
-                    if let Some(path) = module_path(&item.name)? {
+                    // The manifest is resolved once for the whole run — see
+                    // `Vm::pins` — and every import here is answered from that
+                    // one resolution. An `Err` is a manifest this program cannot
+                    // be resolved from, and is passed on rather than ignored,
+                    // because the answer to "that module cannot be resolved"
+                    // must not be an import of whichever file happens to be at
+                    // `modules/<name>.rb`.
+                    let pinned = self.pins.module(&item.name)?;
+                    if let Some(path) = module_file_in(&self.root, pinned.as_deref(), &item.name) {
                         // The path is there but may not be readable: that is an
                         // Io error, not a miss, so it is reported rather than
                         // folded into the "cannot find" below.

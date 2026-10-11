@@ -10,6 +10,38 @@ pub struct Analyzer {
     /// The names the program binds somewhere the walk may reach before the
     /// declaration that binds them. Collected before the statements are walked.
     later: LaterNames,
+    /// The directory the program resolves its dependencies from: the one holding
+    /// the `redblue.manifest` an `import` is answered by.
+    ///
+    /// The working directory for a program run as itself — [`analyze`] — and its
+    /// own parameter for a program asked about from somewhere else, so that the
+    /// manifest consulted is the one the program was found beside rather than
+    /// whichever directory the host happens to be in.
+    root: std::path::PathBuf,
+    /// The manifest in `root`, read once per analysis and answered to every
+    /// import the walk reaches.
+    ///
+    /// A whole program is answerable from one manifest, so it is read once rather
+    /// than once per import: every import asked again would re-read the manifest
+    /// and re-scan a directory per pinned module, and a static pass has no reason
+    /// to do the reading twice. It is the *same* type the two VMs carry, so all
+    /// three read one manifest the one way and there is no second answer to drift
+    /// from the first.
+    ///
+    /// Read-only — [`crate::manifest::Pins::for_reading`] — because an analysis
+    /// is a question, and a question has no reason to create a `redblue.lock`.
+    pins: crate::manifest::Pins,
+    /// Whether the manifest conflict has been reported, and so the walk stops
+    /// where it found the import that found it.
+    ///
+    /// A program whose pins conflict has an unanswerable question at its every
+    /// name: the import binds nothing, so every read of a name it would have
+    /// bound says "unknown variable" and says nothing about why. Walking on turns
+    /// one conflict into a page of consequences, and the reader goes to the page
+    /// instead of the cause. The conflict is what the walk stops for — at every
+    /// depth, not only at the top level: a body is walked by the same walk, and
+    /// an `import` inside one is just as unanswerable as one outside it.
+    manifest_failed: bool,
     /// How many function, method and object bodies the walk is inside.
     ///
     /// A body runs when it is called, not where it is written, so a read inside
@@ -23,11 +55,19 @@ pub struct Analyzer {
 
 impl Analyzer {
     pub fn new() -> Self {
+        Self::in_dir(std::path::Path::new("."))
+    }
+
+    /// An analyzer that resolves the program's imports against `root`.
+    fn in_dir(root: &std::path::Path) -> Self {
         Self {
             scopes: vec![HashSet::new()],
             functions: HashMap::new(),
             errors: Vec::new(),
             later: LaterNames::default(),
+            root: root.to_path_buf(),
+            pins: crate::manifest::Pins::for_reading(root),
+            manifest_failed: false,
             deferred_depth: 0,
         }
     }
@@ -54,10 +94,19 @@ impl Analyzer {
     }
 
     pub fn analyze(&mut self, program: &Program) -> Result<()> {
-        collect_later_names(&program.statements, &mut self.later);
+        // Read once, here, for the whole program: every import in it — at the top
+        // level and in every body — is answered from these pins. Resolving per
+        // import would re-read the manifest and re-scan a directory for every
+        // import the program has, and a failure found here is a failure of the
+        // program rather than of one statement in it.
+        let root = self.root.clone();
+        collect_later_names(&program.statements, &root, &mut self.pins, &mut self.later);
 
         for statement in &program.statements {
             self.analyze_statement(statement);
+            if self.manifest_failed {
+                break;
+            }
         }
 
         if self.errors.is_empty() {
@@ -183,18 +232,46 @@ impl Analyzer {
         self.errors.push((msg.to_string(), span));
     }
 
+    /// Whether the walk has stopped: the manifest conflict was found and
+    /// reported, and nothing after it is worth walking.
+    fn stopped(&self) -> bool {
+        self.manifest_failed
+    }
+
+    /// Walks a list of statements, stopping at the manifest conflict.
+    ///
+    /// Every branch of the walk comes through here — the arms below hold their
+    /// bodies in an `if`, a loop, a `try`, a function or a module, and each of
+    /// them used to walk its body statement by statement without asking whether
+    /// the walk was still going. An `import` inside any of those recorded the
+    /// conflict and then let the rest of the body be walked anyway, so the names
+    /// the failed import would have bound answered "unknown variable" from
+    /// inside a function as readily as from the top level: the page of
+    /// consequences this is meant to end, one scope deeper.
+    fn analyze_body(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            if self.stopped() {
+                return;
+            }
+            self.analyze_statement(stmt);
+        }
+    }
+
     /// Analyzes the body of a function, method or object, where a read is
     /// answered by the program as it is at the call rather than as it was where
     /// the body is written.
     fn analyze_deferred_body(&mut self, body: &[Stmt]) {
         self.deferred_depth += 1;
-        for stmt in body {
-            self.analyze_statement(stmt);
-        }
+        self.analyze_body(body);
         self.deferred_depth -= 1;
     }
 
     fn analyze_statement(&mut self, stmt: &Stmt) {
+        // The one place the walk is stopped from, so that no branch can walk past
+        // a conflict recorded inside another statement's body.
+        if self.stopped() {
+            return;
+        }
         let span = stmt.span;
         match &stmt.statement {
             Statement::Say(expr) | Statement::Print(expr) => {
@@ -227,22 +304,19 @@ impl Analyzer {
             } => {
                 self.analyze_expr(condition, &span);
                 self.push_scope();
-                for stmt in then_branch {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(then_branch);
                 self.pop_scope();
-                self.push_scope();
-                for stmt in else_branch {
-                    self.analyze_statement(stmt);
+                if self.stopped() {
+                    return;
                 }
+                self.push_scope();
+                self.analyze_body(else_branch);
                 self.pop_scope();
             }
             Statement::Unless { condition, body } => {
                 self.analyze_expr(condition, &span);
                 self.push_scope();
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
                 self.pop_scope();
             }
             Statement::ForEach {
@@ -253,9 +327,7 @@ impl Analyzer {
                 self.analyze_expr(iterable, &span);
                 self.push_scope();
                 self.declare(variable);
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
                 self.pop_scope();
             }
             Statement::ForRange {
@@ -272,25 +344,19 @@ impl Analyzer {
                 }
                 self.push_scope();
                 self.declare(variable);
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
                 self.pop_scope();
             }
             Statement::Repeat { count, body } => {
                 self.analyze_expr(count, &span);
                 self.push_scope();
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
                 self.pop_scope();
             }
             Statement::While { condition, body } => {
                 self.analyze_expr(condition, &span);
                 self.push_scope();
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
                 self.pop_scope();
             }
             Statement::RepeatUntil {
@@ -304,10 +370,11 @@ impl Analyzer {
                 // `repeat / set t to 1 / until t is 1` as an unknown variable,
                 // refusing a program the language runs on both engines.
                 self.push_scope();
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
                 self.pop_scope();
+                if self.stopped() {
+                    return;
+                }
                 self.analyze_expr(condition, &span);
             }
             Statement::Break | Statement::Skip => {}
@@ -366,20 +433,20 @@ impl Analyzer {
                 catch_body,
                 finally_body,
             } => {
-                for stmt in body {
-                    self.analyze_statement(stmt);
+                self.analyze_body(body);
+                if self.stopped() {
+                    return;
                 }
                 if let Some(var) = catch_var {
                     self.push_scope();
                     self.declare(var);
-                    for stmt in catch_body {
-                        self.analyze_statement(stmt);
-                    }
+                    self.analyze_body(catch_body);
                     self.pop_scope();
                 }
-                for stmt in finally_body {
-                    self.analyze_statement(stmt);
+                if self.stopped() {
+                    return;
                 }
+                self.analyze_body(finally_body);
             }
             Statement::Import(items) => {
                 // An import binds the module's names into the program it runs
@@ -390,8 +457,39 @@ impl Analyzer {
                 // known by reading its file, so they are parsed here — a module
                 // that cannot be found or parsed binds nothing and is still
                 // reported by the loader, at runtime, where it belongs.
+                //
+                // A manifest that cannot be resolved is the exception. It is
+                // about the program rather than about one module, so every name
+                // the import would have bound is missing and every read of one of
+                // them answers "unknown variable" — a message about a variable,
+                // for a program whose real problem is that its pins conflict.
+                // The conflict is what the user has to be shown, and it is named
+                // here rather than left to a read that may never happen.
+                //
+                // Which version each module is pinned to was read once, when the
+                // analysis started (`Analyzer::analyze`), so this arm asks for the
+                // names of the version this program pinned rather than resolving
+                // the manifest again per import.
+                if let Some(failure) = self.pins.failure() {
+                    self.add_error(&failure, span);
+                    self.manifest_failed = true;
+                    return;
+                }
                 for item in items {
-                    for name in crate::interpreter::module_bound_names(&item.name) {
+                    // `Ok` by now: the arm above returned on the one failure this
+                    // can produce, and a manifest that resolves has an answer for
+                    // every module or a reason it does not. `None` is what a
+                    // module nothing pins looks like, and an import of it falls
+                    // through to the three search paths as it always did.
+                    let pinned = self
+                        .pins
+                        .module(&item.name)
+                        .expect("the manifest failure was reported above");
+                    for name in crate::interpreter::module_bound_names(
+                        &self.root,
+                        pinned.as_deref(),
+                        &item.name,
+                    ) {
                         self.declare(&name);
                     }
                     // Both the name the import gives the module and the alias
@@ -411,9 +509,7 @@ impl Analyzer {
             Statement::Module { name, body } => {
                 self.declare(name);
                 self.push_scope();
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
                 self.pop_scope();
             }
             Statement::Export { .. } => {}
@@ -421,9 +517,7 @@ impl Analyzer {
                 self.analyze_expr(expr, &span);
             }
             Statement::Test { body, .. } => {
-                for stmt in body {
-                    self.analyze_statement(stmt);
-                }
+                self.analyze_body(body);
             }
         }
     }
@@ -563,7 +657,12 @@ impl LaterNames {
     }
 }
 
-fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
+fn collect_later_names(
+    statements: &[Stmt],
+    root: &std::path::Path,
+    pins: &mut crate::manifest::Pins,
+    out: &mut LaterNames,
+) {
     for stmt in statements {
         match &stmt.statement {
             Statement::Constant { name, .. } => {
@@ -571,8 +670,17 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
             }
             Statement::Import(items) => {
                 for item in items {
-                    out.imported
-                        .extend(crate::interpreter::module_bound_names(&item.name));
+                    // A manifest that cannot be resolved binds nothing, which is
+                    // the analyzer's business at the `import` that found it and
+                    // not here: this pass collects the names a program may read
+                    // before the walk reaches them, and the walk is what reports
+                    // the conflict.
+                    let pinned = pins.module(&item.name).unwrap_or(None);
+                    out.imported.extend(crate::interpreter::module_bound_names(
+                        root,
+                        pinned.as_deref(),
+                        &item.name,
+                    ));
                 }
             }
             Statement::If {
@@ -580,31 +688,31 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
                 else_branch,
                 ..
             } => {
-                collect_later_names(then_branch, out);
-                collect_later_names(else_branch, out);
+                collect_later_names(then_branch, root, pins, out);
+                collect_later_names(else_branch, root, pins, out);
             }
             Statement::Unless { body, .. } => {
-                collect_later_names(body, out);
+                collect_later_names(body, root, pins, out);
             }
             Statement::ForEach { body, .. }
             | Statement::ForRange { body, .. }
             | Statement::Repeat { body, .. }
             | Statement::RepeatUntil { body, .. }
-            | Statement::While { body, .. } => collect_later_names(body, out),
+            | Statement::While { body, .. } => collect_later_names(body, root, pins, out),
             Statement::Function { body, .. }
             | Statement::Method { body, .. }
             | Statement::Object { body, .. }
             | Statement::Module { body, .. }
-            | Statement::Test { body, .. } => collect_later_names(body, out),
+            | Statement::Test { body, .. } => collect_later_names(body, root, pins, out),
             Statement::Try {
                 body,
                 catch_body,
                 finally_body,
                 ..
             } => {
-                collect_later_names(body, out);
-                collect_later_names(catch_body, out);
-                collect_later_names(finally_body, out);
+                collect_later_names(body, root, pins, out);
+                collect_later_names(catch_body, root, pins, out);
+                collect_later_names(finally_body, root, pins, out);
             }
             Statement::Say(_)
             | Statement::Print(_)
@@ -622,7 +730,18 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
 }
 
 pub fn analyze(program: &Program) -> Result<()> {
-    let mut analyzer = Analyzer::new();
+    analyze_in(program, std::path::Path::new("."))
+}
+
+/// Analyzes `program` as the program in `root` resolves its dependencies from.
+///
+/// `analyze` is this against the working directory. A `root` of its own is what
+/// lets the pins that decide what an `import` binds be the pins of the directory
+/// the program was found beside — and, when those pins cannot be resolved, what
+/// lets the conflict be reported here rather than surfacing later as an unknown
+/// variable with nothing in it saying why.
+pub fn analyze_in(program: &Program, root: &std::path::Path) -> Result<()> {
+    let mut analyzer = Analyzer::in_dir(root);
     analyzer.analyze(program)
 }
 

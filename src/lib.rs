@@ -36,16 +36,39 @@ pub use lsp::{
 pub use bytecode::{compile_source, Chunk, Opcode};
 pub use interpreter::{
     resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
-    run_isolated, run_isolated_with_depth, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS,
-    MAX_ITERATIONS_ENV, MAX_STEPS, MAX_STEPS_ENV, NETWORK_CONNECT_TIMEOUT_SECS,
-    NETWORK_TIMEOUT_SECS,
+    run_isolated, run_isolated_in, run_isolated_with_depth, run_isolated_with_depth_in, Vm,
+    MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS, MAX_ITERATIONS_ENV, MAX_STEPS,
+    MAX_STEPS_ENV, NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
 pub use value::{expect_repeat_count, FunctionBody, FunctionValue, Value};
 
+/// Runs the program at `path`.
+///
+/// The directory holding the program is where its imports are resolved from: its
+/// `redblue.manifest` is the one that pins them, and a path an `import` returns
+/// is read against it. So `rb run subdir/prog.rb` consults
+/// `subdir/redblue.manifest` and opens `subdir/modules/Foo.rb` — the same pins
+/// `analyze_in(&program, "subdir")` and `BytecodeVm::new_in("subdir")` are
+/// given, so all three agree about one program rather than the first two
+/// consulting the program's own manifest and the rest consulting the working
+/// directory's.
 pub fn run_file(path: &str) -> Result<(), Error> {
     let source = fs::read_to_string(path).map_err(|e| Error::Io(e.to_string()))?;
 
-    run_source(&source)
+    run_source_in(&source, root_of(path))
+}
+
+/// The directory a program at `path` resolves its dependencies from: the one
+/// holding it.
+///
+/// `Path::parent` answers `""` for a bare `prog.rb`, which is the working
+/// directory written as nothing; `.` is the same answer spelled as a path, and
+/// is what everything downstream compares against.
+fn root_of(path: &str) -> &Path {
+    Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// Runs `path` and, when it fails, renders the source line and caret for the
@@ -56,7 +79,7 @@ fn run_file_with_diagnostic(path: &str) -> std::result::Result<(), String> {
         Err(e) => return Err(Error::Io(e.to_string()).to_string()),
     };
 
-    run_source(&source).map_err(|e| e.render(&source, Some(path)))
+    run_source_in(&source, root_of(path)).map_err(|e| e.render(&source, Some(path)))
 }
 
 fn report(rendered: &str) -> ! {
@@ -65,11 +88,21 @@ fn report(rendered: &str) -> ! {
 }
 
 pub fn run_source(source: &str) -> Result<(), Error> {
+    run_source_in(source, Path::new("."))
+}
+
+/// The whole pipeline on `source`, resolved from `root`.
+///
+/// [`run_source`] is this against the working directory. `root` is the directory
+/// the program lives in, so a program given as text — a REPL line, a snippet in
+/// a test, a host embedding the interpreter — can still be resolved against the
+/// manifest that belongs to it rather than against wherever the process is.
+pub fn run_source_in(source: &str, root: &Path) -> Result<(), Error> {
     let tokens = Lexer::tokenize(source)?;
     let ast = parser::parse(tokens)?;
-    analyzer::analyze(&ast)?;
+    analyzer::analyze_in(&ast, root)?;
 
-    let (_vm, result) = interpreter::run_isolated(&ast);
+    let (_vm, result) = interpreter::run_isolated_in(&ast, root);
     result.map(|_| ())
 }
 
@@ -81,11 +114,16 @@ pub fn run_source(source: &str) -> Result<(), Error> {
 /// that went through the analyzer rather than around it: a test that skips the
 /// analyzer cannot fail on what the analyzer refuses.
 pub fn run_source_value(source: &str) -> Result<Value, Error> {
+    run_source_value_in(source, Path::new("."))
+}
+
+/// [`run_source_value`] against `root` — see [`run_source_in`].
+pub fn run_source_value_in(source: &str, root: &Path) -> Result<Value, Error> {
     let tokens = Lexer::tokenize(source)?;
     let ast = parser::parse(tokens)?;
-    analyzer::analyze(&ast)?;
+    analyzer::analyze_in(&ast, root)?;
 
-    let (_vm, result) = interpreter::run_isolated(&ast);
+    let (_vm, result) = interpreter::run_isolated_in(&ast, root);
     result
 }
 

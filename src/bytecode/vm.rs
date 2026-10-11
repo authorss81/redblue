@@ -570,24 +570,36 @@ fn unary_operator(opcode: Opcode) -> &'static UnaryOp {
     }
 }
 
-/// The paths an `import` of `name` is looked for under, in order — the version
-/// a manifest pins it to first, then the same three, in the same order, as the
-/// tree-walking VM uses.
+/// The paths an `import` of `name` is looked for under `root`, in order — the
+/// version the manifest there pins it to first, then the same three, in the same
+/// order, as the tree-walking VM uses.
 ///
-/// `Err` is a manifest this program cannot be resolved from, and is passed on
-/// for the same reason the tree-walking VM passes it on: a pin nothing
-/// publishes must not resolve to whichever file is at `modules/<name>.rb`.
-fn module_paths(name: &str) -> Result<Vec<String>> {
-    let mut paths = Vec::new();
-    if let Some(pinned) = crate::manifest::pinned_module_path(name)? {
-        paths.push(pinned);
+/// `pinned` is handed in rather than looked up. A program is answered from one
+/// manifest, so this VM resolves it once — [`BytecodeVm::pins`] — and every
+/// `IMPORT` it runs is answered from that one resolution, as the analyzer's are
+/// and as the tree-walking VM's are. Asked per import, this was a manifest read
+/// and a `modules/*/*` directory scan per `IMPORT` instruction, against the same
+/// answer each time.
+///
+/// The paths it returns are **rooted** — already joined to `root` — because that
+/// is the text a filesystem is asked about. On `wasm32-unknown-unknown` the
+/// filesystem is a map from path text to bytes, so a `std::fs` probe here would
+/// compile, pass every native test, and find no module there at all.
+fn module_paths(root: &std::path::Path, pinned: Option<&str>, name: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    if let Some(pinned) = pinned {
+        paths.push(pinned.to_string());
     }
     paths.extend([
         format!("modules/{name}.rb"),
         format!("./modules/{name}"),
         name.to_string(),
     ]);
-    Ok(paths)
+
+    paths
+        .into_iter()
+        .map(|path| crate::vfs::rooted(root, &path))
+        .collect()
 }
 
 /// Where the `try` name a file wrote splits into the two names it carries.
@@ -602,6 +614,22 @@ fn split_dotted(name: &str) -> Option<(&str, &str)> {
 
 /// Runs a compiled Redblue program.
 pub struct BytecodeVm {
+    /// The directory modules are resolved from: where the `redblue.manifest`
+    /// that pins them is, and what every path an `import` returns is read
+    /// against.
+    ///
+    /// Data rather than process state, which is what makes a program testable
+    /// away from the working directory. `BytecodeVm::new_in` sets it to the
+    /// directory the program was found beside, so this VM and
+    /// [`crate::analyzer::analyze_in`] read one manifest between them; `new`
+    /// sets it to `.`, which is what a program run as itself resolves from.
+    root: std::path::PathBuf,
+    /// The pins of the manifest in `root`, resolved once for this run and
+    /// answered to every `IMPORT` it runs.
+    ///
+    /// Not a global cache: it is held by the VM running *this* program, so two
+    /// programs in one process — and two roots — keep their own pins.
+    pins: crate::manifest::Pins,
     globals: HashMap<String, Value>,
     /// The names bound by a `constant` declaration. The value lives in
     /// [`BytecodeVm::globals`] so a read resolves through one name-resolution
@@ -751,7 +779,25 @@ impl Default for BytecodeVm {
 impl BytecodeVm {
     /// Builds a VM with the configured limits and an empty program.
     pub fn new() -> Self {
+        Self::in_dir(std::path::Path::new("."))
+    }
+
+    /// Builds a VM that resolves its imports against `root`.
+    ///
+    /// The manifest in `root` is the one that decides which version of a module
+    /// an `import` binds, and it is the manifest the analyzer was given when it
+    /// was asked about the same program — [`crate::analyzer::analyze_in`]. A VM
+    /// that resolved against `.` instead would import a different file than the
+    /// analyzer checked, for every program not run from its own directory, and
+    /// only one of the two would be wrong in a way a test could see.
+    pub fn new_in(root: &std::path::Path) -> Self {
+        Self::in_dir(root)
+    }
+
+    fn in_dir(root: &std::path::Path) -> Self {
         Self {
+            root: root.to_path_buf(),
+            pins: crate::manifest::Pins::for_running(root),
             globals: stdlib::builtins(),
             constants: HashSet::new(),
             locals: vec![CapturedScope::new()],
@@ -3384,13 +3430,18 @@ impl BytecodeVm {
         // A builtin namespace has no file behind it, and refusing the import
         // because of that was the whole difference between this VM and the
         // tree-walking one for `import json`.
-        let path = module_paths(&name)?
+        // A pin nothing publishes must not resolve to whichever file
+        // is at `modules/<name>.rb`, so the manifest's own failure is passed on
+        // rather than folded into the "cannot find" below. The resolution behind
+        // it was made once for this run — see `BytecodeVm::pins`.
+        let pinned = self.pins.module(&name)?;
+        let path = module_paths(&self.root, pinned.as_deref(), &name)
             .into_iter()
             // A directory is not a module: `modules/Fixture/` is where the
             // versions of `Fixture` are published, so it is skipped rather than
             // opened. The tree-walking VM skips it for the same reason — see
-            // `crate::interpreter::module_path`.
-            .find(|path| std::path::Path::new(path).is_file());
+            // `crate::interpreter::module_file_in`.
+            .find(|path| crate::vfs::is_file(path));
         if path.is_none() && !stdlib::is_module(&name) && !self.declared_modules.contains_key(&name)
         {
             return Err(Error::Runtime(
@@ -3677,9 +3728,18 @@ impl BytecodeVm {
     /// The `to` functions are compiled for the same reason: a call written
     /// `MathUtils.circle_area(5)` resolves to `MathUtils_circle_area`, which
     /// exists on the tree-walking VM and did not here.
+    ///
+    /// `path` arrives rooted — joined to [`BytecodeVm::root`] by
+    /// [`module_paths`] — and is read through [`crate::vfs`] rather than
+    /// `std::fs`, for the reason [`crate::runtime::module_program`] gives: on
+    /// `wasm32-unknown-unknown` a module is a file in the same in-memory
+    /// filesystem `files.write` writes to, so a program that writes a module and
+    /// then imports it has to work here too. A `std::fs` read compiled, passed
+    /// every native test, and failed on that target with an `Io` error naming a
+    /// file the program could plainly see.
     fn compile_module(&self, path: &str) -> Result<(Chunk, Vec<String>)> {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
+        let source = crate::vfs::read_to_string(path)
+            .map_err(|e| Error::Io(format!("Cannot load module '{path}': {e}")))?;
         let tokens = Lexer::tokenize(&source)?;
         let ast = parser::parse(tokens)?;
         let body = parser::module_body(&ast);

@@ -36,6 +36,12 @@
 //! that changed bytes on every resolve would be a file nobody could read a
 //! diff of.
 //!
+//! It is also *read*. A lockfile that is only written records what the last
+//! resolve found, and a program whose manifest pins `*` would be handed a new
+//! version the moment one is published, in silence, with nothing to notice. So a
+//! lockfile that disagrees with the resolution is refused, by
+//! [`check_lockfile`], naming the module that moved.
+//!
 //! # Failing
 //!
 //! A pin nothing publishes, and a module needed at two versions, are both
@@ -43,8 +49,11 @@
 //! because the alternative is importing something the program did not ask for:
 //! a lockfile that cannot be honoured means the program is not the program that
 //! was written.
+//!
+//! Those errors carry their position — the file and the line — in the message
+//! rather than in a [`Span`], because a span is rendered as a caret against the
+//! program being run and a manifest is a second file. See [`Manifest::parse`].
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,11 +74,27 @@ pub const LOCKFILE: &str = "redblue.lock";
 /// does not stop is a registry that keeps offering fresh names. Both are a
 /// package manager describing a graph no human would write, and the answer to
 /// either is a clean error rather than the process disappearing.
-const MAX_RESOLUTION_STEPS: usize = 4096;
+///
+/// Public so that a test can build the graph that trips it rather than a smaller
+/// one that does not: the number is the contract, and a test that writes 4096
+/// hard-coded next to a constant that says 4096 is a test that rots quietly when
+/// the constant moves.
+pub const MAX_RESOLUTION_STEPS: usize = 4096;
 
 /// How deep one module's chain of dependencies may go before it is refused, as
 /// distinct from how many entries there are in total.
-const MAX_RESOLUTION_DEPTH: usize = 64;
+///
+/// Counted per *chain*, not per module: the program's own pins are one step
+/// deep, a pin of a module one step from the program is two, and so on. A
+/// hundred-long chain of one dependency each is a hundred steps — inside
+/// [`MAX_RESOLUTION_STEPS`] — and is refused here. Width is the other question
+/// and [`MAX_RESOLUTION_STEPS`] is what answers it: a manifest listing a
+/// thousand pins is wide, not deep, and a thousand pins is a manifest somebody
+/// wrote on purpose rather than a graph that ran away.
+///
+/// Public for the same reason as [`MAX_RESOLUTION_STEPS`]: the test builds a
+/// chain of exactly this length and one of exactly one more.
+pub const MAX_RESOLUTION_DEPTH: usize = 64;
 
 /// A `major.minor.patch` version.
 ///
@@ -190,6 +215,18 @@ impl Manifest {
     /// `label` names the file in every error, because a module's manifest is
     /// read by the resolver rather than by the user who wrote it, and "line 3
     /// is not a field" without saying which file line 3 is in names nothing.
+    ///
+    /// The label and the line are in the *message*, and every failure here is
+    /// [`Span::unknown`]. That is not a gap in the reporting: a `Span` is a
+    /// position in a source text, and it is rendered by drawing a caret against
+    /// one — the program that was being analyzed or run. A manifest is a second
+    /// file, so a manifest line carried as a span would render as
+    /// `--> report.rb:3:1` over a line of `report.rb` that has nothing to do
+    /// with it. The position the reader needs travels with the words instead.
+    /// A caller that surfaces the failure against the *program* — the analyzer,
+    /// which reports a conflict at the `import` that found it — therefore passes
+    /// this message on as it is, label and line intact and no `RuntimeError:`
+    /// prefix, so that one failure is reported once.
     pub fn parse(text: &str, label: &str) -> Result<Manifest> {
         // A byte-order mark is what a file saved by a Windows editor starts
         // with, and CRLF is how that same editor ends every line. Neither is
@@ -234,7 +271,7 @@ impl Manifest {
                     }
                     manifest.version = Some(Version::parse(fields[1]).map_err(|error| {
                         Error::Runtime(
-                            format!("{label} line {number}: {}", message_of(&error)),
+                            format!("{label} line {number}: {}", error.message()),
                             Span::unknown(),
                         )
                     })?);
@@ -245,20 +282,37 @@ impl Manifest {
                         name: fields[1].to_string(),
                         requirement: Requirement::parse(fields[2]).map_err(|error| {
                             Error::Runtime(
-                                format!("{label} line {number}: {}", message_of(&error)),
+                                format!("{label} line {number}: {}", error.message()),
                                 Span::unknown(),
                             )
                         })?,
                         line: number,
                     });
                 }
-                _ => {
-                    // One of the three fields above, reached with the wrong
-                    // number of words: the guard arms did not claim it.
+                _ if fields.len() < words_in_a_line(fields[0]) => {
+                    // One of the three fields above, reached with too few words:
+                    // the guard arms did not claim it because the value it wants
+                    // is the one that is not there.
                     return Err(Error::Runtime(
                         format!(
                             "{label} line {number}: '{line}' is not a complete {} line: it \
                              carries no value, where one is required",
+                            fields[0]
+                        ),
+                        Span::unknown(),
+                    ));
+                }
+                _ => {
+                    // Too *many* words this time, which is a different mistake:
+                    // everything the line needs is written and something else is
+                    // written beside it. Saying it "carries no value" would be
+                    // backwards — `name report notes` is missing nothing.
+                    let wanted = words_in_a_line(fields[0]) - 1;
+                    return Err(Error::Runtime(
+                        format!(
+                            "{label} line {number}: '{line}' carries {} values, where a {} line \
+                             takes {wanted}",
+                            fields.len() - 1,
                             fields[0]
                         ),
                         Span::unknown(),
@@ -270,10 +324,17 @@ impl Manifest {
     }
 }
 
-/// The message inside an error, for a message that has to be re-wrapped with
-/// the line it came from.
-fn message_of(error: &Error) -> String {
-    error.to_string()
+/// How many words a line of `field` is written in, counting the field itself.
+///
+/// `name` and `version` name one value; `dependency` names two. The count is
+/// what tells a line that is *missing* its value from one that has an extra,
+/// because the two reach the same place otherwise and the same sentence cannot
+/// describe both.
+fn words_in_a_line(field: &str) -> usize {
+    match field {
+        "dependency" => 3,
+        _ => 2,
+    }
 }
 
 /// Whether `name` could be written in a Redblue program, and so could name a
@@ -311,7 +372,12 @@ fn check_module_name(name: &str, label: &str, line: usize) -> Result<()> {
 /// it is — which version of which module is where — and so that the files on
 /// disk are one implementation of it rather than the shape of the algorithm.
 pub trait Registry {
-    /// Every version of `name` that is published, in ascending order.
+    /// Every version of `name` that is published.
+    ///
+    /// In whatever order the registry finds them in: [`resolve`] asks for the
+    /// highest version itself rather than trusting that the last one offered is
+    /// the highest, because a third-party [`Registry`] that returned `1.10.0`,
+    /// `1.9.0` would have `*` resolve to `1.9.0` and say nothing about why.
     fn versions(&self, name: &str) -> Vec<Version>;
 
     /// The path the module `name` at `version` is at, or `None` when that
@@ -382,20 +448,96 @@ impl Resolution {
     }
 }
 
+/// One line of a lockfile: the module, the version it is held at, and the file
+/// that version is at, relative to the root it was written under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedModule {
+    /// The module the line names.
+    pub name: String,
+    /// The version it is held at.
+    pub version: Version,
+    /// The file that version is at, relative to the root.
+    pub path: String,
+}
+
+/// The lockfile `text` holds.
+///
+/// A lockfile is read, not only written. Written alone it is a log of what the
+/// last resolve found, and the world moves under it: publish a new version of a
+/// module a manifest pins with `*`, and the next resolve quietly hands the
+/// program different code from the one the file records, with nothing to notice.
+/// Reading it back is what makes it a lock — see [`check_lockfile`], which
+/// refuses exactly that disagreement.
+///
+/// The errors are [`Error::Runtime`] naming the line, like [`Manifest::parse`]
+///'s and for the same reason: a lockfile is a second file, so its position
+/// travels in the message rather than as a [`Span`] drawn against the program.
+pub fn parse_lockfile(text: &str) -> Result<Vec<LockedModule>> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut locked = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields[0] != "module" {
+            return Err(Error::Runtime(
+                format!(
+                    "{LOCKFILE} line {number}: '{}' is not a field a lockfile has; it holds \
+                     'module' lines",
+                    fields[0]
+                ),
+                Span::unknown(),
+            ));
+        }
+        if fields.len() != 4 {
+            return Err(Error::Runtime(
+                format!(
+                    "{LOCKFILE} line {number}: '{line}' is not a complete module line: it takes \
+                     a name, a version and a path, and it carries {}",
+                    fields.len().saturating_sub(1)
+                ),
+                Span::unknown(),
+            ));
+        }
+        check_module_name(fields[1], LOCKFILE, number)?;
+        let version = Version::parse(fields[2]).map_err(|error| {
+            Error::Runtime(
+                format!("{LOCKFILE} line {number}: {}", error.message()),
+                Span::unknown(),
+            )
+        })?;
+        locked.push(LockedModule {
+            name: fields[1].to_string(),
+            version,
+            path: fields[3].to_string(),
+        });
+    }
+    Ok(locked)
+}
+
 /// Settles every pin in `manifest`, and the pins of the modules it pulls in.
+///
+/// Each queued dependency carries the depth of the chain that reached it: the
+/// program's own pins are one deep, and a module's pins are one deeper than
+/// the module itself. That is what [`MAX_RESOLUTION_DEPTH`] is checked against,
+/// so a dependency that arrives too deep is refused by the chain it is in
+/// rather than by how wide the graph around it happens to be.
 pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resolution> {
     let mut resolution = Resolution::default();
-    let mut pending: VecDeque<(Dependency, String)> = manifest
+    let mut pending: VecDeque<(Dependency, String, usize)> = manifest
         .dependencies
         .iter()
         .cloned()
-        .map(|dependency| (dependency, "this program".to_string()))
+        .map(|dependency| (dependency, "this program".to_string(), 1))
         .collect();
-    let mut depth = 0usize;
+    let mut steps = 0usize;
 
-    while let Some((dependency, required_by)) = pending.pop_front() {
-        depth += 1;
-        if depth > MAX_RESOLUTION_STEPS {
+    while let Some((dependency, required_by, depth)) = pending.pop_front() {
+        steps += 1;
+        if steps > MAX_RESOLUTION_STEPS {
             return Err(Error::Runtime(
                 format!(
                     "Resolving these dependencies did not finish in {MAX_RESOLUTION_STEPS} \
@@ -404,11 +546,26 @@ pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resoluti
                 Span::unknown(),
             ));
         }
+        if depth > MAX_RESOLUTION_DEPTH {
+            return Err(Error::Runtime(
+                format!(
+                    "Dependency '{}' is {depth} steps from this program (required by {required_by}), \
+                     and a resolution walks at most {MAX_RESOLUTION_DEPTH}: the chain of \
+                     dependencies under it is longer than one a program meant",
+                    dependency.name
+                ),
+                Span::unknown(),
+            ));
+        }
 
         let available = registry.versions(&dependency.name);
         let chosen = match &dependency.requirement {
             Requirement::Exact(version) => *version,
-            Requirement::Any => match available.last() {
+            // The maximum, not the last one offered. Both bundled registries
+            // happen to sort, so `available.last()` agreed with this everywhere
+            // it could be exercised — and would silently resolve `*` to the
+            // wrong file for any registry that does not.
+            Requirement::Any => match available.iter().max() {
                 Some(version) => *version,
                 None => {
                     return Err(Error::Runtime(
@@ -467,21 +624,8 @@ pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resoluti
         if let Some(text) = registry.module_manifest(&dependency.name, &chosen) {
             let label = format!("{} {}", dependency.name, chosen);
             let module_manifest = Manifest::parse(&text, &label)?;
-            // A single module manifest listing more pins than the deepest
-            // chain allowed would be walked before the loop's own step count
-            // ever saw it, so the depth it contributes is checked here.
-            if module_manifest.dependencies.len() > MAX_RESOLUTION_DEPTH {
-                return Err(Error::Runtime(
-                    format!(
-                        "Module '{}' {chosen} depends on more than {MAX_RESOLUTION_DEPTH} things, \
-                         which is deeper than a resolution walks",
-                        dependency.name
-                    ),
-                    Span::unknown(),
-                ));
-            }
             for dependency in module_manifest.dependencies {
-                pending.push_back((dependency, label.clone()));
+                pending.push_back((dependency, label.clone(), depth + 1));
             }
         }
     }
@@ -569,18 +713,16 @@ impl Registry for DirRegistry {
     }
 }
 
-/// Resolves what the program in `root` depends on, and writes its lockfile.
+/// The manifest the program in `root` publishes, or `None` when it publishes
+/// none.
 ///
-/// A `root` with no manifest resolves to nothing and writes nothing: that is
-/// what every program written before there was a manifest must keep doing, and
-/// a missing manifest is not an error because the pins are all optional.
-pub fn resolve_in(root: &Path) -> Result<Resolution> {
-    let registry = DirRegistry::new(root);
+/// A missing manifest is not an error: the pins are all optional, and every
+/// program written before there was a manifest has to keep working. A manifest
+/// that is there and cannot be read or parsed is an error, naming the file.
+fn manifest_in(root: &Path) -> Result<Option<Manifest>> {
     let text = match fs::read_to_string(root.join(MANIFEST_FILE)) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Resolution::default())
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(Error::Io(format!(
                 "Cannot read '{}': {}",
@@ -589,10 +731,99 @@ pub fn resolve_in(root: &Path) -> Result<Resolution> {
             )))
         }
     };
-    let manifest = parse_manifest(&text)?;
-    let resolution = resolve(&manifest, &registry)?;
+    parse_manifest(&text).map(Some)
+}
+
+/// Resolves what the program in `root` depends on, and writes its lockfile.
+///
+/// A `root` with no manifest resolves to nothing and writes nothing: that is
+/// what every program written before there was a manifest must keep doing, and
+/// a missing manifest is not an error because the pins are all optional.
+///
+/// This is the *resolving* path — it is what writes `redblue.lock`, and what a
+/// program that is about to be run wants. A pass that only answers questions
+/// about the program wants [`resolve_without_writing`] instead, which resolves
+/// the same pins and touches nothing on disk.
+pub fn resolve_in(root: &Path) -> Result<Resolution> {
+    let Some(manifest) = manifest_in(root)? else {
+        return Ok(Resolution::default());
+    };
+    let resolution = resolve(&manifest, &DirRegistry::new(root))?;
+    check_lockfile(root, &resolution)?;
     write_lockfile(root, &resolution)?;
     Ok(resolution)
+}
+
+/// Resolves what the program in `root` depends on, writing nothing.
+///
+/// The same answers as [`resolve_in`] — a pin nothing publishes is still an
+/// error, a module needed at two versions is still a conflict — from reads
+/// only. A static pass (the analyzer, a linter, a formatter) asks what a
+/// program's pins bind and has no reason to create a file to answer it:
+/// without this, `rb lint` in a directory holding a `redblue.manifest` left a
+/// `redblue.lock` beside it, which is what `cargo check` does with a
+/// `Cargo.lock` and is still a write a reader of `lint` did not ask for.
+pub fn resolve_without_writing(root: &Path) -> Result<Resolution> {
+    let Some(manifest) = manifest_in(root)? else {
+        return Ok(Resolution::default());
+    };
+    resolve(&manifest, &DirRegistry::new(root))
+}
+
+/// Refuses a lockfile that says something other than what this resolve found.
+///
+/// A lockfile nobody reads is a log. Reading it back is what makes it a lock: a
+/// program whose `redblue.lock` holds `MathUtils 2.0.0` was run against
+/// `2.0.0`, and a `MathUtils/3.0.0/` published since then — which is what a
+/// `dependency MathUtils *` resolves to — must not be handed to it in silence.
+/// The world moved under the lock, so the lock is refused rather than quietly
+/// rewritten by the same resolve that noticed.
+///
+/// The way out is named in the message: delete `redblue.lock`. That is a
+/// deliberate act, and it is the right one — a program that has not been run
+/// since a module was published should not change under the reader's feet
+/// because a directory was added somewhere else.
+///
+/// No lockfile, or one that cannot be read, is nothing to disagree with; only a
+/// lockfile that is there and says something different is refused. A malformed
+/// one *is* a disagreement with the grammar, and [`parse_lockfile`] says so.
+fn check_lockfile(root: &Path, resolution: &Resolution) -> Result<()> {
+    let path = root.join(LOCKFILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::Io(format!(
+                "Cannot read '{}': {}",
+                path.display(),
+                error
+            )))
+        }
+    };
+
+    for locked in parse_lockfile(&text)? {
+        let disagreement = match resolution.module(&locked.name) {
+            Some(module) if module.version == locked.version => continue,
+            Some(module) => format!(
+                "it is locked at {} and this manifest resolves it to {}",
+                locked.version, module.version
+            ),
+            None => format!(
+                "it is locked at {} and this manifest does not resolve it at all",
+                locked.version
+            ),
+        };
+        return Err(Error::Runtime(
+            format!(
+                "Cannot honour '{LOCKFILE}': module '{}' disagrees with the resolution — \
+                 {disagreement}. The world moved under the lock; delete '{LOCKFILE}' to resolve \
+                 again against what is published now",
+                locked.name
+            ),
+            Span::unknown(),
+        ));
+    }
+    Ok(())
 }
 
 /// Writes the lockfile for `resolution` under `root`, if it is not already
@@ -621,36 +852,147 @@ fn write_lockfile(root: &Path, resolution: &Resolution) -> Result<()> {
         .map_err(|error| Error::Io(format!("Cannot write '{}': {}", path.display(), error)))
 }
 
-// The resolution this process is running against, resolved once. `import` asks
-// for it on every import it resolves, and reading a directory per import would
-// make a program's start-up cost its module count.
-//
-// The message is kept rather than the `Error` because a failure has to be
-// reported again on the next import, and `Error` is not `Clone`.
-thread_local! {
-    static RESOLUTION: RefCell<Option<std::result::Result<Resolution, String>>> =
-        const { RefCell::new(None) };
+/// One program's pins, resolved once and answered to every import it has.
+///
+/// A resolve is a manifest read and a scan of `modules/<name>/` for each module
+/// it settles. A program imports what it imports — four `import Fixture` lines,
+/// one import at the top of every function of a file — so asked per import that
+/// is the same work done once per import to produce one answer. The cache that
+/// used to hold the first answer was keyed on nothing at all, so it answered a
+/// second program in the same process from the *first* program's manifest. This
+/// is neither: one resolution, held by the thing that is running the program,
+/// which is the only thing that knows which program it is.
+///
+/// Read on first question, not on construction: a VM built for a program with no
+/// `import` reads no manifest and writes no lockfile, which is what every
+/// program written before there was a manifest must keep doing.
+#[derive(Debug)]
+pub struct Pins {
+    root: PathBuf,
+    /// Whether resolving this one is what writes the lockfile. A program about to
+    /// be run is the resolution the lockfile records; a pass that is only looking
+    /// — the analyzer, a linter, a formatter — creates nothing.
+    writing: bool,
+    loaded: bool,
+    resolution: Resolution,
+    failure: Option<Error>,
+}
+
+impl Pins {
+    /// The pins of the manifest in `root`, for a program that is about to be run.
+    pub fn for_running(root: &Path) -> Pins {
+        Pins::in_dir(root, true)
+    }
+
+    /// The pins of the manifest in `root`, for a pass that is only looking.
+    ///
+    /// The same answers — a pin nothing publishes is still a failure, a module
+    /// needed at two versions is still a conflict — from reads only.
+    pub fn for_reading(root: &Path) -> Pins {
+        Pins::in_dir(root, false)
+    }
+
+    fn in_dir(root: &Path, writing: bool) -> Pins {
+        Pins {
+            root: root.to_path_buf(),
+            writing,
+            loaded: false,
+            resolution: Resolution::default(),
+            failure: None,
+        }
+    }
+
+    fn load(&mut self) {
+        if self.loaded {
+            return;
+        }
+        self.loaded = true;
+        let outcome = if self.writing {
+            resolve_in(&self.root)
+        } else {
+            resolve_without_writing(&self.root)
+        };
+        match outcome {
+            Ok(resolution) => self.resolution = resolution,
+            Err(error) => self.failure = Some(error),
+        }
+    }
+
+    /// The directory these pins are the manifest of.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Why the manifest cannot be resolved, or `None` when it can — and `None`
+    /// when there is no manifest at all, which is not a failure.
+    ///
+    /// A whole program is answerable from one manifest, so this asks about the
+    /// manifest rather than about one module: a conflict between two modules is
+    /// raised whichever module is asked about, which is what makes it usable by a
+    /// walk that only wants to know whether to carry on.
+    ///
+    /// The *message*, with no `RuntimeError:` label in front of it. The caller is
+    /// the analyzer, which reports this as an `Analyzer` error at the `import`
+    /// that found it — handing it `Error::to_string` produced `AnalyzerError:
+    /// RuntimeError: Cannot resolve …` for one failure, two labels and a name the
+    /// user never typed. The manifest's own location stays in the message, where
+    /// it belongs: the caret an `Error`'s span draws is drawn against the
+    /// *program*, so a manifest line carried as a span would put `report.rb:3:1`
+    /// under a line of the program that is not line 3 of the manifest. See
+    /// [`Manifest::parse`].
+    pub fn failure(&mut self) -> Option<String> {
+        self.load();
+        self.failure
+            .as_ref()
+            .map(|error| error.message().to_string())
+    }
+
+    /// Everything this program resolved to, or nothing when it could not be
+    /// resolved — ask [`Pins::failure`] for why.
+    pub fn resolution(&mut self) -> &Resolution {
+        self.load();
+        &self.resolution
+    }
+
+    /// The file the module `name` is pinned to, or `None` when nothing depends
+    /// on it.
+    ///
+    /// `Err` is a manifest this program cannot be resolved from, and is passed
+    /// on rather than swallowed: a pin nothing publishes must not turn into an
+    /// import of whichever file happens to be at `modules/<name>.rb`.
+    pub fn module(&mut self, name: &str) -> Result<Option<String>> {
+        self.load();
+        match &self.failure {
+            Some(error) => Err(error.clone()),
+            None => Ok(self.resolution.module(name).map(|m| m.path.clone())),
+        }
+    }
 }
 
 /// The path the module `name` is pinned to by the manifest in the working
 /// directory, or `None` when nothing depends on it.
 ///
-/// `Err` is a manifest or lockfile this program cannot be resolved from, and
-/// is passed on rather than swallowed: a pin nothing publishes must not turn
-/// into an import of whatever file happens to be at `modules/<name>.rb`.
+/// One [`Pins`] against the working directory, asked once. A caller running a
+/// whole program holds one [`Pins`] for it instead; this is for a caller with a
+/// single question and no run of its own to hang them on.
+///
+/// This is the *resolving* path and it writes the lockfile, because it is called
+/// by a loader — a program is about to be run, and running it is the resolution
+/// that the lockfile records. A pass that only asks what the pins bind uses
+/// [`resolve_without_writing`] instead and creates nothing; see
+/// [`crate::analyzer::analyze_in`], which reads once per program and hands its
+/// pins to every import rather than resolving per import.
 pub fn pinned_module_path(name: &str) -> Result<Option<String>> {
-    RESOLUTION.with(|slot| {
-        if slot.borrow().is_none() {
-            let resolved = resolve_in(Path::new(".")).map_err(|error| error.to_string());
-            *slot.borrow_mut() = Some(resolved);
-        }
-        // Cloned rather than borrowed through the `match`: the borrow is held
-        // for the whole arm, and a resolution is small enough that copying one
-        // costs less than proving nothing under it can re-enter this.
-        match slot.borrow().clone() {
-            Some(Ok(resolution)) => Ok(resolution.module(name).map(|m| m.path.clone())),
-            Some(Err(message)) => Err(Error::Runtime(message, Span::unknown())),
-            None => Ok(None),
-        }
-    })
+    pinned_module_path_in(Path::new("."), name)
+}
+
+/// The path the module `name` under `root` is pinned to, or `None` when nothing
+/// depends on it.
+///
+/// `root` is its own parameter so that a caller holding a program from somewhere
+/// other than the working directory resolves against the manifest that program
+/// was found beside rather than against whichever directory the host happens to
+/// be in.
+pub fn pinned_module_path_in(root: &Path, name: &str) -> Result<Option<String>> {
+    Pins::for_running(root).module(name)
 }
