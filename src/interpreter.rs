@@ -397,10 +397,9 @@ struct ObjectType {
     methods: Fields,
 }
 
-/// The paths `import <name>` looks for, in order: the version the manifest in
-/// the working directory pins the module to, then the `modules/` directory,
-/// the same directory written with a leading `./`, and the name as a path of
-/// its own.
+/// The paths `import <name>` looks for under `root`, in order: the version the
+/// manifest there pins the module to, then the `modules/` directory, the same
+/// directory written with a leading `./`, and the name as a path of its own.
 ///
 /// The pin comes first because it is the only one of the four that says which
 /// version the program asked for; the rest are what an import did before there
@@ -410,9 +409,14 @@ struct ObjectType {
 /// publishes, or a module needed at two versions. It is passed on rather than
 /// ignored, because the answer to "that module cannot be resolved" must not be
 /// an import of whichever file happens to be at `modules/<name>.rb`.
-fn module_search_paths(name: &str) -> Result<Vec<String>> {
+///
+/// `root` is a parameter rather than the working directory so that the analyzer,
+/// which is asked about a program before anything is run, reads the pins of the
+/// directory the program was found beside. Every caller that *is* running the
+/// program from where it sits passes [`Path::new(".")`].
+fn module_search_paths(root: &Path, name: &str) -> Result<Vec<String>> {
     let mut paths = Vec::new();
-    if let Some(pinned) = crate::manifest::pinned_module_path(name)? {
+    if let Some(pinned) = crate::manifest::pinned_module_path_in(root, name)? {
         paths.push(pinned);
     }
     paths.extend([
@@ -432,32 +436,38 @@ fn module_search_paths(name: &str) -> Result<Vec<String>> {
 /// version, `import Fixture` has no module to import, and saying so beats
 /// `Is a directory` on a directory that was never meant to be opened.
 pub fn module_path(name: &str) -> Result<Option<String>> {
-    Ok(module_search_paths(name)?
+    Ok(module_search_paths(Path::new("."), name)?
         .into_iter()
         .find(|path| Path::new(path).is_file()))
 }
 
-/// The source of the module `name` resolves to, or `None` when no path is
-/// there. A path that is there but cannot be read is an error, not a miss: the
-/// two say different things about the import.
-pub fn module_source(name: &str) -> Result<Option<String>> {
-    let Some(path) = module_path(name)? else {
+/// The source of the module `name` resolves to under `root`, or `None` when no
+/// path is there. A path that is there but cannot be read is an error, not a
+/// miss: the two say different things about the import.
+fn module_source_in(root: &Path, name: &str) -> Result<Option<String>> {
+    let Some(path) = module_search_paths(root, name)?
+        .into_iter()
+        .find(|path| root.join(path).is_file())
+    else {
         return Ok(None);
     };
-    let source = std::fs::read_to_string(&path)
+    let source = std::fs::read_to_string(root.join(&path))
         .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
     Ok(Some(source))
 }
 
-/// The names `import <name>` binds into the importing program: the module's own
-/// `set` and `constant` declarations, which is everything the loader runs.
+/// The names an `import` of `name` under `root` binds into the importing
+/// program: the module's own `set` and `constant` declarations, which is
+/// everything the loader runs.
 ///
-/// Read by the analyzer, which cannot see into a separate file, so that a read
-/// of one of these names is a read of a name the program binds. A module that
-/// cannot be found, read or parsed binds nothing here — the loader still
-/// reports that at runtime, and the analyzer must not report it first.
-pub fn module_bound_names(name: &str) -> Vec<String> {
-    let Some(source) = module_source(name).unwrap_or(None) else {
+/// Read by the analyzer, which cannot see into a separate file, so that a read of
+/// one of these names is a read of a name the program binds. A module that cannot
+/// be found, read or parsed binds nothing here — the loader still reports that at
+/// runtime, and the analyzer must not report it first. Which version of the module
+/// those names come from is the manifest's answer, so a program importing the same
+/// module at two versions is told which of the two it is reading.
+pub(crate) fn module_bound_names_in(root: &Path, name: &str) -> Vec<String> {
+    let Ok(Some(source)) = module_source_in(root, name) else {
         return Vec::new();
     };
     let Ok(tokens) = Lexer::tokenize(&source) else {

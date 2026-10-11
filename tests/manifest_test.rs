@@ -109,6 +109,16 @@ fn parse_err(text: &str) -> String {
         .to_string()
 }
 
+/// The program `source` is, lexed and parsed.
+#[track_caller]
+fn program(source: &str) -> redblue::parser::Program {
+    redblue::parser::parse(
+        redblue::lexer::Lexer::tokenize(source)
+            .unwrap_or_else(|error| panic!("the source should lex, failed with {error}")),
+    )
+    .unwrap_or_else(|error| panic!("the source should parse, failed with {error}"))
+}
+
 /// The version `name` resolved to, as text.
 #[track_caller]
 fn version_of(resolved: &manifest::Resolution, name: &str) -> String {
@@ -522,4 +532,123 @@ fn two_programs_load_two_versions_of_one_fixture_module() {
     );
     assert_eq!(values[0], "set VALUE to 1\n");
     assert_eq!(values[1], "set VALUE to 2\n");
+}
+
+/// A pin nothing publishes has to reach the user as the conflict the manifest
+/// names. Without this, `import Fixture` binds no names, the next line reads one
+/// of them, and the analyzer answers "Unknown variable 'VALUE'" — a message
+/// about a variable, pointing at a variable, for a program whose real problem is
+/// that its `redblue.manifest` cannot be resolved at all.
+#[test]
+fn edge_an_unresolvable_pin_is_an_analyzer_error_naming_the_conflict() {
+    let root = scratch("manifest_analyzer_unresolvable");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Ghost =1.0.0\n",
+    );
+
+    let error = redblue::analyzer::analyze_in(&program("import Fixture\nsay VALUE\n"), &root)
+        .expect_err("a pin nothing publishes is not a program that analyzes");
+
+    assert!(
+        error.message().contains("Ghost") && error.message().contains("1.0.0"),
+        "the analyzer has to name the module and the version that could not be resolved, got: {}",
+        error.message()
+    );
+    assert!(
+        !error.message().contains("Unknown variable"),
+        "the failure the manifest names is the failure the user has to be shown, not a \
+         variable that went missing because of it: {}",
+        error.message()
+    );
+}
+
+/// The same masking, for the conflict this phase exists over: one module pinned
+/// at two versions is a conflict whether the loader or the analyzer is looking.
+#[test]
+fn edge_two_versions_in_one_manifest_is_an_analyzer_error() {
+    let root = scratch("manifest_analyzer_conflict");
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    publish(&root, "Fixture", "2.0.0", "set VALUE to 2\n");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Fixture =1.0.0\ndependency Fixture =2.0.0\n",
+    );
+
+    let error = redblue::analyzer::analyze_in(&program("import Fixture\nsay VALUE\n"), &root)
+        .expect_err("two versions of one module is not a program that analyzes");
+
+    assert!(
+        error.message().contains("two versions"),
+        "the analyzer has to say what the conflict is, got: {}",
+        error.message()
+    );
+    assert!(
+        !error.message().contains("Unknown variable"),
+        "the conflict is the failure the user has to be shown, got: {}",
+        error.message()
+    );
+}
+
+/// The pin decides which file an `import` binds names from: the two published
+/// versions of one fixture declare different names, and each program analyzes
+/// against the version it pinned rather than against whichever file was newest.
+#[test]
+fn edge_an_import_binds_the_names_of_the_pinned_version() {
+    let one = scratch("manifest_pinned_names_v1");
+    let two = scratch("manifest_pinned_names_v2");
+    manifest_file(&one, "name old\nversion 0.1.0\ndependency Fixture =1.0.0\n");
+    manifest_file(&two, "name new\nversion 0.1.0\ndependency Fixture =2.0.0\n");
+    for root in [&one, &two] {
+        publish(root, "Fixture", "1.0.0", "set VALUE to 1\n");
+        publish(root, "Fixture", "2.0.0", "set AMOUNT to 2\n");
+    }
+
+    redblue::analyzer::analyze_in(&program("import Fixture\nsay VALUE\n"), &one)
+        .expect("the pinned version declares VALUE, so the read is of a bound name");
+    redblue::analyzer::analyze_in(&program("import Fixture\nsay AMOUNT\n"), &two)
+        .expect("the other pinned version declares AMOUNT");
+    assert!(
+        redblue::analyzer::analyze_in(&program("import Fixture\nsay AMOUNT\n"), &one).is_err(),
+        "1.0.0 declares VALUE and not AMOUNT, so this read is of a name nothing bound"
+    );
+    assert!(
+        redblue::analyzer::analyze_in(&program("import Fixture\nsay VALUE\n"), &two).is_err(),
+        "2.0.0 declares AMOUNT and not VALUE, so this read is of a name nothing bound"
+    );
+}
+
+/// A root with no manifest is every program written before there was one: the
+/// analyzer has nothing to complain about, and adding a root to `analyze` must
+/// not have made it complain about something else.
+#[test]
+fn edge_a_root_with_no_manifest_analyses_as_it_always_did() {
+    let root = scratch("manifest_analyzer_absent");
+    std::fs::create_dir_all(root.join("modules")).expect("the modules directory is creatable");
+    std::fs::write(root.join("modules").join("Fixture.rb"), "set VALUE to 1\n")
+        .expect("the module file is writable");
+
+    redblue::analyzer::analyze_in(&program("import Fixture\nsay VALUE\n"), &root)
+        .expect("a manifest-less program binds what it always bound");
+    assert!(
+        !root.join(manifest::LOCKFILE).exists(),
+        "analyzing is not resolving: no manifest, no lockfile"
+    );
+}
+
+/// A program that only imports, and reads nothing from the module, is the one
+/// shape where a broken manifest used to surface. It still does, and through the
+/// same message.
+#[test]
+fn edge_an_unresolvable_pin_is_reported_even_with_nothing_read() {
+    let root = scratch("manifest_analyzer_bare_import");
+    manifest_file(&root, "dependency Ghost =1.0.0\n");
+
+    let error = redblue::analyzer::analyze_in(&program("import Fixture\n"), &root)
+        .expect_err("a pin nothing publishes is not a program that analyzes");
+    assert!(
+        error.message().contains("Ghost"),
+        "an import that binds nothing is still an import that failed, got: {}",
+        error.message()
+    );
 }

@@ -10,6 +10,23 @@ pub struct Analyzer {
     /// The names the program binds somewhere the walk may reach before the
     /// declaration that binds them. Collected before the statements are walked.
     later: LaterNames,
+    /// The directory the program resolves its dependencies from: the one holding
+    /// the `redblue.manifest` an `import` is answered by.
+    ///
+    /// The working directory for a program run as itself — [`analyze`] — and its
+    /// own parameter for a program asked about from somewhere else, so that the
+    /// manifest consulted is the one the program was found beside rather than
+    /// whichever directory the host happens to be in.
+    root: std::path::PathBuf,
+    /// Whether the manifest in `root` could not be resolved, and so the walk
+    /// stops where it found the import that found it.
+    ///
+    /// A program whose pins conflict has an unanswerable question at its every
+    /// name: the import binds nothing, so every read of a name it would have
+    /// bound says "unknown variable" and says nothing about why. Walking on turns
+    /// one conflict into a page of consequences, and the reader goes to the page
+    /// instead of the cause. The conflict is what the walk stops for.
+    manifest_failed: bool,
     /// How many function, method and object bodies the walk is inside.
     ///
     /// A body runs when it is called, not where it is written, so a read inside
@@ -23,11 +40,18 @@ pub struct Analyzer {
 
 impl Analyzer {
     pub fn new() -> Self {
+        Self::in_dir(std::path::Path::new("."))
+    }
+
+    /// An analyzer that resolves the program's imports against `root`.
+    fn in_dir(root: &std::path::Path) -> Self {
         Self {
             scopes: vec![HashSet::new()],
             functions: HashMap::new(),
             errors: Vec::new(),
             later: LaterNames::default(),
+            root: root.to_path_buf(),
+            manifest_failed: false,
             deferred_depth: 0,
         }
     }
@@ -54,10 +78,13 @@ impl Analyzer {
     }
 
     pub fn analyze(&mut self, program: &Program) -> Result<()> {
-        collect_later_names(&program.statements, &mut self.later);
+        collect_later_names(&program.statements, &self.root, &mut self.later);
 
         for statement in &program.statements {
             self.analyze_statement(statement);
+            if self.manifest_failed {
+                break;
+            }
         }
 
         if self.errors.is_empty() {
@@ -390,8 +417,21 @@ impl Analyzer {
                 // known by reading its file, so they are parsed here — a module
                 // that cannot be found or parsed binds nothing and is still
                 // reported by the loader, at runtime, where it belongs.
+                //
+                // A manifest that cannot be resolved is the exception. It is
+                // about the program rather than about one module, so every name
+                // the import would have bound is missing and every read of one of
+                // them answers "unknown variable" — a message about a variable,
+                // for a program whose real problem is that its pins conflict.
+                // The conflict is what the user has to be shown, and it is named
+                // here rather than left to a read that may never happen.
+                if let Some(failure) = crate::manifest::failure_in(&self.root) {
+                    self.add_error(&failure, span);
+                    self.manifest_failed = true;
+                    return;
+                }
                 for item in items {
-                    for name in crate::interpreter::module_bound_names(&item.name) {
+                    for name in crate::interpreter::module_bound_names_in(&self.root, &item.name) {
                         self.declare(&name);
                     }
                     // Both the name the import gives the module and the alias
@@ -563,7 +603,7 @@ impl LaterNames {
     }
 }
 
-fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
+fn collect_later_names(statements: &[Stmt], root: &std::path::Path, out: &mut LaterNames) {
     for stmt in statements {
         match &stmt.statement {
             Statement::Constant { name, .. } => {
@@ -572,7 +612,7 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
             Statement::Import(items) => {
                 for item in items {
                     out.imported
-                        .extend(crate::interpreter::module_bound_names(&item.name));
+                        .extend(crate::interpreter::module_bound_names_in(root, &item.name));
                 }
             }
             Statement::If {
@@ -580,31 +620,31 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
                 else_branch,
                 ..
             } => {
-                collect_later_names(then_branch, out);
-                collect_later_names(else_branch, out);
+                collect_later_names(then_branch, root, out);
+                collect_later_names(else_branch, root, out);
             }
             Statement::Unless { body, .. } => {
-                collect_later_names(body, out);
+                collect_later_names(body, root, out);
             }
             Statement::ForEach { body, .. }
             | Statement::ForRange { body, .. }
             | Statement::Repeat { body, .. }
             | Statement::RepeatUntil { body, .. }
-            | Statement::While { body, .. } => collect_later_names(body, out),
+            | Statement::While { body, .. } => collect_later_names(body, root, out),
             Statement::Function { body, .. }
             | Statement::Method { body, .. }
             | Statement::Object { body, .. }
             | Statement::Module { body, .. }
-            | Statement::Test { body, .. } => collect_later_names(body, out),
+            | Statement::Test { body, .. } => collect_later_names(body, root, out),
             Statement::Try {
                 body,
                 catch_body,
                 finally_body,
                 ..
             } => {
-                collect_later_names(body, out);
-                collect_later_names(catch_body, out);
-                collect_later_names(finally_body, out);
+                collect_later_names(body, root, out);
+                collect_later_names(catch_body, root, out);
+                collect_later_names(finally_body, root, out);
             }
             Statement::Say(_)
             | Statement::Print(_)
@@ -622,7 +662,18 @@ fn collect_later_names(statements: &[Stmt], out: &mut LaterNames) {
 }
 
 pub fn analyze(program: &Program) -> Result<()> {
-    let mut analyzer = Analyzer::new();
+    analyze_in(program, std::path::Path::new("."))
+}
+
+/// Analyzes `program` as the program in `root` resolves its dependencies from.
+///
+/// `analyze` is this against the working directory. A `root` of its own is what
+/// lets the pins that decide what an `import` binds be the pins of the directory
+/// the program was found beside — and, when those pins cannot be resolved, what
+/// lets the conflict be reported here rather than surfacing later as an unknown
+/// variable with nothing in it saying why.
+pub fn analyze_in(program: &Program, root: &std::path::Path) -> Result<()> {
+    let mut analyzer = Analyzer::in_dir(root);
     analyzer.analyze(program)
 }
 

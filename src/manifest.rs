@@ -654,3 +654,29 @@ pub fn pinned_module_path(name: &str) -> Result<Option<String>> {
         }
     })
 }
+
+/// The path the module `name` under `root` is pinned to, or `None` when nothing
+/// depends on it.
+///
+/// [`pinned_module_path`] is this against the working directory, with the
+/// resolution cached. `root` is its own parameter so that a caller holding a
+/// program from somewhere other than the working directory — the analyzer, which
+/// is asked about a program before anything is run — resolves against the
+/// manifest that program was found beside.
+pub fn pinned_module_path_in(root: &Path, name: &str) -> Result<Option<String>> {
+    match resolve_in(root) {
+        Ok(resolution) => Ok(resolution.module(name).map(|module| module.path.clone())),
+        Err(error) => Err(error),
+    }
+}
+
+/// Why the manifest in `root` cannot be resolved, or `None` when it can — and
+/// `None` when there is no manifest at all, which is not a failure.
+///
+/// A whole program is answerable from one manifest, so this asks about the
+/// manifest rather than about one module: a conflict between two modules is
+/// raised whichever module is asked about, which is what makes it usable by a
+/// walk that only wants to know whether to carry on.
+pub fn failure_in(root: &Path) -> Option<String> {
+    resolve_in(root).err().map(|error| error.to_string())
+}
