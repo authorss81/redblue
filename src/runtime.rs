@@ -30,8 +30,13 @@ use crate::value::Value;
 /// binding of the same names. [`module_bindings`] reads the declarations out of
 /// the same `Program`, so a module is read and parsed once however many names it
 /// contributes.
+///
+/// Through [`crate::vfs`], not `std::fs`: on `wasm32-unknown-unknown` a module
+/// is a file in the same in-memory filesystem `files.write` writes to, so a
+/// program that writes a module and then imports it works. A `std::fs` read
+/// would compile, pass every native test, and fail there.
 pub fn module_program(path: &str) -> Result<Program> {
-    let source = std::fs::read_to_string(path)
+    let source = crate::vfs::read_to_string(path)
         .map_err(|e| Error::Io(format!("Cannot load module '{}': {}", path, e)))?;
 
     let tokens = Lexer::tokenize(&source)?;
@@ -328,6 +333,69 @@ fn since_epoch(instant: SystemTime, span: Span) -> Result<Duration> {
     })
 }
 
+/// The current instant, as the `time` module reads it.
+///
+/// `SystemTime::now()` panics on `wasm32-unknown-unknown` — that platform has
+/// no clock for a program to read — and a panic there aborts the whole module
+/// instance rather than failing one run, so a playground whose `time.now()`
+/// took the page down with it would be worse than one that says no.
+///
+/// The playground asks the host for the time instead: `redblue.js` passes the
+/// browser's `Date.now()` through `rb_set_clock` before each run, and a host
+/// that does not is told so. This is a source of a value, like the filesystem
+/// and the network: nothing about how `time` is *used* differs, and
+/// `time.format`, `time.unix` and the arithmetic over a timestamp are the same
+/// code in both builds.
+#[cfg(not(target_arch = "wasm32"))]
+fn now() -> Result<SystemTime> {
+    Ok(SystemTime::now())
+}
+
+/// The playground's clock, as a [`Duration`] from the Unix epoch. `None` until
+/// the host has supplied one.
+#[cfg(target_arch = "wasm32")]
+static HOST_CLOCK: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(None);
+
+/// Records the host's clock. Exported as `rb_set_clock`; see [`now`].
+#[cfg(target_arch = "wasm32")]
+pub fn set_host_clock(seconds: f64) {
+    if let Ok(mut slot) = HOST_CLOCK.lock() {
+        *slot = if seconds.is_finite() && seconds >= 0.0 {
+            Some(Duration::from_secs_f64(seconds))
+        } else {
+            None
+        };
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now() -> Result<SystemTime> {
+    let slot = HOST_CLOCK
+        .lock()
+        .map_err(|_| Error::Io("The playground clock could not be read".to_string()))?;
+    let since_epoch = slot.ok_or_else(|| {
+        Error::Runtime(
+            "time.now() has no clock in the WebAssembly playground: the platform has none for \
+             a program to read. The host supplies one — see rb_set_clock in src/wasm.rs."
+                .to_string(),
+            Span::unknown(),
+        )
+    })?;
+
+    // `UNIX_EPOCH + d` panics on overflow, and the host's clock is an input a
+    // page can set to anything, so the round trip is checked rather than
+    // trusted: a host that sends 1e300 gets a clean error, not an abort.
+    UNIX_EPOCH.checked_add(since_epoch).ok_or_else(|| {
+        Error::Runtime(
+            format!(
+                "The playground's clock is at {since_epoch:?}, which is not an instant \
+                     this platform can represent"
+            ),
+            Span::unknown(),
+        )
+    })
+}
+
 /// The whole seconds `timestamp` names, counted from the Unix epoch, for
 /// `chrono` to format.
 ///
@@ -412,6 +480,35 @@ fn seconds_for_unix(text: &str, span: Span) -> Result<i64> {
 /// A fractional sleep keeps the behaviour it always had — `time.sleep(0.25)`
 /// waits 250ms — so this refuses only what would panic, and says which of the
 /// three reasons it is refusing.
+/// Carries out a sleep [`sleep_duration`] already agreed to.
+///
+/// `std::thread::sleep` panics on `wasm32-unknown-unknown` — there is no thread
+/// to put it on — and a panic there aborts the whole module instance instead of
+/// failing one run, so a playground whose `time.sleep` took the page down with
+/// it would be worse than one that says it cannot. Blocking the module's only
+/// thread would freeze the page besides. So the playground refuses, and says so:
+/// the *request* was valid, and `sleep_duration` has already refused the
+/// arguments no sleep could honour. The wait is the whole of what this cannot
+/// do; nothing about how a program uses the time it waited is affected, because
+/// no program gets past this line.
+#[cfg(not(target_arch = "wasm32"))]
+fn sleep_for(duration: Duration, _span: Span) -> Result<()> {
+    std::thread::sleep(duration);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sleep_for(duration: Duration, span: Span) -> Result<()> {
+    Err(Error::Runtime(
+        format!(
+            "time.sleep cannot wait in the WebAssembly playground: the module has one thread \
+             and blocking it would freeze the page. The request for {duration:?} was valid; \
+             the playground cannot carry it out."
+        ),
+        span,
+    ))
+}
+
 fn sleep_duration(seconds: f64, span: Span) -> Result<Duration> {
     if !seconds.is_finite() {
         return Err(Error::Runtime(
@@ -617,6 +714,42 @@ fn random_range(span: Span, name: &str, args: &[Value], default_max: f64) -> Res
     }
 }
 
+/// `input`/`ask`: the prompt goes out, one line comes back.
+///
+/// The prompt goes through [`crate::wasm::emit`] for the same reason `say` does
+/// — a page that can collect the answer's program but not its prompt would show
+/// a program reading input with nothing to show for it.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_line(args: &[Value], span: Span) -> Result<String> {
+    if let Some(Value::Text(prompt)) = args.first() {
+        crate::wasm::emit(prompt);
+    }
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| Error::Runtime(e.to_string(), span))?;
+    input.pop(); // Remove newline
+    Ok(input)
+}
+
+/// The playground refuses, the way `network` and `time.sleep` do.
+///
+/// `wasm32-unknown-unknown` has no stdin, so `std::io::stdin` there cannot
+/// return: the read blocks forever, which on the module's only thread is a frozen
+/// page rather than a failure a page can display. There is nothing to prompt
+/// with either — the program has no user to ask — so the honest answer is the
+/// refusal below rather than an empty string that would read as "the user pressed
+/// enter".
+#[cfg(target_arch = "wasm32")]
+fn read_line(_args: &[Value], span: Span) -> Result<String> {
+    Err(Error::Runtime(
+        "input is not available in the WebAssembly playground: a program there has no terminal \
+         to read from. Run it with the native rb binary to read a line of input."
+            .to_string(),
+        span,
+    ))
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -628,7 +761,12 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
     match name {
         "say" => {
             if let Some(arg) = args.first() {
-                println!("{}", arg);
+                // Through the one boundary every program's bytes leave by, as
+                // `say` the statement does. A `println!` here would put
+                // `say("hi")` on stdout while `say "hi"` went to the playground's
+                // capture, and the byte-identical promise is exactly that the two
+                // spellings of the same thing print the same thing.
+                crate::wasm::emit(&format!("{}\n", arg));
                 Ok(Some(Value::Nothing))
             } else {
                 Err(Error::Runtime("say requires an argument".to_string(), span))
@@ -646,17 +784,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ))
             }
         }
-        "input" | "ask" => {
-            let mut input = String::new();
-            if let Some(prompt) = args.first() {
-                print!("{}", prompt);
-            }
-            std::io::stdin()
-                .read_line(&mut input)
-                .map_err(|e| Error::Runtime(e.to_string(), span))?;
-            input.pop(); // Remove newline
-            Ok(Some(Value::Text(input)))
-        }
+        "input" | "ask" => read_line(args, span).map(|line| Some(Value::Text(line))),
         "random" => {
             let (min, max) = random_range(span, "random", args, 100.0)?;
             random_int(span, min, max).map(Some)
@@ -701,7 +829,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::fs::read_to_string(path)
+            crate::vfs::read_to_string(path)
                 .map(Value::Text)
                 .map(Some)
                 .map_err(|e| Error::Io(format!("Failed to read '{}': {}", path, e)))
@@ -716,7 +844,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::fs::write(path, content)
+            crate::vfs::write(path, content)
                 .map_err(|e| Error::Io(format!("Failed to write '{}': {}", path, e)))?;
             Ok(Some(Value::Nothing))
         }
@@ -730,11 +858,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
+            crate::vfs::append(path, content)
                 .map_err(|e| Error::Io(format!("Failed to append to '{}': {}", path, e)))?;
             Ok(Some(Value::Nothing))
         }
@@ -748,7 +872,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            Ok(Some(Value::YesNo(std::path::Path::new(path).exists())))
+            Ok(Some(Value::YesNo(crate::vfs::exists(path))))
         }
         "files_lines" => {
             let path = match args.first() {
@@ -760,7 +884,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            let content = std::fs::read_to_string(path)
+            let content = crate::vfs::read_to_string(path)
                 .map_err(|e| Error::Io(format!("Failed to read '{}': {}", path, e)))?;
             let lines: Vec<Value> = content
                 .lines()
@@ -778,7 +902,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::fs::remove_file(path)
+            crate::vfs::remove_file(path)
                 .map_err(|e| Error::Io(format!("Failed to delete '{}': {}", path, e)))?;
             Ok(Some(Value::Nothing))
         }
@@ -792,7 +916,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::fs::copy(from, to)
+            crate::vfs::copy(from, to)
                 .map(|_| Some(Value::Nothing))
                 .map_err(|e| Error::Io(format!("Failed to copy '{}' to '{}': {}", from, to, e)))
         }
@@ -806,13 +930,13 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::fs::rename(from, to)
+            crate::vfs::rename(from, to)
                 .map(|_| Some(Value::Nothing))
                 .map_err(|e| Error::Io(format!("Failed to rename '{}' to '{}': {}", from, to, e)))
         }
         // Time module
         "time_now" => {
-            let now = since_epoch(SystemTime::now(), span)?;
+            let now = since_epoch(now()?, span)?;
             let secs = now.as_secs();
             let nanos = now.subsec_nanos();
             let record = crate::value::Fields::from([
@@ -831,7 +955,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            std::thread::sleep(sleep_duration(seconds, span)?);
+            sleep_for(sleep_duration(seconds, span)?, span)?;
             Ok(Some(Value::Nothing))
         }
         "time_format" => {
@@ -907,15 +1031,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            let client = network_client(span)?;
-            let response = client
-                .get(url)
-                .send()
-                .map_err(|e| Error::Runtime(format!("HTTP request failed: {}", e), span))?;
-            let body = response
-                .text()
-                .map_err(|e| Error::Runtime(format!("Failed to read response: {}", e), span))?;
-            Ok(Some(Value::Text(body)))
+            network_get(url, span).map(Some)
         }
         "network_post" => {
             let (url, data) = match (args.first(), args.get(1)) {
@@ -927,16 +1043,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            let client = network_client(span)?;
-            let response = client
-                .post(url)
-                .body(data.clone())
-                .send()
-                .map_err(|e| Error::Runtime(format!("HTTP request failed: {}", e), span))?;
-            let body = response
-                .text()
-                .map_err(|e| Error::Runtime(format!("Failed to read response: {}", e), span))?;
-            Ok(Some(Value::Text(body)))
+            network_post(url, data, span).map(Some)
         }
         // Testing module
         "expect" | "assert" => {
@@ -959,18 +1066,26 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         // Console module
         "console_log" => {
             if let Some(arg) = args.first() {
-                println!("{}", arg);
+                // The same boundary `say` uses, for the same reason: a page that
+                // can collect `say` but not `console.log` collected half a
+                // program's output.
+                crate::wasm::emit(&format!("{}\n", arg));
             }
             Ok(Some(Value::Nothing))
         }
         "console_error" => {
             if let Some(arg) = args.first() {
+                // Deliberately *not* the capture. stderr is where a program's
+                // diagnostics go and stdout is where its output goes; folding
+                // the two together would change what the native binary writes on
+                // each stream, which is the thing the playground promises not to
+                // do. The page has its own surface for it.
                 eprintln!("{}", arg);
             }
             Ok(Some(Value::Nothing))
         }
         "console_clear" => {
-            print!("\x1B[2J\x1B[1H");
+            crate::wasm::emit("\x1B[2J\x1B[1H");
             Ok(Some(Value::Nothing))
         }
         // Random module
@@ -1129,7 +1244,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 }
                 out.push(*value as u8);
             }
-            std::fs::write(path, out)
+            // Through the filesystem shim, like `files.write`: `std::fs` here
+            // would compile for `wasm32-unknown-unknown`, pass every native test
+            // and fail at runtime there, leaving the two write paths pointing at
+            // two different filesystems in the one build that has both.
+            crate::vfs::write_bytes(path, &out)
                 .map_err(|e| Error::Io(format!("Failed to write '{}': {}", path, e)))?;
             Ok(Some(Value::Nothing))
         }
@@ -1243,12 +1362,69 @@ pub const NETWORK_CONNECT_TIMEOUT_SECS: u64 = 5;
 /// Builds the client every `network` call uses. A client that cannot be built
 /// is a `Runtime` error rather than a panic: a Redblue program must not be able
 /// to abort the process.
+#[cfg(not(target_arch = "wasm32"))]
 fn network_client(span: Span) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(NETWORK_TIMEOUT_SECS))
         .connect_timeout(std::time::Duration::from_secs(NETWORK_CONNECT_TIMEOUT_SECS))
         .build()
         .map_err(|e| Error::Runtime(format!("Cannot create the HTTP client: {}", e), span))
+}
+
+/// The WebAssembly playground has no threads, so `reqwest`'s blocking client —
+/// which is compiled out of that target entirely — cannot be built there. The
+/// two `network` builtins answer with a clean `Runtime` error instead, naming
+/// what is missing and what to use instead. Nothing else about them changes:
+/// same names, same arity, same argument-type refusals, same `Error::Runtime`
+/// shape. Only the transport differs, and the transport is the whole of what a
+/// playground cannot have.
+#[cfg(target_arch = "wasm32")]
+fn network_refused(call: &str, span: Span) -> Error {
+    Error::Runtime(
+        format!(
+            "network.{call} is not available in the WebAssembly playground: it has no \
+             threads to block on. Use the native rb binary, or run the program on a host \
+             that can reach the network."
+        ),
+        span,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn network_get(url: &str, span: Span) -> Result<Value> {
+    let client = network_client(span)?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| Error::Runtime(format!("HTTP request failed: {}", e), span))?;
+    let body = response
+        .text()
+        .map_err(|e| Error::Runtime(format!("Failed to read response: {}", e), span))?;
+    Ok(Value::Text(body))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn network_get(_url: &str, span: Span) -> Result<Value> {
+    Err(network_refused("get", span))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn network_post(url: &str, data: &str, span: Span) -> Result<Value> {
+    let client = network_client(span)?;
+    let response = client
+        .post(url)
+        .body(data.to_string())
+        .send()
+        .map_err(|e| Error::Runtime(format!("HTTP request failed: {}", e), span))?;
+    let body = response
+        .text()
+        .map_err(|e| Error::Runtime(format!("Failed to read response: {}", e), span))?;
+    Ok(Value::Text(body))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn network_post(_url: &str, _data: &str, span: Span) -> Result<Value> {
+    Err(network_refused("post", span))
 }
 
 fn parse_json(json: &str, span: Span) -> Result<Value> {

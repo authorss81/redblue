@@ -13,6 +13,8 @@ mod runtime;
 pub mod stdlib;
 pub mod testing;
 mod value;
+pub mod vfs;
+pub mod wasm;
 
 use std::env;
 use std::fs;
@@ -33,8 +35,9 @@ pub use lsp::{
 pub use bytecode::{compile_source, Chunk, Opcode};
 pub use interpreter::{
     resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps, resolve_max_steps_from,
-    run_isolated, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS, MAX_ITERATIONS_ENV,
-    MAX_STEPS, MAX_STEPS_ENV, NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
+    run_isolated, run_isolated_with_depth, Vm, MAX_CALL_DEPTH, MAX_CALL_DEPTH_ENV, MAX_ITERATIONS,
+    MAX_ITERATIONS_ENV, MAX_STEPS, MAX_STEPS_ENV, NETWORK_CONNECT_TIMEOUT_SECS,
+    NETWORK_TIMEOUT_SECS,
 };
 pub use value::{expect_repeat_count, FunctionBody, FunctionValue, Value};
 

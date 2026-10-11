@@ -24,9 +24,17 @@ use std::sync::Arc;
 // before the move.
 pub use crate::runtime::{NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS};
 
-/// The default number of user function calls that may be active at once.
-/// Exceeding it is a `RuntimeError`, not a Rust stack overflow.
-pub const MAX_CALL_DEPTH: usize = 1000;
+// The call-depth limit and the stack one call frame is allowed are declared in
+// `build.rs`, which writes them into `$OUT_DIR/stack_budget.rs` for the
+// `include!` below.
+//
+// They live there and not here because they are the same number twice: the
+// interpreter counts calls against `MAX_CALL_DEPTH`, and the linker sizes the
+// WebAssembly shadow stack at `MAX_CALL_DEPTH * STACK_BYTES_PER_CALL` so that
+// counter is physically reachable there. Two copies could drift, and drift
+// between them would make the playground trap on a program the native binary
+// reports a catchable `Limit` for.
+include!(concat!(env!("OUT_DIR"), "/stack_budget.rs"));
 
 /// The environment variable that overrides [`MAX_CALL_DEPTH`].
 pub const MAX_CALL_DEPTH_ENV: &str = "REDBLUE_MAX_CALL_DEPTH";
@@ -115,14 +123,6 @@ pub fn resolve_max_steps() -> usize {
     )
 }
 
-/// The stack one active call frame is allowed. A frame costs roughly 58 KiB in an
-/// unoptimised build — six nested Rust frames per Redblue call — so
-/// [`MAX_CALL_DEPTH`] needs about 60 MiB, well past the 16 MiB a main thread
-/// gets by default. A limit the process cannot physically reach would turn a
-/// clean `RuntimeError` back into the abort this counter exists to prevent, so
-/// the interpreter runs on a thread sized from the limit.
-const STACK_BYTES_PER_CALL: usize = 256 * 1024;
-
 /// The name a function literal carries.
 ///
 /// A literal has no name to carry, so diagnostics about one — a call-depth
@@ -151,27 +151,33 @@ pub fn resolve_max_call_depth() -> usize {
 /// can still read [`Vm::take_expectation_failure`], which is set on the VM that
 /// ran the assertions.
 pub fn run_isolated(program: &Program) -> (Vm, Result<Value>) {
-    let limit = resolve_max_call_depth();
-    let program = program.clone();
+    run_isolated_with_depth(program, resolve_max_call_depth())
+}
+
+/// [`run_isolated`] with the call depth given explicitly rather than read from
+/// [`MAX_CALL_DEPTH_ENV`].
+///
+/// Split out for the same reason [`resolve_max_iterations_from`] is: a test has
+/// to be able to ask for a stack this process cannot reserve — the case
+/// [`run_without_a_sized_thread`] decides — and the only way to reach it without
+/// mutating the process environment is to hand the number in. It reads a depth,
+/// not bytes: the size asked for is `depth * STACK_BYTES_PER_CALL`, so a depth
+/// past what any thread can carry asks for the impossible and the refusal is the
+/// answer under test.
+pub fn run_isolated_with_depth(program: &Program, depth: usize) -> (Vm, Result<Value>) {
+    let limit = depth.max(1);
+    let threaded = program.clone();
     let builder = std::thread::Builder::new()
         .name("redblue-vm".to_string())
         .stack_size(limit.saturating_mul(STACK_BYTES_PER_CALL));
 
     let joined = match builder.spawn(move || {
         let mut vm = Vm::new();
-        let result = vm.run(&program);
+        let result = vm.run(&threaded);
         (vm, result)
     }) {
         Ok(handle) => handle.join(),
-        Err(e) => {
-            return (
-                Vm::new(),
-                Err(Error::Io(format!(
-                    "Cannot start the interpreter thread: {}",
-                    e
-                ))),
-            );
-        }
+        Err(_) => return run_without_a_sized_thread(program, limit),
     };
 
     match joined {
@@ -186,6 +192,48 @@ pub fn run_isolated(program: &Program) -> (Vm, Result<Value>) {
     }
 }
 
+/// What to do when the thread [`run_isolated`] needs cannot be started.
+///
+/// The thread buys exactly one thing: stack room for the configured call depth.
+/// `MAX_CALL_DEPTH` frames of `STACK_BYTES_PER_CALL` is what the depth counter
+/// assumes is physically reachable, and a stack that is not that big turns the
+/// catchable `Limit` the counter raises back into a native stack overflow — an
+/// abort, not a failure a host can catch and not a page that can show anything.
+///
+/// So there is no fallback here that runs the program on a stack smaller than
+/// the counter's assumption. There is one place where running inline is not
+/// running unprotected: `wasm32-unknown-unknown` has no threads, `spawn` always
+/// fails there, and `build.rs` links the module's single shadow stack from the
+/// very same `limit * STACK_BYTES_PER_CALL` product. On that target the inline
+/// run is on a stack sized for the whole limit, which is why the two builds can
+/// be trusted to stop at the same depth — and it is scoped to that target
+/// rather than to "the spawn failed", because on any other target a failed
+/// spawn means the stack could not be had and the run has to be refused.
+fn run_without_a_sized_thread(program: &Program, limit: usize) -> (Vm, Result<Value>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = limit;
+        let mut vm = Vm::new();
+        let result = vm.run(program);
+        (vm, result)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = program;
+        (
+            Vm::new(),
+            Err(Error::Limit(
+                format!(
+                    "Cannot start the interpreter thread: a stack for {limit} calls could not be \
+                     reserved, and running on a smaller one would stop the process rather than \
+                     the program"
+                ),
+                Span::unknown(),
+            )),
+        )
+    }
+}
+
 pub struct Vm {
     globals: HashMap<String, Value>,
     /// The names bound by a `constant` declaration. The value lives in
@@ -196,7 +244,29 @@ pub struct Vm {
     /// innermost scope, and a function value that closed over scopes pushes
     /// them above its caller's frames — see [`Vm::call_user_function`].
     locals: Vec<CapturedScope>,
+    /// The lines `say` has produced, printed when the program finishes — see
+    /// [`Vm::run`]. Bounded by [`Vm::output_bytes`] and [`Vm::output_full`];
+    /// see [`Vm::charge_output`].
     output: Vec<String>,
+    /// How many bytes [`Vm::output`] holds, the newline [`Vm::run`] will append
+    /// to each line included.
+    ///
+    /// The lines are *buffered*, so charging at [`crate::wasm::emit`] bounds
+    /// the capture and not this: a program whose `say` never reached the
+    /// boundary — because it failed before the end, or because it never
+    /// finished — would still have grown a `Vec<String>` without limit while it
+    /// did. This is the counter that stops that, and it is why a `repeat` of
+    /// [`MAX_ITERATIONS`] long lines fails instead of exhausting memory before
+    /// any output is ever written.
+    output_bytes: usize,
+    /// Whether [`Vm::charge_output`] has already stopped a `say` in this run.
+    ///
+    /// Once the bound has stopped one line it stops every later one. The
+    /// alternative — letting a shorter line through into whatever room the last
+    /// long line happened to leave — would make what a program can still say
+    /// depend on how its earlier lines divided the limit, which is not a
+    /// property anyone can rely on or write a test against.
+    output_full: bool,
     /// How many `break` statements have been evaluated, including one that was
     /// then refused for being outside every loop. See
     /// [`Vm::loop_control_counts`].
@@ -393,6 +463,8 @@ impl Vm {
             constants: HashSet::new(),
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
+            output_bytes: 0,
+            output_full: false,
             break_statements: 0,
             skip_statements: 0,
             modules: HashMap::new(),
@@ -611,7 +683,37 @@ impl Vm {
     /// It exists so that a caller comparing this VM with the bytecode VM can see
     /// what each printed without capturing a process's stdout.
     pub fn take_output(&mut self) -> Vec<String> {
+        self.output_bytes = 0;
+        self.output_full = false;
         std::mem::take(&mut self.output)
+    }
+
+    /// Charges `bytes` to the buffered `say` output, failing once one program's
+    /// lines would need more than [`crate::wasm::MAX_OUTPUT_BYTES`].
+    ///
+    /// The same bound [`crate::wasm::emit`] enforces, charged here rather than
+    /// there, and on the same `Error::Limit` channel — so the limit is the
+    /// interpreter's own, a Redblue program can `catch` it, and the two engines
+    /// stop at the same number because they read the same constant.
+    ///
+    /// One byte per line is the newline [`Vm::run`] appends on the way out, so
+    /// what is charged is what the boundary will eventually be handed. The
+    /// charge sticks: see [`Vm::output_full`].
+    fn charge_output(&mut self, line: &str) -> Result<()> {
+        let limit = crate::wasm::MAX_OUTPUT_BYTES;
+        let needed = line.len().saturating_add(1);
+        if self.output_full || self.output_bytes.saturating_add(needed) > limit {
+            self.output_full = true;
+            return Err(Error::Limit(
+                format!(
+                    "Output past the limit of {limit} bytes: this program said more than the \
+                     interpreter will hold"
+                ),
+                self.span(),
+            ));
+        }
+        self.output_bytes += needed;
+        Ok(())
     }
 
     /// How many `break` and `skip` statements this VM has evaluated, as
@@ -942,9 +1044,11 @@ impl Vm {
             result = self.execute_statement(statement)?;
         }
 
-        // Print collected output
+        // Print collected output. Through the one boundary a program writes
+        // through, so the WebAssembly playground can collect what the native
+        // binary would have printed.
         for line in &self.output {
-            println!("{}", line);
+            crate::wasm::emit(&format!("{}\n", line));
         }
 
         Ok(result)
@@ -1121,12 +1225,14 @@ impl Vm {
         match stmt {
             Statement::Say(expr) => {
                 let value = self.evaluate(expr)?;
-                self.output.push(value.to_string());
+                let line = value.to_string();
+                self.charge_output(&line)?;
+                self.output.push(line);
                 Ok(Value::Nothing)
             }
             Statement::Print(expr) => {
                 let value = self.evaluate(expr)?;
-                print!("{}", value);
+                crate::wasm::emit(&value.to_string());
                 Ok(Value::Nothing)
             }
             Statement::Set { name, value } => {

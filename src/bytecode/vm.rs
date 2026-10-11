@@ -604,7 +604,19 @@ pub struct BytecodeVm {
     /// The lines `say` has produced. Printed when the program finishes, which is
     /// where the tree-walking VM prints them too, so a program that mixes `say`
     /// and `print` writes its lines in the same order either way.
+    ///
+    /// Bounded by [`BytecodeVm::output_bytes`] and [`BytecodeVm::output_full`];
+    /// see [`BytecodeVm::charge_output`].
     output: Vec<String>,
+    /// How many bytes [`BytecodeVm::output`] holds, the newline
+    /// [`BytecodeVm::run`] will append to each line included. The tree-walking
+    /// VM keeps the same counter under the same name for the same reason.
+    output_bytes: usize,
+    /// Whether [`BytecodeVm::charge_output`] has already stopped a `say` in this
+    /// run, and stops every later one with it. See
+    /// [`crate::interpreter::Vm::output_full`], which this mirrors so the two
+    /// engines stop at the same point in the same program.
+    output_full: bool,
     /// Every `object` declaration, by type name. See [`ObjectType`].
     objects: HashMap<String, ObjectType>,
     /// The modules an `import` has already run, by the name the program wrote.
@@ -734,6 +746,8 @@ impl BytecodeVm {
             constants: HashSet::new(),
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
+            output_bytes: 0,
+            output_full: false,
             objects: HashMap::new(),
             modules: HashSet::new(),
             module_aliases: HashMap::new(),
@@ -845,7 +859,7 @@ impl BytecodeVm {
         let result = self.drive(0).map(|_| ());
         if result.is_ok() && self.echo {
             for line in &self.output {
-                println!("{}", line);
+                crate::wasm::emit(&format!("{}\n", line));
             }
         }
         result.map(|()| self.outcome.clone())
@@ -854,7 +868,34 @@ impl BytecodeVm {
     /// Takes the lines `say` produced, for a caller that wants them rather than
     /// the printing.
     pub fn take_output(&mut self) -> Vec<String> {
+        self.output_bytes = 0;
+        self.output_full = false;
         std::mem::take(&mut self.output)
+    }
+
+    /// Charges `bytes` to the buffered `say` output, failing once one program's
+    /// lines would need more than [`crate::wasm::MAX_OUTPUT_BYTES`].
+    ///
+    /// The same bound [`crate::wasm::emit`] enforces, charged here rather than
+    /// there, and on the same `Error::Limit` channel — so the limit is the
+    /// interpreter's own, a Redblue program can `catch` it, and the two engines
+    /// stop at the same number because they read the same constant. The charge
+    /// sticks; see [`crate::interpreter::Vm::charge_output`], which this mirrors.
+    fn charge_output(&mut self, line: &str) -> Result<()> {
+        let limit = crate::wasm::MAX_OUTPUT_BYTES;
+        let needed = line.len().saturating_add(1);
+        if self.output_full || self.output_bytes.saturating_add(needed) > limit {
+            self.output_full = true;
+            return Err(Error::Limit(
+                format!(
+                    "Output past the limit of {limit} bytes: this program said more than the \
+                     interpreter will hold"
+                ),
+                self.span(),
+            ));
+        }
+        self.output_bytes += needed;
+        Ok(())
     }
 
     /// How many `BREAK` and `SKIP` instructions this VM has dispatched, as
@@ -1633,13 +1674,15 @@ impl BytecodeVm {
             }
             Opcode::Say => {
                 let value = self.pop()?;
-                self.output.push(value.to_string());
+                let line = value.to_string();
+                self.charge_output(&line)?;
+                self.output.push(line);
                 self.advance(frame);
                 Ok(())
             }
             Opcode::Print => {
                 let value = self.pop()?;
-                print!("{}", value);
+                crate::wasm::emit(&value.to_string());
                 self.advance(frame);
                 Ok(())
             }

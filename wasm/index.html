@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Redblue playground</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfa;
+        --fg: #1d1c1a;
+        --muted: #6b6862;
+        --line: #ddd9d2;
+        --panel: #ffffff;
+        --accent: #2f6f4e;
+        --bad: #a3312a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #17181a;
+          --fg: #e6e3dd;
+          --muted: #9a968e;
+          --line: #34363a;
+          --panel: #1f2124;
+          --accent: #6fbf8f;
+          --bad: #e2726a;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 1.5rem;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      header { max-width: 60rem; margin: 0 auto 1rem; }
+      h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+      header p { margin: 0; color: var(--muted); font-size: .875rem; }
+      main { max-width: 60rem; margin: 0 auto; display: grid; gap: 1rem; }
+      .row { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+      @media (max-width: 44rem) { .row { grid-template-columns: 1fr; } }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      h2 {
+        font-size: .75rem;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        color: var(--muted);
+        margin: 0;
+        padding: .5rem .75rem;
+        border-bottom: 1px solid var(--line);
+      }
+      textarea, pre {
+        margin: 0;
+        padding: .75rem;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        min-height: 18rem;
+        width: 100%;
+        resize: vertical;
+      }
+      textarea:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+      pre { overflow: auto; white-space: pre-wrap; word-break: break-word; }
+      pre.error { color: var(--bad); }
+      footer {
+        max-width: 60rem;
+        margin: 1rem auto 0;
+        display: flex;
+        gap: .5rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        padding: .4rem 1rem;
+        border-radius: 6px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+      button:disabled { opacity: .5; cursor: progress; }
+      select { font: inherit; padding: .35rem .5rem; border-radius: 6px;
+               border: 1px solid var(--line); background: var(--panel); color: inherit; }
+      code { font: 13px ui-monospace, monospace; color: var(--muted); }
+      .grow { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Redblue playground</h1>
+      <p>
+        The interpreter, compiled to WebAssembly. Output is byte-for-byte what the
+        native <code>rb</code> binary prints.
+      </p>
+    </header>
+
+    <main>
+      <div class="row">
+        <section>
+          <h2>Program</h2>
+          <textarea id="source" spellcheck="false" aria-label="Redblue program">
+say "Hello, World!"
+
+set squares to []
+for each n in [1, 2, 3, 4, 5]
+    push squares with n * n
+end
+
+say "Squares: {squares}"</textarea
+          >
+        </section>
+        <section>
+          <h2>Output</h2>
+          <pre id="output" aria-live="polite"></pre>
+        </section>
+      </div>
+
+      <footer>
+        <button id="run" disabled>Run</button>
+        <button id="example" class="grow" style="visibility: hidden"></button>
+        <span id="status"><code>loading the module…</code></span>
+      </footer>
+    </main>
+
+    <script type="module">
+      import { Redblue } from "./redblue.js";
+
+      const sourceEl = document.querySelector("#source");
+      const outputEl = document.querySelector("#output");
+      const runEl = document.querySelector("#run");
+      const statusEl = document.querySelector("#status");
+      const exampleEl = document.querySelector("#example");
+
+      // The same build the corpus is checked against: the module compiled from
+      // `src/` to `wasm32-unknown-unknown`, with the `rb_*` C ABI in
+      // `src/wasm.rs` and no JavaScript glue beyond `redblue.js`.
+      const WASM_URL = "../target/wasm32-unknown-unknown/release/redblue.wasm";
+
+      let rb = null;
+
+      try {
+        rb = await Redblue.loadFrom(WASM_URL);
+      } catch (error) {
+        statusEl.textContent = String(error);
+        throw error;
+      }
+
+      statusEl.textContent = "";
+      runEl.disabled = false;
+      exampleEl.style.visibility = "visible";
+      exampleEl.textContent = `v${rb.version()} · ${rb.keywords().trim().split("\n").length} keywords`;
+
+      function run() {
+        const result = rb.run(sourceEl.value);
+        if (result.ok) {
+          outputEl.classList.remove("error");
+          // `textContent`, never `innerHTML`: a Redblue program prints whatever
+          // its author wrote, including `<script>`, and it is text.
+          outputEl.textContent = result.output;
+        } else {
+          outputEl.classList.add("error");
+          outputEl.textContent = result.error;
+        }
+      }
+
+      runEl.addEventListener("click", run);
+      sourceEl.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+          event.preventDefault();
+          run();
+        }
+      });
+
+      run();
+    </script>
+  </body>
+</html>
