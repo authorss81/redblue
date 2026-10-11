@@ -14,7 +14,10 @@
 use redblue::wasm;
 
 /// The bytes native `rb` writes for `examples/hello.rb`.
-const HELLO: &str = "Hello, World!\nHello, World!\nHello, {name}!\n";
+///
+/// The third line is `greet("World")` reaching a `"Hello, {name}!"` literal,
+/// so it is only `Hello, World!` because interpolation substitutes.
+const HELLO: &str = "Hello, World!\nHello, World!\nHello, World!\n";
 
 const FIZZBUZZ: &str = "1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\n\
                         FizzBuzz\n1\n2\n3\n4\n5\n";

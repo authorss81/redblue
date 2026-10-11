@@ -596,8 +596,8 @@ const TEXT_OPS: &[&str] = &[
     "say \"a\" + \"b\" + \"c\"\n",
     "say \"Hello, World!\"\n",
     "set name to \"World\"\nsay \"Hello, \" + name + \"!\"\n",
-    // `{interp}` is documented and unimplemented: the braces are printed. The
-    // corpus records what the interpreter does, and FINDINGS.md carries the gap.
+    // `{interp}` substitution: the corpus records that the braces are replaced
+    // by the value, on both engines.
     "set name to \"World\"\nsay \"Hello, {name}!\"\n",
     "say \"abc\" is not \"abd\"\n",
     "say length(\"🎉\")\n",

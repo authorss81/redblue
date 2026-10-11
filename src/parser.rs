@@ -1,5 +1,7 @@
 use crate::error::{Error, Result, Span};
 use crate::lexer::{Token, TokenKind};
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -379,6 +381,14 @@ pub struct Parser {
     pos: usize,
     depth: usize,
     block_depth: usize,
+    /// How many `{…}` levels deep an expression being read out of a text
+    /// literal is.
+    ///
+    /// Shared by every parser in the chain, because each level is read by a
+    /// fresh [`Parser`] over a fresh source: a counter that belonged to a parser
+    /// would start again at zero at every level, and the nesting it is here to
+    /// bound would be unbounded.
+    interp_depth: Rc<Cell<usize>>,
 }
 
 impl Parser {
@@ -388,6 +398,7 @@ impl Parser {
             pos: 0,
             depth: 0,
             block_depth: 0,
+            interp_depth: Rc::new(Cell::new(0)),
         }
     }
 
@@ -534,6 +545,7 @@ impl Parser {
         // Expression nesting is counted per statement, so one long expression
         // cannot spend the budget of the next one.
         self.depth = 0;
+        self.interp_depth.set(0);
         if opened_block {
             self.leave_block();
         }
@@ -2307,7 +2319,7 @@ impl Parser {
             }
             TokenKind::Text(s) => {
                 self.advance();
-                Ok(Expr::Text(s.clone()))
+                self.parse_text(s.clone(), token.span())
             }
             TokenKind::YesNo(b) => {
                 self.advance();
@@ -2414,11 +2426,190 @@ impl Parser {
             )),
         }
     }
+
+    /// Reads a text literal into the expression it is: a plain
+    /// [`Expr::Text`] when it holds no substitution, and an
+    /// [`Expr::InterpolatedText`] when it does.
+    ///
+    /// `span` is the position of the literal itself. Every token read out of an
+    /// interpolated expression is moved onto it, so a failure raised inside
+    /// `{…}` is reported where the string is written rather than at a line and
+    /// column counted from inside the braces.
+    fn parse_text(&mut self, text: String, span: Span) -> Result<Expr> {
+        match self.interpolated_parts(&text, span)? {
+            Some(parts) => Ok(Expr::InterpolatedText(parts)),
+            None => Ok(Expr::Text(text)),
+        }
+    }
+
+    /// Splits a text literal into the parts it is made of: an [`Expr::Text`]
+    /// for each run of literal characters, and the parsed expression for each
+    /// `{…}` pair. `None` when the literal has no substitution at all, which is
+    /// every literal a program that never writes one produces.
+    ///
+    /// A brace pair is markup only when it is **well formed**: a `{` with a
+    /// matching `}` whose contents read as one whole expression. An unmatched
+    /// `{`, a lone `}`, an empty `{}` and a pair holding something that is not
+    /// an expression — a JSON document in a string, most of all — are left as
+    /// the characters they were written as, so making interpolation work could
+    /// not reject a program that ran yesterday.
+    ///
+    /// The walk is linear in the length of the literal. [`unmatched_opens`]
+    /// settles which opens have no `}` in one backward pass, so an open that
+    /// closes nothing costs a lookup instead of another scan to the end of the
+    /// literal, and the scans that are left cover disjoint spans.
+    fn interpolated_parts(&mut self, text: &str, span: Span) -> Result<Option<Vec<Expr>>> {
+        let chars: Vec<char> = text.chars().collect();
+        let unmatched = unmatched_opens(&chars);
+        let mut parts: Vec<Expr> = Vec::new();
+        let mut literal = String::new();
+        let mut index = 0usize;
+        let mut substituted = false;
+
+        while index < chars.len() {
+            if chars[index] != '{' || unmatched[index] {
+                literal.push(chars[index]);
+                index += 1;
+                continue;
+            }
+
+            // The matching `}` is found by counting braces, so a record or a
+            // nested substitution written inside the expression closes its own
+            // pair rather than ending this one. `unmatched[index]` is what
+            // guarantees the count reaches zero: the scan below starts from an
+            // open the pre-pass matched, and the walk that marked it read the
+            // same characters in the same order.
+            let mut depth = 1usize;
+            let mut scan = index + 1;
+            while scan < chars.len() && depth > 0 {
+                match chars[scan] {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                if depth > 0 {
+                    scan += 1;
+                }
+            }
+
+            let inner: String = chars[index + 1..scan].iter().collect();
+            let expression = self.read_interpolated(&inner, span)?;
+            let Some(expression) = expression else {
+                literal.push('{');
+                index += 1;
+                continue;
+            };
+
+            if !literal.is_empty() {
+                parts.push(Expr::Text(std::mem::take(&mut literal)));
+            }
+            parts.push(expression);
+            substituted = true;
+            index = scan + 1;
+        }
+
+        if !literal.is_empty() {
+            parts.push(Expr::Text(literal));
+        }
+
+        Ok(substituted.then_some(parts))
+    }
+
+    /// Reads the source between a `{` and its `}` as one expression, or `None`
+    /// when it is not one.
+    ///
+    /// `None` is not an error: it is what makes `{` an ordinary character
+    /// again. The tokens are re-spanned onto `span` so a failure inside the
+    /// braces is reported at the string.
+    fn read_interpolated(&mut self, source: &str, span: Span) -> Result<Option<Expr>> {
+        if source.trim().is_empty() {
+            return Ok(None);
+        }
+        let level = self.interp_depth.get();
+        if level >= MAX_NESTING_DEPTH {
+            // Left where it is on purpose. Every parser up the chain reads this
+            // same cell to tell a spent budget from "this is not an
+            // expression", and a budget that reset itself on the way out would
+            // be swallowed as an ordinary failed parse by the first of them.
+            return Err(self.interpolation_too_deep(span));
+        }
+        self.interp_depth.set(level + 1);
+        let read = self.read_interpolated_inner(source, span);
+        if read.is_ok() {
+            self.interp_depth.set(level);
+        }
+        read
+    }
+
+    fn read_interpolated_inner(&mut self, source: &str, span: Span) -> Result<Option<Expr>> {
+        let Ok(tokens) = crate::lexer::Lexer::tokenize(source) else {
+            return Ok(None);
+        };
+        let tokens = tokens
+            .into_iter()
+            .map(|token| Token::new(token.kind, span.line, span.column))
+            .collect();
+        let mut inner = Parser::new(tokens);
+        inner.interp_depth = Rc::clone(&self.interp_depth);
+        let expression = match inner.parse_expression() {
+            Ok(expression) => expression,
+            // A budget that is gone is a diagnostic, not "this is not an
+            // expression". Answering `None` here would turn a source past the
+            // limit into text that prints, which is how a pathologically nested
+            // literal would reach the stack limit in the first place.
+            Err(_) if self.interp_depth.get() >= MAX_NESTING_DEPTH => {
+                return Err(self.interpolation_too_deep(span));
+            }
+            Err(_) => return Ok(None),
+        };
+        // Everything inside the braces has to be the expression. A prefix of a
+        // larger one — `{1 + }`, `{a b}` — is text, not a substitution.
+        if inner.current().map(|token| &token.kind) != Some(&TokenKind::Eof) {
+            return Ok(None);
+        }
+        Ok(Some(expression))
+    }
+
+    fn interpolation_too_deep(&self, span: Span) -> Error {
+        Error::Parser(
+            format!("Interpolated expressions nest more than {MAX_NESTING_DEPTH} levels deep"),
+            span,
+        )
+    }
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program> {
     let mut parser = Parser::new(tokens);
     parser.parse()
+}
+
+/// Marks the `{`s of a text literal that no `}` closes.
+///
+/// One backward walk with a counter: a `}` raises the depth and a `{` spends
+/// one if there is any left, so the `{`s that arrive with the depth at zero
+/// are exactly the ones nothing closes. Reading right to left is what makes it
+/// work — a forward count cannot tell an open whose close has not been reached
+/// yet from an open that never has one, and that is the question being asked.
+///
+/// [`Parser::interpolated_parts`] needs this before it starts, because its own
+/// scan answers "is there a `}` for this `{`?" by walking forward to look for
+/// one. That answer is `O(n)` per open, so a literal nothing closes — a run of
+/// `{`s, which is ordinary text — would be read `n` times over. Marking the
+/// opens first lets the walk skip each of them in constant time instead, which
+/// is the whole difference between linear and quadratic in the length of a
+/// literal a program can write.
+fn unmatched_opens(chars: &[char]) -> Vec<bool> {
+    let mut unmatched = vec![false; chars.len()];
+    let mut depth = 0usize;
+    for index in (0..chars.len()).rev() {
+        match chars[index] {
+            '}' => depth += 1,
+            '{' if depth > 0 => depth -= 1,
+            '{' => unmatched[index] = true,
+            _ => {}
+        }
+    }
+    unmatched
 }
 
 /// Whether `kind` is a token that opens a `... end` block wherever it can begin a
@@ -2830,5 +3021,170 @@ mod tests {
                 "the program is one `set`, whatever the literal's shape"
             );
         }
+    }
+
+    // --- `{expr}` interpolation ------------------------------------------------
+
+    fn interp_parser(source: &str) -> Parser {
+        Parser::new(Lexer::tokenize(source).expect("the source should lex"))
+    }
+
+    /// The budget `read_interpolated` spends is one counter shared by every
+    /// parser in the chain, so a read that came back — whether it read an
+    /// expression or refused to find one — has to hand the budget back, and a
+    /// read one level past the limit has to be a diagnostic rather than an
+    /// ordinary "this is not an expression". A budget that reset itself on the
+    /// way out would be swallowed as a failed parse by the first parser up the
+    /// chain, which is what the second half of this holds to account for.
+    #[test]
+    fn edge_the_interpolation_budget_is_shared_and_bounds_the_chain() {
+        let span = Span::new(1, 1);
+        let mut outer = interp_parser("set s to \"\"");
+        assert_eq!(
+            outer.interp_depth.get(),
+            0,
+            "a parser starts with the whole budget"
+        );
+
+        assert!(
+            matches!(
+                outer.read_interpolated("x", span),
+                Ok(Some(Expr::Variable(ref name))) if name == "x"
+            ),
+            "a name inside the braces is read as an expression"
+        );
+        assert!(
+            outer
+                .read_interpolated("1 +", span)
+                .expect("a brace pair that holds no expression is text, not a failure")
+                .is_none(),
+            "a prefix of a larger expression is not a substitution"
+        );
+        assert_eq!(
+            outer.interp_depth.get(),
+            0,
+            "a read that came back — either way — spends nothing"
+        );
+
+        // The counter belongs to the chain, not to one parser: the fresh parser
+        // a nested read builds reads the same cell, so what the outer spends the
+        // inner sees.
+        outer.interp_depth.set(MAX_NESTING_DEPTH - 1);
+        let mut inner = interp_parser("");
+        inner.interp_depth = Rc::clone(&outer.interp_depth);
+        assert!(
+            matches!(
+                inner.read_interpolated("x", span),
+                Ok(Some(Expr::Variable(ref name))) if name == "x"
+            ),
+            "the last level of the budget is still usable"
+        );
+        assert_eq!(
+            outer.interp_depth.get(),
+            MAX_NESTING_DEPTH - 1,
+            "and the chain is back where it started"
+        );
+
+        // One more level is a diagnostic, and it is the chain's — so it is
+        // visible to every parser above it, not just the one that spent it.
+        outer.interp_depth.set(MAX_NESTING_DEPTH);
+        match outer.read_interpolated("x", span) {
+            Err(Error::Parser(message, at)) => {
+                assert!(
+                    message.contains(&MAX_NESTING_DEPTH.to_string()),
+                    "the diagnostic has to name the limit, got: {message}"
+                );
+                assert_eq!(
+                    at, span,
+                    "and it is reported at the string the braces were written in"
+                );
+            }
+            other => panic!("a spent budget is a diagnostic, not an answer: {other:?}"),
+        }
+        assert_eq!(
+            outer.interp_depth.get(),
+            MAX_NESTING_DEPTH,
+            "a spent budget stays spent, so the parser above it sees it too"
+        );
+    }
+
+    /// A source cannot reach [`MAX_NESTING_DEPTH`] — every level of nesting
+    /// costs an escaped copy of the level below it, so the source for *n* levels
+    /// grows like 2ⁿ — but a *few* levels are reachable, and the parser has to
+    /// read them as nesting rather than as text. This is the shape that proves
+    /// it: a text literal written inside an interpolated expression, whose own
+    /// content is a brace pair, which is a third level of substitution.
+    #[test]
+    fn edge_interpolation_nests_through_an_escaped_text_literal() {
+        let source = "set a to \"five\"\nset s to \"{\\\"{\\\"{a}\\\"}\\\"}\\\"\"\nsay s\n";
+        let program = parse(Lexer::tokenize(source).expect("the source should lex"))
+            .expect("the source should parse");
+        crate::analyzer::analyze(&program).expect("the program should analyze");
+        let (mut vm, run) = crate::interpreter::run_isolated(&program);
+        run.expect("the program runs");
+        assert_eq!(
+            vm.take_output(),
+            vec!["{\"five\"}\"".to_string()],
+            "three levels of substitution: the innermost brace pair reads the \
+             name, the one around it is an expression in its own right, and the \
+             text either side of it survives"
+        );
+    }
+
+    /// The walk through a text literal has to stay linear in the length of the
+    /// literal, including for a literal nothing closes. Marking the unmatched
+    /// opens up front is what makes an open that closes nothing cost a lookup
+    /// rather than another scan to the end of the literal — the difference
+    /// between reading *n* characters of `"{{{{…"` and reading *n²* of them.
+    ///
+    /// The mark answers "does a `}` reach this open?", which is the question the
+    /// scan asks by walking forward to look for one. So the cases below are the
+    /// ones where the two answers could come apart.
+    #[test]
+    fn edge_unmatched_opens_are_marked_in_one_backward_pass() {
+        let marked = |literal: &str| {
+            let chars: Vec<char> = literal.chars().collect();
+            unmatched_opens(&chars)
+        };
+
+        assert_eq!(
+            marked("{{{"),
+            vec![true; 3],
+            "no close brace reaches any of them, so every one is an ordinary \\
+             character"
+        );
+        assert_eq!(
+            marked("{}"),
+            vec![false; 2],
+            "and every open that closes is left alone"
+        );
+        assert_eq!(
+            marked("{ { }"),
+            vec![true, false, false, false, false],
+            "the second open closes and the first does not — the case a scan \\
+             restarted at every open is most likely to get wrong, and the one \\
+             this literal exists for"
+        );
+        assert_eq!(
+            marked("{ {}"),
+            vec![true, false, false, false],
+            "adding a second close brace cannot reach back further than the \\
+             innermost open"
+        );
+        assert_eq!(
+            marked("{ {} }"),
+            vec![false; 6],
+            "one more close brace and the outer open closes as well"
+        );
+        assert_eq!(
+            marked("}{"),
+            vec![false, true],
+            "a close brace before the open closes nothing that follows it"
+        );
+        assert_eq!(
+            marked("no braces here"),
+            vec![false; 14],
+            "a literal without braces has no opens to mark"
+        );
     }
 }

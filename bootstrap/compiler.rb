@@ -1988,7 +1988,11 @@ to parse_primary(tokens, pos, depth)
     end
     if type_of(parse_primary_out) is "nothing" then
         if token_kind(tokens, pos) is "text" then
-            set parse_primary_out to [{k: "text", b: tokens[pos].b}, pos + 1]
+            set parse_primary_out to parse_text_literal(tokens[pos].b)
+            if type_of(parse_primary_out) is "nothing" then
+                set parse_primary_out to {k: "text", b: tokens[pos].b}
+            end
+            set parse_primary_out to [parse_primary_out, pos + 1]
         end
     end
     if type_of(parse_primary_out) is "nothing" then
@@ -2048,6 +2052,114 @@ to parse_primary(tokens, pos, depth)
         refuse(token_line(tokens, pos), "unexpected token " + token_kind(tokens, pos))
     end
     give back parse_primary_out
+end
+
+// ---------------------------------------------------------------------------
+// `{expr}` interpolation
+//
+// A `{...}` is a substitution only when it is well formed: a `{` with a
+// matching `}` whose contents read as one whole expression. Everything else —
+// an unmatched brace, an empty pair, a JSON document in a string — stays the
+// characters it was written as, which is what `src/parser.rs` answers and what
+// keeps a program that ran yesterday running today.
+// ---------------------------------------------------------------------------
+
+// The index of the `}` that closes the `{` at `open`, or -1 when the pair is
+// never closed. Braces are counted, so a record written inside the expression
+// closes its own pair rather than ending this one.
+to interp_close(b, open)
+    set interp_close_depth to 1
+    set interp_close_i to open + 1
+    set interp_close_j to -1
+    while interp_close_i < length(b)
+        if b[interp_close_i] is 123 then
+            set interp_close_depth to interp_close_depth + 1
+        end
+        if b[interp_close_i] is 125 then
+            set interp_close_depth to interp_close_depth - 1
+            if interp_close_depth is 0 then
+                set interp_close_j to interp_close_i
+                set interp_close_i to length(b)
+            end
+        end
+        if interp_close_i < length(b) then
+            set interp_close_i to interp_close_i + 1
+        end
+    end
+    give back interp_close_j
+end
+
+// The expression the bytes between `first` and `last` hold, or `nothing` when
+// they do not hold one. The lexer and the parser here `refuse` rather than hand
+// back an error, so the caller reads this under `try`: a refusal and a `nothing`
+// are the same answer, and both mean the braces are text.
+to interp_read(b, first, last)
+    set interp_read_out to nothing
+    set interp_read_bytes to []
+    set interp_read_i to first
+    while interp_read_i < last
+        set interp_read_bytes to push(interp_read_bytes, b[interp_read_i])
+        set interp_read_i to interp_read_i + 1
+    end
+    set interp_read_tokens to lex(interp_read_bytes)
+    set interp_read_r to parse_expression(interp_read_tokens, 0, 0, 0)
+    // Everything inside the braces has to be the expression: a prefix of a
+    // larger one is text, not a substitution.
+    if token_kind(interp_read_tokens, interp_read_r[1]) is "eof" then
+        set interp_read_out to interp_read_r[0]
+    end
+    give back interp_read_out
+end
+
+// A text literal read into its parts: an `interp` node when it holds a
+// substitution, and `nothing` when it does not — which the `text` arm of
+// `parse_primary` answers as a plain text literal, exactly as before.
+to parse_text_literal(b)
+    set parse_text_literal_out to nothing
+    set parse_text_literal_parts to []
+    set parse_text_literal_used to no
+    set parse_text_literal_lit to []
+    set parse_text_literal_i to 0
+    while parse_text_literal_i < length(b)
+        if b[parse_text_literal_i] is not 123 then
+            set parse_text_literal_lit to push(parse_text_literal_lit, b[parse_text_literal_i])
+            set parse_text_literal_i to parse_text_literal_i + 1
+        else
+            set parse_text_literal_close to interp_close(b, parse_text_literal_i)
+            if parse_text_literal_close is -1 then
+                set parse_text_literal_lit to push(parse_text_literal_lit, 123)
+                set parse_text_literal_i to parse_text_literal_i + 1
+            else
+                set parse_text_literal_expr to nothing
+                if parse_text_literal_close > parse_text_literal_i + 1 then
+                    try
+                        set parse_text_literal_expr to interp_read(b, parse_text_literal_i + 1, parse_text_literal_close)
+                    catch error
+                        set parse_text_literal_expr to nothing
+                    end
+                end
+                if type_of(parse_text_literal_expr) is "nothing" then
+                    set parse_text_literal_lit to push(parse_text_literal_lit, 123)
+                    set parse_text_literal_i to parse_text_literal_i + 1
+                else
+                    if length(parse_text_literal_lit) > 0 then
+                        set parse_text_literal_parts to push(parse_text_literal_parts, {k: "text", b: parse_text_literal_lit})
+                        set parse_text_literal_lit to []
+                    end
+                    set parse_text_literal_parts to push(parse_text_literal_parts, parse_text_literal_expr)
+                    set parse_text_literal_used to yes
+                    set parse_text_literal_i to parse_text_literal_close + 1
+                end
+            end
+        end
+    end
+    if parse_text_literal_used is yes then
+        if length(parse_text_literal_lit) > 0 then
+            set parse_text_literal_parts to push(parse_text_literal_parts, {k: "text", b: parse_text_literal_lit})
+        end
+        set parse_text_literal_out to {k: "interp", parts: parse_text_literal_parts}
+    end
+    give back parse_text_literal_out
 end
 
 to parse_parenthesised(tokens, pos, depth)
@@ -2773,6 +2885,12 @@ to compile_expr(expr, line)
     end
     if expr.k is "text" then
         emit_const(3, expr.b, line)
+    end
+    if expr.k is "interp" then
+        for each each_part in expr.parts
+            compile_expr(each_part, line)
+        end
+        emit(12, length(expr.parts), 0, line)
     end
     if expr.k is "yes" then
         emit_const(2, [1], line)

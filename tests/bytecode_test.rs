@@ -346,8 +346,16 @@ fn expressions_compile_to_the_documented_instruction_sequences() {
             "LOAD",
             "LOAD_PROPERTY",
             "SAY",
+            // `"n is {1 + 2}"` is two parts — the text `n is ` and the sum. The
+            // empty run after the closing brace is dropped, because joining
+            // nothing adds nothing, so the constant, the arithmetic and the
+            // BUILD_TEXT that joins them are all there to be seen.
             "NOP",
             "PUSH_CONST",
+            "PUSH_CONST",
+            "PUSH_CONST",
+            "ADD",
+            "BUILD_TEXT",
             "SAY",
         ],
         "expression codegen drifted from the documented shape"
@@ -368,6 +376,10 @@ fn expressions_compile_to_the_documented_instruction_sequences() {
         chunk.constants[chunk.main.code[17].arg as usize],
         Constant::Text("a".to_string()),
         "LOAD_PROPERTY names the field through the constant pool"
+    );
+    assert_eq!(
+        chunk.main.code[24].arg, 2,
+        "BUILD_TEXT carries its part count, which the parser now produces"
     );
 }
 
