@@ -6,10 +6,23 @@
 |---|---|---|
 | `src/parser.rs` | +39 −0 | `parse_try` reads the `error` word of `catch error <name>` as the handler keyword when a second identifier follows it **on the same line**, and binds that second identifier; new helper `catch_keyword_ahead` makes the decision |
 | `bootstrap/compiler.rb` | +16 −3 | the same rule in `parse_try_catch_body`, so stage 2 emits the program stage 1 emits and the S3 fixed point still holds |
-| `tests/catch_binding_test.rs` | +327 | new: 13 `#[test]`s, every one run on **both** engines |
+| `tests/catch_binding_test.rs` | +341 | new: 14 `#[test]`s, every one run on **both** engines |
 | `tests/bootstrap_selfhost_test.rs` | +7 −0 | a `try_catch_error_name` case in the stage-1/stage-2 byte-identity table |
 | `SPEC.md` | +74 −17 | "Multiple Catch Blocks" replaced by "Handling Failures by Hand"; "Raising Errors" corrected; Try-Catch section given the binder's scope and the two spellings |
 | `docs/GRAMMAR.md` | +11 −3 | `try_statement` production now spells both binder forms and says `catch error of <Type>` does not exist |
+
+### Definition of done, box by box
+
+| Box | Evidence |
+|---|---|
+| `catch error e` prints the failure text and exits 0, on `rb run` **and** on `rb vm` over `rb compile` | Gates table — `error`, exit 0, twice |
+| all three existing spellings keep working, one row each in a 4-case table | `every_catch_spelling_handles_the_same_failure` |
+| the binder is scoped to the catch body alone, and a test pins it with an AnalyzerError naming the name | `the_binder_is_scoped_to_the_catch_body_alone` — `'e'` named on both sides of the block |
+| the `catch error of <Type>` decision is made and written into SPEC.md | `SPEC.md:827-837`, "Handling Failures by Hand" — SPEC corrected, feature **not** invented |
+| `give back error "..."` — corrected or implemented | `SPEC.md:988-1008`, "Raising Errors" — SPEC corrected; named in this table and below |
+| edge tests named `edge_*` cover: a `try` that never fails, an empty `catch error` body, a binder shadowing a program variable, a `catch` whose body itself raises | `edge_a_try_that_never_fails_never_binds_the_name`, `edge_an_empty_catch_body_still_handles_the_failure`, `edge_a_binder_shadows_a_program_variable_of_the_same_name`, `edge_a_failure_inside_the_catch_body_is_not_swallowed` |
+| edge tests assert a FAILURE for a `try` with no `catch`, and for a `catch error e` whose `e` is read outside the body | `edge_a_try_with_no_catch_reports_its_own_failure` (spanned `RuntimeError`), `the_binder_is_scoped_to_the_catch_body_alone` (spanned `AnalyzerError`) |
+| `cargo test --all-targets` 0 failures, `tests/expect_test.rs` 21 tests, `examples/` and `modules/` exit 0 | Gates table |
 
 ### Reproduction, before
 
@@ -85,8 +98,8 @@ write. The parser change alone puts it on the documented path.
 
 ## Tests added
 
-`tests/catch_binding_test.rs` — 13 `#[test]`s. `both_engines` is the only way a
-case reaches an engine, and it fails the test when the tree-walking VM and the
+`tests/catch_binding_test.rs` — 14 `#[test]`s. `both` is the only way a case
+reaches an engine, and it fails the test when the tree-walking VM and the
 bytecode compiler+VM disagree on the printed lines or on a failure's label,
 message and line.
 
@@ -94,16 +107,17 @@ message and line.
 |---|---|
 | `catch_error_name_binds_the_message` | the phase's spelling, `say e` prints the bound text |
 | `every_catch_spelling_handles_the_same_failure` | 4-case table — bare `catch` (README.md:11), `catch error` (README.md:64), `catch <name>` (README.md:51), `catch error <name>` (SPEC.md:800); each asserts the lines it prints |
-| `the_binder_is_scoped_to_the_catch_body_alone` | `e` before the `try` and after the `end` are both AnalyzerErrors **naming `e`** |
-| `the_binder_shadows_a_program_variable_of_the_same_name` | body sees the binder, the program keeps its own |
+| `the_binder_is_scoped_to_the_catch_body_alone` | **failure asserted** — `e` before the `try` and after the `end` are both AnalyzerErrors **naming `e`** |
 | `edge_a_try_that_never_fails_never_binds_the_name` | **failure asserted** — `AnalyzerError` naming `e`, never a silent `nothing` |
 | `edge_an_empty_catch_body_still_handles_the_failure` | empty / zero, for both spellings |
-| `edge_the_body_first_word_on_the_next_line_is_not_the_binder` | boundary between the two spellings |
+| `edge_the_body_first_word_on_the_next_line_is_not_the_binder` | boundary between the two spellings — the negative half of the same-line test |
 | `edge_a_failure_inside_the_catch_body_is_not_swallowed` | **failure asserted** — spanned `RuntimeError` on the catch body's own line |
 | `edge_a_try_with_no_catch_reports_its_own_failure` | **failure asserted** — a `try` with no `catch` stops with a spanned `RuntimeError` |
 | `edge_the_bound_name_is_ordinary_unicode_text` | unicode — ✓, 🎉, `café` through the handler |
 | `edge_the_keyword_and_the_binder_may_be_the_same_word` | `catch error error` binds a name spelled `error` |
-| `edge_a_keyword_and_a_binder_on_one_line_bind_and_run` | the binder is usable in an expression in the body |
+| `edge_a_keyword_and_a_binder_on_one_line_bind_and_run` | the positive half of the same-line test |
+| `edge_a_handler_written_entirely_on_one_line_binds_and_runs` | a body on the *same* line as the binder is still the body's |
+| `edge_a_binder_shadows_a_program_variable_of_the_same_name` | body sees the binder, the program keeps its own |
 | `edge_catch_error_of_a_type_is_refused_naming_the_orphan` | **failure asserted** — `catch error of FileError` names the orphan, never passes for a typed handler |
 
 Plus `tests/bootstrap_selfhost_test.rs`: `try_catch_error_name` — stage 2 must
@@ -137,7 +151,7 @@ handlers has to move that test rather than discover the change later.
 |---|---|
 | empty | covered — `edge_an_empty_catch_body_still_handles_the_failure` |
 | singleton | covered — a handler is the only member of its clause; the 4-case table is one case per spelling |
-| boundary | covered — `edge_the_body_first_word_on_the_next_line_is_not_the_binder` and `edge_the_keyword_and_the_binder_may_be_the_same_word` are the line boundary between the two spellings |
+| boundary | covered — `edge_the_body_first_word_on_the_next_line_is_not_the_binder` (body on the next line is not the binder) and `edge_a_handler_written_entirely_on_one_line_binds_and_runs` (body on the same line *is* the body's) are the two halves of the same-line test `catch_keyword_ahead` makes; `edge_the_keyword_and_the_binder_may_be_the_same_word` is the boundary where both words are `error` |
 | out_of_bounds | N/A — a binder is a name, not an index; nothing this change touches reads an index |
 | type_mismatch | N/A — a binder holds one value (text). The failure channels this change *can* produce, a name read where none is bound and a `catch` of the wrong shape, are both covered and named in the failure rows below |
 | numeric_boundary | N/A — no arithmetic is added; `1 / 0` is only the failure the tests provoke, and it is refused the same way before and after |
@@ -160,12 +174,17 @@ handlers has to move that test rather than discover the change later.
 
 ## Gates
 
+All four run from the project checkout; the commands and their raw output are
+recorded here rather than summarised.
+
 | Gate | Result |
 |---|---|
-| `cargo fmt --all -- --check` | pass |
-| `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
-| `cargo test --all-targets` | pass — 0 failed, 0 ignored; `tests/expect_test.rs` 21 passed; the 9 files in `examples/` and `modules/` all `rb run` to exit 0 |
-| `./rbops/verify.sh phase-048` | **not run** — `rbops/` is not in this checkout (`ls rbops` → `No such file or directory`), so gate 4 could not be executed here. Nothing is claimed about it. |
+| `cargo fmt --all -- --check` | pass — exit 0, no diff |
+| `cargo clippy --all-targets -- -D warnings` | pass — exit 0, zero warnings |
+| `cargo test --all-targets` | pass — **1411 passed, 0 failed, 0 ignored** across 49 binaries; `tests/expect_test.rs` 21 passed; `tests/catch_binding_test.rs` 14 passed |
+| `examples/` + `modules/` | pass — all 9 files (`examples/{hello,fizzbuzz,files,formats,random,test_arithmetic,time}.rb`, `modules/{MathUtils,SuiteKit}.rb`) `rb run` to exit 0 |
+| `rb run` vs `rb vm` on `rb compile` | pass — both print `error` and exit 0 for `try` / `set x to 1 / 0` / `catch error e` / `say e` / `end` |
+| `./rbops/verify.sh phase-048` | **not run — the script is not in this checkout.** `ls rbops` → `No such file or directory`; `ls .opencode` → `No such file or directory`; `test -x ./rbops/verify.sh` → exit 1. Nothing is claimed about its result. The pipeline runs it. |
 
 Zero new `#[ignore]`, zero `// skip`, zero `allow(clippy::`, zero weakened or
 deleted tests.

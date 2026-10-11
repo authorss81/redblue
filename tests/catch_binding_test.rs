@@ -197,7 +197,7 @@ fn the_binder_is_scoped_to_the_catch_body_alone() {
 /// A `catch error e` body is a scope of its own, so the binder shadows a
 /// program variable of the same name without disturbing it.
 #[test]
-fn the_binder_shadows_a_program_variable_of_the_same_name() {
+fn edge_a_binder_shadows_a_program_variable_of_the_same_name() {
     both_print(
         "set e to \"outer\"\ntry\n    set bad to 1 / 0\ncatch error e\n    say e\nend\nsay e\n",
         &["error", "outer"],
@@ -309,6 +309,17 @@ fn edge_the_keyword_and_the_binder_may_be_the_same_word() {
 fn edge_a_keyword_and_a_binder_on_one_line_bind_and_run() {
     both_print(
         "try\n    set bad to 1 / 0\ncatch error e\n    say \"caught \" + e\nend\n",
+        &["caught error"],
+    );
+}
+
+/// The other side of the same line test: a body that follows the binder on the
+/// *same* line is still the body's, and the two words are still read as keyword
+/// and binder rather than swallowing the body.
+#[test]
+fn edge_a_handler_written_entirely_on_one_line_binds_and_runs() {
+    both_print(
+        "try\n    set bad to 1 / 0\ncatch error e say \"caught \" + e\nend\n",
         &["caught error"],
     );
 }
