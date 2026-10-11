@@ -39,18 +39,30 @@ digit         = '0'..'9'
 ### 1.3 Keywords (Reserved)
 
 ```
-keywords = 'set' | 'constant' | 'to' | 'is' | 'are' | 'nothing' | 'yes' | 'no'
-         | 'if' | 'then' | 'else' | 'end' | 'when' | 'unless'
+keywords = 'set' | 'constant' | 'to' | 'is' | 'nothing' | 'yes' | 'no'
+         | 'if' | 'then' | 'else' | 'end' | 'unless'
          | 'for' | 'each' | 'in' | 'from' | 'times' | 'while' | 'repeat'
-         | 'break' | 'skip' | 'return' | 'give back'
-         | 'to' | 'takes' | 'needs' | 'called' | 'might fail'
-         | 'number' | 'text' | 'yes/no' | 'list' | 'record' | 'object'
+         | 'until'
+         | 'break' | 'skip' | 'return'
+         | 'give' 'back'             // `give back <expr>` is one form
+         | 'might' 'fail'            // `might fail <call>` is one form
+         | 'say' | 'print'
          | 'module' | 'import' | 'export' | 'as'
-         | 'and' | 'or' | 'not' | 'either' | 'neither'
-         | 'try' | 'catch' | 'finally' | 'error'
-         | 'has' | 'can' | 'this' | 'that' | 'new' | 'extends' | 'every'
-         | 'async' | 'wait' | 'parallel' | 'until'
+         | 'and' | 'or' | 'not' | 'mod'
+         | 'try' | 'catch' | 'finally'
+         | 'test' | 'expect'
+         | 'object' | 'has' | 'can' | 'this' | 'extends'
 ```
+
+A word is listed here only while the parser has a rule that reads it. A reserved
+word the parser cannot read is not a feature: it cannot be an identifier either,
+and the rejection names an internal token kind rather than the word the writer
+typed. Nine words — `are`, `ask`, `async`, `done`, `new`, `parallel`, `that`,
+`wait`, `when` — were listed and read by nothing; they are identifiers now, and
+`docs/GRAMMAR.md` §4.8 and §2.1's `when_statement` no longer describe them. The
+table is checked against `Lexer::keywords()` by
+`tests/keyword_reservation_test.rs`, so a word added here without a parser arm
+fails the suite rather than shipping.
 
 ### 1.4 Literals
 
@@ -210,7 +222,9 @@ if_statement     = 'if' expression
                       { statement } ]
                     'end'
 
-// When statement (pattern matching)
+// When statement (pattern matching) — NOT IMPLEMENTED, and `when` is not a
+// reserved word: it is an ordinary identifier. Left here so the form a future
+// `when` has to parse is written down rather than invented again.
 when_statement    = 'when' expression
                     { 'case' pattern 'then' expression }
                     [ 'else' expression ]
@@ -322,6 +336,11 @@ Two things in that `finally` are not the failure being reported:
   `catch` written around the `try` does not run. See `SPEC.md`, "Finally".
 
 ### 4.8 Async Statements
+
+Not implemented. `async`, `wait`, `parallel` and `done` are ordinary
+identifiers — the lexer reserved them with no rule in the parser to read them.
+The productions are kept here as the shape a future implementation has to match;
+nothing below parses today.
 
 ```
 async_function   = 'async' function_decl

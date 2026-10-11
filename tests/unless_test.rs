@@ -291,7 +291,7 @@ fn edge_unless_rejects_else_because_its_body_has_no_alternative() {
         "unless no then\n    say \"a\"\nelse\n    say \"b\"\nend\n",
     ));
     assert!(
-        message.contains("End") || message.contains("Else"),
+        message.contains("'else'") || message.contains("'end'"),
         "the error for an `else` under `unless` must name the token it expected, got {message:?}"
     );
 }
