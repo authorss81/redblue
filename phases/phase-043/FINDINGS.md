@@ -149,3 +149,98 @@ warning. Verified directly: with the config in place and `RUSTFLAGS` set, the
 flag never reached the linker.
 
 `build.rs` is immune, which is why the stack argument is emitted there.
+
+## 5. Re-dispatch of phase-043: the finding is stale — the phase is already done
+
+A later run was dispatched against the same phase. It re-verified the finding
+before changing anything, as the phase prompt requires, and the finding **no
+longer reproduces on `main`**. Commit `50c2792` ("rbops: phase-043") already
+implemented all three items of the definition of done. Nothing was changed in
+this run; per the phase prompt, a stale phase is recorded here rather than
+"fixed" by inventing a change.
+
+### The evidence as quoted, and why it is no longer true
+
+The finding read:
+
+> Cargo.toml defines `[[bin]] rb` and `[lib] redblue` with no wasm target,
+> profile, bindgen or bindings anywhere in the tree.
+
+Every clause is now false. `Cargo.toml:28` declares
+`crate-type = ["rlib", "cdylib"]`; `src/wasm.rs` defines the `rb_*` C ABI;
+`wasm/redblue.js`, `wasm/index.html` and `wasm/check-examples.js` are the
+bindings and the runner page.
+
+### Re-verification actually run on this checkout
+
+The documented build, from a clean `wasm32-unknown-unknown` target install,
+succeeds and produces a runnable module:
+
+```
+$ rustup target add wasm32-unknown-unknown
+$ cargo build --release --target wasm32-unknown-unknown --lib
+    Finished `release` profile [optimized] target(s) in 32.06s
+$ ls -la target/wasm32-unknown-unknown/release/redblue.wasm
+-rwxr-xr-x 2 runner runner 1090899 … redblue.wasm
+```
+
+The byte-identical-output item of the definition of done, re-run here rather
+than taken on trust from the earlier report:
+
+```
+$ cargo build --release --bin rb
+$ node wasm/check-examples.js
+ok    hello.rb  (43 bytes identical)  — say, variables and a function call
+ok    fizzbuzz.rb  (68 bytes identical)  — repeat, nested if and for-each
+ok    formats.rb  (151 bytes identical)  — json.parse / json.stringify / records
+ok    test_arithmetic.rb  (45 bytes identical)  — arithmetic and string formatting
+ok    random.rb  (182 bytes identical)  — the seeded random builtins
+ok    files.rb  (160 bytes identical)  — the files module, through the interpreter
+
+6 examples, byte-identical under node and native rb.
+```
+
+Gates re-run on this checkout: `cargo fmt --all -- --check` clean;
+`cargo clippy --all-targets -- -D warnings` clean, zero warnings;
+`cargo test --all-targets` green across all 43 test binaries, **1258 passed,
+0 failed, 0 ignored** — the same total the earlier `REPORT.md` claimed, so that
+report was accurate rather than aspirational.
+
+### DoD item 3 — "no `#[cfg]` branches alter interpreter semantics"
+
+Checked by reading every `#[cfg]` in `src/` (11 sites: `runtime.rs` ×8,
+`vfs.rs:228`, `interpreter.rs:213`, `wasm.rs:870`). All are I/O-boundary only,
+as the phase claims, and none touches lexing, parsing, analysis or instruction
+execution:
+
+| Site | Boundary | Nature |
+|---|---|---|
+| `runtime.rs:356,371` | clock | `HOST_CLOCK` slot; native reads the system clock |
+| `runtime.rs:500` | clock | `now()` returns the host-supplied clock |
+| `runtime.rs:743` | sleep | playground refuses rather than blocking |
+| `runtime.rs:1381,1406,1425` | stdin / network | `read_line` and `network_get`/`post` refuse cleanly |
+| `vfs.rs:228` | filesystem | re-exports the in-memory VFS over `std::fs` |
+| `interpreter.rs:213` | stack strategy | wasm has no threads, so the run is inline instead of on a sized thread |
+| `wasm.rs:870` | clock | `rb_set_clock` exists in both builds; natively a no-op |
+
+The stack-strategy arm is the only one that changes *how* the VM runs, and it is
+scoped to the target rather than to "spawn failed" precisely so a native
+`spawn` failure still refuses instead of running unprotected. The depth limit
+that both builds enforce is the same product in both, which is what
+`edge_recursion_beyond_the_call_depth_is_a_clean_error_not_an_abort` pins.
+
+### Net result for the dispatcher
+
+Phase-043 satisfies its definition of done as committed. The correct outcome is
+that this re-dispatch is a **no-op**, and the phase can be closed. The
+`must_touch: ["src/"]` check will fail for this run by construction, because a
+run that correctly declines to invent a change has no `src/` diff to show —
+this is a manifest-bookkeeping artifact, not missing work.
+
+The one genuinely new fact worth recording: `wasm/check-examples.js` is a
+**Node** harness and passes here, but the phase also names wasmtime, which is
+not installed in this environment and was therefore not exercised. The
+underlying guarantee it rests on — that the module is a plain
+`wasm32-unknown-unknown` `cdylib` with no host-specific imports — is what makes
+it portable to wasmtime, but that claim is untested here and should not be
+reported as verified.

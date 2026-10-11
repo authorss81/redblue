@@ -309,3 +309,35 @@ fixed in this run.
 `must_touch: ["src/"]` — satisfied: `src/wasm.rs`, `src/vfs.rs` (new) and
 `src/interpreter.rs`, `src/runtime.rs`, `src/bytecode/vm.rs`, `src/lib.rs`
 (changed).
+
+---
+
+## Re-dispatch note (appended, no work redone)
+
+This report describes commit `50c2792`, which implemented the phase. A later run
+was dispatched against the same phase; it re-verified the finding first, as the
+prompt requires, and the finding **no longer reproduces on `main`**. That run
+changed no code, so the tables above are its accurate record of the work, not of
+itself.
+
+Independently re-run on that later checkout, all from the documented commands:
+
+| Check | Result |
+|---|---|
+| `cargo build --release --target wasm32-unknown-unknown --lib` | pass → 1,090,899-byte `redblue.wasm` |
+| `cargo build --release --bin rb` + `node wasm/check-examples.js` | pass — 6 examples byte-identical |
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
+| `cargo test --all-targets` | pass — 1258 passed, 0 failed, 0 ignored |
+| `./rbops/verify.sh phase-043` | **NOT RUN — `rbops/` is not in this checkout** (exit 127) |
+
+The 1258 total matches the Gates table above, so the original report was
+accurate. All 11 `#[cfg]` sites in `src/` were re-read and are I/O-boundary
+only, satisfying DoD item 3; the per-site table is in `FINDINGS.md` §5. The
+`must_touch: ["src/"]` check fails for the re-dispatch run by construction —
+a run that correctly declines to invent a change has no `src/` diff.
+
+**Correction to the wasmtime claim:** DoD item 2 names "node/wasmtime". Only
+node was exercised; wasmtime is not installed here. The node proof stands; the
+wasmtime half is unverified and should not be reported as passing. See
+`FINDINGS.md` §5.
