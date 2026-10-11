@@ -5,6 +5,7 @@
 //! need — arithmetic, indexing, the builtin library — live in
 //! [`crate::runtime`] and are read from here rather than written twice.
 
+use crate::debugger::{DebugEvent, DebugHook};
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser as redblue_parser;
@@ -356,6 +357,14 @@ pub struct Vm {
     /// completion, `:vars`, `:funcs` and the analyzer's seed shows the program a
     /// name it cannot write.
     qualified_members: HashSet<String>,
+    /// The names every VM is born holding: the builtins
+    /// [`stdlib::builtins`] provides, by name.
+    ///
+    /// A copy of the keys rather than a call to [`stdlib::builtins`] per
+    /// question, because the debugger asks "which globals did the program
+    /// write" at *every statement it is shown* and a frame listing two hundred
+    /// builtins answers nothing.
+    builtin_names: HashSet<String>,
     /// Every `object` declaration, by type name. The table is the inheritance
     /// model: an entry already holds its own fields and methods merged with
     /// everything it inherits, nearest declaration first, so a lookup is a
@@ -370,6 +379,21 @@ pub struct Vm {
     /// [`Expr::MightFail`].
     assertions_failed: usize,
     current_span: Span,
+    /// How many statements are executing right now, the one in
+    /// [`Vm::execute_statement`] itself counting as one.
+    ///
+    /// Distinct from [`Vm::call_depth`], which counts *calls*: a `say` nested in
+    /// a one-line `if` is one call deep but two statements deep, and the
+    /// debugger needs the second to tell a breakpoint on that line from a stop
+    /// it has already made inside the statement it is looking at.
+    statement_depth: usize,
+    /// The debugger watching this VM, if one is attached — see
+    /// [`Vm::set_debug_hook`].
+    ///
+    /// `None` for every program that is not being debugged, which is what makes
+    /// [`Vm::debug_before`] a single predictable branch on the hot path and
+    /// nothing else.
+    debug_hook: Option<DebugHook>,
     call_depth: usize,
     max_call_depth: usize,
     /// Statements executed so far, against [`Vm::max_steps`]. Monotonic for the
@@ -573,10 +597,13 @@ impl Vm {
             declared_modules: HashMap::new(),
             module_depth: 0,
             qualified_members: HashSet::new(),
+            builtin_names: stdlib::builtins().keys().cloned().collect(),
             objects: HashMap::new(),
             expectation_failure: None,
             assertions_failed: 0,
             current_span: Span::unknown(),
+            statement_depth: 0,
+            debug_hook: None,
             call_depth: 0,
             max_call_depth: resolve_max_call_depth(),
             steps: 0,
@@ -1308,11 +1335,55 @@ impl Vm {
 
     fn execute_statement(&mut self, stmt: &Stmt) -> Result<Value> {
         let previous_span = std::mem::replace(&mut self.current_span, stmt.span);
+        self.statement_depth += 1;
+        self.debug_before(stmt.span.line);
         let result = self
             .charge_step()
             .and_then(|()| self.execute_statement_body(&stmt.statement));
+        // Restored on the failing path as well as the succeeding one: a
+        // statement that raised an error still finished, and leaving the counter
+        // raised would make every later statement look nested inside it.
+        self.statement_depth -= 1;
         self.current_span = previous_span;
         result
+    }
+
+    /// Installs the debugger, or takes it away again with `None`.
+    ///
+    /// The hook is asked before every statement and may only answer what to do
+    /// next. It cannot change what a statement evaluates to, cannot raise an
+    /// error and cannot skip a step charge — a program run with a debugger
+    /// attached is the same program, observed.
+    pub fn set_debug_hook(&mut self, hook: Option<DebugHook>) {
+        self.debug_hook = hook;
+    }
+
+    /// Gives the attached debugger the chance to stop before this statement on
+    /// `line` runs.
+    ///
+    /// Called first in [`Vm::execute_statement`], before the step charge and
+    /// before the statement body, so a breakpoint on a line stops *on* that
+    /// line rather than after it. Every diagnostic a program can raise still
+    /// comes from the statement itself: the hook has no way to answer with an
+    /// error.
+    fn debug_before(&mut self, line: usize) {
+        if self.debug_hook.is_none() {
+            return;
+        }
+        // Two fields of the same VM at once: the hook is taken mutably and the
+        // scopes it reads immutably, which is fine because they are disjoint.
+        let event = DebugEvent {
+            line,
+            depth: self.call_depth,
+            statement_depth: self.statement_depth,
+            scopes: &self.locals,
+            globals: &self.globals,
+            builtins: &self.builtin_names,
+            module_members: &self.qualified_members,
+        };
+        if let Some(hook) = self.debug_hook.as_mut() {
+            let _ = hook(event);
+        }
     }
 
     /// The source position of the statement being executed. Every runtime

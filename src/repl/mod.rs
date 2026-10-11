@@ -10,6 +10,7 @@ pub use completer::ReplCompleter;
 pub use history::ReplHistory;
 
 use crate::analyzer;
+use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
 use crate::interpreter::Vm;
 use crate::lexer::Lexer;
 use crate::parser::{open_block_depth, Parser, Program};
@@ -39,6 +40,108 @@ const MAX_BLOCK_BYTES: usize = 64 * 1024;
 /// gives up. The rest are counted and reported, so the report itself cannot be
 /// the thing that floods a terminal.
 const BLOCK_REPORT_LINES: usize = 20;
+
+/// The prompt a program stopped by the debugger waits at.
+///
+/// Distinct from `>>> ` and `..  ` because it is asked by a running program
+/// rather than typed at, and a session has to be able to tell the three apart.
+const DEBUG_PROMPT: &str = "(rb-debug) ";
+
+/// The answers a debugger prompt takes, and what each one asks the VM to do.
+///
+/// Read in [`debug_stop`]. Every word is also reachable with a sigil, because
+/// the same words are the REPL's `:continue`, `:step` and `:next` and a user who
+/// has learned one should not have to unlearn it in the other place.
+fn debug_answer(input: &str) -> Option<DebugAction> {
+    let word = input
+        .trim()
+        .trim_start_matches([':', '.'])
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match word.as_str() {
+        "c" | "continue" | "r" | "run" | "q" | "quit" | "detach" => Some(DebugAction::Run),
+        "s" | "step" | "into" => Some(DebugAction::Step(StepMode::Into)),
+        "n" | "next" | "over" => Some(DebugAction::Step(StepMode::Over)),
+        _ => None,
+    }
+}
+
+/// Whether `input` at a debugger prompt asked to be shown the frame again.
+fn debug_asks_for_frame(input: &str) -> bool {
+    let word = input
+        .trim()
+        .trim_start_matches([':', '.'])
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(word.as_str(), "f" | "frame" | "where" | "bt" | "backtrace")
+}
+
+/// The interactive half of a stop: print where the program is, then read what to
+/// do about it.
+///
+/// This is the one place a running Redblue program reads the terminal, and it is
+/// here rather than anywhere in the interpreter so that the VM never learns that
+/// a terminal exists. Two reads end the wait rather than spinning on it: end of
+/// input, which is what a piped session runs into, and a terminal that has gone
+/// away. A debugger that kept asking a closed pipe for answers would hang the
+/// very sessions it is meant to be able to watch.
+fn debug_stop(report: &[String]) -> DebugAction {
+    for line in report {
+        println!("{}", line);
+    }
+    loop {
+        print!("{}", DEBUG_PROMPT);
+        if io::stdout().flush().is_err() {
+            return DebugAction::Run;
+        }
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(0) | Err(_) => {
+                println!();
+                return DebugAction::Run;
+            }
+            Ok(_) => {}
+        }
+        if debug_asks_for_frame(&input) {
+            for line in report {
+                println!("{}", line);
+            }
+            continue;
+        }
+        if let Some(action) = debug_answer(&input) {
+            return action;
+        }
+        if input.trim().is_empty() {
+            continue;
+        }
+        println!(
+            "Expected c (continue), s (step into), n (step over) or f (frame). \
+             A line with none of those is not a debugger answer."
+        );
+    }
+}
+
+/// Reads the line number a `:break` or `:delete` was given, or says why it is
+/// not one.
+///
+/// Nothing is guessed. An argument that does not parse is reported rather than
+/// read as line `0`, and `0` is refused rather than clamped up to `1`: a
+/// breakpoint on a line the program never has is a debugger that appears to
+/// ignore the user, which is worse than one that says the line is wrong.
+fn line_number(argument: &str) -> Result<usize, String> {
+    let trimmed = argument.trim();
+    let line: usize = trimmed
+        .parse()
+        .map_err(|_| format!("'{trimmed}' is not a line number"))?;
+    if line == 0 {
+        return Err("lines are counted from 1, so there is no line 0".to_string());
+    }
+    Ok(line)
+}
 
 /// The snippets `:help` prints under "Quick Reference", each one a complete
 /// program the session has run.
@@ -91,6 +194,10 @@ pub struct Repl {
     running: bool,
     multiline_buffer: Vec<String>,
     in_multiline: bool,
+    /// The debugging session: its breakpoints, its pending step, and the frame
+    /// the last program stopped in. Shared with the hook the VM calls, so a
+    /// `:frame` typed after the program has run reads the frame that stop left.
+    debug: SharedDebugSession,
 }
 
 impl Repl {
@@ -103,6 +210,7 @@ impl Repl {
             running: true,
             multiline_buffer: Vec::new(),
             in_multiline: false,
+            debug: DebugSession::shared(),
         }
     }
 
@@ -248,6 +356,34 @@ impl Repl {
             }
             ReplCommand::Debug => {
                 self.debug_mode();
+                true
+            }
+            ReplCommand::Break(line) => {
+                self.toggle_breakpoint(&line);
+                true
+            }
+            ReplCommand::Breaks => {
+                self.print_breakpoints();
+                true
+            }
+            ReplCommand::Delete(line) => {
+                self.delete_breakpoint(&line);
+                true
+            }
+            ReplCommand::Step => {
+                self.arm_step(StepMode::Into);
+                true
+            }
+            ReplCommand::Next => {
+                self.arm_step(StepMode::Over);
+                true
+            }
+            ReplCommand::Continue => {
+                self.resume();
+                true
+            }
+            ReplCommand::Frame => {
+                self.print_frame();
                 true
             }
             ReplCommand::Inspect(name) => {
@@ -425,7 +561,32 @@ impl Repl {
         let program = parser.parse()?;
         let bound = self.session_names();
         analyzer::analyze_with_bound_names(&program, &bound)?;
-        self.run_program(&program)
+        self.run_program(&program, code)
+    }
+
+    /// Installs the debugger on the session's VM for the program about to run,
+    /// or takes it away again.
+    ///
+    /// The hook is installed only when the session has something to stop for — a
+    /// breakpoint, or a step armed at the prompt — so a session that never asked
+    /// to debug pays a single `is_none` branch per statement and nothing else.
+    fn arm_debugger(&mut self, source: &str) {
+        if !lock(&self.debug).active() {
+            self.vm.set_debug_hook(None);
+            return;
+        }
+        lock(&self.debug).set_source(source);
+        let session = std::sync::Arc::clone(&self.debug);
+        self.vm.set_debug_hook(Some(Box::new(move |event| {
+            let mut session = lock(&session);
+            if !session.poll(&event) {
+                return DebugAction::Run;
+            }
+            let report = session.stop_report();
+            let action = debug_stop(&report);
+            session.record_action(action);
+            action
+        })));
     }
 
     /// Runs `program` in this session's VM and prints what it printed.
@@ -440,7 +601,16 @@ impl Repl {
     /// fails half way through never reaches [`Vm::run`]'s print loop, so the `say`
     /// it had already run would otherwise be reported several lines later, by
     /// whichever program ran next.
-    fn run_program(&mut self, program: &Program) -> Result<Value, crate::error::Error> {
+    /// `source` is the text `program` was parsed from, which is what a stop shows
+    /// the user so the line they are looking at is the line they wrote. It is
+    /// the whole block the session buffered, so its line numbers are the block's
+    /// own rather than the prompt's.
+    fn run_program(
+        &mut self,
+        program: &Program,
+        source: &str,
+    ) -> Result<Value, crate::error::Error> {
+        self.arm_debugger(source);
         self.vm.take_output();
         let result = self.vm.run(program);
         if result.is_err() {
@@ -678,8 +848,99 @@ impl Repl {
     }
 
     fn debug_mode(&self) {
-        println!("Debug mode - Not implemented yet");
-        println!("Press Ctrl+C to exit debug mode");
+        let session = lock(&self.debug);
+        let lines = session.breakpoints();
+        println!(
+            "Debugger: {} breakpoint(s) set. `:break <line>` sets one, `:next` steps \
+             over a call, `:step` steps into it, `:continue` runs on.",
+            lines.len()
+        );
+        for line in lines {
+            println!("  line {}", line);
+        }
+    }
+
+    /// Sets the breakpoint on `argument`, or clears one already set there.
+    fn toggle_breakpoint(&self, argument: &str) {
+        match line_number(argument) {
+            Ok(line) => {
+                let mut session = lock(&self.debug);
+                if session.toggle_breakpoint(line) {
+                    println!("Breakpoint set on line {}.", line);
+                } else {
+                    println!("Breakpoint removed from line {}.", line);
+                }
+            }
+            Err(complaint) => println!("{}", complaint),
+        }
+    }
+
+    /// Removes the breakpoint on `argument`, saying so when there was none.
+    fn delete_breakpoint(&self, argument: &str) {
+        match line_number(argument) {
+            Ok(line) => {
+                let mut session = lock(&self.debug);
+                if session.clear_breakpoint(line) {
+                    println!("Breakpoint removed from line {}.", line);
+                } else {
+                    println!("No breakpoint on line {}.", line);
+                }
+            }
+            Err(complaint) => println!("{}", complaint),
+        }
+    }
+
+    /// Lists where the breakpoints are, or that there are none.
+    fn print_breakpoints(&self) {
+        let session = lock(&self.debug);
+        let lines = session.breakpoints();
+        if lines.is_empty() {
+            println!("No breakpoints set.");
+            return;
+        }
+        println!("Breakpoints:");
+        for line in lines {
+            println!("  line {}", line);
+        }
+    }
+
+    /// Arms a step for the next program the session runs.
+    fn arm_step(&self, mode: StepMode) {
+        lock(&self.debug).arm_step(mode);
+        println!(
+            "{}",
+            match mode {
+                StepMode::Into => "Stepping into the next call.",
+                StepMode::Over => "Stepping over the next call.",
+                StepMode::None => "Continuing.",
+            }
+        );
+    }
+
+    /// Says what a program typed here would do.
+    ///
+    /// `:continue` at the prompt cannot resume a program — nothing is running
+    /// by then, because a stop is answered from inside the run — so this
+    /// reports the state it would find rather than pretending to act.
+    fn resume(&self) {
+        let session = lock(&self.debug);
+        if session.active() {
+            println!("Running to the next breakpoint.");
+        } else {
+            println!("No breakpoints set and no step armed.");
+        }
+    }
+
+    /// Prints the frame the program last stopped in, or says there was none.
+    fn print_frame(&self) {
+        let session = lock(&self.debug);
+        let Some(frame) = session.last_stop() else {
+            println!("Nothing has stopped yet.");
+            return;
+        };
+        for line in frame.lines() {
+            println!("{}", line);
+        }
     }
 
     /// The `:inspect` listing for `name`, or `None` when nothing in the session is

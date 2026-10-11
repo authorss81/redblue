@@ -23,6 +23,20 @@ pub enum ReplCommand {
     Reset,
     Run(String),
     Debug,
+    /// Sets a breakpoint on a line, or clears one that is already set there.
+    Break(String),
+    /// Lists the lines the session has breakpoints on.
+    Breaks,
+    /// Removes the breakpoint on a line.
+    Delete(String),
+    /// Arms a step into the next call, for the next program the session runs.
+    Step,
+    /// Arms a step over the next call, for the next program the session runs.
+    Next,
+    /// Runs the program to its end, or to the next breakpoint.
+    Continue,
+    /// Prints the frame the program last stopped in.
+    Frame,
     Inspect(String),
     Ast(String),
     Tokens(String),
@@ -147,6 +161,48 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         description: "Debug mode",
         usage: None,
         build: |_| ReplCommand::Debug,
+    },
+    CommandSpec {
+        names: &["break", "b"],
+        description: "Stop at a line, or clear the breakpoint there",
+        usage: Some("<line>"),
+        build: |argument| ReplCommand::Break(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["breaks", "bps"],
+        description: "List the lines breakpoints are set on",
+        usage: None,
+        build: |_| ReplCommand::Breaks,
+    },
+    CommandSpec {
+        names: &["delete", "d"],
+        description: "Remove the breakpoint on a line",
+        usage: Some("<line>"),
+        build: |argument| ReplCommand::Delete(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["step", "st"],
+        description: "Step into the next call",
+        usage: None,
+        build: |_| ReplCommand::Step,
+    },
+    CommandSpec {
+        names: &["next", "n"],
+        description: "Step over the next call",
+        usage: None,
+        build: |_| ReplCommand::Next,
+    },
+    CommandSpec {
+        names: &["continue", "c"],
+        description: "Run on to the next breakpoint",
+        usage: None,
+        build: |_| ReplCommand::Continue,
+    },
+    CommandSpec {
+        names: &["frame", "fr"],
+        description: "Show the frame the program last stopped in",
+        usage: None,
+        build: |_| ReplCommand::Frame,
     },
     CommandSpec {
         names: &["inspect", "i"],
@@ -350,6 +406,20 @@ mod tests {
             (":reset", "Reset", ""),
             (":run prog.rb", "Run", "prog.rb"),
             (":debug", "Debug", ""),
+            (":break 3", "Break", "3"),
+            (":b 3", "Break", "3"),
+            (":breaks", "Breaks", ""),
+            (":bps", "Breaks", ""),
+            (":delete 3", "Delete", "3"),
+            (":d 3", "Delete", "3"),
+            (":step", "Step", ""),
+            (":st", "Step", ""),
+            (":next", "Next", ""),
+            (":n", "Next", ""),
+            (":continue", "Continue", ""),
+            (":c", "Continue", ""),
+            (":frame", "Frame", ""),
+            (":fr", "Frame", ""),
             (":inspect x", "Inspect", "x"),
             (":i x", "Inspect", "x"),
             (":ast 1 + 1", "Ast", "1 + 1"),
@@ -375,7 +445,9 @@ mod tests {
                 | ReplCommand::Run(value)
                 | ReplCommand::Inspect(value)
                 | ReplCommand::Ast(value)
-                | ReplCommand::Tokens(value) => value.as_str(),
+                | ReplCommand::Tokens(value)
+                | ReplCommand::Break(value)
+                | ReplCommand::Delete(value) => value.as_str(),
                 _ => "",
             };
             assert_eq!(

@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod bootstrap;
 pub mod bytecode;
+pub mod debugger;
 mod error;
 pub mod formatter;
 mod interpreter;
