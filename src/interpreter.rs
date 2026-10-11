@@ -397,30 +397,51 @@ struct ObjectType {
     methods: Fields,
 }
 
-/// The paths `import <name>` looks for, in order: the `modules/` directory, the
-/// same directory written with a leading `./`, and the name as a path of its
-/// own.
-fn module_search_paths(name: &str) -> Vec<String> {
-    vec![
+/// The paths `import <name>` looks for, in order: the version the manifest in
+/// the working directory pins the module to, then the `modules/` directory,
+/// the same directory written with a leading `./`, and the name as a path of
+/// its own.
+///
+/// The pin comes first because it is the only one of the four that says which
+/// version the program asked for; the rest are what an import did before there
+/// was a manifest, and a program with no manifest still resolves through them.
+///
+/// `Err` is a manifest this program cannot be resolved from — a pin nothing
+/// publishes, or a module needed at two versions. It is passed on rather than
+/// ignored, because the answer to "that module cannot be resolved" must not be
+/// an import of whichever file happens to be at `modules/<name>.rb`.
+fn module_search_paths(name: &str) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    if let Some(pinned) = crate::manifest::pinned_module_path(name)? {
+        paths.push(pinned);
+    }
+    paths.extend([
         format!("modules/{name}.rb"),
         format!("./modules/{name}"),
         name.to_string(),
-    ]
+    ]);
+    Ok(paths)
 }
 
 /// The first path the module `name` resolves to, or `None` when no path is
 /// there.
-pub fn module_path(name: &str) -> Option<String> {
-    module_search_paths(name)
+///
+/// A directory is not a module. `modules/Fixture/` is where the versions of
+/// `Fixture` are published — see [`crate::manifest`] — so it is a path the
+/// search skips rather than one it fails to read: without a manifest naming a
+/// version, `import Fixture` has no module to import, and saying so beats
+/// `Is a directory` on a directory that was never meant to be opened.
+pub fn module_path(name: &str) -> Result<Option<String>> {
+    Ok(module_search_paths(name)?
         .into_iter()
-        .find(|path| Path::new(path).exists())
+        .find(|path| Path::new(path).is_file()))
 }
 
 /// The source of the module `name` resolves to, or `None` when no path is
 /// there. A path that is there but cannot be read is an error, not a miss: the
 /// two say different things about the import.
 pub fn module_source(name: &str) -> Result<Option<String>> {
-    let Some(path) = module_path(name) else {
+    let Some(path) = module_path(name)? else {
         return Ok(None);
     };
     let source = std::fs::read_to_string(&path)
@@ -1515,7 +1536,7 @@ impl Vm {
                         ));
                     }
 
-                    if let Some(path) = module_path(&item.name) {
+                    if let Some(path) = module_path(&item.name)? {
                         // The path is there but may not be readable: that is an
                         // Io error, not a miss, so it is reported rather than
                         // folded into the "cannot find" below.

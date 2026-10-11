@@ -570,14 +570,24 @@ fn unary_operator(opcode: Opcode) -> &'static UnaryOp {
     }
 }
 
-/// The paths an `import` of `name` is looked for under, in order — the same
-/// three, in the same order, as the tree-walking VM uses.
-fn module_paths(name: &str) -> Vec<String> {
-    vec![
+/// The paths an `import` of `name` is looked for under, in order — the version
+/// a manifest pins it to first, then the same three, in the same order, as the
+/// tree-walking VM uses.
+///
+/// `Err` is a manifest this program cannot be resolved from, and is passed on
+/// for the same reason the tree-walking VM passes it on: a pin nothing
+/// publishes must not resolve to whichever file is at `modules/<name>.rb`.
+fn module_paths(name: &str) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    if let Some(pinned) = crate::manifest::pinned_module_path(name)? {
+        paths.push(pinned);
+    }
+    paths.extend([
         format!("modules/{name}.rb"),
         format!("./modules/{name}"),
         name.to_string(),
-    ]
+    ]);
+    Ok(paths)
 }
 
 /// Where the `try` name a file wrote splits into the two names it carries.
@@ -3374,9 +3384,13 @@ impl BytecodeVm {
         // A builtin namespace has no file behind it, and refusing the import
         // because of that was the whole difference between this VM and the
         // tree-walking one for `import json`.
-        let path = module_paths(&name)
+        let path = module_paths(&name)?
             .into_iter()
-            .find(|path| std::path::Path::new(path).exists());
+            // A directory is not a module: `modules/Fixture/` is where the
+            // versions of `Fixture` are published, so it is skipped rather than
+            // opened. The tree-walking VM skips it for the same reason — see
+            // `crate::interpreter::module_path`.
+            .find(|path| std::path::Path::new(path).is_file());
         if path.is_none() && !stdlib::is_module(&name) && !self.declared_modules.contains_key(&name)
         {
             return Err(Error::Runtime(

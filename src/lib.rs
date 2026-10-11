@@ -7,6 +7,7 @@ mod interpreter;
 pub mod lexer;
 pub mod linter;
 pub mod lsp;
+pub mod manifest;
 pub mod parser;
 pub mod repl;
 mod runtime;
