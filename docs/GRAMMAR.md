@@ -301,12 +301,21 @@ method_decl      = 'to' 'can' identifier [ '(' [ parameter { ',' parameter } ] '
 ```
 try_statement    = 'try'
                     { statement }
-                    { 'catch' [ identifier ] [ 'of' identifier ]
+                    { 'catch' [ 'error' ] [ identifier ] [ 'error' ] 
                       { statement } }
                     [ 'finally'
                       { statement } ]
                     'end'
 ```
+
+A `catch` names what it caught by naming it, and there is one form of that name:
+the word after `catch`. `catch error` is a name spelled `error` — `error` is not
+a keyword — and `catch error <name>` is the same handler with the name written
+after the word, which is read when a second identifier follows `error` on the
+same line. The grammar writes the `error` twice because either of the two
+optional words may be the one that is actually there; it is not two separate
+keywords. There is no `catch error of <Type>`: `of` is not a word in the
+language.
 
 The `catch` is optional, and a `try` without one is not a handler: the `finally`
 is still owed however its region is left — a failure runs it before the failure is
