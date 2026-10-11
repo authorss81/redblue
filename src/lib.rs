@@ -13,6 +13,7 @@ pub mod parser;
 pub mod repl;
 mod runtime;
 pub mod stdlib;
+pub mod suggest;
 pub mod testing;
 mod value;
 pub mod vfs;

@@ -279,7 +279,7 @@ impl Lexer {
         let mut text = String::new();
         loop {
             let Some(c) = self.current() else {
-                return Err(Error::Lexer("Unterminated string".to_string(), span));
+                return Err(self.unterminated(span));
             };
             if c == '"' {
                 self.advance();
@@ -294,13 +294,23 @@ impl Lexer {
                     Some('\\') => text.push('\\'),
                     Some('"') => text.push('"'),
                     Some(c) => text.push(c),
-                    None => return Err(Error::Lexer("Unterminated string".to_string(), span)),
+                    None => return Err(self.unterminated(span)),
                 }
             } else {
                 text.push(c);
                 self.advance();
             }
         }
+    }
+
+    /// The failure for a string that ran to the end of input without closing.
+    ///
+    /// It spans from the opening quote to wherever the reading stopped, which for
+    /// a string broken across lines is several lines and not one: the reader has
+    /// to see the whole runaway string, not only the quote that opened it.
+    fn unterminated(&self, span: Span) -> Error {
+        let span = span.extended_to(self.line, self.column);
+        Error::Lexer("Unterminated string".to_string(), span)
     }
 
     fn read_identifier(&mut self) -> String {

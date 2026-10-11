@@ -1,6 +1,7 @@
 use crate::error::{Error, Result, Span};
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt};
 use crate::stdlib;
+use crate::suggest;
 use std::collections::{HashMap, HashSet};
 
 pub struct Analyzer {
@@ -230,6 +231,33 @@ impl Analyzer {
 
     fn add_error(&mut self, msg: &str, span: Span) {
         self.errors.push((msg.to_string(), span));
+    }
+
+    /// Reports a name the walk could not find, offering the one it most likely
+    /// meant.
+    ///
+    /// The candidates are the names the walk can see — every scope's, plus every
+    /// keyword — so the suggestion is drawn from what this program actually has,
+    /// not from what the language might one day add. They are offered as one
+    /// list, so the nearest of them wins rather than whichever group was asked
+    /// first.
+    fn add_unknown_variable(&mut self, name: &str, span: Span) {
+        let mut candidates: Vec<String> = self.scopes.iter().flatten().cloned().collect();
+        candidates.extend(
+            crate::lexer::Lexer::keywords()
+                .iter()
+                .map(|word| (*word).to_string()),
+        );
+        candidates.sort();
+        candidates.dedup();
+
+        let message = format!(
+            "Unknown variable '{}'{}",
+            name,
+            suggest::did_you_mean(name, candidates)
+        );
+
+        self.add_error(&message, span);
     }
 
     /// Whether the walk has stopped: the manifest conflict was found and
@@ -527,7 +555,7 @@ impl Analyzer {
             Expr::Number(_) | Expr::Text(_) | Expr::YesNo(_) | Expr::Nothing => {}
             Expr::Variable(name) => {
                 if !self.name_is_bound(name) {
-                    self.add_error(&format!("Unknown variable '{}'", name), *span);
+                    self.add_unknown_variable(name, *span);
                 }
             }
             Expr::Binary { op, left, right } => {
@@ -562,7 +590,7 @@ impl Analyzer {
                     Expr::Variable(name)
                         if !self.name_is_bound(name) && !stdlib::is_module(name) =>
                     {
-                        self.add_error(&format!("Unknown variable '{}'", name), *span);
+                        self.add_unknown_variable(name, *span);
                     }
                     Expr::Variable(_) => {}
                     other => self.analyze_expr(other, span),
