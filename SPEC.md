@@ -794,24 +794,61 @@ compiled file says the name is read-only. See `docs/BYTECODE.md`.
 
 ```redblue
 try
-    set data to might fail files.read("config.rb")
+    set data to files.read("config.rb")
     process data
 catch error
-    say "Error: {error message}"
+    say "Error: {error}"
 end
 ```
 
-### Multiple Catch Blocks
+A `catch` may name what it caught, and that name is bound for the body of the
+`catch` alone — not before the `try` and not after its `end`:
 
 ```redblue
 try
-    set result to might fail risky_operation()
-catch error of FileError
-    handle_file_error(error)
-catch error of NetworkError
-    handle_network_error(error)
-catch error
-    handle_generic_error(error)
+    set data to files.read("config.rb")
+catch error problem
+    say "Error: {problem}"
+end
+```
+
+The two spellings are one word apart and both are the same handler: `catch error`
+binds a name spelled `error`, and `catch error problem` binds a name spelled
+`problem`. `error` is a word to the lexer, not a keyword, so which of the two a
+line is writing is decided by whether a second name follows it **on the same
+line**. A `catch error` whose body starts on the next line is the first spelling,
+whatever the body's first word is.
+
+The name is bound to the text `error` — the word that says a failure was handled.
+Redblue errors are messages, not tagged values: there is no error object with a
+type to dispatch on, so `say error` is the whole of what a handler can say about
+what it caught.
+
+### Handling Failures by Hand
+
+A `try` has **one** `catch`. There is no `catch error of <Type>`, no second
+`catch`, and no type a failure could be matched against — `of` is not a word in
+the language, so `catch error of FileError` reads as a binder named `of` and
+leaves `FileError` as a statement of its own. A handler written that way fails
+the analyzer, naming the orphan.
+
+Asking what kind of failure it was is work for the program, not for the handler:
+the failing operation is inside the `try`, and its own result is what says which
+kind it was.
+
+```redblue
+try
+    set record to files.read("records/cleo.rb")
+catch error problem
+    say "could not read the record: {problem}"
+    give back
+end
+```
+
+```redblue
+set result to might fail network.get("https://example.com")
+if result is nothing
+    say "the network call failed"
 end
 ```
 
@@ -950,13 +987,24 @@ set stopped to might fail files.read("config.rb")   // -> nothing
 
 ### Raising Errors
 
+There is no `raise`, and no `give back error "..."`. Redblue has no statement
+that fails on the writer's account: `give back` hands a value back to the caller,
+and a value is not a failure. What `error` would be here is a name like any other
+— `give back error "Cannot divide by zero"` reads `error` as a variable, and a
+function that has never been given one fails the analyzer naming it.
+
+A function signals a failure by performing an operation that fails, which is the
+only thing that can fail:
+
 ```redblue
-to might fail divide(a, b)
-    if b is equal to 0
-        give back error "Cannot divide by zero"
+to divide(a, b)
+    if b is equal to 0 then
+        give back 1 / 0          // the RuntimeError this function owes its caller
     end
     give back a / b
 end
+
+set result to might fail divide(1, 0)   // -> nothing
 ```
 
 ---
