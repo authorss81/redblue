@@ -32,6 +32,11 @@ What *did* reproduce, and was still true on `main`:
   exists.
 - Nothing in the tree compared the three lists, so either drift would have
   stayed green.
+- **Round 11 found a fourth copy of the list.** `src/repl/completer.rs` kept its
+  own `builtins:` table for tab-completion, and it had drifted in both
+  directions: it offered `formats` — the name this phase exists to retire — and
+  five flat names that answer nothing, and did not offer five modules that do.
+  See "Round 11" below; that is the only thing round 11 changes.
 
 ## What changed
 
@@ -61,6 +66,9 @@ What *did* reproduce, and was still true on `main`:
 | `tests/stdlib_module_names_test.rs` | +233 | Round 8: two gates — a dotted receiver that is no module answers or is written down as refused, and every spelling SPEC.md enumerates for `map` is run. Three helpers, one of which keys on the `(` so a path and a host are not read as a receiver. |
 | `phases/phase-050/FINDINGS.md` | +51 −27 | Round 8: §14 split into the half this phase owns (the document) and the half it does not (making `xs.map(f)` answer), and §15 added for the engine-parity defect the new gate found on the way — the bytecode VM refuses a higher-order call the tree-walker answers. |
 | `src/bytecode/vm.rs` | +158 | **Round 9, the behaviour fix**: `Frame::pending_map` and `PendingMap`; `start_map`/`advance_map` carry a `map` on the frame that started it; `call_named` answers `map`/`list_map` **before** the shared resolver; `call_method` answers the one expression receiver the language has, `[1, 2, 3].map(f)`; `discard_frames_above`/`unwind_frame` give a map up when its frame is taken away. Turns `map was called with arguments it cannot use` into `[2, 4, 6]` on the bytecode VM. See round 9 below. |
+| `src/repl/completer.rs` | +98 −39 | **Round 11, the behaviour fix**: the completer's hand-kept builtin table is split — the module names are read from `stdlib::MODULES` (the table the analyzer asks), and the six entries no program can name (`formats`, `parse_json`, `to_json`, `read`, `write`, `exists`) are gone. See round 11 below. |
+| `src/repl/completer.rs` | +58 | Round 11: `edge_every_module_the_language_has_is_offered` and `edge_the_repl_offers_no_builtin_a_program_cannot_call`, beside the table they check. |
+| `tests/repl_module_completion_test.rs` | +78 | Round 11, new: the same two claims through the public surface a user reaches — `ReplCompleter::complete` and the interpreter that decides whether a name works. |
 | `src/interpreter.rs` | +9 −1 | Round 9: `apply_map` reports a call failure under `function.name` rather than a fixed "anonymous function", so a depth limit reached inside a `map` of a *named* function names that function — which is what the bytecode VM says, and what makes the two engines' messages comparable. A function *literal* already carries `ANONYMOUS_FUNCTION`, so it says the same thing either way. Plus the doc comment at `map_builtin`, corrected to name `[1, 2, 3].map(f)` rather than the `xs.map(f)` round 8 removed from SPEC.md. |
 | `src/bytecode/codegen.rs`, `src/bytecode/opcode.rs` | +8 −4 | Round 9: comments only. Both said a bare method name was "the one shape the language rejects"; a list literal receiver is now answered, so they say a bare name says the receiver was not a name at all and point at the runtime that answers it. |
 | `tests/differential_test.rs` | +130 | Round 9: `edge_a_higher_order_call_answers_the_same_way_on_both_engines` — eleven cases asked on **both** engines, comparing the two outcomes rather than asking whether each succeeded. This is the gate that makes the fix unfalsifiable-by-refusal. |
@@ -160,7 +168,11 @@ All in `tests/stdlib_module_names_test.rs` — 22 `#[test]` functions, 20 named
 and 16, round 7 adds rows 17 to 19, and round 8 adds rows 20 and 21. Round 9
 widened row 21 from one engine to two rather than adding a test here — its new
 parity gate lives in `tests/differential_test.rs` and is listed under Round 9
-below.)
+below. **Round 11's rows 22 and 23 are the first tests of this phase that are not
+in that file**: they belong to the REPL completer, so they sit beside the table
+they read in `src/repl/completer.rs`, and rows 24 and 25 repeat both claims
+through the public surface from `tests/`, because the private table is where a
+gate is strongest and the public API is where a user is.)
 
 | # | Test | Edge class covered |
 |---|---|---|
@@ -185,6 +197,10 @@ below.)
 | 19 | `edge_length_answers_a_text_or_a_list_and_refuses_a_record` | the drift a prose sentence can hide — all three spellings of `length` against a text, a list and a record, **and** § text read out of SPEC.md to assert it now says the refusal rather than claiming the record |
 | 20 | `edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused` | the receiver that is neither an object nor a module nor a registry prefix — every `name.member(` a document writes on a bare identifier no module claims either answers or is **written down as refused** in SPEC.md. `api.example.com` is the keying case: the scan requires the `(` that makes a dotted thing a call, and a chain of three names is dropped |
 | 21 | `edge_every_spelling_the_spec_promises_for_map_answers` | an enumerated **prose** promise rather than a code block — the sentence in § list that enumerates the spellings of `map` is found by what it contains, the backticked runs are read out of it, and each is run and expected to print `[2, 4, 6]`. **Both** engines since round 9 (row 21 as written in round 8 walked `rb run` alone; see FINDINGS §15) |
+| 22 | `edge_every_module_the_language_has_is_offered` (round 11, `src/repl/completer.rs`) | the completer's module list against `stdlib::MODULES` — the missing-module direction: `bytes`, `csv`, `json`, `sys` and `time` were offered by nothing |
+| 23 | `edge_the_repl_offers_no_builtin_a_program_cannot_call` (round 11, `src/repl/completer.rs`) | the unanswerable direction, over the whole table: every offered name must be a module, a registered builtin or a global constant — `formats`, `parse_json`, `to_json`, `read`, `write`, `exists` were not |
+| 24 | `edge_every_module_the_language_accepts_is_offered_by_the_repl` (round 11, `tests/repl_module_completion_test.rs`) | row 22 through the public surface, and paired with the analyzer's own predicate `stdlib::is_module` rather than with the table the completer reads |
+| 25 | `edge_no_name_the_repl_offers_is_one_a_program_cannot_call` (round 11, `tests/repl_module_completion_test.rs`) | **asserts a failure is produced**: for each of the six names, `complete(name)` is empty *and* `run_source_value` is an `Err` — the completion and the interpreter cannot drift apart, because either half failing is this test failing |
 
 The failing-test-first sequence, with the real output:
 
@@ -711,16 +727,135 @@ at the repository root and round 3 had to delete it, so a run that reports nine
 green files and a dirty tree would be telling the reader something the table above
 does not.
 
+### Round 11 — a fourth copy of the module list, in the one place that invites a user to type one
+
+Rounds 1 to 10 reconciled SPEC.md, README.md and `stdlib::MODULES` and put gates on
+all three. The gate walks **documents** and the registry. It does not walk the
+REPL, and the REPL is the one place Redblue *offers* a name rather than waiting to
+be asked: a user who types `for` and presses Tab is told what can follow it.
+
+`src/repl/completer.rs` kept its own `builtins:` table. It had drifted in **both**
+directions:
+
+```
+$ cargo test --lib repl::completer        # the two new tests, before the fix
+---- edge_every_module_the_language_has_is_offered stdout ----
+bytes is a module, so a user typing it is offered it: []
+---- edge_the_repl_offers_no_builtin_a_program_cannot_call stdout ----
+formats is offered as a builtin, so it has to be one a program can name:
+it is not a module, not a registered builtin, and not a global
+test result: FAILED. 15 passed; 2 failed
+```
+
+and the six names the table offered that no program can name, each refused by the
+built interpreter:
+
+```
+$ cargo run --quiet --bin rb -- run formats.rb      # say formats.parse_json("{}")
+Error: AnalyzerError: Unknown variable 'formats'
+$ cargo run --quiet --bin rb -- run parsejson.rb     # say parse_json("{}")
+Error: RuntimeError: Unknown function 'parse_json'
+$ cargo run --quiet --bin rb -- run tojson.rb       # say to_json({a: 1})
+Error: RuntimeError: Unknown function 'to_json'
+$ cargo run --quiet --bin rb -- run flat_read.rb     # say read("x")
+Error: RuntimeError: Unknown function 'read'
+   …and the same for write and exists — the file functions are files.read etc.
+```
+
+`formats` is this phase's own headline name: SPEC.md and README.md stopped writing
+it in rounds 1 and 2, and the completer went on offering it — which is worse than a
+document, because a document is read and a completion is *accepted*. `parse_json`
+and `to_json` are that same name flat-spelled; `read`, `write` and `exists` are
+real functions that live under `files.` and answer to nothing on their own. And
+the list was short five modules that work — `bytes`, `csv`, `json`, `sys`,
+`time` — so `json` and `csv` completed to nothing at all while `json.parse` is
+the first call of the code block SPEC.md opens its JSON section with
+(`SPEC.md:1220`).
+
+Both sides of that, measured rather than argued — the pre-round-11 table restored
+from the commit, then the fixed one, each answering the same six prefixes:
+
+```
+prefix        before                                after
+json          []                                    ["json"]
+csv           []                                    ["csv"]
+time          ["times"]        (the keyword)        ["time", "times"]
+j             ["join"]         (a builtin)          ["join", "json"]
+formats       ["formats"]      (a name with no       []
+                              meaning in the
+                              language)
+read          ["read"]         (Unknown function)    []
+parse_json    ["parse_json"]   (Unknown function)    []
+```
+
+`time` is the one worth reading twice: the keyword `times` was the *only* thing
+offered, so a user who typed `time` and pressed Tab got `times` back and would
+have accepted it.
+
+**The fix is the one this file already had a precedent for**, in the same struct:
+`commands: commands::ReplCommand::bare_names()` reads the REPL's command words
+from the parser's table, because a hand-kept copy of those had drifted too
+(`edge_the_command_vocabulary_is_the_parsers_own_table`,
+`src/repl/completer.rs:326`). `builtins:` now reads its module half from
+`stdlib::MODULES` — the table `src/analyzer.rs:591` asks for a bare receiver — and
+its flat half holds only names `stdlib::BUILTIN_NAMES` and `stdlib::GLOBAL_CONSTANTS`
+hold. Nothing else about completion changes: the same words are offered for the
+same prefixes, and the six that were dropped were names a program could never
+call.
+
+**Both new tests were watched failing first, and both mutations were watched failing
+afterwards.** Reinstating `formats` (with `parse_json` and `read`) in the table:
+
+```
+$ cargo test --lib repl::completer::tests::edge_the_repl_offers_no_builtin
+test repl::completer::tests::edge_the_repl_offers_no_builtin_a_program_cannot_call ... FAILED
+formats is offered as a builtin, so it has to be one a program can name: …
+test result: FAILED. 0 passed; 1 failed
+$ cargo test --test repl_module_completion_test
+test edge_no_name_the_repl_offers_is_one_a_program_cannot_call ... FAILED
+formats is not a name Redblue has, so it is not offered: ["formats"]
+test result: FAILED. 1 passed; 1 failed
+```
+
+and dropping one module from what is offered, which is the other direction:
+
+```
+test edge_every_module_the_language_has_is_offered ... FAILED
+time is a module, so a user typing it is offered it: ["times"]
+test edge_every_module_the_language_accepts_is_offered_by_the_repl ... FAILED
+time is a module a program can write, so typing it is completed: ["times"]
+```
+
+`src/repl/completer.rs` was restored from a copy taken before each mutation and is
+byte-identical to the fixed file.
+
+**What round 11 did not fix, on purpose.** The `keywords:` table in the same struct
+has drifted the same way — it offers `ask`, `new`, `async`, `done` and `when`,
+none of which start anything, and does not offer `constant`, `might`, `fail`,
+`as`, `test` or `expect`, all six of which are in `lexer::KEYWORDS`. That is a
+question about statements rather than about module names, so it is FINDINGS.md §16
+with the full list and the two wrinkles a fixing phase has to decide (`give back`
+is two keywords; `by` is read positionally and is not in `lexer::KEYWORDS`).
+Nothing was changed there.
+
 ## Gates
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, exit 0, no warnings |
-| `cargo test --all-targets` | **1463 passed, 0 failed, 0 ignored** across 54 result lines |
-| `cargo test --all-targets -- --list \| grep -c ": test$"` | 1463 — the same total, counted without running anything |
+| `cargo test --all-targets` | **1467 passed, 0 failed, 0 ignored** across 55 result lines |
+| `cargo test --all-targets -- --list \| grep -c ": test$"` | 1467 — the same total, counted without running anything |
 | `rb run` over `examples/*.rb` and `modules/*.rb` | 9 files, 0 failures |
 | `rbops/verify.sh phase-050` | **not run** — there is no `rbops/` directory in this checkout (`ls: cannot access 'rbops': No such file or directory`), and the run instructions forbid spending a tool call on the pipeline that lives elsewhere. Recorded as FINDINGS.md §7, as phase-049 did. Nothing is claimed about it. |
+
+**Round 11 re-measured the whole table rather than carrying it forward**, since
+round 10's finding was a table whose numbers had not been re-read. 1463 + 4 is
+1467: the two unit tests in `src/repl/completer.rs` and the two in
+`tests/repl_module_completion_test.rs`, over one more result line — 53 test
+binaries plus the library and the `rb` binary, which is what
+`cargo test --all-targets` runs. Both numbers come from the run above, measured
+once running and once from `--list`.
 
 **The 1435 and 53 this table used to carry were wrong, and round 10 found it.** See
 "Round 10 — a report that did not match its own gate" below: the figure was 28
@@ -731,7 +866,8 @@ is 22 of it.
 
 `git status` is clean after the full run apart from this phase's own files — no
 program left a file at the repository root. Round 10 re-ran all nine
-`examples/`/`modules/` files and re-checked that.
+`examples/`/`modules/` files and re-checked that; round 11 did the same and added
+the twenty programs it wrote under `target/tmp/`, which is ignored.
 
 ## Invariants touched
 
@@ -823,6 +959,16 @@ program left a file at the repository root. Round 10 re-ran all nine
   document, and `git status` carries the two files it touched and nothing else.
   The two mutations it ran were undone from copies taken before the edit, and
   `src/bytecode/vm.rs` is byte-identical to `HEAD`.
+- **Round 11 changes what the REPL offers and nothing a `.rb` program can do.** No
+  line of the lexer, parser, analyzer, interpreter or either VM changed, so the
+  language's answers are identical before and after — `stdlib::MODULES`,
+  `BUILTIN_NAMES`, `GLOBAL_CONSTANTS` and the registry are untouched. What changed
+  is a suggestion: `formats`, `parse_json`, `to_json`, `read`, `write` and `exists`
+  are no longer offered by tab-completion (a program naming any of them was already
+  refused, and still is), and `bytes`, `csv`, `json`, `sys` and `time` are now
+  offered, all five of which answered before this round and still do. Nothing that
+  used to complete stopped completing except six names that could only ever produce
+  `Unknown variable` or `Unknown function`.
 
 ## Test-requirement matrix
 
@@ -839,9 +985,10 @@ program left a file at the repository root. Round 10 re-ran all nine
 | duplicate_missing_keys | N/A — no record key handling changed; no module takes a record |
 | malformed_input | covered — `bytes.text([0, 255])` is bytes in range that are not UTF-8, refused by name; `time.unix("")` is not a date and is refused; a bare `nosuchmodule` receiver is refused in the spelling the program wrote; and round 8 added the document-side half — a `name.member(` a document writes on a receiver that is no module at all is read back out of the document, so a promise no program can keep is a failing gate rather than a reader's lost afternoon |
 | unknown_member | covered (round 5; widened in round 6; **the other side of the predicate in round 7**) — every `module.member` pair of 11 modules and 64 short names that **neither document writes** is refused by its dotted spelling in both engines: 646 pairs, including `console.input`, `math.random`, `json.uppercase` (each of which SPEC.md denies), `json.read`, `text.get` and `files.parse` (the short suffixes the old qualified-name walk never asked about), and `list.filter` (round 6). A name the parser reserves (`bytes.expect`) does not parse at all, which is asserted rather than skipped, and the three counters are asserted to add up to the size of the matrix. Round 7 added the **receiver** half: every `<name>_<member>` in the registry whose `<name>` is not a module — 14 pairs, a source neither the table nor the documents can skew — is refused in both engines, with the four `random` pairs named and the flat spellings behind the prefix asserted to still answer. It also walks all 11 stdlib module names as a program-declared `module … end`, which is the collision the matrix could not see |
-| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges. Rounds 4, 5, 6 and 7 add none, and round 8's gate runs three one-line programs with a four-line preamble |
+| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges. Rounds 4, 5, 6 and 7 add none, round 8's gate runs three one-line programs with a four-line preamble, and round 11 adds a table walk over at most 69 names — no I/O, no thread, no clock |
 | process_control | N/A — nothing signals or exits; `network` is the only module that starts anything, and its transport is a loopback listener owned by the test |
 | engine_parity | covered — `edge_every_spelling_the_spec_promises_for_map_answers` walks **both** engines and `edge_a_higher_order_call_answers_the_same_way_on_both_engines` (`tests/differential_test.rs`) compares the two **outcomes** for eleven cases, so a fix that made the bytecode VM agree by refusing what the tree-walker answers fails the gate rather than passing one that ran a subset. This row was `partly N/A` in round 8 and is not any more: round 9 closed the defect round 8 recorded at FINDINGS.md §15 instead of enshrining it. `map([1, 2, 3], f)` with `f` a named `to` function was `map was called with arguments it cannot use` on the bytecode VM, because the shared resolver claimed the name before the engine could; the VM now answers `map`/`list_map` itself before the resolver (`src/bytecode/vm.rs`, `call_named`), carries the map on the frame that started it (`start_map`/`advance_map`), and answers a literal receiver in `call_method`. The one limitation §15 still records is real and still open: the bytecode compiler refuses a closure *expression* (`set f to to (x) … end`), so the gates use a **named** declaration, which both engines compile. Nothing is skipped and no gate was narrowed to reach this |
+| stale_suggestion (round 11) | covered — the new row for what this round changed. Two directions, both asserted: a module the language has and nothing offered (`bytes`, `csv`, `json`, `sys`, `time`), and a name offered that nothing answers (`formats`, `parse_json`, `to_json`, `read`, `write`, `exists` — each of which is *also* run and refused, so the two tables are checked against each other and not against a copy). Round 11 leaves one drift standing deliberately and records it: the completer's **keyword** table, which offers `ask`/`new`/`async`/`done`/`when` and omits `constant`/`might`/`fail`/`as`/`test`/`expect` → FINDINGS.md §16 |
 
 ## Known gaps / follow-ups
 
@@ -899,3 +1046,19 @@ program left a file at the repository root. Round 10 re-ran all nine
   report that is enforced from `src/stdlib.rs` rather than written twice. The two
   engines had drifted onto two different halves of it, and the drift was the
   BLOCKER → FINDINGS.md §12.
+- **The completer's keyword table has drifted the same way its builtin table had**,
+  and round 11 deliberately left it: it offers `ask`, `new`, `async`, `done` and
+  `when`, none of which start anything, and does not offer `constant`, `might`,
+  `fail`, `as`, `test` or `expect`, all six of which are in `lexer::KEYWORDS`. It
+  is a statement vocabulary rather than a module name, so it belongs to another
+  phase; the full list, the fix and the two decisions it needs (`give back` is two
+  keywords, `by` is read positionally) are written down with the evidence →
+  FINDINGS.md §16.
+- The completer offers 25 flat names — 23 of the 69 in `stdlib::BUILTIN_NAMES`,
+  plus the two globals `PI` and `E` — so a name like `starts_with` or `replace`
+  completes to nothing even though it answers. Round 11 fixed both directions of
+  the module list and left the flat half hand-kept on purpose: offering all 69 is a
+  decision about how much a completion list should contain, not a reconciliation,
+  and the gate added here says which way it errs — **never offer a name that
+  cannot be called**, never guarantee to offer one that can. The same applies to
+  `filter` and `reduce`, which are offered and answer nothing today (§4).

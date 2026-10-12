@@ -1,5 +1,20 @@
 use super::commands;
 
+/// The module names a program can write as a receiver of a dotted call, read
+/// from the one table the analyzer reads them from.
+///
+/// A module is the only vocabulary the completer offers that the language
+/// *decides*: `json.parse` is a name or it is `Unknown variable 'json'`, and the
+/// REPL should not be the place a user finds out. [`crate::stdlib::MODULES`] is
+/// that decision, and [`crate::analyzer`] asks it, so a name added there is
+/// completed here without a second list to remember to change.
+fn module_names() -> Vec<String> {
+    crate::stdlib::MODULES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
 pub struct ReplCompleter {
     keywords: Vec<String>,
     builtins: Vec<String>,
@@ -60,45 +75,41 @@ impl ReplCompleter {
                 "parallel".to_string(),
                 "done".to_string(),
             ],
-            builtins: vec![
-                "math".to_string(),
-                "text".to_string(),
-                "files".to_string(),
-                "network".to_string(),
-                "formats".to_string(),
-                "list".to_string(),
-                "console".to_string(),
-                "PI".to_string(),
-                "E".to_string(),
-                "abs".to_string(),
-                "floor".to_string(),
-                "ceil".to_string(),
-                "round".to_string(),
-                "sqrt".to_string(),
-                "pow".to_string(),
-                "sin".to_string(),
-                "cos".to_string(),
-                "tan".to_string(),
-                "length".to_string(),
-                "push".to_string(),
-                "pop".to_string(),
-                "map".to_string(),
-                "filter".to_string(),
-                "reduce".to_string(),
-                "random".to_string(),
-                "random_seed".to_string(),
-                "uppercase".to_string(),
-                "lowercase".to_string(),
-                "trim".to_string(),
-                "split".to_string(),
-                "join".to_string(),
-                "contains".to_string(),
-                "read".to_string(),
-                "write".to_string(),
-                "exists".to_string(),
-                "parse_json".to_string(),
-                "to_json".to_string(),
-            ],
+            // The module names are the language's table, read rather than
+            // written out again — the same reason `commands` below is
+            // `ReplCommand`'s own list. The hand-kept copy had drifted both ways:
+            // it offered `formats`, which no program can name, and did not offer
+            // five modules that answer — `bytes`, `csv`, `json`, `sys`, `time`.
+            builtins: module_names()
+                .into_iter()
+                .chain(vec![
+                    "PI".to_string(),
+                    "E".to_string(),
+                    "abs".to_string(),
+                    "floor".to_string(),
+                    "ceil".to_string(),
+                    "round".to_string(),
+                    "sqrt".to_string(),
+                    "pow".to_string(),
+                    "sin".to_string(),
+                    "cos".to_string(),
+                    "tan".to_string(),
+                    "length".to_string(),
+                    "push".to_string(),
+                    "pop".to_string(),
+                    "map".to_string(),
+                    "filter".to_string(),
+                    "reduce".to_string(),
+                    "random".to_string(),
+                    "random_seed".to_string(),
+                    "uppercase".to_string(),
+                    "lowercase".to_string(),
+                    "trim".to_string(),
+                    "split".to_string(),
+                    "join".to_string(),
+                    "contains".to_string(),
+                ])
+                .collect(),
             // The REPL's own command words, read from the table the parser
             // accepts them in rather than written out again. A hand-kept list
             // here is the second table: it held the sixteen canonical names
@@ -427,6 +438,54 @@ mod tests {
                 );
                 seen.push(word);
             }
+        }
+    }
+
+    /// The module names are the language's own table, and every one of them is
+    /// offered.
+    ///
+    /// The completer kept its own list beside it, and it had drifted both ways: it
+    /// offered `formats` — a name that has never been a module, which the analyzer
+    /// refuses as `Unknown variable 'formats'` — and did not offer five modules
+    /// that are in [`crate::stdlib::MODULES`] and do answer: `bytes`, `csv`,
+    /// `json`, `sys` and `time`. The list is read from `MODULES` for the same
+    /// reason the command list is read from [`commands::ReplCommand`]: a table
+    /// written out again is a second answer to a question that already has one.
+    #[test]
+    fn edge_every_module_the_language_has_is_offered() {
+        let completer = ReplCompleter::new();
+
+        for module in crate::stdlib::MODULES {
+            let offered = completer.complete(module);
+            assert!(
+                offered.contains(&(*module).to_string()),
+                "{module} is a module, so a user typing it is offered it: {offered:?}"
+            );
+        }
+    }
+
+    /// Every builtin the completer offers is a name a program can actually name:
+    /// a module, a registered builtin or a global constant.
+    ///
+    /// Tab-completion is the one place the language *invites* a name rather than
+    /// waiting to be asked, so a name here is a promise — and this table held six
+    /// it could not keep. `formats` is the one this phase is about (SPEC.md and
+    /// README.md both stopped naming it in rounds 1 and 2; the completer still
+    /// offered it), and `parse_json`, `to_json`, `read`, `write` and `exists` are
+    /// the same fiction flat-spelled: each answers `Unknown function`, because
+    /// JSON is `json.parse` and the file functions are `files.read`.
+    #[test]
+    fn edge_the_repl_offers_no_builtin_a_program_cannot_call() {
+        let completer = ReplCompleter::new();
+
+        for name in &completer.builtins {
+            assert!(
+                crate::stdlib::is_module(name)
+                    || crate::stdlib::is_builtin(name)
+                    || crate::stdlib::is_global(name),
+                "{name} is offered as a builtin, so it has to be one a program can name: \
+                 it is not a module, not a registered builtin, and not a global"
+            );
         }
     }
 

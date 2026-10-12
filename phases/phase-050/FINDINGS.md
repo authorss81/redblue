@@ -519,3 +519,53 @@ run:
 The round-8 trade ("a gate that asserts a known defect is a gate that will stop
 passing once the defect is fixed") is why this is now a defect that is fixed
 rather than a gate that is narrow.
+
+## 16. The completer's **keyword** table has drifted the same way its builtin table had — found in round 11, not fixed here
+
+Round 11 fixed the builtin half of `src/repl/completer.rs` (the module names and
+the six unanswerable entries). The `keywords:` table six lines above it is the
+same kind of hand-kept copy and has drifted the same way, so it is recorded here
+rather than fixed: it is a question about statements, not about module names, and
+AGENTS.md §1.7 does not let this phase answer it.
+
+Evidence, measured against `lexer::KEYWORDS` (`src/lexer.rs:23`) — the table the
+lexer actually lexes from:
+
+| Direction | Words |
+|---|---|
+| offered by the completer, **not** a keyword (`src/repl/completer.rs:27-77`) | `are`, `when`, `by`, `ask`, `new`, `async`, `wait`, `parallel`, `done` (and the two-token `give back`) |
+| a keyword the completer does **not** offer | `constant`, `give`, `back`, `might`, `fail`, `as`, `test`, `expect` |
+
+Four of the nine offered words start nothing:
+
+```
+$ rb run one-word.rb          # say when
+Error: AnalyzerError: Unknown variable 'when'; did you mean 'then'?
+$ rb run one-word.rb          # say new      → Unknown variable 'new'
+$ rb run one-word.rb          # say async    → Unknown variable 'async'
+$ rb run one-word.rb          # say done     → Unknown variable 'done'
+$ rb run one-word.rb          # say ask      → Unknown variable 'ask'; did you mean 'as'?
+```
+
+So a user who types `as` and presses Tab is offered `ask`, and one who types
+`ne` is offered `new`. That is the same defect the builtin table had, on the
+other half of the same struct.
+
+Two things a fixing phase has to decide, which is why the obvious "read
+`lexer::KEYWORDS`" is not the whole answer:
+
+- `give back` is **two** keywords (`give`, `back`) and the completer deliberately
+  offers it whole — `edge_completion_ignores_the_case_of_the_prefix`'s neighbour
+  `complete_matches_a_keyword` pins that as "a multi-word keyword is offered
+  whole". A table read from `KEYWORDS` has to join that pair rather than offer
+  `give` and `back` separately.
+- `by` is **not** in `KEYWORDS` because the parser reads it positionally
+  (`src/parser.rs:943`). Whether it belongs in a keyword table at all is a
+  decision about the grammar, not about a list.
+
+The one-line shape the builtin table already demonstrates is at
+`src/repl/completer.rs:11`: read the vocabulary from the table that decides it, and
+put a gate beside it that fails when the two drift apart
+(`edge_the_command_vocabulary_is_the_parsers_own_table`, `src/repl/completer.rs:326`).
+Round 11's `edge_the_repl_offers_no_builtin_a_program_cannot_call` is the same
+gate for the builtin half.
