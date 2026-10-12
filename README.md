@@ -187,6 +187,13 @@ files.lines(path)    // Read as list of lines
 files.delete(path)
 ```
 
+### Bytes
+```
+bytes.from_text(text)   // Text to a list of byte values (0 to 255)
+bytes.text(bytes)       // A byte list back to text
+bytes.write(path, bytes) // Write a byte list to a file
+```
+
 ### Time
 ```
 time.now()             // Get current timestamp
@@ -195,13 +202,18 @@ time.format(timestamp, "format")
 time.unix("YYYY-MM-DD HH:MM:SS")
 ```
 
+### Sys
+```
+sys.argv()             // Arguments after the program path (empty outside `rb run`)
+```
+
 ### Network
 ```
 network.get(url)     // HTTP GET
 network.post(url, body)
 ```
 
-### Formats
+### JSON and CSV
 ```
 json.parse(text)     // Parse JSON to record
 json.stringify(value)
@@ -222,6 +234,23 @@ log(x), exp(x)
 uppercase("text"), lowercase("text"), trim("text")
 split("text", by), join(list, by)
 contains("text", sub)
+length("text")                 // bytes, not characters: length("héllo") is 6
+```
+
+### Console
+```
+say "Hello"                      // print with a newline
+print "Hello"                    // print without one
+console.log("Hello")             // `say` under its module spelling
+console.error("Could not read")  // diagnostics go to stderr
+console.clear()                  // clear the screen
+set name to input("Your name? ")  // read one line from the terminal
+```
+
+### List
+```
+list.map(xs, to (x) give back x * 2)  // every member, through a function
+length(xs), push(xs, x)               // flat list builtins
 ```
 
 ## Project Structure

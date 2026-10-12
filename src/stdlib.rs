@@ -20,9 +20,133 @@ pub const MODULES: &[&str] = &[
     "bytes", "console", "csv", "files", "json", "list", "math", "network", "sys", "text", "time",
 ];
 
+/// The modules whose functions are the flat builtins of the same name rather
+/// than a `<module>_<function>` entry in the registry: `text.uppercase` is
+/// `uppercase`, and `math.sqrt` is `sqrt`.
+///
+/// A module listed here is *expected* to have no `<module>_<function>` builtin
+/// behind it. Every other name in [`MODULES`] is expected to have one, which is
+/// what [`modules_without_functions`] checks.
+pub const ALIAS_MODULES: &[&str] = &["math", "text"];
+
+/// Every function each module exposes, as the caller spells it.
+///
+/// This is what makes [`members_without_functions`] a per-member check rather
+/// than a per-module one. The check it replaced asked whether *any* builtin
+/// started with `<module>_`, which one stub answers for the whole module:
+/// `list_map` made `list` look complete while `list.filter` and `list.reduce`
+/// reached builtins that are registered and refuse every call, and dropping
+/// `filter` from the registry entirely would have left the gate green. A member
+/// is named here, so removing one is a line that has to be removed here too, and
+/// a member that resolves to nothing is one name rather than a whole namespace.
+///
+/// Every module in [`MODULES`] appears exactly once, including the two in
+/// [`ALIAS_MODULES`]: their members are flat builtins, and spelling them
+/// `<module>.<member>` is how a program reaches them.
+pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
+    ("bytes", &["from_text", "text", "write"]),
+    ("console", &["log", "error", "clear"]),
+    ("csv", &["parse"]),
+    (
+        "files",
+        &[
+            "read", "write", "append", "exists", "lines", "delete", "copy", "rename",
+        ],
+    ),
+    ("json", &["parse", "stringify"]),
+    // `filter` and `reduce` are registered as flat builtins, so `list.filter`
+    // resolves to `filter` — which is registered and answers nothing. Being
+    // resolvable is what this table checks; whether a member *answers* is
+    // `tests/stdlib_module_docs_test.rs`, which runs a program per name.
+    ("list", &["map", "filter", "reduce"]),
+    (
+        "math",
+        &[
+            "abs", "floor", "ceil", "round", "sqrt", "pow", "sin", "cos", "tan", "log", "exp",
+        ],
+    ),
+    ("network", &["get", "post"]),
+    ("sys", &["argv"]),
+    (
+        "text",
+        &[
+            "uppercase",
+            "lowercase",
+            "trim",
+            "split",
+            "join",
+            "contains",
+            "starts_with",
+            "ends_with",
+            "replace",
+        ],
+    ),
+    ("time", &["now", "sleep", "format", "unix"]),
+];
+
+/// Whether the `module.member` spelling reaches a builtin.
+///
+/// Two ways, and which one applies is not a choice the caller makes. A
+/// `<module>_<member>` entry in the registry is already the right name — that is
+/// the internal encoding `files.read` is stored under — so it answers as itself.
+/// Anything else is resolved through [`module_member_name`], which is how the
+/// two [`ALIAS_MODULES`] (`text.uppercase` is `uppercase`) and how `list.filter`
+/// reaches the flat `filter` reach their builtin at all.
+pub fn member_resolves(module: &str, member: &str) -> bool {
+    let qualified = format!("{module}_{member}");
+    BUILTIN_NAMES.contains(&qualified.as_str())
+        || module_member_name(&qualified).is_some_and(|name| BUILTIN_NAMES.contains(&name))
+}
+
+/// The `module.member` pairs in [`MODULE_MEMBERS`] that reach no builtin.
+///
+/// A name in that position is a spelling the analyzer accepts — the receiver is
+/// a module — and the runtime then refuses, which is worse than either error
+/// alone because the program passes analysis and dies on its first call.
+/// Should always be empty.
+pub fn members_without_functions() -> Vec<String> {
+    MODULE_MEMBERS
+        .iter()
+        .flat_map(|(module, members)| {
+            members
+                .iter()
+                .filter(|member| !member_resolves(module, member))
+                .map(move |member| format!("{module}.{member}"))
+        })
+        .collect()
+}
+
 /// Whether `name` is one of the [`MODULES`].
 pub fn is_module(name: &str) -> bool {
     MODULES.contains(&name)
+}
+
+/// The names in [`MODULES`] with no function behind them and no entry in
+/// [`ALIAS_MODULES`] to explain why.
+///
+/// A name in that position is a namespace the analyzer accepts as the receiver
+/// of a dotted call and the runtime then refuses — a worse failure than either
+/// error alone, because the program passes analysis and dies on its first call.
+/// Should always be empty.
+///
+/// Derived from [`MODULE_MEMBERS`] rather than from a prefix scan over the
+/// registry, so it and [`members_without_functions`] cannot disagree about what
+/// a module has behind it.
+pub fn modules_without_functions() -> Vec<&'static str> {
+    MODULES
+        .iter()
+        .copied()
+        .filter(|name| !ALIAS_MODULES.contains(name))
+        .filter(|name| {
+            MODULE_MEMBERS
+                .iter()
+                .find(|(module, _)| module == name)
+                .is_some_and(|(_, members)| {
+                    !members.is_empty()
+                        && members.iter().all(|member| !member_resolves(name, member))
+                })
+        })
+        .collect()
 }
 
 pub fn builtins() -> HashMap<String, Value> {
@@ -246,6 +370,18 @@ pub fn builtins() -> HashMap<String, Value> {
         Value::Builtin("sys_argv".to_string()),
     );
 
+    // Input. `runtime::builtin` has answered `input` since phase-028, and it
+    // answered it *reachably*: a callee written with parentheses is resolved at
+    // run time and never asked of the analyzer, so `input("n")` read stdin while
+    // this table did not hold the name — which is how SPEC.md came to say the
+    // language reads nothing from the program it is running in, and how
+    // `edge_no_registered_builtin_is_unreachable_from_a_program` could not see
+    // it. Registering it makes the registry and the language one set.
+    //
+    // `ask` is deliberately not registered: it is a freed keyword, and
+    // `tests/keyword_reservation_test.rs` holds it as an ordinary identifier.
+    globals.insert("input".to_string(), Value::Builtin("input".to_string()));
+
     globals
 }
 
@@ -422,7 +558,16 @@ pub fn builtin_function(name: &str, args: Vec<Value>) -> Option<Value> {
         "is_record" => Some(Value::YesNo(matches!(args.first()?, Value::Record(_)))),
 
         "length" => match args.first()? {
-            Value::Text(s) => Some(Value::Number(s.chars().count() as f64)),
+            // Bytes, which is what `runtime::builtin` answers and what the
+            // language has always answered: `tests/test_text.rb` names the
+            // contract in six tests and `corpus/unicode-0001..0008` record it.
+            // This arm used to count characters, which is how two
+            // implementations of one function disagreed by a factor of two to
+            // four for every text outside ASCII — and only the other one was
+            // reachable, so no test could see it. `runtime::builtin` handles
+            // `length` first and answers before this is consulted; the two must
+            // say the same thing on the day that stops being true.
+            Value::Text(s) => Some(Value::Number(s.len() as f64)),
             Value::List(items) => Some(Value::Number(items.len() as f64)),
             _ => None,
         },
@@ -621,6 +766,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "bytes_write",
     "bytes_text",
     "sys_argv",
+    "input",
 ];
 
 impl Value {

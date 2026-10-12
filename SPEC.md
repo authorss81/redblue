@@ -997,10 +997,38 @@ end
 ### console
 
 ```redblue
-say "Hello"           // Print with newline
-print "Hello"         // Print without newline
-ask "Your name?"      // Get user input
+say "Hello"                      // print with a newline
+print "Hello"                    // print without one
+console.log("Hello")             // `say` under its module spelling
+console.error("Could not read")  // diagnostics go to stderr
+console.clear()                  // clear the screen
+set name to input("Your name? ")  // read one line from the terminal
 ```
+
+`say` and `print` are keywords rather than module functions, so there is no
+`console.say` and no `console.print`: a module has the functions that are spelled
+`<module>_<member>` in the registry, and those two are not. `console.log` is the
+module spelling of `say` and answers `nothing`, so `say console.log("x")` prints
+`x` and then `nothing`. `console.error` writes to stderr rather than stdout, so a
+program that collects its output can keep its diagnostics separate from it.
+`console.clear` writes the terminal's clear sequence to stdout and answers
+`nothing`; on a stream that is not a terminal the sequence is still written.
+
+`input` is the whole of the language's input: it writes its first argument as a
+prompt, reads one line from the terminal, and answers that line as text with the
+line terminator removed — `"abc"` from `abc\n` and from `abc` alike, since a pipe
+whose last line has no newline is still a line. At the end of the input it
+answers the empty text rather than refusing, so a program that runs out of input
+sees an empty answer instead of an error. The prompt is optional:
+`input()` reads a line and asks nothing. It is a registered builtin rather than a
+module function, so there is no `console.input` — the same rule as for `say` and
+`print` — and it takes parentheses like any other call.
+
+There is no `ask`. It was a reserved word with no rule in the parser to read it,
+which is how this section came to name it, and it is an ordinary identifier
+again — `set ask to 1` is a program. Both spellings are refused: `ask("n")` is
+`Unknown function 'ask'`, and `ask "n"` — which is not a call at all, because a
+function is only called with parentheses — is `Unknown variable 'ask'`.
 
 ### text
 
@@ -1010,6 +1038,14 @@ set lower to text.lowercase("HELLO")  // "hello"
 set parts to text.split("a,b,c", by ",")  // ["a", "b", "c"]
 set joined to text.join(["a", "b", "c"], by ",")  // "a,b,c"
 ```
+
+`length` counts **bytes**, which is what a text is made of: `length("héllo")` is
+6 and `length("世界")` is 6, not 2. The same number is spelled as a list by
+`length(bytes.from_text("héllo"))`, so a program that wants the byte values
+rather than the count asks § bytes below for them. `tests/test_text.rb` pins this
+in six tests and `corpus/unicode-0001..0008` record it, including the case the
+rule exists for: `é` — an `e` and a combining acute accent — is one glyph, three
+bytes and a length of 3.
 
 ### math
 
@@ -1096,6 +1132,56 @@ set rows to csv.parse("name,age\nAlice,30")
 
 There is no `formats` module. JSON and CSV are their own modules, spelled
 `json.*` and `csv.*`.
+
+### bytes
+
+```redblue
+set data to bytes.from_text("Hi")        // [72, 105] — a byte list
+set back to bytes.text(data)             // "Hi"
+bytes.write("out.bin", data)             // write a byte list to a file
+```
+
+A byte is the whole number 0 to 255. `files.write` writes the UTF-8 encoding of
+a text, so `bytes` is how a program writes a byte it cannot spell — which a
+compiler writing a bytecode file cannot avoid. A value that is not a byte, or a
+byte list that is not valid UTF-8, is a refusal naming the byte rather than a
+wrapped value or a replacement character three files later.
+
+### sys
+
+```redblue
+for each argument in sys.argv()
+    say argument
+end
+```
+
+`sys.argv()` is the list of arguments after the program path, and it is empty
+for a program run from the REPL or from a test, because only `rb run` collects
+them.
+
+### time
+
+```redblue
+set stamp to time.now()                  // a record: seconds, nanoseconds
+time.sleep(0.5)                          // pause for half a second
+say time.format(1704067200, "%Y-%m-%d")  // "2024-01-01"
+say time.unix("2024-01-01 00:00:00")     // 1704067200
+```
+
+`time.now()` is a record of `seconds` and `nanoseconds` since
+1970-01-01T00:00:00Z, and `time.sleep` answers `nothing` once the pause is over.
+`time.format` takes a number of seconds since the same instant and a format
+string; with no format string it writes `%Y-%m-%d %H:%M:%S`. `time.unix` is the
+other direction: it takes `YYYY-MM-DD HH:MM:SS` and answers the seconds since
+the same instant, read as UTC whichever time zone the machine is in, so the
+answer is the same on the machine that wrote the text and on one that reads it.
+
+`time.sleep` is the one call in this section that blocks — the other three are
+computed and returned immediately, so `time.format` and `time.unix` cost no wall
+time whatever the clock says. A program that wants a timer rather than a pause
+has to read the clock itself — `time.now()` twice and `time.sleep` between them.
+The calls that block besides `time.sleep` are `network.get` and `network.post`,
+which wait for a response.
 
 ---
 
