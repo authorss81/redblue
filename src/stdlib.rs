@@ -82,10 +82,12 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
     //
     // `length` is here for the same reason `map` is: it is a flat builtin with a
     // dotted spelling, and `tests/text_split_join_test.rs` pins `list.length`
-    // against `length` for both. It answers a list, a text and a record alike, so
-    // it is named by the two modules whose members it is a member of — see the
-    // same name under `text`. Both documents write the spelling, which is what
-    // `tests/stdlib_module_names_test.rs` checks in both directions.
+    // against `length` for both. It answers a list and a text — and refuses a
+    // record, as `runtime::builtin` has always done and as SPEC.md § text now
+    // writes down — so it is named by the two modules whose members it is a
+    // member of: see the same name under `text`. Both documents write the
+    // spelling, which is what `tests/stdlib_module_names_test.rs` checks in
+    // both directions.
     ("list", &["map", "length"]),
     (
         "math",

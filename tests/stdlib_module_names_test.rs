@@ -472,12 +472,18 @@ const PROXY_ENV: &[&str] = &[
     "no_proxy",
 ];
 
+/// What running a program answers: exit success, what it printed, what it said.
+type Ran = (bool, String, String);
+
+/// Runs `source` under `tag`, on one engine, and answers [`Ran`].
+type Run = fn(&str, &str) -> Ran;
+
 /// Runs `source` under `tag` and returns `(exit success, stdout, stderr)`.
 ///
 /// Stdin is closed rather than inherited. A program that calls `input` reads
 /// end-of-input immediately and answers the empty text instead of blocking a test
 /// suite on a terminal nobody is sitting at.
-fn run_named(tag: &str, source: &str) -> (bool, String, String) {
+fn run_named(tag: &str, source: &str) -> Ran {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/p50names");
     std::fs::create_dir_all(&dir).expect("scratch directory");
     let file = dir.join(format!("{tag}.rb"));
@@ -500,8 +506,77 @@ fn run_named(tag: &str, source: &str) -> (bool, String, String) {
     )
 }
 
+/// Runs `source` under `tag` through `rb compile` and then `rb vm`.
+///
+/// The second engine, run as the two processes the CLI runs it rather than as
+/// the in-process pair `tests/common/vm.rs` compares. A document claim that is
+/// true on `rb run` and false on `rb compile` + `rb vm` is false, and the only
+/// way this file can see that is to ask both — `map(xs, f)` was `RuntimeError:
+/// map was called with arguments it cannot use` here while the tree-walker
+/// answered `[2, 4, 6]`, and a gate that only ever ran `rb run` called a
+/// specification sentence true on the strength of the engine it happened to use.
+///
+/// A compiler that refuses the source is a failure of the same program, so it
+/// is returned as one: `(false, "", <the compiler's message>)`, which is what
+/// makes "the two engines answer the same thing" a claim about compilation as
+/// well as about running.
+fn run_bytecode_named(tag: &str, source: &str) -> Ran {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/p50names");
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    let file = dir.join(format!("{tag}.rb"));
+    let chunk = dir.join(format!("{tag}.rbc"));
+    std::fs::write(&file, source).expect("the program is written");
+
+    let mut compile_command = Command::new(env!("CARGO_BIN_EXE_rb"));
+    compile_command
+        .arg("compile")
+        .arg(&file)
+        .arg("-o")
+        .arg(&chunk)
+        .stdin(std::process::Stdio::null());
+    for name in PROXY_ENV {
+        compile_command.env_remove(name);
+    }
+    let compiled = compile_command.output().expect("rb compiles");
+    if !compiled.status.success() {
+        return (
+            false,
+            String::from_utf8_lossy(&compiled.stdout).into_owned(),
+            String::from_utf8_lossy(&compiled.stderr).into_owned(),
+        );
+    }
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rb"));
+    command
+        .arg("vm")
+        .arg(&chunk)
+        .stdin(std::process::Stdio::null());
+    for name in PROXY_ENV {
+        command.env_remove(name);
+    }
+    let out = command.output().expect("rb runs the chunk");
+
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The two engines a documented spelling has to answer on, and the runner each
+/// one is asked through.
+///
+/// A pair rather than a list of engines to skip: a gate that runs a document on
+/// one engine says nothing about the other, which is how `list.map`'s three
+/// spellings could be specified and green while the bytecode VM refused all
+/// three.
+const ENGINES: &[(&str, Run)] = &[
+    ("rb run", run_named),
+    ("rb compile + rb vm", run_bytecode_named),
+];
+
 /// Runs `source` under `tag` with `typed` on its standard input.
-fn run_with_stdin(tag: &str, source: &str, typed: &str) -> (bool, String, String) {
+fn run_with_stdin(tag: &str, source: &str, typed: &str) -> Ran {
     use std::io::Write;
     use std::process::Stdio;
 
@@ -2170,6 +2245,378 @@ fn edge_length_answers_a_text_or_a_list_and_refuses_a_record() {
         text_section.contains(refusal),
         "SPEC.md § text does not say that a record is refused as `{refusal}`, which is what \
          every spelling above does, so a reader is left to believe it answers one:\n\
-          {text_section}"
+         {text_section}"
     );
+}
+
+/// Every dotted call a document writes on a receiver that is **not** a module is
+/// either an answer, or is written down as a refusal.
+///
+/// The other gates in this file each own one universe, and a receiver that is
+/// neither belongs to neither:
+///
+/// - [`edge_a_module_does_not_answer_a_function_the_documents_say_it_does_not_have`]
+///   walks `stdlib::MODULES` × short member names;
+/// - [`edge_a_registered_builtin_is_not_a_module_namespace`] walks the prefixes
+///   the builtin registry itself spells as `<name>_<member>`;
+/// - [`the_text_and_math_examples_answer_what_the_spec_claims`] runs the code
+///   blocks, and a call written only in prose is not in a code block.
+///
+/// `xs` is in none of them. SPEC.md § list promised `xs.map(f)` in a sentence —
+/// "it works in all three spellings: `map(xs, f)`, `list.map(xs, f)` and
+/// `xs.map(f)`" — and no gate read that sentence, so a call no program can make
+/// sat in the specification with the whole suite green. It is
+/// `RuntimeError: Module 'xs' has no function 'map'` in both engines: a dotted
+/// call resolves its receiver against modules and objects, and a list held in a
+/// variable is a value.
+///
+/// So the property is stated over the *documents* rather than over a table: a
+/// `name.member(` on a bare identifier that no module claims either answers or
+/// is documented as refused. A third outcome — a call that does not answer and is
+/// not written down as refused — is the defect this phase exists for, and it is
+/// what a reader copies into a file.
+///
+/// The probe is the **document's own call**, not a guess at one. It used to be
+/// `say {spelling}(1)`, which cannot answer for the very spelling that brought
+/// this gate into being: `xs` is bound by nothing, so the program died in the
+/// analyzer before it reached the runtime, and `map` given `1` is refused even
+/// with a list. The *answered* branch was therefore unreachable for every
+/// receiver the documents write, and the gate could only ever pass on the
+/// *written down* one — a gate with one working arm is a gate that cannot fail
+/// on the half of the claim that matters most.
+///
+/// So the call is read out of the document with its arguments, and the names it
+/// mentions are bound before it: the receiver to a list and each argument to a
+/// declared function. That binding is derived from the document rather than
+/// listed in the test, which is FINDINGS §10's rule — a gate's list has to come
+/// from somewhere the gate is not auditing, and here the list would be exactly
+/// the set of receivers the gate does not run.
+#[test]
+fn edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused() {
+    let mut asked: Vec<(&str, String, String)> = Vec::new();
+    for document in ["SPEC.md", "README.md"] {
+        let section = standard_library_section(&read_doc(document));
+        for heading in subheadings(&section) {
+            let body = section_under(&section, &heading);
+            for (receiver, member) in called_dotted_receivers(&body) {
+                if stdlib::is_module(&receiver) {
+                    continue;
+                }
+                asked.push((document, heading.clone(), format!("{receiver}.{member}")));
+            }
+        }
+    }
+    assert!(
+        !asked.is_empty(),
+        "no document writes a dotted call on a receiver that is not a module, so this gate \
+         would pass on any tree. It has to keep at least one such name to ask about."
+    );
+
+    for (document, heading, spelling) in &asked {
+        let body = section_under(&standard_library_section(&read_doc(document)), heading);
+        let call = documented_call(&body, spelling);
+        let program = format!("{}say {call}\n", preamble_for(&call));
+        let refusals = documented_refusals(&body, spelling);
+
+        for (engine, run) in ENGINES {
+            let (ok, _, stderr) = run("dotted_receiver", &program);
+            if ok {
+                continue;
+            }
+            assert!(
+                !refusals.is_empty(),
+                "{document} {heading} writes `{call}`, which {engine} does not answer and \
+                 does not say it is refused — so a reader who copies it gets an error instead \
+                 of the answer the document promised. Either keep it if it answers, or write \
+                 the refusal down:\n{body}\n--- the program it would be\n{program}\
+                 --- stderr\n{stderr}"
+            );
+            assert!(
+                refusals.iter().any(|message| stderr.contains(message)),
+                "{document} {heading} writes `{call}` as refused, and the message it names is \
+                 not what {engine} refuses it with — so a reader who copies the sentence is \
+                 told to expect a message they will not see:\n{body}\
+                 --- the program it would be\n{program}--- stderr\n{stderr}"
+            );
+        }
+    }
+}
+
+/// The call a document writes for `spelling`, with its arguments.
+///
+/// The document's own spelling, backticked or not, so the arity and the argument
+/// names are the ones a reader copies rather than ones this file invented.
+/// `xs.map(f)` rather than `xs.map(1)`: the first is what § list writes and the
+/// second is a call no reader would make, so a probe built from it says nothing
+/// about the spelling the gate exists for. `format!("{spelling}(1)")` is the
+/// fallback, so a spelling the document writes without an argument list is still
+/// probed rather than skipped.
+fn documented_call(body: &str, spelling: &str) -> String {
+    let mut from = 0;
+    while let Some(at) = body[from..].find(spelling) {
+        let start = from + at;
+        let after = start + spelling.len();
+        if let Some(call) = call_from(body, start, after) {
+            return call;
+        }
+        from = after;
+    }
+    format!("{spelling}(1)")
+}
+
+/// The whole of the call that opens with `(` at `arguments` in `body`, up to the
+/// parenthesis that closes it.
+///
+/// Counted rather than cut at the first `)`, so a call written with a nested one
+/// — `xs.map(pick(xs, 1))` — is taken whole instead of losing its tail.
+fn call_from(body: &str, start: usize, arguments: usize) -> Option<String> {
+    if !body[arguments..].starts_with('(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (offset, c) in body[arguments..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(body[start..arguments + offset + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The bindings a probe of `call` needs, for the names `call` itself mentions.
+///
+/// The receiver is bound to a list and each argument to a declared function —
+/// the two shapes a `name.member(…)` a document writes in prose has: a list to
+/// take a method of, and something to apply. `to f(x) … end` rather than
+/// `set f to to (x) … end` because the bytecode compiler refuses a function
+/// literal, and a probe that cannot be compiled answers for one engine only.
+fn preamble_for(call: &str) -> String {
+    let (head, arguments) = call.split_once('(').unwrap_or((call, ""));
+    let receiver = head.split('.').next().unwrap_or(head).trim();
+    let mut preamble = String::new();
+    let mut bound = BTreeSet::new();
+    if !receiver.is_empty()
+        && receiver
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        bound.insert(receiver.to_string());
+        preamble.push_str(&format!("set {receiver} to [1, 2, 3]\n"));
+    }
+    for argument in arguments
+        .trim_end_matches(')')
+        .split(',')
+        .map(str::trim)
+        .filter(|name| {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    {
+        if !bound.insert(argument.to_string()) {
+            continue;
+        }
+        preamble.push_str(&format!("to {argument}(x)\n    give back x * 2\nend\n"));
+    }
+    preamble
+}
+
+/// The refusals a document writes down for `spelling`, if it writes any.
+///
+/// Empty unless a line names the spelling and says it is refused. What comes
+/// back is the backticked text in the window around that line which reads as a
+/// message rather than as a name — the text a reader copies out of the
+/// sentence, which is the part that has to be the message the program produces.
+/// A word like "refused" next to a call is not a documented refusal, it is
+/// prose, and neither is the name of a module member mentioned in the same
+/// breath: `… is refused as `Module 'x' has no function 'y'` — the same refusal
+/// `list.filter` gives` carries three backticked runs and only the first is the
+/// message, so the other two are dropped by asking for text with a space in it.
+///
+/// The window is the naming line and the two after it, because a document
+/// wraps: SPEC.md writes `is refused as` on one line and the message on the
+/// next. Every candidate is returned rather than the first, because a caller
+/// matches them against what the program actually said.
+fn documented_refusals(body: &str, spelling: &str) -> Vec<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let Some(index) = lines
+        .iter()
+        .position(|line| line.contains(spelling) && mentions_a_refusal(line))
+    else {
+        return Vec::new();
+    };
+    lines[index..(index + 3).min(lines.len())]
+        .iter()
+        .flat_map(|line| backticked_runs(line))
+        .filter(|run| !run.contains('(') && run.contains(' '))
+        .map(|run| run.trim().to_string())
+        .collect()
+}
+
+/// Whether `line` says a call is refused rather than merely mentioning it.
+///
+/// The same three words the gate has always read, so a document that spells a
+/// refusal as "no function" or "not implemented" still counts as one.
+fn mentions_a_refusal(line: &str) -> bool {
+    ["refuse", "no function", "not implemented"]
+        .iter()
+        .any(|word| line.contains(word))
+}
+
+/// The backticked runs of `line`, in the order they appear.
+fn backticked_runs(line: &str) -> Vec<&str> {
+    let mut runs = Vec::new();
+    let mut parts = line.split('`');
+    let mut inside = false;
+    for part in parts.by_ref() {
+        if inside {
+            runs.push(part);
+        }
+        inside = !inside;
+    }
+    runs
+}
+
+/// The spellings SPEC.md § list enumerates for `map`, extracted from the sentence
+/// that enumerates them and run on **both** engines.
+///
+/// `map` is the only higher-order builtin and § list is the one place a section
+/// makes an enumerated prose promise rather than leaving the reader to find the
+/// spellings in a code block — which is exactly why `the_text_and_math_examples_answer_what_the_spec_claims`
+/// could not catch it. A section that says "three spellings" and then lists them
+/// in a sentence has made a testable claim, so it gets a test: the list is read
+/// out of the document, so a fourth spelling written into that sentence is run
+/// too, and the sentence is found by what it contains rather than by a line
+/// number, so moving it in SPEC.md moves the gate with it.
+///
+/// The three it names are `map(xs, f)`, `list.map(xs, f)` and a **literal**
+/// receiver. A variable is not a spelling — see
+/// [`edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused`],
+/// which is what keeps `xs.map(f)` out of this sentence.
+///
+/// Both engines, because one is not enough and saying so in a doc comment is not
+/// a substitute. Before this round the gate ran `rb run` only, and wrote down
+/// here that the bytecode VM refused every one of these three spellings — so
+/// SPEC.md § list promised a sentence that was true on one of the two engines and
+/// the suite was green. That is the same trade FINDINGS §4 records being
+/// withdrawn for `time`: a claim a document makes about the language, checked
+/// against a subset of the language and recorded as correct.
+///
+/// `xs` and `f` are the two names the section's own spelling list uses, so the
+/// program carrying the sentence's spelling and nothing else is the program a
+/// reader writes. The function is a *named* declaration rather than a `to (x) …
+/// end` literal because the bytecode compiler refuses a literal outright, and a
+/// gate for this sentence has to reach both engines.
+#[test]
+fn edge_every_spelling_the_spec_promises_for_map_answers() {
+    let section = section_under(&read_doc("SPEC.md"), "### list");
+    assert!(
+        !section.trim().is_empty(),
+        "SPEC.md has no § list, so the spellings it promises for `map` cannot be read"
+    );
+
+    // The enumerating sentence is the one that carries `map(xs, f)`: that is the
+    // spelling which cannot be written as a bare receiver, so it is the one a
+    // section saying "three spellings" cannot leave out.
+    let promise = section
+        .lines()
+        .find(|line| line.contains("`map(xs, f)`"))
+        .unwrap_or_else(|| {
+            panic!(
+                "SPEC.md § list no longer enumerates the spellings `map` answers, so the \
+                 promise cannot be read back. The claim a reader copies lives here:\n{section}"
+            )
+        });
+    let spellings = backticked_calls(promise);
+    assert!(
+        !spellings.is_empty(),
+        "the sentence enumerating the spellings of `map` names none that can be run: {promise}"
+    );
+
+    let preamble = "set xs to [1, 2, 3]\nto f(x)\n    give back x * 2\nend\n";
+    for (engine, run) in ENGINES {
+        for spelling in &spellings {
+            let program = format!("{preamble}say {spelling}\n");
+
+            let (ok, stdout, stderr) = run("map_spelling", &program);
+            assert!(
+                ok,
+                "SPEC.md § list promises `{spelling}` and {engine} refused it:\n{program}\
+                 --- stderr\n{stderr}"
+            );
+            assert_eq!(
+                stdout.trim_end(),
+                "[2, 4, 6]",
+                "SPEC.md § list promises `{spelling}` and {engine} answered something \
+                 else:\n{program}--- stderr\n{stderr}"
+            );
+        }
+    }
+}
+
+/// The `### ` headings inside a `## Standard Library` section.
+fn subheadings(section: &str) -> Vec<String> {
+    section
+        .lines()
+        .filter(|line| line.starts_with("### "))
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
+/// The `(receiver, member)` of every `name.member(` `text` writes.
+///
+/// The `(` is what makes it a call, and it is the whole filter. `config.rb`,
+/// `out.bin` and `api.example.com` are a path, a file and a host, and an
+/// identifier in this language cannot contain a `.` — so a scan without it reads
+/// every dotted thing a document mentions as a receiver, which is how
+/// [`dotted_calls`] earns its name and this earns a stricter one.
+///
+/// A chain of three or more names (`a.b.c(`) is dropped for the same reason: it is
+/// a host or a path, not a receiver and a member.
+fn called_dotted_receivers(text: &str) -> BTreeSet<(String, String)> {
+    let is_chain_part = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
+
+    let mut names = BTreeSet::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_alphabetic() && chars[i] != '_' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && is_chain_part(chars[i]) {
+            i += 1;
+        }
+        let chain: String = chars[start..i].iter().collect();
+        if chain.matches('.').count() != 1 || chars.get(i) != Some(&'(') {
+            continue;
+        }
+        if let Some((receiver, member)) = chain.split_once('.') {
+            names.insert((receiver.to_string(), member.to_string()));
+        }
+    }
+    names
+}
+
+/// The backticked tokens of `line` that read as a call — one that opens and one
+/// that closes.
+///
+/// Not a parse: a redblue call in prose is written by hand and this only has to
+/// tell `map(xs, f)` — which a reader can copy — from `map`, which is a name.
+fn backticked_calls(line: &str) -> Vec<String> {
+    let mut calls = Vec::new();
+    let mut parts = line.split('`');
+    let mut inside = false;
+    for part in parts.by_ref() {
+        if inside && part.contains('(') && part.ends_with(')') {
+            calls.push(part.to_string());
+        }
+        inside = !inside;
+    }
+    calls
 }

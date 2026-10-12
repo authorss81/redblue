@@ -2007,7 +2007,9 @@ impl Vm {
     }
 
     /// `map(list, function)` — the higher-order builtin, in the three spellings
-    /// `SPEC.md` uses: `map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`.
+    /// `SPEC.md` uses: `map(xs, f)`, `list.map(xs, f)` and `[1, 2, 3].map(f)`.
+    /// The third takes its receiver literally, so `xs.map(f)` is not one of them
+    /// and is refused as `Module 'xs' has no function 'map'`.
     ///
     /// It lives here rather than in `runtime::builtin` because applying a
     /// Redblue function needs this walker's captured scopes and its call-depth
@@ -2026,11 +2028,18 @@ impl Vm {
     }
 
     /// Applies `function` to every element of `items`, in order.
+    ///
+    /// The call is reported under `function.name` rather than under a fixed
+    /// "anonymous function", so a limit reached inside a `map` of a *named* `to`
+    /// function names that function — which is what the bytecode VM says, and
+    /// what a reader needs to be told. A function *literal* carries
+    /// [`ANONYMOUS_FUNCTION`] as its name already, so it says the same thing
+    /// either way.
     fn apply_map(&mut self, items: &[Value], function: &FunctionValue) -> Result<Value> {
         let mut mapped = Vec::with_capacity(items.len());
         for item in items {
             mapped.push(self.call_user_function(
-                ANONYMOUS_FUNCTION,
+                &function.name,
                 function,
                 std::slice::from_ref(item),
             )?);

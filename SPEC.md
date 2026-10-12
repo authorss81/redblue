@@ -1145,9 +1145,15 @@ implemented, so neither is a member of `list`: `list.filter(xs, f)` is
 above. A builtin that cannot answer is not a module member — the alternative is a
 spelling the analyzer accepts and the runtime can only refuse.
 
-`list.map` is the only higher-order builtin, and it works in all three spellings:
-`map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`. `list.length` is `length` under
-its module spelling, as § text writes it for a text.
+`list.map` is the only higher-order builtin, and it works in three spellings:
+`map(xs, f)`, `list.map(xs, f)` and `[1, 2, 3].map(f)`. `list.length` is `length`
+under its module spelling, as § text writes it for a text.
+
+The third spelling takes its receiver **literally**. A dotted call resolves its
+receiver against modules and objects, and a list held in a variable is a value
+rather than either of those, so `xs.map(f)` is refused as
+`Module 'xs' has no function 'map'` — the same refusal `list.filter` gives above.
+A list written out in full is the only one a `.` can be put in front of.
 
 ### network
 

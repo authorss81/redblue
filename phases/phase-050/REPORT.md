@@ -56,6 +56,15 @@ What *did* reproduce, and was still true on `main`:
 | `src/interpreter.rs`, `src/bytecode/vm.rs` | +30 −25 | Round 7: both `call_method`s call it, and `is_module_name` is replaced by `is_declared_module` — the program's own modules, asked apart from [`stdlib::MODULES`]. |
 | `tests/stdlib_module_names_test.rs` | +283 | Round 7: three gates — the registry's non-module prefixes are not namespaces, a program-declared module owns its own name, and `length` answers a text or a list and says so in the document. |
 | `SPEC.md` | +5 −2 | Round 7: § text's `length` sentence corrected — it answered a text and a list, not a record, which four other layers already said. |
+| `SPEC.md` | +9 −3 | Round 8: § list's third spelling of `map` is `[1, 2, 3].map(f)`, not `xs.map(f)` — a variable receiver is a value, not a module — and the refusal is written down rather than left as a promise no gate read. |
+| `src/stdlib.rs` | +6 −6 | Round 8: the `length` comment above `MODULE_MEMBERS`' `list` row still claimed a record was answered — the same false sentence round 7 took out of SPEC.md, left in the one file a reader opens. |
+| `tests/stdlib_module_names_test.rs` | +233 | Round 8: two gates — a dotted receiver that is no module answers or is written down as refused, and every spelling SPEC.md enumerates for `map` is run. Three helpers, one of which keys on the `(` so a path and a host are not read as a receiver. |
+| `phases/phase-050/FINDINGS.md` | +51 −27 | Round 8: §14 split into the half this phase owns (the document) and the half it does not (making `xs.map(f)` answer), and §15 added for the engine-parity defect the new gate found on the way — the bytecode VM refuses a higher-order call the tree-walker answers. |
+| `src/bytecode/vm.rs` | +158 | **Round 9, the behaviour fix**: `Frame::pending_map` and `PendingMap`; `start_map`/`advance_map` carry a `map` on the frame that started it; `call_named` answers `map`/`list_map` **before** the shared resolver; `call_method` answers the one expression receiver the language has, `[1, 2, 3].map(f)`; `discard_frames_above`/`unwind_frame` give a map up when its frame is taken away. Turns `map was called with arguments it cannot use` into `[2, 4, 6]` on the bytecode VM. See round 9 below. |
+| `src/interpreter.rs` | +9 −1 | Round 9: `apply_map` reports a call failure under `function.name` rather than a fixed "anonymous function", so a depth limit reached inside a `map` of a *named* function names that function — which is what the bytecode VM says, and what makes the two engines' messages comparable. A function *literal* already carries `ANONYMOUS_FUNCTION`, so it says the same thing either way. Plus the doc comment at `map_builtin`, corrected to name `[1, 2, 3].map(f)` rather than the `xs.map(f)` round 8 removed from SPEC.md. |
+| `src/bytecode/codegen.rs`, `src/bytecode/opcode.rs` | +8 −4 | Round 9: comments only. Both said a bare method name was "the one shape the language rejects"; a list literal receiver is now answered, so they say a bare name says the receiver was not a name at all and point at the runtime that answers it. |
+| `tests/differential_test.rs` | +130 | Round 9: `edge_a_higher_order_call_answers_the_same_way_on_both_engines` — eleven cases asked on **both** engines, comparing the two outcomes rather than asking whether each succeeded. This is the gate that makes the fix unfalsifiable-by-refusal. |
+| `tests/stdlib_module_names_test.rs` | +220 (round 9) | Round 9: `edge_every_spelling_the_spec_promises_for_map_answers` now walks `ENGINES` instead of `rb run` alone — the gate round 8 wrote on one engine, widened once the defect it named was fixed. The rest of round 9's additions are the `xs` receiver case and the closure-expression note in the doc comment. |
 
 Round 2, round 3, round 4 and round 5 moved every one of the round-1
 `SPEC.md`/`README.md` line numbers; those below are the current ones.
@@ -144,10 +153,13 @@ is withdrawn (FINDINGS.md §4).
 
 ## Tests added
 
-All in `tests/stdlib_module_names_test.rs` — 20 `#[test]` functions, 18 named
+All in `tests/stdlib_module_names_test.rs` — 22 `#[test]` functions, 20 named
 `edge_*`. (The previous round's table listed 9; the five it omitted are rows 4,
 5, 8, 10 and the round-4 row 13, and are restored here. Round 5 adds rows 15
-and 16, and round 7 adds rows 17 to 19.)
+and 16, round 7 adds rows 17 to 19, and round 8 adds rows 20 and 21. Round 9
+widened row 21 from one engine to two rather than adding a test here — its new
+parity gate lives in `tests/differential_test.rs` and is listed under Round 9
+below.)
 
 | # | Test | Edge class covered |
 |---|---|---|
@@ -170,6 +182,8 @@ and 16, and round 7 adds rows 17 to 19.)
 | 17 | `edge_a_registered_builtin_is_not_a_module_namespace` | **the receiver**, which row 15 never asked about — every `<name>_<member>` in the registry whose `<name>` is not a module (14 pairs, from the registry rather than from the table) is refused in both engines, the four live `random` pairs named, and the flat spellings behind each prefix asserted to still answer so the gate cannot be satisfied by deleting the builtin |
 | 18 | `edge_a_module_the_program_declares_owns_its_own_name` | all 11 stdlib module names as a program-declared `module … end` — the member it publishes answers in both engines, the member it does not have is still refused by the dotted name, and the collision with the stdlib's table is decided the way an object already decides it |
 | 19 | `edge_length_answers_a_text_or_a_list_and_refuses_a_record` | the drift a prose sentence can hide — all three spellings of `length` against a text, a list and a record, **and** § text read out of SPEC.md to assert it now says the refusal rather than claiming the record |
+| 20 | `edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused` | the receiver that is neither an object nor a module nor a registry prefix — every `name.member(` a document writes on a bare identifier no module claims either answers or is **written down as refused** in SPEC.md. `api.example.com` is the keying case: the scan requires the `(` that makes a dotted thing a call, and a chain of three names is dropped |
+| 21 | `edge_every_spelling_the_spec_promises_for_map_answers` | an enumerated **prose** promise rather than a code block — the sentence in § list that enumerates the spellings of `map` is found by what it contains, the backticked runs are read out of it, and each is run and expected to print `[2, 4, 6]`. **Both** engines since round 9 (row 21 as written in round 8 walked `rb run` alone; see FINDINGS §15) |
 
 The failing-test-first sequence, with the real output:
 
@@ -427,24 +441,185 @@ hi ada
 exit=0
 ```
 
+### Round 8 — the resumed run
+
+The four gates were run **before** anything was changed. `cargo fmt --all -- --check`
+was clean, `cargo clippy --all-targets -- -D warnings` exited 0, and `cargo test
+--all-targets` reported 1433 passed / 0 failed across the same 53 result lines
+round 7 recorded. `rbops/verify.sh` still does not exist in this checkout. So the
+previous round's *green* claims held; what was left was the question of whether
+they were **complete**, and one answer was no.
+
+The hole is the third kind of dotted receiver. Round 7 added the registry's
+prefixes to the set of things a gate refuses, and round 5–6 bounded the ones that
+are modules, and the code-block runner runs what is inside a code block — which
+leaves a bare identifier that is **neither**: a name in no module, in no registry
+prefix, written into SPEC.md § list's prose.
+
+```
+$ rb run target/tmp/p50res/m1.rb   # set xs to [1, 2, 3] / say xs.map(to (x) give back x * 2 end)
+Error: RuntimeError: Module 'xs' has no function 'map'
+```
+
+and SPEC.md:1148 said, in a sentence and not in a code block: "`list.map` is the
+only higher-order builtin, and it works in all three spellings: `map(xs, f)`,
+`list.map(xs, f)` and `xs.map(f)`." A reader copies the third and gets a runtime
+error. FINDINGS §14 had recorded it as out of scope; the resumed run is the same
+hand that wrote it, and the phase prompt settles half of it directly — *"or
+SPEC.md is corrected to the names the code uses and the correction is named in
+REPORT.md"* — so the document half was taken here and the semantics half left for
+a promotion.
+
+Two gates, one general and one specific, and the general one is the one that stops
+this coming back:
+
+| Test | What it holds |
+|---|---|
+| `edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused` | Every `name.member(` that SPEC.md or README.md writes on a bare identifier no module claims either **answers** or is **written down as refused**. This is the receiver the other three universes never asked about. |
+| `edge_every_spelling_the_spec_promises_for_map_answers` | The enumerating sentence in § list is read **out of the document** and every spelling in it is run through `rb run`, expected `3` doubled. A fourth spelling written into that sentence is run rather than believed. |
+
+Plus three helpers (`subheadings`, `called_dotted_receivers`, `backticked_calls`)
+and one comment correction in `src/stdlib.rs`.
+
+`called_dotted_receivers` keys on the `(`. That is the whole filter and it is
+load-bearing: § Standard Library writes `config.rb`, `out.bin`, `copy.rb`,
+`moved.rb`, `data.rb`, `log.rb`, `output.rb`, `test_text.rb`, `README.md` and
+`api.example.com`, and an identifier in this language cannot contain a `.` — so a
+scan without it reads every dotted thing a document mentions as a receiver. A
+chain of three or more names is dropped for the same reason. `api.example.com` was
+the mutation that proved it: it is the only dotted thing in the two documents
+that is neither a module, a path with a known extension, nor a call, and before
+the `(` was required it was `api.example` — a receiver.
+
+#### Round 8's failing-test-first sequence
+
+Both tests were written and run against the tree **before** the SPEC.md sentence
+was touched. Both failed, for the reason they name:
+
+```
+$ cargo test --test stdlib_module_names_test edge_
+test edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused ... FAILED
+test edge_every_spelling_the_spec_promises_for_map_answers ... FAILED
+
+panicked at tests/stdlib_module_names_test.rs:2233:
+SPEC.md ### list writes `xs.map`, which does not answer and does not say it is refused —
+so a reader who copies it gets an error instead of the answer the document promised.
+panicked at tests/stdlib_module_names_test.rs:2304:
+SPEC.md § list promises `xs.map(f)` and `rb run` refused it:
+```
+
+After the sentence was corrected, both pass — and two further mutations were
+introduced into the finished tree to show the gates are not vacuous. Each was
+reverted; neither is in the diff:
+
+| Reintroduced | Test | Real output |
+|---|---|---|
+| `xs.reverse()` added to § list's prose with no refusal written down | `edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused` | FAILED — ``SPEC.md ### list writes `xs.reverse`, which does not answer and does not say it is refused`` |
+| `xs.each(f)` added to the enumerating sentence as a fourth spelling | `edge_every_spelling_the_spec_promises_for_map_answers` | FAILED — `SPEC.md § list promises `xs.each(f)` and `rb run` refused it:` |
+
+The first is the gate's own property on a name it has never seen; the second is
+the gate's own extraction on a sentence that has grown. Neither depends on `xs.map`
+being in the document.
+
+#### Round 8 also corrected a comment that round 7 left contradicting itself
+
+Round 7 corrected SPEC.md's claim that `length` answers a record. The comment
+above `MODULE_MEMBERS`' `list` row in `src/stdlib.rs` was not corrected with it and
+still said `length` "answers a list, a text and a record alike" — the same false
+sentence, in the one file a reader opens to find out what the language has. It now
+says what `runtime::builtin` has always done: it answers a list and a text, and
+refuses a record.
+
+### Round 9 — the engine-parity defect round 8 recorded, fixed
+
+Round 8 found §15 and ran its gate on one engine rather than two. That was the
+right trade *for round 8* — a gate that asserts a known defect is a gate that
+stops passing once the defect is fixed — but it left the defect open, and round
+9's review was right to name it: a phase that ends with a green gate and an open
+defect it documented has not reconciled anything, it has described something.
+
+So the defect was fixed rather than the gate narrowed.
+
+```
+$ rb run n4.rb                     # to f(x) give back x * 2 end, then the three spellings
+[2, 4, 6]
+[2, 4, 6]
+[2, 4, 6]
+$ rb compile n4.rb -o n4.rbc && rb vm n4.rbc   # round 8: map was called with arguments it cannot use
+[2, 4, 6]
+[2, 4, 6]
+[2, 4, 6]
+```
+
+The fix was smaller than §15 guessed. FINDINGS wrote the cause as a
+value-representation mismatch — the VM putting something other than a
+`Value::Function` on the stack — and it is not: the VM did put a function there.
+The resolver simply got asked first, and `map` is a registered builtin whose
+`runtime::builtin` arm cannot *call* a Redblue function, so it claimed the name
+and refused it as one it cannot use. `src/interpreter.rs` already excluded those
+two names ahead of its own resolver call; `src/bytecode/vm.rs` now does the same,
+in `call_named` and in `call_method` for a literal receiver.
+
+The part that was not optional is where the map is carried. The obvious
+implementation drives each element with a nested `Self::drive`, which costs one
+**host** stack frame per nesting level: a `map` inside the function it calls would
+overflow the thread — a crash, not a diagnostic — on a program the tree-walker
+runs fine, and at a depth far below `MAX_CALL_DEPTH`. So the map lives on the
+frame that started it (`Frame::pending_map`), each element is one ordinary
+`call_function` that charges and releases the depth exactly as a call a program
+writes does, and `advance_map` hands the next element its turn when the previous
+one returns. That is why `a map of a map` is one of the differential gate's
+cases and why it is asked on both engines: it is the case that would crash rather
+than disagree.
+
+Two gates hold it, and neither can be satisfied by making the engines agree the
+wrong way:
+
+| Test | What it holds |
+|---|---|
+| `edge_a_higher_order_call_answers_the_same_way_on_both_engines` (`tests/differential_test.rs`) | Eleven cases on both engines, comparing the two **outcomes**. A VM that agreed by *refusing* what the tree-walker answers fails here, which is the failure mode round 8's one-engine gate could not have seen — it never asked. Covers the three spellings, a captured binding, output written from inside a mapped function, a map of a map, an empty list that never calls the function, and failures under `might fail` and `catch`. |
+| `edge_every_spelling_the_spec_promises_for_map_answers` (`tests/stdlib_module_names_test.rs`) | The spellings read **out of** SPEC.md § list, now walked through `ENGINES` rather than `rb run`. A fourth spelling written into that sentence is still run rather than believed, now on both engines. |
+
+The one thing §15 still holds is that a closure **expression** (`set f to to (x) …
+end`) does not compile for the bytecode VM at all:
+
+```
+$ rb compile n2.rb -o n2.rbc
+ParserError: `to (x) ... end` as an expression is not compiled yet; run programs that use one with `rb run`
+```
+
+That is a compiler gap rather than a runtime one, so it is recorded and left for
+a bytecode phase. It is not a skip: every gate above uses a **named** declaration
+(`to f(x) … end`), which both engines compile, and the doc comment on
+`edge_every_spelling_the_spec_promises_for_map_answers` says why, so a reader who
+wonders why the gates do not use a lambda is told rather than left guessing.
+
+Nothing was weakened to get here: `ENGINES` gained no skip, no test was deleted,
+nothing was `#[ignore]`d, and no lint was allowed. The one gate that changed is
+the same gate widened from one engine to two.
+
 ## Gates
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, exit 0, no warnings |
-| `cargo test --all-targets` | **1433 passed, 0 failed, 0 ignored** across 53 result lines |
+| `cargo test --all-targets` | **1435 passed, 0 failed, 0 ignored** across 53 result lines |
 | `rb run` over `examples/*.rb` and `modules/*.rb` | 9 files, 0 failures |
 | `rbops/verify.sh phase-050` | **not run** — there is no `rbops/` directory in this checkout (`ls: cannot access 'rbops': No such file or directory`), and the run instructions forbid spending a tool call on the pipeline that lives elsewhere. Recorded as FINDINGS.md §7, as phase-049 did. Nothing is claimed about it. |
 
-1433 is the 1430 the previous round recorded plus the three gates round 7 added;
-`tests/stdlib_module_names_test.rs` is 20. The count per file is otherwise the
-one the previous round recorded: the same 53 result lines,
-`tests/text_split_join_test.rs` still 20, `tests/stdlib_modules_test.rs` still 39,
-and `tests/stdlib_module_docs_test.rs` still 10.
+1435 is the 1433 round 7 recorded plus round 8's two gates;
+`tests/stdlib_module_names_test.rs` is 22. The count per file is otherwise
+unchanged: the same 53 result lines, `tests/text_split_join_test.rs` still 20,
+`tests/stdlib_modules_test.rs` still 39, and `tests/stdlib_module_docs_test.rs`
+still 10.
 
-`git status` is clean after the full run — no program left a file at the
-repository root, which was round 4's last open item.
+The three runnable gates were also run **before** any change was made, on the tree
+round 7 left: `fmt` clean, `clippy` exit 0, `cargo test --all-targets` 1433 passed
+/ 0 failed. The previous round's green claims held.
+
+`git status` is clean after the full run apart from this phase's own three files —
+no program left a file at the repository root.
 
 ## Invariants touched
 
@@ -493,6 +668,44 @@ repository root, which was round 4's last open item.
   - `MODULE_MEMBERS`, `MODULES`, `ALIAS_MODULES`, `BUILTIN_NAMES` and the registry
     are unchanged in round 7. Only the rule that reads them moved, and it moved
     into `stdlib::dotted_call_reaches`, which both engines call.
+- **Round 8 changed no behaviour at all.** As of round 8 itself no line of
+  `src/interpreter.rs`, `src/bytecode/vm.rs` or `src/runtime.rs` was touched;
+  `src/stdlib.rs` gained a comment correction and nothing else. What round 8
+  removed was a **promise**: § list no longer says `xs.map(f)` answers, and it now
+  says which spelling does — `[1, 2, 3].map(f)`, a literal receiver, which is what
+  the interpreter had always done. The refusal itself was unchanged from round 7
+  (`Module 'xs' has no function 'map'`) and was written down in the document that
+  used to deny it. A program that copies § list today runs; a program that copied
+  it yesterday died on the third line.
+- **Round 9 changes the bytecode VM's answer, and it is the second round in nine to
+  put one back.** `map([1, 2, 3], f)` and `list.map([1, 2, 3], f)`, with `f` a
+  named `to` function, were `RuntimeError: map was called with arguments it cannot
+  use` / `list_map was called with arguments it cannot use` on the bytecode VM and
+  are now `[2, 4, 6]`, matching the tree-walker. The tree-walker's answers are
+  unchanged, and the three names round 8 established still hold: a variable
+  receiver (`xs.map(f)`) is refused in both engines as `Module 'xs' has no
+  function 'map'`, and so is every other expression receiver on the bytecode VM.
+  - The cause was ordering, not representation: the VM asked the shared resolver
+    before it could answer the call itself, and the resolver claims `map` as a
+    registered builtin it cannot apply. The tree-walker already excluded those two
+    names ahead of its own resolver call and the VM now does the same, in
+    `call_named` and in `call_method` for a literal receiver.
+  - **The call-depth budget is part of the fix, not a detail of it.** The map is
+    carried on the frame that started it (`Frame::pending_map`, `start_map`,
+    `advance_map`) rather than by nested `drive` runs, so each element is one
+    ordinary `call_function` that charges and releases the depth. A `map` nesting
+    inside the function it calls therefore reaches `MAX_CALL_DEPTH` as a
+    `Limit` error on both engines, instead of putting one Rust stack frame on the
+    host per level and overflowing the thread on a program the tree-walker runs.
+    `edge_a_higher_order_call_answers_the_same_way_on_both_engines` carries that
+    case (`a map of a map`) on both engines precisely because it is the one that
+    would crash rather than disagree.
+  - A frame that is taken away from under a running map (`break`, `try`,
+    `might fail`) gives the map up with itself, in `discard_frames_above` and in
+    `unwind_frame` — otherwise the guarded expression would be handed one element
+    of a list instead of the failure the program asked to catch. The gate carries
+    both directions (`a guard takes a failure raised inside an element`, and the
+    mapped function writing to the program's output).
 
 ## Test-requirement matrix
 
@@ -507,10 +720,11 @@ repository root, which was round 4's last open item.
 | unicode | covered — `bytes.from_text("é")` is `[195, 169]` and back; `length("héllo")` is 6 in both arms |
 | nesting_recursion | N/A — no new nesting or recursion; the documents' only higher-order builtin (`list.map`) is covered by the too-many-arguments case |
 | duplicate_missing_keys | N/A — no record key handling changed; no module takes a record |
-| malformed_input | covered — `bytes.text([0, 255])` is bytes in range that are not UTF-8, refused by name; `time.unix("")` is not a date and is refused; a bare `nosuchmodule` receiver is refused in the spelling the program wrote |
+| malformed_input | covered — `bytes.text([0, 255])` is bytes in range that are not UTF-8, refused by name; `time.unix("")` is not a date and is refused; a bare `nosuchmodule` receiver is refused in the spelling the program wrote; and round 8 added the document-side half — a `name.member(` a document writes on a receiver that is no module at all is read back out of the document, so a promise no program can keep is a failing gate rather than a reader's lost afternoon |
 | unknown_member | covered (round 5; widened in round 6; **the other side of the predicate in round 7**) — every `module.member` pair of 11 modules and 64 short names that **neither document writes** is refused by its dotted spelling in both engines: 646 pairs, including `console.input`, `math.random`, `json.uppercase` (each of which SPEC.md denies), `json.read`, `text.get` and `files.parse` (the short suffixes the old qualified-name walk never asked about), and `list.filter` (round 6). A name the parser reserves (`bytes.expect`) does not parse at all, which is asserted rather than skipped, and the three counters are asserted to add up to the size of the matrix. Round 7 added the **receiver** half: every `<name>_<member>` in the registry whose `<name>` is not a module — 14 pairs, a source neither the table nor the documents can skew — is refused in both engines, with the four `random` pairs named and the flat spellings behind the prefix asserted to still answer. It also walks all 11 stdlib module names as a program-declared `module … end`, which is the collision the matrix could not see |
-| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges. Rounds 4, 5, 6 and 7 add none |
+| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges. Rounds 4, 5, 6 and 7 add none, and round 8's gate runs three one-line programs with a four-line preamble |
 | process_control | N/A — nothing signals or exits; `network` is the only module that starts anything, and its transport is a loopback listener owned by the test |
+| engine_parity | covered — `edge_every_spelling_the_spec_promises_for_map_answers` walks **both** engines and `edge_a_higher_order_call_answers_the_same_way_on_both_engines` (`tests/differential_test.rs`) compares the two **outcomes** for eleven cases, so a fix that made the bytecode VM agree by refusing what the tree-walker answers fails the gate rather than passing one that ran a subset. This row was `partly N/A` in round 8 and is not any more: round 9 closed the defect round 8 recorded at FINDINGS.md §15 instead of enshrining it. `map([1, 2, 3], f)` with `f` a named `to` function was `map was called with arguments it cannot use` on the bytecode VM, because the shared resolver claimed the name before the engine could; the VM now answers `map`/`list_map` itself before the resolver (`src/bytecode/vm.rs`, `call_named`), carries the map on the frame that started it (`start_map`/`advance_map`), and answers a literal receiver in `call_method`. The one limitation §15 still records is real and still open: the bytecode compiler refuses a closure *expression* (`set f to to (x) … end`), so the gates use a **named** declaration, which both engines compile. Nothing is skipped and no gate was narrowed to reach this |
 
 ## Known gaps / follow-ups
 
@@ -547,11 +761,23 @@ repository root, which was round 4's last open item.
   `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` pins catchability
   in one test and the error's wording in another: the second property is not
   reachable from inside the program. → FINDINGS.md §8.
-- `xs.map(f)` is in SPEC.md § list and does not answer. A *literal* list receiver
-  does (`[1, 2, 3].map(..)`), a variable one is `Module 'xs' has no function
-  'map'`. This predates every round of this phase and is a semantics decision —
-  which methods a list *value* has — rather than a document fix, so it is
-  recorded rather than taken here → FINDINGS.md §14.
+- `xs.map(f)` was in SPEC.md § list and did not answer. The **document** half is
+  fixed: § list names `[1, 2, 3].map(f)` as the third spelling, says the receiver
+  is taken literally, and writes the refusal down, with two gates holding both
+  halves of that. The **semantics** half — making a list *value* answer `map` on a
+  variable receiver — is untouched and still open, because it is a decision about
+  which methods a value has rather than a reconciliation →
+  FINDINGS.md §14.
+- The two engines disagreed about a higher-order call: `map([1, 2, 3], f)` with `f`
+  a named `to` function answered on the tree-walker and was
+  `map was called with arguments it cannot use` on the bytecode VM. Found in round 8
+  while writing §14's gate and **fixed in round 9** — the VM answers `map`/`list_map`
+  itself, before the shared resolver can claim the name, and carries the map on the
+  frame that started it, so the two engines charge the same call-depth budget →
+  FINDINGS.md §15. What is still open is the *other* half of §15: a closure
+  **expression** (`set f to to (x) give back x * 2 end`) does not compile for the
+  bytecode VM at all, so every gate that needs a function value uses a named
+  declaration.
 - A dotted call's receiver must now name a module, which is the one rule in this
   report that is enforced from `src/stdlib.rs` rather than written twice. The two
   engines had drifted onto two different halves of it, and the drift was the

@@ -413,6 +413,27 @@ struct Frame {
     globals_only: bool,
     /// The loops in this block, found once when the frame was pushed.
     sites: Vec<LoopSite>,
+    /// A `map` this frame started and has not finished.
+    ///
+    /// The map's callee is always the frame directly above this one, because
+    /// the frame is blocked at the `CALL` until every element has been mapped —
+    /// so "is this frame mapping?" needs no index and no counter. A frame that
+    /// started a map and is then abandoned by a failure gives it up with
+    /// itself; see [`BytecodeVm::start_map`].
+    pending_map: Option<PendingMap>,
+}
+
+/// A `map` in progress: what is left to apply the function to, what it has
+/// answered so far, and the function itself.
+///
+/// Held by the frame that wrote the `CALL` rather than by the callee, so the
+/// element that just finished hands over to the next one from where the map was
+/// started. See [`BytecodeVm::start_map`] for why that is not a Rust stack.
+struct PendingMap {
+    items: Shared<Vec<Value>>,
+    next: usize,
+    mapped: Vec<Value>,
+    function: FunctionValue,
 }
 
 /// A loop in a block, located from its backward jump.
@@ -989,6 +1010,7 @@ impl BytecodeVm {
             loop_owner: None,
             globals_only: false,
             sites,
+            pending_map: None,
         }
     }
 
@@ -1493,6 +1515,12 @@ impl BytecodeVm {
         }
         if self.frames.is_empty() {
             self.outcome = value;
+        } else if self.frames[self.frames.len() - 1].pending_map.is_some() {
+            // The value is one element's answer to a `map` the caller started,
+            // and the caller is waiting for the whole list rather than for this
+            // one call: `advance_map` has either called the next element or
+            // pushed the mapped list. See [`Self::start_map`].
+            self.advance_map(self.frames.len() - 1, value)?;
         } else {
             self.stack.push(value);
         }
@@ -2485,6 +2513,13 @@ impl BytecodeVm {
         while self.frames.len() > keep + 1 {
             self.finish_top_frame()?;
         }
+        // A `map` the surviving frame started is given up for the same reason
+        // `discard_frames_above` gives one up: the frame's `CALL` was waiting for
+        // the callee that has just gone, and a `break` out of a loop the map was
+        // called from is the third way to take a frame away.
+        if let Some(surviving) = self.frames.get_mut(keep) {
+            surviving.pending_map = None;
+        }
         Ok(())
     }
 
@@ -2678,6 +2713,23 @@ impl BytecodeVm {
             self.advance(frame);
             return Ok(());
         }
+        // `map` has to *call* a Redblue function, which the shared resolver
+        // cannot do, so it is answered here and started on the frame — asked for
+        // before the resolver, which would otherwise claim the name and refuse it
+        // as one it cannot use, turning a working higher-order call into an
+        // error. The tree-walking VM excludes the same two names before its own
+        // call into `stdlib::builtin`; see [`crate::interpreter::Vm::call`].
+        if matches!(name, "map" | "list_map") {
+            let [Value::List(items), Value::Function(function)] = args else {
+                return Err(Error::Runtime(
+                    "map requires a list and a function".to_string(),
+                    self.span(),
+                ));
+            };
+            self.start_map(frame, items.clone(), function.clone())?;
+            self.advance(frame);
+            return Ok(());
+        }
         // The same single resolver the tree-walker uses, so the two engines
         // cannot disagree about which names exist. See `stdlib::builtin`.
         if let Some(value) = crate::stdlib::builtin(self.span(), name, args)? {
@@ -2711,14 +2763,40 @@ impl BytecodeVm {
         let Some((object_name, method)) = split_dotted(&dotted) else {
             // A receiver that was an expression rather than a name pushed its
             // value, and the file says so by carrying the bare method name.
+            // `[1, 2, 3].map(f)` is the one such call the language answers: a
+            // list is not an object and is not a module, but the higher-order
+            // builtin has a spelling that takes its receiver literally. It is
+            // the same answer the tree-walking VM gives its own expression
+            // receiver; see [`crate::interpreter::Vm::call_method`].
             let receiver = self.pop()?;
-            return Err(Error::Runtime(
-                format!(
-                    "Cannot call method '{}' on {}, which is not an object",
-                    dotted, receiver
-                ),
-                self.span(),
-            ));
+            return match dotted.as_str() {
+                "map" => {
+                    let Value::List(items) = receiver else {
+                        return Err(Error::Runtime(
+                            format!(
+                                "Cannot call method '{dotted}' on {receiver}, which is not an object"
+                            ),
+                            self.span(),
+                        ));
+                    };
+                    let [Value::Function(function)] = args.as_slice() else {
+                        return Err(Error::Runtime(
+                            "map requires a function".to_string(),
+                            self.span(),
+                        ));
+                    };
+                    self.start_map(frame, items.clone(), function.clone())?;
+                    self.advance(frame);
+                    Ok(())
+                }
+                _ => Err(Error::Runtime(
+                    format!(
+                        "Cannot call method '{}' on {}, which is not an object",
+                        dotted, receiver
+                    ),
+                    self.span(),
+                )),
+            };
         };
         // A receiver that was a name pushed nothing: the name is the whole of
         // what a call resolves against. An object method still needs a `this`,
@@ -2781,6 +2859,65 @@ impl BytecodeVm {
         self.call_function(&function, &args, receiver)?;
         self.advance(frame);
         Ok(())
+    }
+
+    /// Starts `map(list, function)` in `frame`, the frame whose `CALL` is the
+    /// `map` and which is therefore blocked until every element has been mapped.
+    ///
+    /// The map is carried **by the frame that started it** rather than by a Rust
+    /// stack of nested runs. That is what keeps the two engines agreeing about
+    /// how deep a program may go: the tree-walking VM recurses per element and
+    /// is bounded by [`crate::MAX_CALL_DEPTH`], so a `map` that nests inside a
+    /// function that `map` calls reaches that limit as an ordinary
+    /// [`Error::Limit`]. A VM that drove each element with a nested
+    /// [`Self::drive`] would put one Rust stack frame on the host per nesting
+    /// level and overflow the thread long before the limit was reached — a
+    /// crash rather than a diagnostic, on a program the other engine runs.
+    ///
+    /// Each element is one [`Self::call_function`], so the call-depth budget is
+    /// charged and released exactly as it is for a call a program writes, and
+    /// [`Self::unwind_frame`] is what hands the next element its turn.
+    fn start_map(
+        &mut self,
+        frame: usize,
+        items: Shared<Vec<Value>>,
+        function: FunctionValue,
+    ) -> Result<()> {
+        if items.is_empty() {
+            self.push(Value::list(Vec::new()));
+            return Ok(());
+        }
+        // The first element is read from the list the caller handed over rather
+        // than copied out of it, and every later one the same way: a `map` reads
+        // its receiver, it does not take it, so the handle is shared for as long
+        // as the map lasts and each element is cloned on its own turn. See
+        // [`crate::value::Shared`].
+        let first = items[0].clone();
+        self.frames[frame].pending_map = Some(PendingMap {
+            items,
+            next: 1,
+            mapped: Vec::new(),
+            function: function.clone(),
+        });
+        self.call_function(&function, std::slice::from_ref(&first), None)
+    }
+
+    /// Carries the finished callee's `value` on to the `map` `frame` started.
+    fn advance_map(&mut self, frame: usize, value: Value) -> Result<()> {
+        let Some(map) = self.frames[frame].pending_map.as_mut() else {
+            return Ok(());
+        };
+        map.mapped.push(value);
+        if map.next >= map.items.len() {
+            let mapped = Value::list(std::mem::take(&mut map.mapped));
+            self.frames[frame].pending_map = None;
+            self.push(mapped);
+            return Ok(());
+        }
+        let next = map.items[map.next].clone();
+        map.next += 1;
+        let function = map.function.clone();
+        self.call_function(&function, std::slice::from_ref(&next), None)
     }
 
     /// Runs a closure's block, binding `args` to its parameters.
@@ -3302,6 +3439,13 @@ impl BytecodeVm {
             if frame.is_call {
                 self.call_depth = self.call_depth.saturating_sub(1);
             }
+        }
+        // A `map` the surviving frame started has just lost its callee, so it is
+        // given up: the frame's `CALL` is no longer waiting for a list, and a
+        // `try` or a `might fail` around it is about to take the failure as the
+        // answer rather than as one element of a list. See [`Self::start_map`].
+        if let Some(surviving) = self.frames.get_mut(keep) {
+            surviving.pending_map = None;
         }
     }
 

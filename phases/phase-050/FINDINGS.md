@@ -368,32 +368,145 @@ spellings against the runtime **and** reads § text out of SPEC.md to assert it
 says the refusal. A document claim written only in prose needs its own gate; that
 is §4's `KNOWN_GAPS` and §10's skip list in a third place.
 
-## 14. `xs.map(f)` is in SPEC.md and does not answer
+## 14. `xs.map(f)` was in SPEC.md and does not answer — the document half is fixed, the semantics half is not
 
-Out of scope, recorded so it is promoted rather than smuggled in. Found while
-proving the BLOCKER above, and it is **pre-existing** — it predates every round of
-this phase and is not a consequence of anything here.
+Half out of scope, and the half that is not is still open. Found while proving
+the BLOCKER above, and it is **pre-existing** — it predates every round of this
+phase and is not a consequence of anything here.
 
-`SPEC.md:1147` says `list.map` "works in all three spellings: `map(xs, f)`,
+`SPEC.md:1148` said `list.map` "works in all three spellings: `map(xs, f)`,
 `list.map(xs, f)` and `xs.map(f)`". The third does not answer:
 
 ```
-$ rb run /tmp/opencode/p50r3/m1.rb      # set ys to xs.map(to (x) give back x * 2 end)
+$ rb run target/tmp/p50res/m1.rb      # set xs to [1,2,3] / say xs.map(to (x) give back x * 2 end)
 Error: RuntimeError: Module 'xs' has no function 'map'
-$ rb run /tmp/opencode/p50r3/m2.rb      # say [1,2,3].map(to (x) give back x * 2 end)
+$ rb run target/tmp/p50res/m2.rb      # say [1,2,3].map(to (x) give back x * 2 end)
 [2, 4, 6]
 ```
 
 A *literal* list receiver works because `call_method` evaluates a non-name
-receiver and handles `map` there; a receiver that is a variable takes the
-name path, which is the module path, and a variable is not a module. Making it
-answer is a semantics decision rather than a documentation fix — it says which
-methods a list *value* has, and `xs` has to be in scope for the example to be
-runnable at all — so it belongs in its own phase, with a documented rule, rather
-than in a reconciliation one.
+receiver and handles `map` there; a receiver that is a variable takes the name
+path, which is the module path, and a variable is not a module.
 
-The wording did change, and for the better: the refusal now names the receiver the
-program wrote (`Module 'xs' has no function 'map'`) instead of the internal
-encoding (`Unknown function 'xs_map'`), which is the same thing
-`edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` requires of a
-receiver that is no module at all. Nothing in the suite pinned the old wording.
+**What round 8 did** is the half this phase is allowed to do: the phase prompt
+gives exactly this choice — "or SPEC.md is corrected to the names the code uses
+and the correction is named in REPORT.md". The sentence now names
+`[1, 2, 3].map(f)` as the third spelling, says the receiver is taken **literally**,
+and writes the `xs.map(f)` refusal down in the same section. Two gates hold it:
+
+- `edge_a_dotted_receiver_that_is_no_module_answers_or_is_written_down_as_refused`
+  is the general form — every `name.member(` a document writes on a bare
+  identifier that no module claims either answers or is written down as refused.
+  The receiver that is neither a module nor a registry prefix (`xs`) was in none
+  of this file's three universes: the refusal matrix walks `MODULES` × members,
+  `edge_a_registered_builtin_is_not_a_module_namespace` walks `<name>_<member>`
+  prefixes, and the code-block runner only runs code blocks.
+- `edge_every_spelling_the_spec_promises_for_map_answers` reads the enumerating
+  sentence **out of SPEC.md** and runs every spelling it finds there, so a fourth
+  spelling written into that sentence is run rather than believed.
+
+**What round 8 did not do**, and what is still open for a promotion: make
+`xs.map(f)` answer. That is a semantics decision rather than a documentation fix
+— it says which methods a list *value* has, and `xs` has to be in scope for the
+example to be runnable at all — so it belongs in its own phase, with a documented
+rule, rather than in a reconciliation one. Until then the correct answer is the
+one SPEC.md now gives.
+
+One wording change does fall out of this phase and is worth naming: the refusal
+names the receiver the program wrote (`Module 'xs' has no function 'map'`)
+instead of the internal encoding (`Unknown function 'xs_map'`), which is the same
+thing `edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` requires of
+a receiver that is no module at all. Nothing in the suite pinned the old wording.
+
+## 15. The two engines disagreed about a higher-order call — **fixed in round 9**
+
+Found in round 8 while writing §14's gate, and **pre-existing** — it was about
+closures reaching a builtin, not about module names. Round 8 recorded it and ran
+§ list's gate on one engine; **round 9 fixed it**, and the gate now runs on both.
+
+### What round 8 saw
+
+The bytecode compiler refuses a closure expression outright:
+
+```
+$ rb compile n2.rb -o n2.rbc && rb vm n2.rbc   # set f to to (x) give back x * 2 end
+ParserError: `to (x) ... end` as an expression is not compiled yet; run programs that use one with `rb run`
+```
+
+And given a closure written as a **statement** it compiled and then refused the
+call, where the tree-walker answered:
+
+```
+$ rb run n4.rb                     # to f(x) give back x * 2 end / say f(3) / say map([1,2,3], f)
+6
+[2, 4, 6]
+$ rb compile n4.rb -o n4.rbc && rb vm n4.rbc
+Error: RuntimeError: map was called with arguments it cannot use
+  --> 5:1
+$ rb compile n5.rb -o n5.rbc && rb vm n5.rbc   # the same call as list.map
+Error: RuntimeError: list_map was called with arguments it cannot use
+```
+
+So `map` was unreachable through a function value on the bytecode VM at all, in
+either spelling, while `f(3)` directly was not.
+
+### What was actually wrong, and the fix
+
+Not a value-representation mismatch between `runtime::builtin`'s
+`Value::Function` arm and what the VM puts on the stack — the VM did put a
+`Value::Function` there. The bug was **ordering**: `call_named` asked the shared
+resolver first, and `map` is a registered builtin name whose `runtime::builtin`
+arm cannot *call* a Redblue function, so the resolver claimed the name and
+refused it as one it cannot use. The tree-walker already excluded those two
+names before its own resolver call; the VM did not.
+
+`src/bytecode/vm.rs` now answers `map`/`list_map` itself **before** the
+resolver, in both spellings:
+
+- `call_named` starts the map directly, so `map(xs, f)` and `list.map(xs, f)`
+  answer.
+- `call_method` answers the one expression receiver the language has,
+  `[1, 2, 3].map(f)`, and still refuses every other one.
+- `start_map`/`advance_map` carry the map **on the frame that started it**
+  rather than on a Rust stack of nested runs. That is the part that keeps the
+  two engines agreeing: each element is one `call_function`, so the call-depth
+  budget is charged and released exactly as for a call a program writes, and a
+  `map` nesting inside its own callee reaches `MAX_CALL_DEPTH` as a diagnostic
+  rather than overflowing the host thread. The map is also given up wherever a
+  frame is (`discard_frames_above`, `unwind_frame`), so `break`, `try` and
+  `might fail` around a map take the failure as the answer rather than as one
+  element of a list.
+
+```
+$ rb run n4.rb
+[2, 4, 6]
+[2, 4, 6]
+[2, 4, 6]
+$ rb compile n4.rb -o n4.rbc && rb vm n4.rbc
+[2, 4, 6]
+[2, 4, 6]
+[2, 4, 6]
+```
+
+### What is still open
+
+The **closure expression** half is real and unchanged: `set f to to (x) give
+back x * 2 end` does not compile for the bytecode VM at all, so it needs a
+bytecode-compiler phase and is not a runtime one. Every gate that needs a
+function value therefore uses a **named** declaration (`to f(x) … end`), which
+both engines compile — that is a property of the gate's programs, not a skip.
+
+Two gates hold this, both of which round 8's one-engine version could not have
+run:
+
+- `edge_a_higher_order_call_answers_the_same_way_on_both_engines`
+  (`tests/differential_test.rs`) asks eleven cases on both engines and compares
+  the two **outcomes**, so a fix that made the VM agree by *refusing* what the
+  tree-walker answers fails the gate.
+- `edge_every_spelling_the_spec_promises_for_map_answers`
+  (`tests/stdlib_module_names_test.rs`) walks `ENGINES` — both — over the
+  spellings read out of SPEC.md § list.
+
+The round-8 trade ("a gate that asserts a known defect is a gate that will stop
+passing once the defect is fixed") is why this is now a defect that is fixed
+rather than a gate that is narrow.

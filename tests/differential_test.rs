@@ -907,6 +907,136 @@ fn edge_a_call_stack_that_cannot_come_back_is_a_clean_failure() {
     }
 }
 
+/// What one engine made of a program, as the text a failure message carries.
+fn show_outcome(outcome: &Outcome) -> String {
+    let result = match &outcome.result {
+        Ok(value) => format!("value: {}", value.tagged()),
+        Err(failure) => format!("failed: {}", vm::show(failure)),
+    };
+    format!("output: {:?}\n{result}", outcome.output)
+}
+
+/// A higher-order call is a call, and the two engines make it the same one.
+///
+/// `map` is the only builtin that calls a Redblue function, so it is the only
+/// one whose answer can depend on which engine is running: the tree-walker
+/// applies a `FunctionValue` with its own captured scopes, and the bytecode VM
+/// applies one by driving frames. They were not the same, and SPEC.md § list
+/// promised three spellings of it while only one engine had any of them.
+///
+/// Every case is asked on both engines and the two **outcomes** are compared, so
+/// a fix that makes the bytecode VM agree by refusing what the tree-walker
+/// answers fails here rather than passing a gate that only ran one of them.
+/// The last case is the one a fix has to be careful about: applying a function
+/// per element must not cost a *host* stack frame per element, or a `map` that
+/// nests inside the function it calls overflows the thread instead of reaching
+/// the call-depth limit.
+#[test]
+fn edge_a_higher_order_call_answers_the_same_way_on_both_engines() {
+    let double = "to double(x)\n    give back x * 2\nend\n";
+    let cases: &[(&str, &str)] = &[
+        // The three spellings SPEC.md § list enumerates.
+        (
+            "the flat spelling",
+            "set xs to [1, 2, 3]\nset out to map(xs, double)\nsay out\n",
+        ),
+        (
+            "the module spelling",
+            "set xs to [1, 2, 3]\nset out to list.map(xs, double)\nsay out\n",
+        ),
+        (
+            "the literal-receiver spelling",
+            "set out to [1, 2, 3].map(double)\nsay out\n",
+        ),
+        // A list written out in full is the receiver that answers; a name is not.
+        (
+            "a variable receiver is still refused",
+            "set xs to [1, 2, 3]\nsay xs.map(double)\n",
+        ),
+        // The function reads the scope the declaration closed over, and the
+        // engine's own: a capture has to survive being applied later.
+        (
+            "the function reads a captured binding",
+            "set scale to 10\nto scaled(x)\n    give back x * scale\nend\n\
+             set out to map([1, 2, 3], scaled)\nsay out\n",
+        ),
+        // Output written from inside the mapped function is ordered with it.
+        (
+            "the mapped function writes to the program's output",
+            "to chatty(x)\n    say x\n    give back x + 1\nend\n\
+             say map([1, 2], chatty)\n",
+        ),
+        // `map` of `map`: two maps in flight at once, the outer one held by the
+        // frame the inner one is called from.
+        (
+            "a map of a map",
+            "to double(x)\n    give back x * 2\nend\n\
+             to twice(x)\n    give back map([x, x], double)\nend\n\
+             say map([1, 2], twice)\n",
+        ),
+        // The empty list answers without ever calling the function, so the map
+        // has to be answered before the callee rather than by it.
+        (
+            "an empty list answers without calling the function",
+            "to never(x)\n    give back 1 / 0\nend\nsay map([], never)\n",
+        ),
+        // A failure inside an element fails the whole call, and `might fail`
+        // turns it back into a value — which only works if the guard is told
+        // that the frames the map pushed belong to the guarded expression.
+        (
+            "a guard takes a failure raised inside an element",
+            "to half(x)\n    if x = 2 then\n        give back 1 / 0\n    end\n\
+             give back x\nend\n\
+             set out to might fail map([1, 2, 3], half)\nsay out\n\
+             set kept to might fail map([1], half)\nsay kept\n",
+        ),
+        (
+            "a catch takes a failure raised inside an element",
+            "to half(x)\n    give back 1 / 0\nend\n\
+             try\n    set out to map([1, 2], half)\ncatch error\n    say \"caught\"\nend\n\
+             say \"after\"\n",
+        ),
+        // The refusal a bad call gets is the same one, with the same words.
+        (
+            "a bad argument is refused by name",
+            "to double(x)\n    give back x * 2\nend\nsay map([1, 2], 5)\n",
+        ),
+        (
+            "a bad receiver is refused by name",
+            "to double(x)\n    give back x * 2\nend\nsay \"ab\".map(double)\n",
+        ),
+        // A `map` that calls itself is stopped by the call-depth limit rather
+        // than by the host's stack: the tree-walker recurses per element, so a
+        // VM that nested a run per element would overflow the thread instead of
+        // reaching the limit — a crash, on a program the other engine runs.
+        (
+            "a map that calls itself is stopped by the limit",
+            "to rec(n)\n    give back map([n], rec)\nend\nsay rec(1)\n",
+        ),
+    ];
+
+    let mut failures_asked = 0usize;
+    for (name, body) in cases {
+        let source = format!("{double}{body}");
+        let tree = vm::tree_walk(&source);
+        let byte = vm::bytecode(&source);
+        assert!(
+            tree.agrees_within_format_limits(&byte),
+            "{name}: the two engines disagree.\n--- tree-walking VM\n{}\n--- bytecode VM\n{}",
+            show_outcome(&tree),
+            show_outcome(&byte),
+        );
+        if tree.result.is_err() {
+            failures_asked += 1;
+        }
+    }
+    assert!(
+        failures_asked >= 4,
+        "only {failures_asked} of these programs are refused, so the refusals above are \
+         not being compared — the agreement being proven would be agreement about answers",
+    );
+}
+
 /// A deeply nested value is data, not a stack: seven levels of list and record
 /// have to read back on both engines.
 #[test]

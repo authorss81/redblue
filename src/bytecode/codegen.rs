@@ -843,9 +843,11 @@ impl Compiler {
     /// `files_read` because the receiver is called `files`, and the same spelling
     /// is how `Counter.bump` finds a method on a declared type. A file that
     /// carried only the value would say `read` and leave both of those
-    /// unresolvable. A receiver that is an expression rather than a name is the
-    /// one case the language rejects, and a bare method name is how the file
-    /// says so — see [`crate::bytecode::Opcode::CallMethod`].
+    /// unresolvable. A receiver that is an expression rather than a name cannot
+    /// be resolved that way, so a bare method name is how the file says so — and
+    /// the runtime answers the one call the language has for such a receiver,
+    /// `[1, 2, 3].map(f)`, and refuses the rest; see
+    /// [`crate::bytecode::vm::BytecodeVm::call_method`].
     fn method_name(&mut self, receiver: &Expr, method: &str) -> u32 {
         match receiver {
             Expr::Variable(name) => self.text(&format!("{name}.{method}")),
