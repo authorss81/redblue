@@ -256,7 +256,8 @@ are undefined names in illustrative prose) or are recorded as a new finding
 
 - FINDINGS § 1 — `catch error of <Type>` is a spec feature the language does not
   have; a tagged error value touches `Value`, both VMs, `Error`, the `.rbc`
-  format and every failure site, and belongs to its own phase.
+  format and every failure site, and belongs to its own phase — **phase-089**,
+  which owns tagged error values and where the decision is settled.
 - FINDINGS § 2 — `give back error "..."` is a `raise` statement the language does
   not have. SPEC.md corrected; a `raise` is a feature, not a fix.
 - FINDINGS § 3 — `rb format` writes `catch <name>` and drops the handler word of

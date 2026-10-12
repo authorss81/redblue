@@ -22,6 +22,8 @@ phase's concern.
 - **What this phase did:** corrected SPEC.md and GRAMMAR.md to the untyped form
   the code supports, and pinned the surviving shape with
   `tests/catch_binding_test.rs::edge_catch_error_of_a_type_is_refused_naming_the_orphan`.
+- **Deferred to phase-089**, which owns tagged error values. The decision is
+  settled there, so nothing in this section is open work for this phase.
 
 ## 2. `give back error "..."` — a raise statement the language does not have
 
