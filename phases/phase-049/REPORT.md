@@ -1,8 +1,17 @@
 # Phase 049 — Stop reserving nine keywords the parser cannot read, or document them
 
-The phase spans commit `6716e6d` ("resume phase-049: adopt preserved work") and
+The phase spans commit `09dd102` ("resume phase-049: adopt preserved work") and
 the working tree on top of it. Every count below is measured against
 `db85d20` (phase-047), which is the commit the phase starts from.
+
+The first resumed run re-verified the merged work and found one
+definition-of-done row it had not closed literally — the four name positions
+were asserted to *name* the reserved word but not to carry a span or to avoid an
+internal `TokenKind` — and closed it. The second resumed run closed the other one:
+the reachability table proved each reserved word *parses*, where the DoD asks that
+each one's `.rb` file *"parses and runs to exit 0"*. Both changes are
+test-only; nothing from the adopted work was removed or rewritten, and no
+production code was touched in either run.
 
 ## What changed
 
@@ -10,7 +19,7 @@ the working tree on top of it. Every count below is measured against
 |---|---|---|
 | `src/lexer.rs` | +101 −30 | Removed the nine words no parser arm could read (`are`, `ask`, `async`, `done`, `new`, `parallel`, `that`, `wait`, `when`) from `KEYWORDS` and their nine variants from the `TokenKind` enum; dropped `TokenKind::By`, which had no `KEYWORDS` entry and no lexer arm that produced it; added `Token::word` / `Token::keyword` / `Token::at` so a token carries the word it was lexed from, and fixed `Lexer::word_for` to answer `None` for the four kinds with more than one spelling (`Mod` and `Not` also come from `%` and `!`; `GiveBack` and `MightFail` are two words each). `KEYWORDS` went **56 → 47** entries. |
 | `src/parser.rs` | +96 −36 | Added `unexpected_token(kind)` and `expected_name(expected, found)`, and routed **thirteen** error sites through them, so a rejection names the word the writer typed (`Unexpected token 'end'`, `Expected variable name, found reserved word 'to'`) instead of a `TokenKind` variant. Thirteen, not ten: `parse_object`'s own name, the name of the object it `extends`, and `parse_test`'s name were reading their names by hand and still reported a bare `Expected object name` / `Expected parent object name` / `Expected test name`. |
-| `tests/keyword_reservation_test.rs` | +770 | New file, **15 tests**, all `#[test]`, none ignored or skipped. |
+| `tests/keyword_reservation_test.rs` | +770, then +47 −10 on top | New file, **15 tests**, all `#[test]`, none ignored or skipped. The resumed run tightened two of the fifteen. `edge_reserved_word_in_each_name_position` now also asserts the span and the absence of `TokenKind::` in each of its four refusals. `edge_every_reserved_keyword_parses_in_the_position_its_grammar_gives_it` now **runs** every snippet through the whole pipeline — lex, parse, analyze, execute — not just `parse`, because the definition of done asks that each reserved word's `.rb` file *"parses and runs to exit 0"* and only the parse half was covered. Three rows of the `REACHABLE` table had to change to meet that half; they were snippet bugs, not behaviour gaps, and each is listed under *Snippet rows repaired* below. |
 | `SPEC.md` | +60 −58 | The `## Asynchronous Programming` section says the forms are **Not implemented** and names the freed words as ordinary identifiers; the keyword appendix no longer lists them; `§ Keywords` now lists the 47 words the lexer actually reserves instead of a stale 32-word table that still named `are`, `when`, `that` and `new`; `§ Instantiation` says there is no `new` and shows the prototype spelling; `§ Constructor` shows the `to create` method called on the declaration; `§ network` drops the `wait` prefix. |
 | `docs/GRAMMAR.md` | +43 −15 | §1.3's reserved-word table reduced to what the lexer actually reserves; `object_literal` removed from the `primary` alternatives in §5.1 and §7 marked **Not implemented**; §9's Object example rewritten off `new Person`; §1.3's note now says where the freed words' productions went. The `async_function` / `async_call` / `parallel_block` productions and `when_statement` are **kept**, each under a **Not implemented** note, as the shape a future implementation has to match. |
 | `tooling/vscode/syntaxes/redblue.tmLanguage.json` | +1 −1 | The TextMate `keyword.control` pattern lost the same nine words, so the editor grammar and the lexer cannot drift. |
@@ -107,13 +116,13 @@ skipped.
 | Test | Edge class covered |
 |---|---|
 | `every_reserved_keyword_has_a_parser_arm` | the enumeration; the check that makes adding an unread word to `KEYWORDS` fail the suite |
-| `edge_every_reserved_keyword_parses_in_the_position_its_grammar_gives_it` | behavioural half of the enumeration — one snippet per reserved word, each must (a) actually write the word it is filed under and (b) survive a real `parse`; also asserts the table covers every word `Lexer::keywords()` returns |
+| `edge_every_reserved_keyword_parses_in_the_position_its_grammar_gives_it` | behavioural half of the enumeration — one snippet per reserved word, each must (a) actually write the word it is filed under, (b) survive a real `parse`, and (c) **run to completion** through lex → parse → analyze → execute; also asserts the table covers every word `Lexer::keywords()` returns |
 | `the_freed_words_lex_as_identifiers_and_run_as_names` | the nine freed words, each run end-to-end and asserted to print `1` |
 | `a_rejected_keyword_names_the_word_not_the_token_kind` | 14 owned words; asserts the message names the word **and** contains no `TokenKind::` |
 | `a_reserved_word_as_a_variable_name_is_refused_by_name` | reserved word where a name is required |
 | `edge_the_rejection_of_a_reserved_word_names_the_word_at_its_column` | exact message text **and** the span — `Expected variable name, found reserved word 'if'` at `1:5`, `Unexpected token 'and'` at `1:1` |
 | `edge_a_reserved_word_where_an_object_or_test_name_is_required_is_refused_by_name` | the three name positions that ask for a name of their own: `object`'s name, the name it `extends`, and a `test`'s name — message and column for each |
-| `edge_reserved_word_in_each_name_position` | the four required positions: `set` target, record key, function parameter, `import` name — freed words work in all four, `if` is refused by name in all four |
+| `edge_reserved_word_in_each_name_position` | the four required positions: `set` target, record key, function parameter, `import` name — freed words work in all four; `if` is refused in all four and each refusal is asserted to name the word, to contain no `TokenKind::`, and to carry a span at the offending word's column (`1:5`, `1:12`, `1:11`, `1:8`) |
 | `edge_freed_word_keeps_working_inside_records_lists_and_fields` | nesting / records / lists / field read / string elements |
 | `edge_freed_word_is_still_an_ordinary_binding` | rebinding and `for each` binding of a freed word |
 | `edge_a_word_is_not_reserved_by_accident_of_being_a_prefix` | boundary — `async` and `async_task` are distinct identifiers, and `if` still lexes as a keyword |
@@ -137,15 +146,65 @@ are the evidence that the tests can go red.
 | the Not-implemented note deleted from `docs/GRAMMAR.md` §7 | `a_freed_word_is_only_spelled_as_a_keyword_under_a_not_implemented_note`: *GRAMMAR.md spells `'new'` as a keyword in `## 7. Object Literals`, which does not say the form is Not implemented* |
 | `are` put back in the `SPEC.md` § Keywords table | `spec_no_longer_promises_the_forms_this_phase_freed`: *SPEC.md § Keywords lists `are` as a keyword; it is an ordinary identifier since this phase* |
 
+### Re-verified in the resumed run
+
+The first and last rows of that table were re-applied and reverted again on the
+merged tree, because the enumeration is the phase's central claim and a claim the
+resumed run has not watched fail is a claim it cannot vouch for.
+
+| Reverted change (re-run) | What went red |
+|---|---|
+| `Async` re-added to `TokenKind` **and** `("async", TokenKind::Async)` to `KEYWORDS` in `src/lexer.rs` | **5** of 15 red again, same five names. The enumeration printed its whole message verbatim: *`the lexer reserves 1 word(s) no parser arm can read: `async` (TokenKind::Async). Either give the parser a rule for them, or free the words so they lex as identifiers`*, and the doc-agreement test added *`the lexer reserves 1 word(s) docs/GRAMMAR.md §1.3 does not list: async`*. `cargo test --test keyword_reservation_test` → `10 passed; 5 failed`. After `git checkout -- src/lexer.rs` the file was back to `15 passed; 0 failed`. |
+
+The resumed run also tightened `edge_reserved_word_in_each_name_position`, which
+was the one definition-of-done row the merged work did not close literally: the
+DoD asks that a reserved word in each of the four name positions give *a spanned
+error whose message names the WORD and not an internal token kind*, and the test
+asserted only the middle of that. It now asserts all three halves, using
+`parse_failure` (which panics on a parser error carrying no span) and checking the
+exact column of each of the four refusals. The assertion went red on the resumed
+run's own first attempt — it caught `set r to { if: 1 }` pointing at `1:12`, not
+the `1:11` the test was written with — which is the column the parser actually
+reports and which the test now pins.
+
+#### Snippet rows repaired so the reachability table runs, not just parses
+
+The DoD also asks that each reserved word's `.rb` file *"parses and runs to exit
+0"*, and the table only asserted the parse. Running all 47 snippets through the
+whole pipeline — a scratch loop over `REACHABLE`, applied and reverted — left
+**44 of 47** green and **3** red. All three were rows that parsed and then failed
+at run time; none was a defect in the interpreter, and all three were fixed by
+changing the snippet, not the implementation:
+
+| Row | What it did at run time | The snippet now |
+|---|---|---|
+| `until` | `repeat` / `until 1 is 2` never terminates — the condition is false forever — and dies at the loop guard: `RuntimeError: Maximum of 1000000 iterations reached in a 'repeat' loop` | `set n to 0` / `repeat` / `set n to n + 1` / `until n is 3` / `say n`, which still writes `until` and terminates on the third turn |
+| `can` | `set count to count + 1` inside the method — `AnalyzerError: Unknown variable 'count'`, because an object's field is only in scope through `this` | the same method body the `this` row uses, `set this.count to this.count + 1`, which writes `can` just as the old row did |
+| `extends` | `object Tally extends Counter` with no `Counter` in the file — `AnalyzerError: Unknown parent object 'Counter'` | declares `object Base` first in the same snippet, so `extends` has a parent to extend |
+
+`edge_every_reserved_keyword_parses_in_the_position_its_grammar_gives_it` now runs
+every row through `run()` — lex, parse, analyze, execute — and reports
+`` `until` is reserved and parses, but the program it builds does not run `` if one
+ever stops running. The `until` row was then put back to the non-terminating form
+to confirm that assertion is load-bearing: the test went red with exactly that
+message, and was restored.
+
+#### Re-verified in the second resumed run
+
+| Reverted change | What went red |
+|---|---|
+| `("until", "repeat\n    say \"a\"\nuntil 1 is 2\n")` put back | `edge_every_reserved_keyword_parses_in_the_position_its_grammar_gives_it`: *`until` is reserved and parses, but the program it builds does not run: RuntimeError: Maximum of 1000000 iterations reached in a 'repeat' loop* — proof the new run-half assertion is live and not decorative |
+
 ## Gates
 
-All four re-run on the tree as it stands, output quoted verbatim.
+All four re-run on the final tree — the adopted work plus this run's one test
+tightening — with output quoted verbatim.
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | exit 0, no diff |
 | `cargo clippy --all-targets -- -D warnings` | exit 0, `Finished dev profile`, no warnings, no `allow(` added |
-| `cargo test --all-targets` | **1412 passed, 0 failed, 0 ignored** across 51 test binaries |
+| `cargo test --all-targets` | **1412 passed, 0 failed, 0 ignored** across 52 test binaries (2 unit-test binaries, `src/lib.rs` and `src/main.rs`, and 50 integration binaries) |
 | `rb run examples/*.rb modules/*.rb` | 0 non-zero exits across all 9 files |
 
 The test total is checkable rather than asserted: `git diff db85d20 -- tests/`
@@ -215,9 +274,16 @@ their output is quoted. Nothing is claimed about `verify.sh`.
   words (`and 1`), reserved words in all seven name positions the parser asks a
   name for, and a word with no parser rule are all rejected, and each rejection
   is asserted to name the word and to carry a span.
-- **resource_limit** — N/A: no new loop, recursion, allocation, or output path.
-  `edge_freed_word_is_still_an_ordinary_binding` uses a 2-element list; nothing
-  here can run away.
+- **resource_limit** — mostly N/A: no new loop, recursion, allocation, or output
+  path is added by this phase. `edge_freed_word_is_still_an_ordinary_binding`
+  uses a 2-element list and nothing here can run away. The one place the phase
+  touches a resource guard is the `until` row of the reachability table: in its
+  original form (`repeat` / `until 1 is 2`) it ran to the loop guard and died
+  with `Maximum of 1000000 iterations reached in a 'repeat' loop`, which is what
+  prompted the run-half assertion. The row now counts to three and terminates,
+  and the falsification above confirms the guard still fires on the original
+  form — the loop limit itself is unchanged and is owned by
+  `tests/loop_bounds_test.rs`.
 
 ## Known gaps / follow-ups
 
@@ -247,6 +313,14 @@ their output is quoted. Nothing is claimed about `verify.sh`.
   is the behavioural counterpart and is what actually pins it; both are kept
   because the scan is the one that fires the moment a word is added to
   `KEYWORDS`, before anyone has written the snippet.
+- **`REACHABLE` runs 47 whole programs, and one row exercises a keyword's
+  construct without exercising the construct's result.** The `object`, `has`,
+  `can`, `this` and `extends` rows declare objects and methods but never
+  instantiate one and call it, so they prove the words parse, analyze and
+  execute — not that the feature they belong to behaves. Object instantiation
+  (`tests/object_model_test.rs`) is where that is covered; nothing about it
+  changed here, and widening these rows would put this phase in the object
+  system's business.
 - `import if` is rejected with `Expected module name, found reserved word 'if'`,
   which is correct but reads awkwardly; the wording is shared across all
   thirteen `expected_name` call sites and reworking it is out of scope here.

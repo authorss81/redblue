@@ -126,7 +126,11 @@ const REACHABLE: &[(&str, &str)] = &[
         "repeat",
         "repeat 3 times\n    say \"a\"\nend\n",
     ),
-    ("until", "repeat\n    say \"a\"\nuntil 1 is 2\n"),
+    // The row has to run as well as parse: a reserved word whose construct
+    // parses but dies at run time is not reachable, and the reader only finds
+    // out when they write the word themselves. `n` counts to three so `until`
+    // terminates on the third turn instead of running to the loop guard.
+    ("until", "set n to 0\nrepeat\n    set n to n + 1\nuntil n is 3\nsay n\n"),
     ("break", "for each x in [1]\n    break\nend\n"),
     ("skip", "for each x in [1]\n    skip\nend\n"),
     (
@@ -182,17 +186,22 @@ const REACHABLE: &[(&str, &str)] = &[
         "has",
         "object Counter\n    has count\nend\n",
     ),
+    // A field is only in scope through `this`, so the `can` row writes it the
+    // way the row above does; the two differ only in the word each is filed
+    // under, and both spell the word they are filed under.
     (
         "can",
-        "object Counter\n    has count\n    to can bump()\n        set count to count + 1\n    end\nend\n",
+        "object Counter\n    has count\n    to can bump()\n        set this.count to this.count + 1\n    end\nend\n",
     ),
     (
         "this",
         "object Counter\n    has count\n    to can bump()\n        set this.count to this.count + 1\n    end\nend\n",
     ),
+    // The parent has to exist in the same file, or the analyzer refuses the
+    // declaration at run time with `Unknown parent object`.
     (
         "extends",
-        "object Tally extends Counter\n    has total\nend\n",
+        "object Base\n    has n\nend\nobject Tally extends Base\n    has total\nend\n",
     ),
     // `yes` and `no` are reserved in their own right and have one kind between
     // them, so their row carries the literal the parser writes.
@@ -242,6 +251,17 @@ fn edge_every_reserved_keyword_parses_in_the_position_its_grammar_gives_it() {
             panic!(
                 "`{}` is reserved but the parser cannot read it where it belongs: {}\n  in {}",
                 word, message, source
+            );
+        }
+
+        // And it has to run. A word whose construct parses and then dies at run
+        // time is reserved-but-unreachable all the same, and the reader finds
+        // out only by writing the word. `run` lexes, parses, analyzes and
+        // executes in one go, so this is the whole pipeline, not a parse.
+        if let Err(error) = run(source) {
+            panic!(
+                "`{}` is reserved and parses, but the program it builds does not run: {}\n  in {}",
+                word, error, source
             );
         }
     }
@@ -438,14 +458,18 @@ say that
     );
 
     // A word the parser owns is still refused, still by name, in each position.
-    for (word, source) in [
-        ("if", "set if to 1\n"),
-        ("if", "set r to { if: 1 }\n"),
-        ("if", "set f to (if) give back 1\n"),
-        ("if", "import if\n"),
+    // Each rejection has to carry a span — the reader has to be able to find the
+    // word — and has to name the word rather than a `TokenKind` from inside the
+    // implementation. `parse_failure` panics on a parser error without a span,
+    // so the span is asserted by being able to reach the column at all.
+    for (word, source, column) in [
+        ("if", "set if to 1\n", 5),
+        ("if", "set r to { if: 1 }\n", 12),
+        ("if", "set f to (if) give back 1\n", 11),
+        ("if", "import if\n", 8),
     ] {
-        let message = parse_error(source)
-            .unwrap_or_else(|| panic!("`{}` in `{}` should be refused", word, source.trim()));
+        let (message, (line, at)) = parse_failure(source)
+            .unwrap_or_else(|| panic!("`{}` should be refused", source.trim()));
 
         assert!(
             message.contains(word),
@@ -453,6 +477,19 @@ say that
             word,
             source.trim(),
             message
+        );
+        assert!(
+            !message.contains("TokenKind::"),
+            "`{}` in `{}` names an internal type instead of the word: {}",
+            word,
+            source.trim(),
+            message
+        );
+        assert_eq!(
+            (line, at),
+            (1, column),
+            "`{}` should be refused with a span pointing at the offending word",
+            source.trim()
         );
     }
 }
