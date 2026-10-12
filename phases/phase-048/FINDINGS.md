@@ -61,8 +61,39 @@ machinery than the ambiguity is worth. Pinned by
 so a future change to the rule has to move that test rather than discover the
 case later.
 
-## 5. Gate 4 was not run
+## 5. `if <cond>` with no `then` will not take `might fail` as its body
+
+Found on this attempt while running every SPEC.md example that mentions `try`.
+`SPEC.md:870` § "Finally" writes:
+
+```redblue
+try
+    set file to might fail files.open("data.rb")
+    process file
+finally
+    if file is not nothing
+        might fail files.close(file)
+    end
+end
+```
+
+which fails on both engines with `ParserError: Expected 'then' but got 'might'`,
+spanned at the `might fail` line. The same `if` with `skip` as its body parses
+(the spec's own `skip`-in-`finally` example, `SPEC.md:911`, runs
+to exit 0), so the inconsistency is specific to `might fail` not being accepted
+as the first statement of a block opened without `then`.
+
+- **Not fixed here.** This is `if`, not `catch`: `might fail` as a block-leading
+  statement is a different phase's concern, and AGENTS.md § 1.7 says to record it
+  rather than do it.
+- **Reproduction:** `printf 'if 1 is 1\n    might fail files.read("x")\nend\n' > t.rb && rb run t.rb`
+- **Why it matters:** `might fail` is the form SPEC.md's corrected "Raising
+  Errors" section tells a reader to use instead of a `raise`, so the documented
+  replacement for a raise cannot be the first statement of an `if` body.
+
+## 6. Gate 4 was not run
 
 `rbops/` is not present in this checkout (`ls rbops` → `No such file or
 directory`), so `./rbops/verify.sh phase-048` could not be executed and nothing
-is claimed about its result. Gates 1-3 were run and pass.
+is claimed about its result. Gates 1-3 were run from the project checkout and
+pass; `examples/` and `modules/` were each run through `rb run` and all exit 0.

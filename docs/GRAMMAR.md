@@ -332,6 +332,16 @@ written after the word, which is read when a second identifier follows `error` o
 the same line. There is no `catch error of <Type>`: `of` is not a word in the
 language.
 
+The word is matched exactly, the way every other word in the language is: `catch
+ERROR err` is a `catch` that binds a name spelled `ERROR`, and `err` is left
+behind as an orphan statement. Two things the rule depends on follow from the
+name being an ordinary identifier — a `catch error <name>` may bind a name
+spelled `error` again (`catch error error` binds `error`), and the binder belongs
+to the `catch` body alone, so it is not readable before the `try`, after the
+`end`, or in a `finally` beside it. `rb format` writes the canonical `catch
+<name>` and drops the handler word; the formatted program reads back to the same
+tree and handles the same failure.
+
 The `catch` is optional, and a `try` without one is not a handler: the `finally`
 is still owed however its region is left — a failure runs it before the failure is
 reported on — and the failure is then the enclosing program's to catch, or its

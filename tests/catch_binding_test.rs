@@ -378,6 +378,95 @@ fn edge_a_handler_written_entirely_on_one_line_binds_and_runs() {
     );
 }
 
+/// The binder is scoped to the `catch` body across a **function** boundary too.
+/// A `catch error e` written inside a function body binds `e` for that body and
+/// nowhere else — a function body is a scope, and the catch body is a scope
+/// inside it, so a read one line further down is a third scope out.
+#[test]
+fn edge_the_binder_does_not_outlive_the_catch_body_inside_a_function() {
+    both_print(
+        "to handle()\n    try\n        set bad to 1 / 0\n    catch error e\n        say e\n    end\nend\nhandle()\n",
+        &["error"],
+    );
+
+    let error = both_fail(
+        "to handle()\n    try\n        set bad to 1 / 0\n    catch error e\n        say e\n    end\n    say e\nend\nhandle()\n",
+    );
+    assert_eq!(
+        error.label(),
+        "AnalyzerError",
+        "a function body does not widen the catch body, got {error:?}"
+    );
+    assert!(
+        error.message().contains("'e'"),
+        "the failure must name the binder, got {:?}",
+        error.message()
+    );
+    assert!(
+        error.span().is_some(),
+        "the failure must be spanned, got {error:?}"
+    );
+}
+
+/// `finally` runs whether the `try` failed or not, and it is a body of its own:
+/// the binder a `catch` declared is not declared in the `finally` beside it.
+#[test]
+fn edge_the_binder_does_not_leak_into_the_finally_body() {
+    both_print(
+        "try\n    set bad to 1 / 0\ncatch error e\n    say e\nfinally\n    say \"cleaned up\"\nend\n",
+        &["error", "cleaned up"],
+    );
+
+    let error =
+        both_fail("try\n    set bad to 1 / 0\ncatch error e\n    say e\nfinally\n    say e\nend\n");
+    assert_eq!(
+        error.label(),
+        "AnalyzerError",
+        "the finally body is not the catch body, got {error:?}"
+    );
+    assert!(
+        error.message().contains("'e'"),
+        "the failure must name the binder, got {:?}",
+        error.message()
+    );
+}
+
+/// The handler word is matched exactly. `error` is a word to the lexer like any
+/// other name, so `catch ERROR err` is a `catch` that binds a name spelled
+/// `ERROR` — which is what makes the read of `err` an analyzer error naming
+/// `err`. A rule that folded case would silently rebind a program's variables.
+#[test]
+fn edge_the_handler_word_is_matched_exactly_and_not_by_case() {
+    let error = both_fail("try\n    set bad to 1 / 0\ncatch ERROR err\n    say err\nend\n");
+    assert_eq!(
+        error.label(),
+        "AnalyzerError",
+        "only the exact word `error` is the handler word, got {error:?}"
+    );
+    assert!(
+        error.message().contains("'err'"),
+        "`ERROR` must bind and `err` must be left unbound, got {:?}",
+        error.message()
+    );
+    assert_eq!(
+        error.span().map(|s| s.line),
+        Some(3),
+        "the failure must point at the catch line"
+    );
+}
+
+/// A trailing comment on the `catch` line does not swallow the binder. The
+/// formatter writes this line by hand for exactly this reason — see
+/// `src/formatter.rs`, where `catch` cannot go through the helper that ends a
+/// line with its comment.
+#[test]
+fn edge_a_trailing_comment_on_the_catch_line_does_not_eat_the_binder() {
+    both_print(
+        "try\n    set bad to 1 / 0\ncatch error e // what it caught\n    say e\nend\n",
+        &["error"],
+    );
+}
+
 /// `catch error of <Type>` is not the language: `of` is not a word, so it reads
 /// as the binder and the type name is left behind as an orphan. The failure
 /// must name that orphan rather than pass for a typed handler.
@@ -494,4 +583,52 @@ fn catch_error_name_runs_and_compiles_through_the_cli() {
     let (code, stdout, stderr) = rb(&["vm", out]);
     assert_eq!(code, 0, "`rb vm` must exit 0, stderr:\n{stderr}");
     assert_eq!(stdout, "error\n", "`rb vm` must print the bound message");
+}
+
+/// `rb format` writes the canonical `catch <name>`, dropping the handler word of
+/// the spelled-out form. That is a deliberate canonicalisation, not a loss, and
+/// this is what makes it a decision rather than an accident: the formatted text
+/// must still handle the same failure, and formatting it again must change
+/// nothing. `FINDINGS.md` § 3 records the choice; this pins its consequence.
+#[test]
+fn edge_formatting_the_spelled_out_handler_keeps_handling_the_failure() {
+    let dir = scratch_dir();
+    let spelled = dir.join("spelled.rb");
+    let once = dir.join("spelled_once.rb");
+    let twice = dir.join("spelled_twice.rb");
+    for path in [&once, &twice] {
+        let _ = fs::remove_file(path);
+    }
+    fs::write(
+        &spelled,
+        "try\n    set x to 1 / 0\ncatch error e\n    say e\nend\n",
+    )
+    .expect("the program should be writable");
+
+    for (source, into) in [(&spelled, &once), (&once, &twice)] {
+        let (code, formatted, stderr) = rb(&["format", source.to_str().expect("path is utf-8")]);
+        assert_eq!(code, 0, "`rb format` must exit 0, stderr:\n{stderr}");
+        assert!(
+            formatted.contains("catch "),
+            "`rb format` dropped the whole handler:\n{formatted}"
+        );
+        fs::write(into, formatted).expect("the formatted text should be writable");
+    }
+
+    let first = fs::read_to_string(&once).expect("the first format should be readable");
+    let second = fs::read_to_string(&twice).expect("the second format should be readable");
+    assert_eq!(
+        first, second,
+        "`rb format` must be idempotent on a formatted handler"
+    );
+
+    let (code, stdout, stderr) = rb(&["run", once.to_str().expect("path is utf-8")]);
+    assert_eq!(
+        code, 0,
+        "the formatted program must still exit 0, stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, "error\n",
+        "the formatted program must still handle the failure:\n{first}"
+    );
 }
