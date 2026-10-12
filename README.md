@@ -185,6 +185,8 @@ files.append(path, content)
 files.exists(path)   // Check if file exists
 files.lines(path)    // Read as list of lines
 files.delete(path)
+files.copy(from, to)     // Copy a file
+files.rename(from, to)   // Rename it, or move it
 ```
 
 ### Bytes
@@ -222,19 +224,24 @@ csv.parse(text)     // Parse CSV to list of lists
 
 ### Math
 ```
-PI, E                    // Constants
-abs(x), floor(x), ceil(x)
-round(x), sqrt(x), pow(x, y)
-sin(x), cos(x), tan(x)
-log(x), exp(x)
+PI, E                          // Constants, not module members: no math.PI
+math.abs(x), math.floor(x), math.ceil(x)
+math.round(x), math.sqrt(x), math.pow(x, y)
+math.sin(x), math.cos(x), math.tan(x)
+math.log(x), math.exp(x)
+// every one of them is also spelled flat: abs(x), sqrt(x), ...
+// math.random is not implemented, and there is no math.random
 ```
 
 ### Text
 ```
-uppercase("text"), lowercase("text"), trim("text")
-split("text", by), join(list, by)
-contains("text", sub)
-length("text")                 // bytes, not characters: length("héllo") is 6
+text.uppercase("text"), text.lowercase("text"), text.trim("text")
+text.split("text", by), text.join(list, by)
+text.contains("text", sub)
+text.starts_with("text", prefix), text.ends_with("text", suffix)
+text.replace("text", from, to)
+text.length("text")      // bytes, not characters: text.length("héllo") is 6
+// every one of them is also spelled flat: uppercase("text"), split("text", by), ...
 ```
 
 ### Console
@@ -250,7 +257,8 @@ set name to input("Your name? ")  // read one line from the terminal
 ### List
 ```
 list.map(xs, to (x) give back x * 2)  // every member, through a function
-length(xs), push(xs, x)               // flat list builtins
+list.length([1, 2, 3])                 // 3
+length(xs), push(xs, x)                // flat list builtins
 ```
 
 ## Project Structure

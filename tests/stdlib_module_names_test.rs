@@ -1,22 +1,34 @@
-//! SPEC.md, README.md and `src/stdlib.rs` must name the same modules.
+//! SPEC.md, README.md and `src/stdlib.rs` must name the same modules — and the
+//! same members.
 //!
 //! `stdlib::MODULES` is the list the analyzer consults before a `.`: a bare
 //! word that is in it is a namespace, and a bare word that is not is
-//! `Unknown variable`. So the two documents and that list are one surface, and
-//! a name that appears in only one of the three is a defect somebody reads:
+//! `Unknown variable`. `stdlib::MODULE_MEMBERS` is the list both engines resolve
+//! a dotted call against, so a `module.member` the table does not hold is
+//! `RuntimeError: Module '<m>' has no function '<x>'` whatever the registry
+//! holds. The two documents and those two tables are one surface, and a name
+//! that appears in only one of them is a defect somebody reads:
 //!
-//! - a name a document names and the list does not hold is a program that dies
-//!   in the analyzer, one step before the runtime could say what was wrong;
-//! - a name the list holds and no document names is a namespace that exists and
+//! - a name a document names and the table does not hold is a program that dies
+//!   in the analyzer or at the first call, one step before the runtime could say
+//!   what was wrong;
+//! - a name the table holds and no document names is a namespace that exists and
 //!   nothing explains, which is how `bytes` and `sys` came to be callable
-//!   spellings of working functions that SPEC.md never mentioned.
+//!   spellings of working functions that SPEC.md never mentioned — and how
+//!   `text.length` and `list.length` came to answer while both documents wrote
+//!   `length` flat.
 //!
-//! The lists are *extracted* from the documents rather than transcribed, and
-//! each document is reconciled **on its own** rather than through a union of
-//! the two. A union is weaker than either document: a name only one of them
-//! gives still passes, so SPEC.md could drop `time` — which it had — or
-//! README.md could drop `console` without a test noticing, and this phase
-//! exists because a document and the registry drifted apart.
+//! The lists are *extracted* from the documents rather than transcribed, and each
+//! document is reconciled **on its own** rather than through a union of the two.
+//! A union is weaker than either document: a name only one of them gives still
+//! passes, so SPEC.md could drop `time` — which it had — or README.md could drop
+//! `console` without a test noticing, and this phase exists because a document
+//! and the registry drifted apart.
+//!
+//! The one union is [`promised_by_the_documents`], which is a different question:
+//! "may this spelling answer at all?", rather than "can a reader of this document
+//! find it?". A spelling answers only if the table holds it, and the table is
+//! reconciled against each document on its own, so the union is bounded by both.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -84,6 +96,30 @@ fn code_block_under(doc: &str, heading: &str) -> Vec<String> {
     lines
 }
 
+/// The whole of the `### ` section `heading` opens in `doc`, prose included.
+///
+/// [`code_block_under`] is the runnable part; this is the part a reader reads,
+/// and a claim written only in prose is still a claim — so a test that says
+/// "the document does not promise X" needs the prose, not just the examples.
+fn section_under(doc: &str, heading: &str) -> String {
+    let mut section = String::new();
+    let mut under = false;
+    for line in doc.lines() {
+        if line.starts_with("### ") {
+            if under {
+                break;
+            }
+            under = line.trim_end() == heading;
+            continue;
+        }
+        if under {
+            section.push_str(line);
+            section.push('\n');
+        }
+    }
+    section
+}
+
 /// `line` with a trailing `//` comment removed, quote-aware.
 ///
 /// `"http://x"` is a string, not the start of a comment, so a line that carries
@@ -131,8 +167,9 @@ fn strip_comment(line: &str) -> &str {
 ///    names in one heading) and calls alone are not enough for a section whose
 ///    first line is `set pi to PI` and whose module is named nowhere but the
 ///    heading.
-/// 2. every word of every `### ` heading in the section, lowercased — which is
-///    why the headings have to name modules rather than topics.
+/// 2. every word of every `### ` heading in the section, folded onto the module
+///    it names by [`module_spelling`] — which is why the headings have to name
+///    modules rather than topics.
 ///
 /// Both rules run over the code block text only, so prose like `` `math.PI` ``
 /// is not a module receiver and `math.PI` stays the refusal
@@ -151,9 +188,15 @@ fn documented_modules(section: &str) -> BTreeSet<String> {
             for word in line.trim_start_matches('#').split_whitespace() {
                 let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
                 // `### json and csv` is two names in one heading, and `and` is
-                // the word joining them rather than one of them.
-                if !word.is_empty() && word != "and" {
-                    names.insert(word.to_lowercase());
+                // the word joining them rather than one of them. Folded
+                // case-insensitively, because [`module_spelling`] folds a
+                // heading case-insensitively too: a heading that capitalised its
+                // joiner would otherwise insert a module called `AND` and fail
+                // `edge_a_module_the_documents_name_is_in_the_registry` with
+                // `AND not in MODULES` — a failure about prose capitalisation,
+                // read as a failure about the language.
+                if !word.is_empty() && !word.eq_ignore_ascii_case("and") {
+                    names.insert(module_spelling(word));
                 }
             }
             continue;
@@ -167,14 +210,42 @@ fn documented_modules(section: &str) -> BTreeSet<String> {
     names
 }
 
-/// The `module.member` spellings the code blocks of `section` write.
+/// The spelling of the module a heading word names, or the word as written.
+///
+/// A heading is prose, and prose capitalises: README.md writes `### Files`,
+/// `### JSON and CSV` and `### Time` where SPEC.md writes `### files`. So a
+/// heading word that names a module case-insensitively is folded onto the
+/// module's own spelling, and a word that names none is left exactly as written —
+/// where it stays a word and never becomes a spelling a program is told to use.
+///
+/// The fold is for headings and nothing else. A dotted receiver is kept as the
+/// program writes it, because that is how the language reads it: `stdlib::is_module`
+/// compares exactly, so a document carrying `JSON.Parse(..)` would send a reader
+/// to `Unknown variable 'JSON'`.
+fn module_spelling(word: &str) -> String {
+    stdlib::MODULES
+        .iter()
+        .copied()
+        .find(|module| module.eq_ignore_ascii_case(word))
+        .unwrap_or(word)
+        .to_string()
+}
+
+/// The `module.member` spellings the code blocks of `section` write, as
+/// `("module", "member")` pairs.
 ///
 /// Only code blocks, for the reason [`documented_modules`] gives: prose carries
 /// names that are *not* calls — `` `math.PI` `` is the one SPEC.md uses to say a
 /// module has no members — and a gate that read prose would either fail on a
 /// sentence or, worse, be taught to skip it.
-fn documented_members(section: &str) -> BTreeSet<String> {
-    let mut members = BTreeSet::new();
+///
+/// Code blocks only is also what makes this set usable as the **independent**
+/// half of a gate. A pair listed here is a spelling a document promises, and a
+/// promise is written as an example; a sentence in prose can promise a name
+/// *and* deny it in the same breath (`there is no console.input`), which is
+/// exactly the pair a refusal gate must go on asking about.
+fn documented_member_pairs(section: &str) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
     let mut in_code = false;
 
     for line in section.lines() {
@@ -183,15 +254,72 @@ fn documented_members(section: &str) -> BTreeSet<String> {
             continue;
         }
         if in_code {
-            members.extend(
-                dotted_calls(line)
-                    .into_iter()
-                    .map(|(module, member)| format!("{module}.{member}")),
-            );
+            pairs.extend(dotted_calls(line));
         }
     }
 
-    members
+    pairs
+}
+
+/// The same pairs, written the way a reader sees them: `text.uppercase`.
+fn documented_members(section: &str) -> BTreeSet<String> {
+    documented_member_pairs(section)
+        .into_iter()
+        .map(|(module, member)| format!("{module}.{member}"))
+        .collect()
+}
+
+/// Every `module.member` spelling **either** document writes, which is the whole
+/// of the dotted surface the language is allowed to answer.
+///
+/// The union, and deliberately so, unlike
+/// [`edge_a_module_in_the_registry_is_named_by_a_document`] which is checked on
+/// each document alone. The two questions are different: "is this module named?"
+/// is about what a reader of *this* document can find, and a quick reference that
+/// drops one is a document that has drifted; "may this spelling answer?" is about
+/// the language, and the answer cannot be "yes, because SPEC.md said so, as long
+/// as README.md did not say otherwise".
+fn promised_by_the_documents() -> BTreeSet<(String, String)> {
+    standard_library_sections()
+        .into_iter()
+        .flat_map(|(_, section)| documented_member_pairs(&section))
+        .collect()
+}
+
+/// Every short name a program could ask a module for, from either direction.
+///
+/// Two sources, and the second is the one this used to be missing:
+///
+/// 1. every member [`stdlib::MODULE_MEMBERS`] names, and
+/// 2. every short name behind a registered builtin — the bare ones (`uppercase`,
+///    `random`, `input`, `expect`) and the suffix of a qualified one
+///    (`files_read` is `read` as far as a program writing `files.read` is
+///    concerned).
+///
+/// The old version walked [`stdlib::BUILTIN_NAMES`] directly, which holds
+/// *qualified* names — `files_read`, `json_parse`, `network_get` — so it asked
+/// about `files.files_read` (a spelling no reader writes) and never asked about
+/// `json.read`, `text.get` or `files.parse`. The pairs that have to be refused
+/// are the short ones: those are the ones a program writes and a resolver
+/// regression would answer.
+fn short_member_names() -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+
+    for (_, members) in stdlib::MODULE_MEMBERS {
+        names.extend(members.iter().map(|member| member.to_string()));
+    }
+
+    for builtin in stdlib::BUILTIN_NAMES {
+        match stdlib::MODULES
+            .iter()
+            .find(|module| builtin.starts_with(&format!("{module}_")))
+        {
+            Some(module) => names.insert(builtin[module.len() + 1..].to_string()),
+            None => names.insert(builtin.to_string()),
+        };
+    }
+
+    names
 }
 
 /// The identifiers immediately before a `.` on `line`.
@@ -216,9 +344,17 @@ fn dotted_receivers(line: &str) -> BTreeSet<String> {
 /// The same scan as [`dotted_receivers`], keeping the half of each hit that says
 /// *which* function the module is being asked for. The receiver alone is not
 /// enough for the per-member check: `list_map` on its own made the `list`
-/// namespace look complete while `list.filter` and `list.reduce` reached builtins
-/// that are registered and refuse every call, and a per-module check cannot see
+/// namespace look complete while `text.uppercase` and `math.sqrt` — nothing to do
+/// with `list` at all — were never named, and a per-module check cannot see
 /// either of them.
+///
+/// Both halves are kept **as written**, because that is the only spelling the
+/// language can be asked about: `stdlib::is_module` and the member table are
+/// exact, so a document carrying `TEXT.UPPERCASE(..)` names something that is
+/// `Unknown variable 'TEXT'` to every program. Folding the case here would have
+/// let such a document pass reconciliation and fail every reader who copied from
+/// it — and folding is right for a *heading*, which is prose, and wrong for a
+/// call, which is a program.
 fn dotted_calls(line: &str) -> BTreeSet<(String, String)> {
     let identifier_start = |c: char| c.is_ascii_alphabetic() || c == '_';
     let identifier_part = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -279,7 +415,7 @@ fn dotted_calls(line: &str) -> BTreeSet<(String, String)> {
             k += 1;
         }
         let member: String = chars[member_start..k].iter().collect();
-        names.insert((word.to_lowercase(), member.to_lowercase()));
+        names.insert((word, member));
         i = k;
     }
     names
@@ -458,11 +594,13 @@ fn edge_a_module_in_the_registry_is_named_by_a_document() {
 /// **Per member, not per module.** The check this replaced asked whether *any*
 /// builtin started with `<module>_`, and one stub answers that for the whole
 /// module: `list_map` made `list` look complete while `list.filter` and
-/// `list.reduce` reached builtins that are registered and refuse every call.
-/// Deleting `filter` from the registry entirely would have left the old gate
+/// `list.reduce` — two builtins that refuse every call — counted as members of
+/// it. Deleting `filter` from the registry entirely would have left the old gate
 /// green. Every member is now named in `stdlib::MODULE_MEMBERS` and checked on
-/// its own, so a member that resolves to nothing is one line rather than a whole
-/// namespace nobody looked at.
+/// its own, so a member that resolves to nothing is one name rather than a whole
+/// namespace nobody looked at — and a name that resolves to a builtin which
+/// cannot answer does not belong in the table at all, which is why `filter` and
+/// `reduce` are out of the `list` row rather than being pinned as members.
 #[test]
 fn edge_no_module_in_the_registry_has_nothing_behind_it() {
     assert_eq!(
@@ -487,6 +625,12 @@ fn edge_no_module_in_the_registry_has_nothing_behind_it() {
 /// surface: every module in `MODULES` listed once, and nothing listed that is not
 /// a module. A module missing from the table would be skipped rather than checked,
 /// which is the same skip-list shape the per-module version had.
+///
+/// The comparison is between the two *sets*, sorted on both sides. Order is not a
+/// property either table promises — `MODULES` happens to be alphabetical and
+/// `MODULE_MEMBERS` happens to follow it — so a test that compared them as
+/// sequences would fail on a reorder that changed nothing about either surface,
+/// and the fix a tired author reaches for is to stop comparing them at all.
 #[test]
 fn edge_the_member_table_covers_exactly_the_modules_that_are_registered() {
     let listed: Vec<&str> = stdlib::MODULE_MEMBERS
@@ -502,10 +646,12 @@ fn edge_the_member_table_covers_exactly_the_modules_that_are_registered() {
         listed.len(),
         "stdlib::MODULE_MEMBERS lists a module twice: {listed:?}"
     );
+    let mut registered = stdlib::MODULES.to_vec();
+    registered.sort_unstable();
     assert_eq!(
         sorted,
-        stdlib::MODULES,
-        "stdlib::MODULE_MEMBERS and stdlib::MODULES are not the same list, so the \
+        registered,
+        "stdlib::MODULE_MEMBERS and stdlib::MODULES are not the same set, so the \
          per-member check walks a surface that is not the registered one. \
          MODULES: {:?} — MODULE_MEMBERS: {listed:?}",
         stdlib::MODULES
@@ -524,7 +670,7 @@ fn edge_the_member_table_covers_exactly_the_modules_that_are_registered() {
 /// must resolve to a builtin.
 ///
 /// `edge_a_module_the_documents_name_is_in_the_registry` answers "is the receiver
-/// a module", which `list.map` passes whether or not `list.filter` exists. This
+/// a module", which `list.map` passes whether or not `list.length` exists. This
 /// asks about the *pair*, so a documented member with nothing behind it fails
 /// here rather than in a reader's program — where it would be an analyzer-level
 /// `Unknown function` naming a spelling SPEC.md printed.
@@ -565,6 +711,273 @@ fn edge_a_member_the_documents_name_is_a_function_the_registry_has() {
             );
         }
     }
+}
+
+// ============================================================ and no other member
+
+/// A member the registry holds is one each document writes down.
+///
+/// The other direction, and the one whose absence let a defect through twice.
+///
+/// The gate above reads the documents and asks the table, so it passes whenever a
+/// document promises no more than the table allows. Nothing asked the question
+/// from the other side, and the question is the one a reader cares about: a
+/// spelling that answers and that neither document mentions is surface nobody
+/// agreed to — `length` under `text` and under `list` was exactly that. The
+/// phase added both to the table and pinned `text.length` in a test, and neither
+/// document said the word; the table had grown answering surface that the
+/// documents deny in principle ("a module has the functions that are spelled
+/// `<module>_<member>` in the registry" — and `list_length` is not a name in the
+/// registry).
+///
+/// **Each document on its own**, for the reason the module-level gate gives. A
+/// union would let README.md write `abs(x)` while SPEC.md wrote `math.abs`, and
+/// both would pass: which is the drift this phase exists to stop, at one level
+/// down.
+#[test]
+fn edge_a_member_the_registry_holds_is_written_by_a_document() {
+    for (document, section) in standard_library_sections() {
+        let written = documented_member_pairs(&section);
+
+        for (module, members) in stdlib::MODULE_MEMBERS {
+            for member in *members {
+                let pair = (module.to_string(), member.to_string());
+                assert!(
+                    written.contains(&pair),
+                    "stdlib::MODULE_MEMBERS holds `{module}.{member}`, so a program may \
+                     write it, and {document} § Standard Library does not. It is a name \
+                     that answers with nothing written down: add a line for \
+                     `{module}.{member}` to the section, or drop the member from the \
+                     table. Every pair {document} writes: {:?}",
+                    documented_members(&section)
+                );
+            }
+        }
+    }
+}
+
+/// A flat builtin is a member of the module that lists it and of no other.
+///
+/// The other half of the table, and the half that was open. `stdlib::module_member_name`
+/// used to unwrap `module_member` to `member` for **any** module against **any**
+/// registered builtin, which made every module a namespace for every flat builtin:
+/// `console.input("n")` read a line, `math.random(1, 6)` drew one and
+/// `json.uppercase("hi")` answered `HI` — each of them a working call the
+/// documents deny in as many words ("there is no `console.input`", "`math.random`
+/// is not implemented", "a module has the functions that are spelled
+/// `<module>_<member>` in the registry"). A per-member check that walks
+/// `MODULE_MEMBERS` cannot see any of that, because each of those spellings is
+/// exactly one the table does not list.
+///
+/// So this walks the other way: eleven modules against every short name a program
+/// could ask one for ([`short_member_names`]), and every pair that is not a
+/// spelling a document writes is refused by its dotted spelling. Both engines run
+/// each one, because the two resolve a dotted call against the same table and a
+/// language that answers in `rb run` and refuses under `rb vm` is a language whose
+/// surface depends on how it is executed.
+///
+/// **The only pairs this skips are the ones the documents promise**, and that is
+/// what makes the gate a gate. It used to skip whatever
+/// `stdlib::member_resolves(module, builtin)` said, which is a predicate derived
+/// from the very table the gate is about: adding `uppercase` to `csv`'s row made
+/// `csv.uppercase` answer *and* made this matrix skip `csv.uppercase`, so the one
+/// hole the table could open was the one hole the matrix could not see. Its guard
+/// (`checked > BUILTIN_NAMES.len()`) did not catch that either, because a table
+/// that grants everything still leaves hundreds of pairs to refuse — the guard
+/// asked whether there was anything left to check, not whether the right things
+/// were being checked. The documents cannot be widened the same way: writing
+/// `csv.uppercase` into a code block is itself checked by
+/// `edge_a_member_the_documents_name_is_a_function_the_registry_has`.
+///
+/// The two directions now meet in one place: a pair answers only if the table
+/// holds it, a pair the table holds is written down by each document, and a pair
+/// no document writes down is refused. Widening any one of the three fails a
+/// gate, so there is nothing left to widen.
+///
+/// The whole matrix runs in-process: it is a property of name resolution, and a
+/// refusal that a subprocess has to be spawned to observe is a refusal a hundred
+/// programs at a time cannot afford to check.
+#[test]
+fn edge_a_flat_builtin_is_not_spelled_as_a_member_of_any_other_module() {
+    let promised = promised_by_the_documents();
+    let members = short_member_names();
+    let (mut refused, mut reserved, mut promised_rows) = (0usize, 0usize, 0usize);
+
+    for module in stdlib::MODULES {
+        for member in &members {
+            // A document writes this one, so the language is expected to answer
+            // it: `text.uppercase` called with no argument is refused by
+            // `uppercase`, not by the module rule, and asserting the module rule
+            // there would be asserting something false. What is asserted instead
+            // is that the table holds it — a document cannot promise a member the
+            // table does not have, which is the gate above's first claim.
+            if promised.contains(&(module.to_string(), member.clone())) {
+                promised_rows += 1;
+                assert!(
+                    stdlib::module_has_member(module, member),
+                    "a document writes `{module}.{member}`, so a program may write it, and \
+                     stdlib::MODULE_MEMBERS does not list it. \
+                     edge_a_member_the_documents_name_is_a_function_the_registry_has is \
+                     the gate that says so by name."
+                );
+                continue;
+            }
+
+            let program = format!("say {module}.{member}()\n");
+            let refusal = format!("Module '{module}' has no function '{member}'");
+
+            let tokens = redblue::lexer::Lexer::tokenize(&program)
+                .unwrap_or_else(|error| panic!("{program} should lex: {error:?}"));
+            let ast = match redblue::parser::parse(tokens) {
+                Ok(ast) => ast,
+                // A name the language reserves cannot be written after a `.` at
+                // all — `bytes.expect()` is `ParserError: Expected property name,
+                // found reserved word 'expect'`. That is a stronger refusal than a
+                // module declining a member it does not have, and it is shared by
+                // both engines because both parse the same text, so it is asserted
+                // rather than skipped.
+                Err(error) => {
+                    assert_eq!(
+                        error.label(),
+                        "ParserError",
+                        "`{module}.{member}` did not parse and was not refused as a \
+                         reserved word, so the matrix has met a failure it does not \
+                         understand:\n{program}\n--- {error}"
+                    );
+                    reserved += 1;
+                    continue;
+                }
+            };
+
+            // The tree-walker, which is what `rb run` executes.
+            let walked = redblue::run_source(&program);
+            let walked = walked
+                .err()
+                .unwrap_or_else(|| panic!("{program} ran, so `{module}` answers `{member}`"));
+            assert!(
+                walked.to_string().contains(&refusal),
+                "`{module}.{member}` was refused, but not by the rule that says a module \
+                 has no such member:\n{program}\n--- {walked}\nThe dotted spelling has to \
+                 name the module and the member it does not have, and an analyzer refusal \
+                 here means the receiver is not reaching the module check at all."
+            );
+
+            // The bytecode VM, which is what `rb vm` executes.
+            let chunk = redblue::bytecode::compile_program(&ast)
+                .unwrap_or_else(|error| panic!("{program} should compile: {error:?}"));
+            let compiled = redblue::bytecode::vm::BytecodeVm::new().run(&chunk);
+            let compiled = compiled.err().unwrap_or_else(|| {
+                panic!(
+                    "the bytecode VM answered `{module}.{member}` where the walker refuses \
+                     it, so the surface depends on the engine:\n{program}"
+                )
+            });
+            assert!(
+                compiled.to_string().contains(&refusal),
+                "the two engines refuse `{module}.{member}` differently:\n{program}\n\
+                 walker: {walked}\nbytecode: {compiled}"
+            );
+            refused += 1;
+        }
+    }
+
+    // Every pair the matrix walked is in exactly one of the three columns, and the
+    // counts have to add up to the size of the matrix. A `continue` that grows a
+    // fourth column is how a skip hides here, and this is the assertion that
+    // makes adding one a deliberate act: the total is computed from the two tables
+    // the loop walked, so a skipped pair cannot be subtracted from both sides.
+    assert_eq!(
+        refused + reserved + promised_rows,
+        stdlib::MODULES.len() * members.len(),
+        "{refused} refused, {reserved} unparseable and {promised_rows} promised do not add \
+         up to the {} pairs this matrix walked, so a pair was skipped without being \
+         counted. {members:?}",
+        stdlib::MODULES.len() * members.len(),
+    );
+
+    // …and the promises are the smaller half of the matrix. A gate whose allowlist
+    // has grown to be most of what it walks is a gate that has stopped asking.
+    assert!(
+        refused > promised_rows,
+        "only {refused} of the {} `module.member` spellings were refused, against \
+         {promised_rows} the documents promise: this gate has almost nothing left to \
+         check. Either stdlib::MODULE_MEMBERS is listing builtins as members of every \
+         module, or the documents are promising spellings the language should not have.",
+        stdlib::MODULES.len() * members.len(),
+    );
+}
+
+/// The three promises the table above exists to keep, named one by one.
+///
+/// The matrix is the general form; these are the specific sentences, so a failure
+/// says which claim in the specification broke rather than which of several
+/// hundred pairs happened to break with it.
+#[test]
+fn edge_a_module_does_not_answer_a_function_the_documents_say_it_does_not_have() {
+    // SPEC.md § console: "`input` is a registered builtin rather than a module
+    // function, so there is no `console.input`". `input` is registered, so only
+    // the module spelling is in question — and it is a refusal, not a silent
+    // reading of an empty line.
+    let (ok, stdout, stderr) = run_named("no_console_input", r#"say console.input("n")"#);
+    assert!(
+        !ok,
+        "`console.input` answered, and SPEC.md says in as many words that there is \
+         none:\n--- stdout\n{stdout}"
+    );
+    assert!(
+        stderr.contains("console") && stderr.contains("input"),
+        "the refusal does not name the module and the member:\n--- stderr\n{stderr}"
+    );
+
+    // SPEC.md § math: "`math.random` is not implemented. The random builtins are
+    // spelled flat". The flat one still works, so this is about the spelling.
+    let (ok, _, stderr) = run_named(
+        "no_math_random",
+        r#"random_seed(1)
+say math.random(1, 6)"#,
+    );
+    assert!(
+        !ok,
+        "`math.random` drew a number, and SPEC.md says it is not implemented:\n{stderr}"
+    );
+
+    // SPEC.md § json and csv: a module has the functions spelled `<module>_<member>`
+    // in the registry, and `uppercase` is registered flat, so `json.uppercase` is
+    // a function of no module at all — not of the json one.
+    let (ok, stdout, stderr) = run_named("no_json_uppercase", r#"say json.uppercase("hi")"#);
+    assert!(
+        !ok,
+        "`json.uppercase` answered:\n--- stdout\n{stdout}\nSo every module is a \
+         namespace for every flat builtin.\n--- stderr\n{stderr}"
+    );
+
+    // ...and the flat spellings are untouched by any of it, because the rule is
+    // about the dotted spelling and nothing else.
+    let (ok, stdout, stderr) = run_named("flat_input_still_answers", r#"say length(input())"#);
+    assert!(
+        ok,
+        "closing the dotted spelling refused the flat one:\n--- stderr\n{stderr}"
+    );
+    assert_eq!(
+        stdout.trim_end(),
+        "0",
+        "flat `input` answered something else"
+    );
+
+    let (ok, stdout, stderr) = run_named(
+        "flat_random_still_answers",
+        r#"random_seed(1)
+say is_number(random(1, 6))"#,
+    );
+    assert!(
+        ok,
+        "closing the dotted spelling refused flat `random`:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.trim_end(),
+        "yes",
+        "flat `random` answered something else"
+    );
 }
 
 // ============================================================ each name answers
@@ -1113,6 +1526,14 @@ say answer"#,
 /// names are in `MODULES` now, and this pins the *values* the section's own
 /// comments claim, so a module that is in the registry and returns something
 /// else still fails.
+///
+/// Two halves, and the second is what the first cannot do. The table is
+/// transcribed, so a line *added* to a section is invisible to it — which is how
+/// `text.trim`, `text.replace` and the whole of `math`'s unwritten members were
+/// able to sit in `MODULE_MEMBERS` answering calls no document gave. The second
+/// half reads each section's block out of SPEC.md and runs every line in it, the
+/// way `edge_the_documented_console_lines_answer` does for § console: a line
+/// written into a document and not run is a line nobody checked.
 #[test]
 fn the_text_and_math_examples_answer_what_the_spec_claims() {
     // `// "HELLO"`, `// "hello"`, `// ["a", "b", "c"]`, `// "a,b,c"` and
@@ -1128,6 +1549,20 @@ fn the_text_and_math_examples_answer_what_the_spec_claims() {
         (r#"say math.floor(1.7)"#, "1"),
         (r#"say text.trim("  x  ")"#, "x"),
         (r#"say text.replace("a-b", "-", "+")"#, "a+b"),
+        // The rest of the two sections' code blocks, with the answers SPEC.md
+        // writes beside them.
+        (r#"say text.contains("abc", "b")"#, "yes"),
+        (r#"say text.starts_with("abc", "ab")"#, "yes"),
+        (r#"say text.ends_with("abc", "bc")"#, "yes"),
+        (r#"say text.length("héllo")"#, "6"),
+        (r#"say list.length([1, 2, 3])"#, "3"),
+        (r#"say math.abs(-3)"#, "3"),
+        (r#"say math.ceil(1.2)"#, "2"),
+        (r#"say math.sin(0)"#, "0"),
+        (r#"say math.cos(0)"#, "1"),
+        (r#"say math.tan(0)"#, "0"),
+        (r#"say math.log(1)"#, "0"),
+        (r#"say math.exp(0)"#, "1"),
     ];
 
     for (source, expected) in cases {
@@ -1140,6 +1575,29 @@ fn the_text_and_math_examples_answer_what_the_spec_claims() {
             stdout.trim_end(),
             expected,
             "a documented example answered something else:\n{source}\n--- stderr\n{stderr}"
+        );
+    }
+
+    // Every block of these four sections, read out of SPEC.md and run as it is
+    // written. A block rather than a line, because a block is what a reader
+    // copies: § json and csv binds `obj` on its first line and reads it on its
+    // third, so running the lines one at a time would test a program nobody
+    // writes. `### files` and `### bytes` are deliberately absent: their examples
+    // write to paths a test cannot promise, which is why they are covered by
+    // `examples/files.rb` and `edge_the_bytes_module_answers_a_round_trip_at_both_ends`
+    // rather than by running a document in a scratch directory.
+    for section in ["### text", "### math", "### list", "### json and csv"] {
+        let program = code_block_under(&read_doc("SPEC.md"), section)
+            .iter()
+            .map(|line| strip_comment(line).trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (ok, stdout, stderr) = run_named("spec_block", &program);
+        assert!(
+            ok,
+            "the code block SPEC.md {section} writes does not run:\n{program}\n\
+             --- stdout\n{stdout}--- stderr\n{stderr}"
         );
     }
 }
@@ -1417,5 +1875,301 @@ fn edge_an_unknown_module_name_is_refused_in_its_dotted_spelling() {
     assert!(
         !stderr.contains("nosuchmodule_"),
         "the refusal leaks the internal encoding instead of the dotted spelling:\n{stderr}"
+    );
+}
+
+/// Compiles `program` for the bytecode VM, or reports the refusal that stopped it
+/// from being compiled at all.
+///
+/// The bytecode VM runs no analyzer, so a gate that has to ask it has to do the
+/// front end itself. A `ParserError` from any of the three stages is a refusal
+/// *before* either engine runs — a reserved word, or a construct the bytecode
+/// compiler has not reached — which is a stronger refusal than these gates claim
+/// and is asserted as one by the callers rather than passed over.
+fn bytecode_chunk(program: &str) -> Result<redblue::Chunk, redblue::Error> {
+    let tokens = redblue::lexer::Lexer::tokenize(program)?;
+    let ast = redblue::parser::parse(tokens)?;
+    redblue::bytecode::compile_program(&ast)
+}
+
+/// A registered builtin spelled `<name>_<member>` does not make `<name>` a module.
+///
+/// The registry encodes a module function internally as `<module>_<member>`, and
+/// both engines resolved *any* dotted call through that encoding: if
+/// `<receiver>_<member>` was bound, the call was made. So every qualified builtin
+/// was also a namespace — `random.seed(1)` answered through `random_seed` and
+/// `random.shuffle([1, 2, 3])` through `random_shuffle`, and there is no `random`
+/// module in the language at all: `stdlib::MODULES` does not list it and neither
+/// document names it. `random` is a *builtin*, which is why the analyzer accepted
+/// it as a receiver, and being a registered name was the whole of what the resolver
+/// asked.
+///
+/// [`stdlib::MODULE_MEMBERS`] bounds the surface of a receiver that *is* a module,
+/// and it cannot bound the surface of one that is not: the rule it belongs to is
+/// only reached for a name in `MODULES`. The matrix above walks that universe, so
+/// it never asked about a non-module receiver at all; this walks the registry's
+/// own prefixes, which is a source neither the table nor the documents can skew.
+///
+/// The claim here is the weaker one that still catches the defect — none of them
+/// answers — because most of the prefixes are refused earlier still: `ends` is
+/// `Unknown variable 'ends'`, and `is` and `to` are keywords. The four `random`
+/// pairs are the ones a program can actually write, and they are named below so a
+/// failure says which spelling broke rather than which of fourteen.
+#[test]
+fn edge_a_registered_builtin_is_not_a_module_namespace() {
+    let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    for builtin in stdlib::BUILTIN_NAMES {
+        if let Some((prefix, member)) = builtin.split_once('_') {
+            if !stdlib::is_module(prefix) {
+                pairs.insert((prefix.to_string(), member.to_string()));
+            }
+        }
+    }
+    assert!(
+        !pairs.is_empty(),
+        "no registered builtin splits into a `<name>_<member>` pair whose name is not a \
+         module, so this gate has nothing to ask about and would pass on any tree"
+    );
+
+    let (mut refused, mut uncompiled) = (0usize, 0usize);
+    for (prefix, member) in &pairs {
+        let program = format!("say {prefix}.{member}(1)\n");
+
+        // The tree-walker, which is what `rb run` executes and which analyses
+        // before it runs — so a prefix that is not a name at all is refused here
+        // for that reason, which is a stronger refusal than this gate claims.
+        assert!(
+            redblue::run_source(&program).is_err(),
+            "`{prefix}.{member}` answered, so a builtin spelled `{prefix}_{member}` made \
+             `{prefix}` a module. The registry encodes how a module function is stored; \
+             it is not a list of what the language has.\n{program}"
+        );
+
+        // The bytecode VM, which analyses nothing, so it is the only engine where
+        // a resolver hole can show up as an answer rather than as an unknown name.
+        let chunk = match bytecode_chunk(&program) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                assert_eq!(
+                    error.label(),
+                    "ParserError",
+                    "`{prefix}.{member}` was answered by neither engine and refused by \
+                     neither the analyzer nor the module rule, so this gate has met a \
+                     failure it does not understand:\n{program}\n--- {error}"
+                );
+                uncompiled += 1;
+                continue;
+            }
+        };
+        assert!(
+            redblue::bytecode::vm::BytecodeVm::new()
+                .run(&chunk)
+                .is_err(),
+            "the bytecode VM answered `{prefix}.{member}` where the tree-walker refuses \
+             it, so the surface depends on the engine — the walker reached the analyzer \
+             first and this VM does not run it:\n{program}"
+        );
+        refused += 1;
+    }
+
+    assert_eq!(
+        refused + uncompiled,
+        pairs.len(),
+        "{refused} refused and {uncompiled} uncompiled do not add up to the {} pairs this \
+         matrix walked, so a pair was skipped without being counted. {pairs:?}",
+        pairs.len(),
+    );
+
+    // The four a program can write, named — `random` is a registered builtin, so
+    // the analyzer accepts it as a receiver and each of these reached a function
+    // through the internal encoding rather than through a module.
+    for member in ["seed", "number", "choice", "shuffle"] {
+        let program = format!("say random.{member}(1)\n");
+        let refusal = format!("Module 'random' has no function '{member}'");
+
+        let walked = redblue::run_source(&program).err().unwrap_or_else(|| {
+            panic!("`random.{member}` answered, and there is no `random` module")
+        });
+        assert!(
+            walked.to_string().contains(&refusal),
+            "`random.{member}` was refused, but not by the rule that says a receiver \
+             which is not a module cannot be called into:\n{program}\n--- {walked}"
+        );
+
+        let chunk = bytecode_chunk(&program)
+            .unwrap_or_else(|error| panic!("{program} should compile: {error:?}"));
+        let compiled = redblue::bytecode::vm::BytecodeVm::new().run(&chunk);
+        let compiled = compiled
+            .err()
+            .unwrap_or_else(|| panic!("the bytecode VM answered `random.{member}`"));
+        assert!(
+            compiled.to_string().contains(&refusal),
+            "the two engines refuse `random.{member}` differently:\n{program}\nwalker: \
+             {walked}\nbytecode: {compiled}"
+        );
+    }
+
+    // …and the flat spellings are untouched, because the claim above is about the
+    // dotted one. Deleting the four builtins would satisfy every row of it, so
+    // this is the row that says the gate was not satisfied by removing surface.
+    for (source, expected) in [
+        ("say random_seed(1)", "nothing"),
+        ("say type_of(1)", "number"),
+        (r#"say ends_with("ab", "b")"#, "yes"),
+        (r#"say starts_with("ab", "a")"#, "yes"),
+    ] {
+        let (ok, stdout, stderr) = run_named("flat_behind_the_prefix", source);
+        assert!(ok, "{source} stopped answering:\n--- stderr\n{stderr}");
+        assert_eq!(
+            stdout.trim_end(),
+            expected,
+            "the flat spelling behind the prefix changed while the dotted one was refused, \
+             so a fix that removed the builtin would have satisfied the rows above"
+        );
+    }
+}
+
+/// A `module … end` the program declared owns its own name.
+///
+/// The member table is the surface of a **stdlib** module and says nothing about a
+/// module a program writes, which is why the engines keep the table's rule for a
+/// receiver in `MODULES` and ask the program's own table otherwise. Asking the
+/// stdlib table first — as round 6's check did — refuses a declared module whose
+/// name happens to be a stdlib module's: `module text … end` publishing `greet` is
+/// `Module 'text' has no function 'greet'`, and all eleven stdlib names refused the
+/// same way.
+///
+/// A program's own declaration winning is the rule an object already follows, and
+/// it is pinned in `tests/object_model_test.rs`
+/// (`object_named_like_a_module_takes_the_call`): a declared `object json` takes the
+/// `json.parse(..)` spelling over the module of the same name because the receiver
+/// is looked up first. Every name in `MODULES` is walked here, so this is a claim
+/// about all eleven rather than about `text`.
+#[test]
+fn edge_a_module_the_program_declares_owns_its_own_name() {
+    assert!(
+        !stdlib::MODULES.is_empty(),
+        "stdlib::MODULES is empty, so this gate has nothing to collide with"
+    );
+
+    for module in stdlib::MODULES {
+        // The last statement *is* the call rather than a `say` or a `set`, because
+        // the engine's return value is the last statement's: both of those answer
+        // `nothing`, and a value of `nothing` here would be the program finishing
+        // rather than the function answering.
+        let program = format!(
+            "module {module}\n    \
+             to greet(who)\n        return \"hi \" + who\n    end\n    \
+             export all\nend\n\
+             {module}.greet(\"ada\")\n"
+        );
+        let complaint = "a module the program declared does not answer its own member, \
+             because the stdlib member table decided a receiver it says nothing about";
+
+        // The tree-walker, which is what `rb run` executes.
+        let walked = redblue::run_source_value(&program);
+        assert_eq!(
+            walked.as_ref().map(|value| value.to_string()).ok(),
+            Some("hi ada".to_string()),
+            "{complaint}:\n{program}\n--- {}",
+            walked
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+        );
+
+        // The bytecode VM, which is what `rb vm` executes.
+        let chunk = bytecode_chunk(&program)
+            .unwrap_or_else(|error| panic!("{program} should compile: {error:?}"));
+        let compiled = redblue::bytecode::vm::BytecodeVm::new().run(&chunk);
+        assert_eq!(
+            compiled.as_ref().map(|value| value.to_string()).ok(),
+            Some("hi ada".to_string()),
+            "the bytecode VM and the tree-walker disagree about a module the program \
+             declared under a stdlib module's name:\n{program}\n--- {}",
+            compiled
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+        );
+
+        // …and the member it does not have is still refused by the dotted name,
+        // rather than reaching a builtin of the stdlib module whose name it took.
+        let missing = format!("say {module}.not_a_function_of_this_module()\n");
+        let refused = redblue::run_source(&missing)
+            .err()
+            .unwrap_or_else(|| panic!("`{module}.not_a_function_of_this_module` answered"));
+        assert!(
+            refused.to_string().contains(&format!(
+                "Module '{module}' has no function 'not_a_function_of_this_module'"
+            )),
+            "the member the declared module does not have was refused by another rule, so \
+             the rows above could pass on a module that answers everything:\n--- {refused}"
+        );
+    }
+}
+
+/// `length` answers a text and a list. It does not answer a record.
+///
+/// SPEC.md § text said all three, and the claim was not one a reader could settle
+/// by reading: `runtime::builtin` refuses a record as `length requires a list or
+/// text`, `tests/test_text.rb` pins that refusal as a caught error, and
+/// `corpus/stdlib-0005` and `corpus/stdlib-0006` record it. Every spelling of the
+/// name is walked here so the runtime cannot drift, and the sentence is read out of
+/// the document rather than transcribed so re-claiming a record — without writing
+/// the refusal down — fails instead of passing on a reader's good faith.
+#[test]
+fn edge_length_answers_a_text_or_a_list_and_refuses_a_record() {
+    for (source, expected) in [
+        (r#"say length("abc")"#, "3"),
+        (r#"say text.length("abc")"#, "3"),
+        ("say length([1, 2, 3])", "3"),
+        ("say list.length([1, 2, 3])", "3"),
+    ] {
+        let (ok, stdout, stderr) = run_named("length_answers", source);
+        assert!(ok, "{source} did not run:\n--- stderr\n{stderr}");
+        assert_eq!(
+            stdout.trim_end(),
+            expected,
+            "length did not answer {source} as both documents write it"
+        );
+    }
+
+    // A record is the third thing SPEC.md used to claim `length` answered. Every
+    // spelling of the name is asked, because the sentence named the function and
+    // not one spelling of it.
+    let refusal = "length requires a list or text";
+    for source in [
+        r#"say length({a: 1})"#,
+        r#"say text.length({a: 1})"#,
+        r#"say list.length({a: 1})"#,
+        "say length({})",
+    ] {
+        let (ok, stdout, stderr) = run_named("length_refuses_a_record", source);
+        assert!(
+            !ok,
+            "{source} answered, so `length` answers a record as well as a text and a list \
+             and SPEC.md's old sentence is right after all:\n--- stdout\n{stdout}"
+        );
+        assert!(
+            stderr.contains(refusal),
+            "{source} was refused by another rule than the one that says a record is not a \
+             length, so the sentence and the runtime have drifted again:\n--- stderr\n{stderr}"
+        );
+    }
+
+    // The document, read rather than transcribed: a claim about what `length`
+    // answers is only worth anything while it agrees with the rows above.
+    let spec = read_doc("SPEC.md");
+    let text_section = section_under(&spec, "### text");
+    assert!(
+        !text_section.trim().is_empty(),
+        "SPEC.md has no § text, so the claim about what `length` answers cannot be read"
+    );
+    assert!(
+        text_section.contains(refusal),
+        "SPEC.md § text does not say that a record is refused as `{refusal}`, which is what \
+         every spelling above does, so a reader is left to believe it answers one:\n\
+          {text_section}"
     );
 }

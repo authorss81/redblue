@@ -44,15 +44,29 @@ What *did* reproduce, and was still true on `main`:
 | `tests/stdlib_module_docs_test.rs` | +5 −2 | `time_unix` and `console_clear` out of `KNOWN_GAPS`: both answer, so their entries were permissions to stop checking names that work. Round 3 took eleven more out and made the list self-checking. |
 | `nope` | −1 | A one-byte (`0x01`) file committed at the repository root by an earlier round of this phase: a `bytes.write` program that named a path relative to the working directory, which is why round 3 gave every such program an absolute path. Deleted, and a full `cargo test --all-targets` now leaves `git status` clean. |
 | `tests/stdlib_module_names_test.rs` | +74 | Round 4: `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` — the bad-argument cases again, inside the program's own `try ... catch error`. See round 4 below. |
+| `src/stdlib.rs` | +33 −7 | Round 5: `module_has_member`, and `module_member_name` now unwraps a qualified name only for a pair `MODULE_MEMBERS` holds. `length` is named under `text` and `list`. See round 5 below. |
+| `tests/stdlib_module_names_test.rs` | +150 −6 | Round 5: the dotted extraction keeps the case a program writes; the member-table check compares sets; two new tests — the closed surface, and the three SPEC promises by name. |
+| `tests/text_split_join_test.rs` | +44 −3 | Round 5: the reachability row names its dotted member separately from the registered name, so `json_parse` is reached as `json.parse` rather than `json.json_parse`. |
+| `src/stdlib.rs` | +27 −13 | Round 6: `filter` and `reduce` are out of `MODULE_MEMBERS`' `list` row, because a builtin nothing implements is not a module member. See round 6 below. |
+| `src/interpreter.rs`, `src/bytecode/vm.rs` | +26 | Round 6: both engines ask `module_has_member` before the `<module>_<member>` registry hit, so the table is the enforced surface on that path too. |
+| `SPEC.md` | +36 −6 | Round 6: every member of every module written in its own section — `text.trim`/`contains`/`starts_with`/`ends_with`/`replace`/`length`, `math.abs`/`ceil`/`sin`/`cos`/`tan`/`log`/`exp`, `files.lines`/`delete`/`copy`/`rename`, `list.length` — and § list's sentence rewritten for `filter`/`reduce`. § json and csv's single-quoted JSON is corrected to an escaped text, because there are no single-quoted strings. |
+| `README.md` | +18 −8 | Round 6: the same members, written dotted; § Math and § Text keep the flat spellings as a comment so the quick reference is still one. |
+| `tests/stdlib_module_names_test.rs` | +216 −46 | Round 6: the refusal matrix's universe is the **short** member names and its skip list is the documents; a new gate reads the table and asks each document; the heading join-word is folded case-insensitively; four code blocks are run as SPEC.md writes them. |
+| `src/stdlib.rs` | +69 | Round 7: `dotted_call_reaches` — the whole rule for a receiver that is not an object, in one place, so the two engines cannot hold two halves of it. |
+| `src/interpreter.rs`, `src/bytecode/vm.rs` | +30 −25 | Round 7: both `call_method`s call it, and `is_module_name` is replaced by `is_declared_module` — the program's own modules, asked apart from [`stdlib::MODULES`]. |
+| `tests/stdlib_module_names_test.rs` | +283 | Round 7: three gates — the registry's non-module prefixes are not namespaces, a program-declared module owns its own name, and `length` answers a text or a list and says so in the document. |
+| `SPEC.md` | +5 −2 | Round 7: § text's `length` sentence corrected — it answered a text and a list, not a record, which four other layers already said. |
 
-Round 2, round 3 and round 4 moved every one of the round-1 `SPEC.md`/`README.md`
-line numbers; those below are the current ones.
+Round 2, round 3, round 4 and round 5 moved every one of the round-1
+`SPEC.md`/`README.md` line numbers; those below are the current ones.
 
-No interpreter behaviour changed. `MODULES` itself is unchanged — every name in
-it answers and every name the documents name was already in it. `src/runtime.rs`
-is untouched by round 3: the `network` defect the review found was in a test, and
-was shown to be there by breaking `runtime.rs` on purpose and watching the old
-row pass and the new one fail.
+Rounds 1 to 4 changed no interpreter behaviour. `MODULES` itself is unchanged in
+every round — every name in it answers and every name the documents name was
+already in it. `src/runtime.rs` is untouched by round 3: the `network` defect the
+review found was in a test, and was shown to be there by breaking `runtime.rs` on
+purpose and watching the old row pass and the new one fail. Round 5 is the first
+round that changed what the language answers, and only in the direction SPEC.md
+already described: see "Invariants touched" below.
 
 ### Round 2 — what the first review found, and what it changed
 
@@ -130,9 +144,10 @@ is withdrawn (FINDINGS.md §4).
 
 ## Tests added
 
-All in `tests/stdlib_module_names_test.rs` — 14 `#[test]` functions, 12 named
+All in `tests/stdlib_module_names_test.rs` — 20 `#[test]` functions, 18 named
 `edge_*`. (The previous round's table listed 9; the five it omitted are rows 4,
-5, 8, 10 and the round-4 row 13, and are restored here.)
+5, 8, 10 and the round-4 row 13, and are restored here. Round 5 adds rows 15
+and 16, and round 7 adds rows 17 to 19.)
 
 | # | Test | Edge class covered |
 |---|---|---|
@@ -150,6 +165,11 @@ All in `tests/stdlib_module_names_test.rs` — 14 `#[test]` functions, 12 named
 | 12 | `edge_a_module_function_refuses_bad_arguments_by_name` | no arguments, too many, wrong type — each a `RuntimeError` naming the function, each asserted not to have panicked |
 | 13 | `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` | the same three refusals **inside the program's own `try … catch error`** — stdout must be exactly `caught\nafter\n`, so a refusal that ended the process fails it; plus the boundary, that an `AnalyzerError` is *not* catchable |
 | 14 | `edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` | `nosuchmodule.read("x")` is refused, and the message says `nosuchmodule`, not the internal `nosuchmodule_read` |
+| 15 | `edge_a_flat_builtin_is_not_spelled_as_a_member_of_any_other_module` | every `module.builtin` pair `MODULE_MEMBERS` does not hold — eleven modules against the whole registry — is refused by its dotted spelling, **in both engines**; a name the parser reserves is a `ParserError` naming it |
+| 16 | `edge_a_module_does_not_answer_a_function_the_documents_say_it_does_not_have` | the three SPEC promises by name — no `console.input`, no `math.random`, no `json.uppercase` — each through the binary, with the flat `input` and `random` asserted to still answer |
+| 17 | `edge_a_registered_builtin_is_not_a_module_namespace` | **the receiver**, which row 15 never asked about — every `<name>_<member>` in the registry whose `<name>` is not a module (14 pairs, from the registry rather than from the table) is refused in both engines, the four live `random` pairs named, and the flat spellings behind each prefix asserted to still answer so the gate cannot be satisfied by deleting the builtin |
+| 18 | `edge_a_module_the_program_declares_owns_its_own_name` | all 11 stdlib module names as a program-declared `module … end` — the member it publishes answers in both engines, the member it does not have is still refused by the dotted name, and the collision with the stdlib's table is decided the way an object already decides it |
+| 19 | `edge_length_answers_a_text_or_a_list_and_refuses_a_record` | the drift a prose sentence can hide — all three spellings of `length` against a text, a list and a record, **and** § text read out of SPEC.md to assert it now says the refusal rather than claiming the record |
 
 The failing-test-first sequence, with the real output:
 
@@ -229,29 +249,250 @@ was open, since a test file that passes proves nothing about the tree it reads:
 | `"zap"` added to `stdlib::MODULES` | `edge_a_module_in_the_registry_is_named_by_a_document`, `edge_the_member_table_covers_exactly_the_modules_that_are_registered` | both FAILED |
 | `"text"` removed from `stdlib::MODULES` | 7 tests in `stdlib_module_names_test`, including `edge_a_module_the_documents_name_is_in_the_registry` and `every_module_the_documents_name_answers_a_call` | `the documented module 'text' does not answer a call:` / `AnalyzerError: Unknown variable 'text'; did you mean 'test'?` |
 
+### Round 5 — the third review
+
+Four findings, all fixed. The BLOCKER is in `src/stdlib.rs`; the other three are
+in the test file that is supposed to *be* this phase's gate, which is the order
+that matters: a defect in a gate is worse than the defect it was written to catch,
+because it is the one place the tree stops asking.
+
+| # | Severity | What was wrong | What changed |
+|---|---|---|---|
+| 1 | BLOCKER | `src/stdlib.rs:679` unwrapped `module_member` to `member` whenever `MODULES.contains(&module) && BUILTIN_NAMES.contains(&member)` — any module against any registered builtin. Every module was therefore a namespace for the whole registry: `console.input("n")` read a line, `math.random(1, 6)` drew one, `json.uppercase("hi")` answered `HI`, `csv.type_of(1)` answered `number`, each contradicting SPEC.md in as many words (`there is no console.input`, SPEC.md:1024; `math.random is not implemented`, SPEC.md:1064; `a module has the functions that are spelled <module>_<member> in the registry`, SPEC.md:1010). | `module_has_member(module, member)` is the predicate, and `module_member_name` unwraps only for a pair `MODULE_MEMBERS` holds *and* whose bare name is registered. Every other pair is `None`, which both engines already turn into `Module '<m>' has no function '<x>'`. The flat spellings are untouched — the rule is about the dotted spelling and nothing else. |
+| 2 | MAJOR | `tests/stdlib_module_names_test.rs:1169` ran `say text.length("héllo")` as a case that answers, and `MODULE_MEMBERS` listed no `length` under `text`. The table the per-member gate walks was therefore *not* the set of spellings that answered — which is only visible once finding 1 is fixed, and is the same defect in the table. | `length` is named under `text` and under `list`, the second because `tests/text_split_join_test.rs:415` pins `list.length` and would otherwise have failed for a reason nobody could read. The table is now the surface the resolver enforces, not only the one the test walks. |
+| 3 | MAJOR | `dotted_calls` lowercased both halves of every pair it extracted, and so did the heading rule. `stdlib::is_module` compares exactly, so a document writing `JSON.Parse(..)` or `TEXT.UPPERCASE(..)` passed reconciliation and then failed every reader who copied from it with `Unknown variable`. | A dotted pair is kept **as written**, because that is the only spelling the language can be asked about. A *heading* is folded onto the module it names case-insensitively by `module_spelling`, because a heading is prose and prose capitalises — README.md writes `### Files` and `### JSON and CSV` where SPEC.md writes `### files`. Both directions are covered by mutations below. |
+| 4 | MINOR | `edge_the_member_table_covers_exactly_the_modules_that_are_registered` compared `sorted(MODULE_MEMBERS)` against `MODULES` as a sequence, so reordering `MODULES` — which neither table promises not to do — failed the gate. | Both sides are sorted before the comparison, so it is a set equality and nothing else. The duplicate check above it is unchanged. |
+
+Finding 1 was also a defect in a test that happened to pass because of it:
+`tests/text_split_join_test.rs` built its dotted spelling as
+`{module}.{builtin}` and so reached `json.json_parse(..)`, `csv.csv_parse(..)`
+and `files.files_read(..)` — spellings no reader writes, which answered only
+through the hole. The row now names its dotted member separately from the
+registered name, asserts the member is in `stdlib::MODULE_MEMBERS` and resolves,
+and then calls `json.parse(..)`. That is the same test doing more, not less.
+
+#### Round 5's failing-test-first sequence
+
+Every defect was reintroduced into the finished tree, the test run, and the
+change undone. Nothing below is asserted; it is what the runs printed.
+
+| Reintroduced | Test | Real output |
+|---|---|---|
+| `module_member_name` back to `MODULES.contains(&module) && BUILTIN_NAMES.contains(&member)` | `edge_a_flat_builtin_is_not_spelled_as_a_member_of_any_other_module`, `edge_a_module_does_not_answer_a_function_the_documents_say_it_does_not_have` | both FAILED |
+| README.md's `json.parse(text)` respelled `JSON.parse(text)`, extraction keeping case | `edge_a_member_the_documents_name_is_a_function_the_registry_has`, `edge_a_module_the_documents_name_is_in_the_registry`, `every_module_the_documents_name_answers_a_call` | all three FAILED |
+| …the same README mutation with the old lowercasing extraction | *(the hole, shown as what it was)* | `16 passed; 0 failed` — which is the defect, run |
+| `MODULES` reordered to `"time", "sys", "bytes", …` | *(none — this is finding 4's fix)* | `16 passed; 0 failed`, where the old assertion failed on the same tree |
+
+The BLOCKER, before the fix, against the binary:
+
+```
+$ ./target/debug/rb run /tmp/opencode/p50/a.rb     # say console.input("name? ")
+name?
+exit=0
+$ ./target/debug/rb run /tmp/opencode/p50/b.rb     # random_seed(1) / say math.random(1, 6)
+3
+exit=0
+$ ./target/debug/rb run /tmp/opencode/p50/c.rb     # say json.uppercase("hi")
+HI
+exit=0
+```
+
+and after it, the same three files:
+
+```
+$ ./target/debug/rb run /tmp/opencode/p50/a.rb
+Error: RuntimeError: Module 'console' has no function 'input'
+exit=1
+$ ./target/debug/rb run /tmp/opencode/p50/b.rb
+Error: RuntimeError: Module 'math' has no function 'random'
+exit=1
+$ ./target/debug/rb run /tmp/opencode/p50/c.rb
+Error: RuntimeError: Module 'json' has no function 'uppercase'
+exit=1
+```
+
+### Round 6 — the review of round 5
+
+Five findings: one BLOCKER, two MAJOR, two MINOR. All five are fixed, and the
+order they are fixed in is the order they matter in, because the BLOCKER was in
+the gate that was supposed to be proving the MAJORs.
+
+| # | Severity | What was wrong | What changed |
+|---|---|---|---|
+| 1 | BLOCKER | `tests/stdlib_module_names_test.rs:639` skipped a pair when `stdlib::member_resolves(module, builtin)` said so — a predicate derived from the very table the matrix is about. Adding `uppercase` to `csv`'s row made `csv.uppercase` answer *and* made the matrix skip `csv.uppercase`. The guard below it (`checked > BUILTIN_NAMES.len()`) could not see that either: a table that grants everything still leaves hundreds of pairs to refuse. | The skip list is `promised_by_the_documents()` — the `module.member` pairs the code blocks of SPEC.md and README.md write — which is independent of both tables. A skipped pair is now also asserted to be in `MODULE_MEMBERS`, and the three counters are asserted to add up to the size of the matrix, so a fourth column (a new `continue`) cannot appear without failing. The guard became `refused > promised_rows`: the promises have to stay the smaller half. |
+| 2 | MAJOR | `length` was a member of `text` and of `list` in the table, pinned by `edge_length_counts_bytes_in_both_arms`, and written by **neither** document — SPEC.md § text and README.md § List both wrote it flat. Nothing checked the table against the documents (`tests/stdlib_module_names_test.rs:596` only read the documents and asked the table), so the phase had enshrined answering surface in exactly the drift it exists to remove. | Both documents now write every member of every module, dotted: `text.length`, `list.length`, `text.trim`/`contains`/`starts_with`/`ends_with`/`replace`, `math.abs`/`ceil`/`sin`/`cos`/`tan`/`log`/`exp`, `files.lines`/`delete`/`copy`/`rename`. The new `edge_a_member_the_registry_holds_is_written_by_a_document` reads the table and asks **each** document, so a member that answers without being written down fails by name. |
+| 3 | MAJOR | The matrix walked `stdlib::BUILTIN_NAMES`, which holds qualified names (`files_read`, `json_parse`, `network_get`), so it asked about `files.files_read` — a spelling no reader writes — and never about `json.read`, `text.get` or `files.parse`. The pairs that have to be refused are the short ones. | `short_member_names()` builds the universe from the members `MODULE_MEMBERS` names plus every short name behind a registered builtin: the bare ones and the suffix of a qualified one (`files_read` is `read`). 64 names against 11 modules: **646 refused, 11 unparseable (`expect` is a reserved word), 47 promised**, where the old matrix asked 759 pairs of which none was a documented one. |
+| 4 | MINOR | Both engines checked `get_var(<module>_<member>)` *before* the table, so a `<module>_<member>` entry in the registry answered a dotted call whether or not `MODULE_MEMBERS` held it — while `src/stdlib.rs` documented `module_has_member` as "the predicate both engines resolve a dotted call against". | Both engines ask `module_has_member` first, for a receiver that names a **stdlib** module (a declared `module … end` keeps the rule below it, since `stdlib::is_module` says nothing about a program's own modules). Verified: registering `text_input` and reverting the two checks answers `text.input("name? ")` through a builtin; with the checks in place it is `Module 'text' has no function 'input'`, and the matrix fails on that tree. |
+| 5 | MINOR | The heading join-word skip was `word != "and"` while `module_spelling` folds case-insensitively, so `### JSON AND CSV` inserted a module called `AND`. | `!word.eq_ignore_ascii_case("and")`. |
+
+Two things the new gates found in the documents while they were being written
+down, which is the second time this has happened and the reason § json and csv
+is in the list of sections that are run:
+
+- `json.parse('{"name": "Alice"}')` — SPEC.md wrote it with single quotes, and
+  there are no single-quoted strings: `LexerError: Unexpected character '\''`.
+  Corrected to an escaped text, and the section now says so in a sentence.
+- `set has to text.contains("abc", "b")` — the line I added first, and `has` is
+  a reserved word (`object Name has x`). Caught by
+  `the_text_and_math_examples_answer_what_the_spec_claims`, which now runs the
+  whole code block of § text, § math, § list and § json and csv out of the file
+  rather than only the lines it transcribes.
+
+`filter` and `reduce` went the other way: they were in `MODULE_MEMBERS`, they
+resolve to registered flat builtins, and neither builtin answers anything.
+A member the table holds must be documented, and neither can be — so they are out
+of the table, and `list.filter(xs, f)` is now `Module 'list' has no function
+'filter'`, the same refusal SPEC.md already gives `math.random`. Both stay in
+`known_gaps()` in `tests/stdlib_module_docs_test.rs` with the program that still
+fails, which is where an unimplemented builtin belongs: a list of names that
+cannot be called, rather than a namespace that accepts them.
+
+#### Round 6's failing-test-first sequence
+
+Every defect was reintroduced into the finished tree, the test run, and the change
+undone. Nothing below is asserted; it is what the runs printed.
+
+| Reintroduced | Test | Real output |
+|---|---|---|
+| `"uppercase"` added to `csv`'s member row | `edge_a_member_the_registry_holds_is_written_by_a_document`, `edge_a_flat_builtin_is_not_spelled_as_a_member_of_any_other_module` | both FAILED — `stdlib::MODULE_MEMBERS holds \`csv.uppercase\` … SPEC.md § Standard Library does not`, and `` `csv.uppercase` was refused, but not by the rule that says a module has no such member `` |
+| `module_has_member` back to `MODULES.contains(&module) && BUILTIN_NAMES.contains(&member)` | 6 tests in this file, the matrix among them | `FAILED. 11 passed; 6 failed` — `` `bytes.abs` was refused, but not by the rule that says a module has no such member `` |
+| `text_input` registered in `builtins()` and `BUILTIN_NAMES`, and the two new engine checks reverted | `edge_a_flat_builtin_is_not_spelled_as_a_member_of_any_other_module` | FAILED — `` `text.input` was refused, but not by the rule that says a module has no such member `` / `RuntimeError: text_input was called with arguments it cannot use` |
+| SPEC.md § text's `set size to text.length("héllo")` line deleted | `edge_a_member_the_registry_holds_is_written_by_a_document` | FAILED — `stdlib::MODULE_MEMBERS holds \`text.length\`, so a program may write it, and SPEC.md § Standard Library does not` |
+| README.md's `### JSON and CSV` capitalised, with the case-sensitive join-word check | `edge_a_module_the_documents_name_is_in_the_registry`, `every_module_the_documents_name_answers_a_call` | both FAILED — `README.md names the module \`AND\` and stdlib::MODULES does not` |
+| …the same capitalisation with the case-insensitive check in place | *(the fix, shown as what it is)* | `17 passed; 0 failed` |
+
+`text.input("name? ")` before and after the engine change, against the binary:
+
+```
+$ ./target/debug/rb run /tmp/opencode/p50/ti.rb      # checks reverted
+Error: RuntimeError: text_input was called with arguments it cannot use
+exit=1
+$ ./target/debug/rb run /tmp/opencode/p50/ti.rb      # checks in place
+Error: RuntimeError: Module 'text' has no function 'input'
+exit=1
+```
+
+### Round 7 — the review of round 6
+
+Three findings: one BLOCKER and two MAJOR. The BLOCKER and the first MAJOR are the
+same defect seen from two sides — the receiver — and the shape is FINDINGS.md §12,
+which is the third round in a row that has found this class in a new place.
+
+| # | Severity | What was wrong | What changed |
+|---|---|---|---|
+| 1 | BLOCKER | `src/interpreter.rs:2119` and `src/bytecode/vm.rs:2757` asked `is_module` and `module_has_member` about the **member** and never about the **receiver**, so a name that is not a module at all fell through to `call(&qualified)`: `say random.seed(1)` answered `nothing`, as did `random.number`, `random.choice` and `random.shuffle`, in both engines. `random` is a registered builtin, so the analyzer is right to accept it as a receiver — `PI.times(..)` needs that — and `random_seed` being in the registry was on its own enough to make the call. There is no `random` module: `MODULES` does not list it and neither document names it. | `stdlib::dotted_call_reaches` is the whole rule, in one place, and both engines are callers of it: the receiver has to name a module, a module the program declared or imported owns the name, and a stdlib module answers only for a pair `MODULE_MEMBERS` holds. `random.seed(1)` is `RuntimeError: Module 'random' has no function 'seed'`. |
+| 2 | MAJOR | The round-6 check was `stdlib::is_module(&module) && !module_has_member(&module, method)`, asked **before** the program's own module table — so a `module text … end` publishing `greet` was `Module 'text' has no function 'greet'`, and all eleven names in `MODULES` refused the same way. `declare_module` only rejects a second declaration, so the program had declared a legal module and the runtime had disagreed with it. | The declared-module case is asked **first**, and the stdlib table is not consulted for it at all: the program's own published members decide. This is the rule an object already follows (`tests/object_model_test.rs::object_named_like_a_module_takes_the_call` — a declared `object json` takes the `json.parse(..)` spelling over the module of the same name), so it is the same answer for a module. |
+| 3 | MAJOR | `SPEC.md:1056` said "`length` answers a text, a list or a record alike". `src/runtime.rs` and `src/stdlib.rs` both refuse a record, `tests/test_text.rb:132` pins that as a **caught** error and `corpus/stdlib-0005`/`0006` record it. Four layers against one sentence, and the sentence was the one nothing could check. | The sentence is corrected, and `edge_length_answers_a_text_or_a_list_and_refuses_a_record` walks all three spellings against the runtime **and** reads § text out of SPEC.md to assert it now says the refusal — a prose claim needs its own gate, which is FINDINGS §4 and §10 in a third place. |
+
+Finding 1 is also the defect that was invisible to a gate by construction: the
+refusal matrix walks `stdlib::MODULES` × short member names, so it asked 646
+questions about eleven receivers and none about the other side of that predicate.
+The new `edge_a_registered_builtin_is_not_a_module_namespace` walks the
+**registry's** prefixes instead — a source neither the table nor the documents can
+skew, which is FINDINGS §10's rule applied to the loop rather than to the skip
+list. Fourteen pairs, four of them live.
+
+#### Round 7's failing-test-first sequence
+
+Each defect was reintroduced into the finished tree, the test run, and the change
+undone. Nothing below is asserted; it is what the runs printed.
+
+| Reintroduced | Test | Real output |
+|---|---|---|
+| `dotted_call_reaches` back to the pre-fix fall-through (any bound `<receiver>_<member>` answers) | `edge_a_registered_builtin_is_not_a_module_namespace` | FAILED — `` `random.number` answered, so a builtin spelled `random_number` made `random` a module. The registry encodes how a module function is stored; it is not a list of what the language has. `` |
+| the stdlib table asked first for a module the program declared (round 6's order) | `edge_a_module_the_program_declares_owns_its_own_name` | FAILED — `a module the program declared does not answer its own member, because the stdlib member table decided a receiver it says nothing about` |
+| the drifted `length` sentence put back into SPEC.md | `edge_length_answers_a_text_or_a_list_and_refuses_a_record` | FAILED — `SPEC.md § text does not say that a record is refused as \`length requires a list or text\`, which is what every spelling above does` |
+
+Before the fix, against the binary, in both engines:
+
+```
+$ ./target/debug/rb run /tmp/opencode/p50r3/r1.rb          # say random.seed(1)
+nothing
+exit=0
+$ ./target/debug/rb compile /tmp/opencode/p50r3/r1.rb && ./target/debug/rb vm /tmp/opencode/p50r3/q.rbc
+nothing
+$ ./target/debug/rb run /tmp/opencode/p50r3/r3.rb          # module text … export all … end
+Error: RuntimeError: Module 'text' has no function 'greet'
+exit=1
+```
+
+and after it, the same files:
+
+```
+$ ./target/debug/rb run /tmp/opencode/p50r3/r1.rb
+Error: RuntimeError: Module 'random' has no function 'seed'
+exit=1
+$ ./target/debug/rb run /tmp/opencode/p50r3/r3.rb
+hi ada
+exit=0
+```
+
 ## Gates
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, exit 0, no warnings |
-| `cargo test --all-targets` | **1427 passed, 0 failed, 0 ignored** across 53 result lines |
+| `cargo test --all-targets` | **1433 passed, 0 failed, 0 ignored** across 53 result lines |
 | `rb run` over `examples/*.rb` and `modules/*.rb` | 9 files, 0 failures |
 | `rbops/verify.sh phase-050` | **not run** — there is no `rbops/` directory in this checkout (`ls: cannot access 'rbops': No such file or directory`), and the run instructions forbid spending a tool call on the pipeline that lives elsewhere. Recorded as FINDINGS.md §7, as phase-049 did. Nothing is claimed about it. |
 
-1427 is the 1426 this run measured on the inherited tree plus the one test round 4
-added, `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort`. Nothing
-else moved: the same 53 result lines, and every count in every other file is the
-one the previous round recorded. (The 1422 the previous round wrote was four
-short of what the same tree measures; it is corrected here rather than carried
-forward.)
+1433 is the 1430 the previous round recorded plus the three gates round 7 added;
+`tests/stdlib_module_names_test.rs` is 20. The count per file is otherwise the
+one the previous round recorded: the same 53 result lines,
+`tests/text_split_join_test.rs` still 20, `tests/stdlib_modules_test.rs` still 39,
+and `tests/stdlib_module_docs_test.rs` still 10.
+
+`git status` is clean after the full run — no program left a file at the
+repository root, which was round 4's last open item.
 
 ## Invariants touched
 
-- None. No `.rb` extension, grammar, `Value` variant, `Error` variant, `say`,
-  trailing-comma or `{interp}` change. The language behaves identically before
-  and after; words in two Markdown files, one constant in a test and the tests
-  that read them moved.
+- No `.rb` extension, grammar, `Value` variant, `Error` variant, `say`,
+  trailing-comma or `{interp}` change, in any round.
+- Rounds 1 to 4 left the language behaving identically before and after.
+- **Round 5 does change what the language answers**, in one direction only:
+  `<module>.<member>` for a pair `stdlib::MODULE_MEMBERS` does not hold is now
+  `RuntimeError: Module '<module>' has no function '<member>'` where it used to
+  reach a flat builtin. That is a refusal replacing an undocumented answer, which
+  is the same trade every previous round made in the other direction, and every
+  spelling the documents give still answers — `every_module_the_documents_name_answers_a_call`
+  and `the_text_and_math_examples_answer_what_the_spec_claims` are unchanged and
+  still pass. Nothing that used to answer stopped answering except
+  `console.input`, `math.random`, `json.uppercase` and the rest of that family,
+  each of which SPEC.md denies in as many words.
+- **Round 6 changes two more things, both in the same direction.** `list.filter`
+  and `list.reduce` are refused by name rather than reaching a builtin that
+  answers nothing, and the `<module>_<member>` registry path is behind the table
+  on both engines — so a builtin registered under a stdlib module's prefix is no
+  longer reachable by a dotted spelling the table does not hold. Neither changes
+  an answer any document gives: the documents now write every member of every
+  module, and `edge_a_member_the_documents_name_is_a_function_the_registry_has`
+  plus `every_module_the_documents_name_answers_a_call` hold that.
+- **Round 7 changes two more, and one of them is the first in seven rounds that
+  puts an answer back.**
+  - A dotted call whose receiver names no module is refused: `random.seed(1)`,
+    `random.number(..)`, `random.choice(..)` and `random.shuffle(..)` were
+    answering through `random_seed`, `random_number`, `random_choice` and
+    `random_shuffle` and now are `RuntimeError: Module 'random' has no function
+    '<member>'`. There is no `random` module, so nothing a document gives stopped
+    answering; the flat spellings (`random_seed(1)`, `random(1, 6)`,
+    `type_of(1)`, `ends_with(..)`) are asserted unchanged by the gate that carries
+    the claim, because a fix that deleted the builtins would otherwise satisfy it.
+  - A `module … end` the program declared now answers its own members: `module
+    text … end` publishing `greet` was `Module 'text' has no function 'greet'` in
+    both engines and is `hi ada`. This is the only round that turns a refusal into
+    an answer, and it does so for a program `declare_module` always accepted.
+  - One wording change falls out of the first and is worth naming: a receiver that
+    is neither an object nor a module is now refused as `Module 'xs' has no
+    function 'map'` where it was `Unknown function 'xs_map'`. That is the dotted
+    spelling the program wrote rather than the internal encoding, which is what
+    `edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` requires of
+    `nosuchmodule`; the program it names is `xs.map(f)`, which does not answer
+    either way and is recorded at FINDINGS.md §14.
+  - `MODULE_MEMBERS`, `MODULES`, `ALIAS_MODULES`, `BUILTIN_NAMES` and the registry
+    are unchanged in round 7. Only the rule that reads them moved, and it moved
+    into `stdlib::dotted_call_reaches`, which both engines call.
 
 ## Test-requirement matrix
 
@@ -261,13 +502,14 @@ forward.)
 | singleton | covered — `bytes.from_text("H")` is `[72]`, one byte |
 | boundary | covered — bytes `0` and `255` round-trip and are written to a file read back as `[0, 255]` |
 | out_of_bounds | covered — `bytes.text([256])` and `bytes.text([-1])` are refusals naming the value, not wrapped values |
-| type_mismatch | covered — `files.read(1)`, `math.sqrt("a")`, `text.split("a", 1)`, `bytes.from_text(1)`; and each of those three is run a second time inside `try … catch error`, so the refusal is also proved to be catchable rather than fatal |
+| type_mismatch | covered — `files.read(1)`, `math.sqrt("a")`, `text.split("a", 1)`, `bytes.from_text(1)`; each of those three is run a second time inside `try … catch error`, so the refusal is also proved to be catchable rather than fatal; and round 7 added the other direction — `length({a: 1})` is refused in all three of its spellings while a text and a list answer, which is the `type_mismatch` the drifted SPEC sentence claimed did not exist |
 | numeric_boundary | covered — the byte range is the numeric boundary this module has: 0, 255, 256, −1, 300; `time.format(0, "%Y")` is `1970` |
 | unicode | covered — `bytes.from_text("é")` is `[195, 169]` and back; `length("héllo")` is 6 in both arms |
 | nesting_recursion | N/A — no new nesting or recursion; the documents' only higher-order builtin (`list.map`) is covered by the too-many-arguments case |
 | duplicate_missing_keys | N/A — no record key handling changed; no module takes a record |
 | malformed_input | covered — `bytes.text([0, 255])` is bytes in range that are not UTF-8, refused by name; `time.unix("")` is not a date and is refused; a bare `nosuchmodule` receiver is refused in the spelling the program wrote |
-| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges. Round 4 adds none |
+| unknown_member | covered (round 5; widened in round 6; **the other side of the predicate in round 7**) — every `module.member` pair of 11 modules and 64 short names that **neither document writes** is refused by its dotted spelling in both engines: 646 pairs, including `console.input`, `math.random`, `json.uppercase` (each of which SPEC.md denies), `json.read`, `text.get` and `files.parse` (the short suffixes the old qualified-name walk never asked about), and `list.filter` (round 6). A name the parser reserves (`bytes.expect`) does not parse at all, which is asserted rather than skipped, and the three counters are asserted to add up to the size of the matrix. Round 7 added the **receiver** half: every `<name>_<member>` in the registry whose `<name>` is not a module — 14 pairs, a source neither the table nor the documents can skew — is refused in both engines, with the four `random` pairs named and the flat spellings behind the prefix asserted to still answer. It also walks all 11 stdlib module names as a program-declared `module … end`, which is the collision the matrix could not see |
+| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges. Rounds 4, 5, 6 and 7 add none |
 | process_control | N/A — nothing signals or exits; `network` is the only module that starts anything, and its transport is a loopback listener owned by the test |
 
 ## Known gaps / follow-ups
@@ -282,16 +524,35 @@ forward.)
 - `filter` and `reduce` are the two entries left in `KNOWN_GAPS`, and they are
   the two the new `edge_a_known_gap_is_still_a_gap` runs on every build — so the
   list can no longer outlive the gap it names the way thirteen of its entries
-  did. Neither has agreed semantics in SPEC.md → FINDINGS.md §4.
-- Only SPEC.md's `### console` section is *executed* by its own test. The other
-  sections' lines are covered by `the_text_and_math_examples_answer_what_the_spec_claims`
-  and by `every_module_the_documents_name_answers_a_call`, which is one program
-  per module rather than one per line. Running every line of every section is
-  the honest version and is not done.
+  did. Neither has agreed semantics in SPEC.md, and round 6 took them out of
+  `MODULE_MEMBERS` for the same reason `math.random` is not a member → FINDINGS.md
+  §4.
+- Four of SPEC.md's sections are now executed as they are written — § console,
+  and round 6 added § text, § math, § list and § json and csv. `### files` and
+  `### bytes` are still not, because their examples write to paths a test cannot
+  promise: they are covered by `examples/files.rb` (gate 4 runs it) and by
+  `edge_the_bytes_module_answers_a_round_trip_at_both_ends`, which is coverage of
+  the functions rather than of the document. Running the remaining sections
+  verbatim needs a scratch directory the examples agree to; that is not done.
 - `ROADMAP.md` still writes `formats.parse_json` → FINDINGS.md §5.
+- `HANDOUT.md` is worse than ROADMAP.md and out of scope: it writes
+  `formats.parse_json`, `ask "Your name?"` and — the one this round caused —
+  `list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)`, which was already a
+  builtin that answers nothing and is now refused by name. It is not one of the
+  three documents this phase reconciles, and it was already wrong about two
+  modules and a keyword before round 6 touched it.
 - `catch error` binds nothing. There is no `catch error as e`, so a program can
   tell *that* a module call failed and can carry on, but cannot read the message
   and cannot choose to handle one error and re-raise another. That is why
   `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` pins catchability
   in one test and the error's wording in another: the second property is not
   reachable from inside the program. → FINDINGS.md §8.
+- `xs.map(f)` is in SPEC.md § list and does not answer. A *literal* list receiver
+  does (`[1, 2, 3].map(..)`), a variable one is `Module 'xs' has no function
+  'map'`. This predates every round of this phase and is a semantics decision —
+  which methods a list *value* has — rather than a document fix, so it is
+  recorded rather than taken here → FINDINGS.md §14.
+- A dotted call's receiver must now name a module, which is the one rule in this
+  report that is enforced from `src/stdlib.rs` rather than written twice. The two
+  engines had drifted onto two different halves of it, and the drift was the
+  BLOCKER → FINDINGS.md §12.

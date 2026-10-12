@@ -178,3 +178,222 @@ expressible inside a Redblue program. `edge_a_bad_module_call_is_a_catchable_err
 proves the error is catchable; `edge_a_module_function_refuses_bad_arguments_by_name`
 reads the name out of the process's stderr instead of out of the program.
 
+
+## 9. A module was a namespace for every flat builtin, and the table did not know
+
+Round 5's review found a BLOCKER and three smaller things, and the BLOCKER is
+the most general defect this phase has produced, so the shape is recorded here
+rather than only in `REPORT.md`.
+
+`stdlib::module_member_name` unwrapped `module_member` to `member` whenever
+`module` was in `MODULES` **and** `member` was any registered builtin:
+
+```rust
+if MODULES.contains(&module) && BUILTIN_NAMES.contains(&member) {
+```
+
+Every one of those conditions is necessary and neither is sufficient, so every
+module became a namespace for the whole registry. Verified against the tree the
+previous round left, before the fix:
+
+```
+$ rb run say-console-input.rb      # say console.input("n")
+name?                    # it read a line
+$ rb run say-math-random.rb       # random_seed(1) / say math.random(1, 6)
+3
+$ rb run say-json-uppercase.rb    # say json.uppercase("hi")
+HI
+```
+
+Each of those contradicts SPEC.md in as many words — `there is no
+console.input` (`SPEC.md:1024`), `math.random is not implemented`
+(`SPEC.md:1064`), and "a module has the functions that are spelled
+`<module>_<member>` in the registry" (`SPEC.md:1010`) — and none of them was
+visible to a test, because the table the per-member gate walks
+(`stdlib::MODULE_MEMBERS`) lists what a module *has*, and a spelling that is not
+listed is exactly a spelling no gate was asking about.
+
+Three points generalize:
+
+- **An enumerated surface that is not enforced is documentation.** The table was
+  introduced to make the check per-member rather than per-module, and it did that
+  — but it was read, never applied. The same shape as the `KNOWN_GAPS` skip list
+  in §4: the names the test does not look at are the names that rot.
+- **A resolution rule that accepts "any of A and any of B" is a namespace.** The
+  rule was written to make `text.uppercase` reach `uppercase`, and the narrow
+  version of it — the pairs the language actually has — is no harder to state.
+- **A test that builds a name by concatenation tests the concatenation.**
+  `tests/text_split_join_test.rs` wrote its dotted spelling as `{module}.{builtin}`
+  and reached `json.json_parse(..)`, which answered only through this same hole.
+  The row was green on a spelling no reader would write.
+
+The fix is one predicate (`stdlib::module_has_member`) used by both the resolver
+and the test, and two new gates: every unlisted pair is refused by its dotted
+spelling, in both engines.
+
+## 10. The gate's own allowlist was derived from the thing it was checking
+
+Round 6's review found the BLOCKER this section records a second time, one level
+up, and the shape is worth its own entry because §4, §5 and §9 are all the same
+shape.
+
+The matrix built for §9 walked every `module.builtin` pair and skipped a pair
+when `stdlib::member_resolves(module, builtin)` said the pair resolves — and
+`member_resolves` is derived from `MODULE_MEMBERS`, the table the matrix exists to
+audit. So the one hole the table could open was the one hole the matrix could not
+see: put `uppercase` in `csv`'s row and `csv.uppercase` answered, *and* the
+matrix skipped `csv.uppercase`, and the suite was green. The guard under the loop
+(`checked > BUILTIN_NAMES.len()`) asked whether there was anything left to
+refuse, not whether the right things were being refused, so a table that granted
+everything still left hundreds of pairs to check and the guard passed.
+
+Two generalizations, and they are the reason this is recorded rather than left in
+`REPORT.md`:
+
+- **An allowlist in a gate has to come from somewhere the gate is not auditing.**
+  The skip list is now the `module.member` pairs the documents' code blocks
+  write, which is a third source: the table, the registry and the documents can
+  each disagree with the others, and a gate derived from one of them cannot catch
+  that one drifting. This is §4's `KNOWN_GAPS` again — a name nobody checks — and
+  it has a harder form here, because the skip list was not a list of names but a
+  *predicate*, which reads like a fact about the language rather than like a
+  list somebody wrote.
+- **A count is not a coverage claim.** The counters are now three and they are
+  asserted to add up to the size of the matrix, so a fourth column — one more
+  `continue` — fails rather than being absorbed, and the guard is
+  `refused > promised_rows`: the allowlist has to stay the smaller half of what
+  the gate walks.
+
+The same review found that the matrix was asking about the wrong names. It walked
+`stdlib::BUILTIN_NAMES`, which holds *qualified* names (`files_read`,
+`json_parse`, `network_get`), so it asked whether `files.files_read` — a spelling
+no reader writes — was refused, and never asked about `json.read`, `text.get` or
+`files.parse`. A test of a closed surface has to enumerate the surface a caller
+would write, not the surface the registry stores. That one is the general form of
+§9's third bullet: a name built by concatenating the storage with the syntax is a
+name the language never had.
+
+## 11. A table that the resolver consults is not the same as a table the tests consult
+
+Also from round 6, and smaller but the same family.
+
+`stdlib::MODULE_MEMBERS` was documented as "the predicate both engines resolve a
+dotted call against", and both engines consulted it on **one** of the two paths a
+dotted call takes: the flat-backed one (`text.uppercase` unwraps to `uppercase`),
+but not the `<module>_<member>` one, which asked `get_var("files_read")` first. So
+`files_read` being registered was on its own a reason `files.read` answered, and
+the claim in the doc comment was false for half the resolution.
+
+The general shape is the one §9 records — an enumerated surface that is read but
+not applied is documentation — and the detail worth keeping is where the check
+went. It went **before** the `get_var` hit rather than beside it, and it was
+scoped to `stdlib::is_module(name)` rather than `is_module_name(name)`, because
+the latter is also true for a `module … end` the program declared, whose members
+are published by the program and about which the stdlib table says nothing. A
+check written against the broader predicate would have broken every user module.
+
+## 12. A namespace is a decision, and the receiver is where the decision was missing
+
+Round 7's BLOCKER and its MAJOR are one defect seen from two sides, and it is the
+third round in a row that has found the *same* class in a new place — which is why
+this is recorded rather than only fixed.
+
+Round 6 closed "a module is a namespace for every flat builtin" by making
+`stdlib::MODULE_MEMBERS` the predicate. Round 7's review showed the predicate was
+being asked about the **member** and never about the **receiver**. Both engines
+resolved a dotted call in this order:
+
+```rust
+if stdlib::is_module(&module) && !stdlib::module_has_member(&module, method) { … }
+if self.get_var(&qualified).is_none() && !answered_by_builtin && self.is_module_name(&module) { … }
+```
+
+Every condition in those two lines is *necessary* and none is *sufficient*, so a
+name that is not a module at all fell straight through to `call(&qualified)`:
+
+```
+$ rb run /tmp/opencode/p50r3/r1.rb      # say random.seed(1)
+nothing
+exit=0
+```
+
+`random` is a registered builtin, so `src/analyzer.rs` accepts it as a receiver —
+correctly, since `PI.times(..)` needs exactly that — and `random_seed` is in the
+registry, so the first refusal did not fire and the second did not either. There is
+no `random` module: `stdlib::MODULES` does not list it and neither document names
+it. `random.number`, `random.choice` and `random.shuffle` answered the same way, in
+both engines (`rb compile` + `rb vm` printed `nothing` and `[2, 3, 1]`).
+
+The other side of the same defect was the mirror image: the table **was** asked
+about a receiver it says nothing about. `module text … end` publishing `greet` is
+`Module 'text' has no function 'greet'`, and all eleven names in `MODULES` refused
+the same way. `src/interpreter.rs:1056` only rejects a *second* declaration of a
+name, so the program had declared a legal module and the runtime had disagreed.
+
+Three points generalize, and they are the third recurrence of one lesson:
+
+- **A gate walks the universe it was built for.** The refusal matrix walks
+  `stdlib::MODULES` × short member names, so it asked 646 questions about eleven
+  receivers and none about the other side of the `MODULES` predicate. The new gate
+  walks the *registry's* prefixes instead — a source neither the table nor the
+  documents can skew — which is FINDINGS §10's "an allowlist in a gate has to come
+  from somewhere the gate is not auditing", applied to the loop rather than to the
+  skip list. Fourteen pairs, of which four were live.
+- **Two predicates that both answer "is this a namespace?" are not one predicate.**
+  `stdlib::is_module` asks the crate's list and `is_module_name` asked the
+  program's; the round-6 check was written against the crate's and the round-6
+  fall-through against the program's, and between them every receiver that was
+  neither was undefined. `stdlib::dotted_call_reaches` is now the single place all
+  three questions are asked, in order, for both engines.
+- **A rule written in two engines is a rule the next change applies to one of them.**
+  `is_module_name` was already duplicated in `src/interpreter.rs` and
+  `src/bytecode/vm.rs` with a comment each way. The new rule is a free function in
+  `src/stdlib.rs` with both engines as callers, so the "both engines refuse the
+  same pairs" claim is structural rather than tested-into-agreement.
+
+## 13. `length` was documented as answering three kinds of value and answers two
+
+Round 7's second MAJOR, and the smallest drift in this phase's history because
+every other layer already had it right.
+
+`SPEC.md:1056` said "`length` answers a text, a list or a record alike".
+`src/runtime.rs` and `src/stdlib.rs` both refuse a record — `length requires a
+list or text` — and `tests/test_text.rb:132` pins that as a **caught** error while
+`corpus/stdlib-0005` and `corpus/stdlib-0006` record it. Four layers against one
+sentence, and the sentence was the one nothing could check: no test runs prose.
+
+The sentence is corrected, and the new gate
+`edge_length_answers_a_text_or_a_list_and_refuses_a_record` walks all three
+spellings against the runtime **and** reads § text out of SPEC.md to assert it
+says the refusal. A document claim written only in prose needs its own gate; that
+is §4's `KNOWN_GAPS` and §10's skip list in a third place.
+
+## 14. `xs.map(f)` is in SPEC.md and does not answer
+
+Out of scope, recorded so it is promoted rather than smuggled in. Found while
+proving the BLOCKER above, and it is **pre-existing** — it predates every round of
+this phase and is not a consequence of anything here.
+
+`SPEC.md:1147` says `list.map` "works in all three spellings: `map(xs, f)`,
+`list.map(xs, f)` and `xs.map(f)`". The third does not answer:
+
+```
+$ rb run /tmp/opencode/p50r3/m1.rb      # set ys to xs.map(to (x) give back x * 2 end)
+Error: RuntimeError: Module 'xs' has no function 'map'
+$ rb run /tmp/opencode/p50r3/m2.rb      # say [1,2,3].map(to (x) give back x * 2 end)
+[2, 4, 6]
+```
+
+A *literal* list receiver works because `call_method` evaluates a non-name
+receiver and handles `map` there; a receiver that is a variable takes the
+name path, which is the module path, and a variable is not a module. Making it
+answer is a semantics decision rather than a documentation fix — it says which
+methods a list *value* has, and `xs` has to be in scope for the example to be
+runnable at all — so it belongs in its own phase, with a documented rule, rather
+than in a reconciliation one.
+
+The wording did change, and for the better: the refusal now names the receiver the
+program wrote (`Module 'xs' has no function 'map'`) instead of the internal
+encoding (`Unknown function 'xs_map'`), which is the same thing
+`edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` requires of a
+receiver that is no module at all. Nothing in the suite pinned the old wording.

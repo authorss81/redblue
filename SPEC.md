@@ -1035,8 +1035,14 @@ function is only called with parentheses — is `Unknown variable 'ask'`.
 ```redblue
 set upper to text.uppercase("hello")  // "HELLO"
 set lower to text.lowercase("HELLO")  // "hello"
+set trimmed to text.trim("  hi  ")    // "hi"
 set parts to text.split("a,b,c", by ",")  // ["a", "b", "c"]
 set joined to text.join(["a", "b", "c"], by ",")  // "a,b,c"
+set holds to text.contains("abc", "b")  // yes
+set starts to text.starts_with("abc", "ab")  // yes
+set ends to text.ends_with("abc", "bc")  // yes
+set swapped to text.replace("a-b", "-", "+")  // "a+b"
+set size to text.length("héllo")  // 6
 ```
 
 `length` counts **bytes**, which is what a text is made of: `length("héllo")` is
@@ -1047,15 +1053,30 @@ in six tests and `corpus/unicode-0001..0008` record it, including the case the
 rule exists for: `é` — an `e` and a combining acute accent — is one glyph, three
 bytes and a length of 3.
 
+`length` answers a text and a list, and it is the same function under each of the
+three spellings: `length(xs)`, `text.length(xs)` and `list.length(xs)`. A record is
+not a length — `length({a: 1})` is `RuntimeError: length requires a list or text`,
+in all three spellings, and `tests/test_text.rb` pins the refusal as a caught
+error. Both dotted spellings are module members, so both are written
+above and in README.md — a name that answers without a document saying so is
+surface nobody agreed to.
+
 ### math
 
 ```redblue
 set pi to PI
 set e to E
+set absolute to math.abs(-3)   // 3
+set floored to math.floor(1.7)  // 1
+set ceiling to math.ceil(1.2)  // 2
 set sqrt2 to math.sqrt(2)
 set rounded to math.round(3.7)  // 4
 set powered to math.pow(2, 10)  // 1024
-set floored to math.floor(1.7)  // 1
+set s to math.sin(0)  // 0
+set c to math.cos(0)  // 1
+set t to math.tan(0)  // 0
+set lg to math.log(1)  // 0
+set raised to math.exp(0)  // 1
 ```
 
 `PI` and `E` are globals, not module members: a module has functions, so
@@ -1096,20 +1117,37 @@ refuses an empty list, since it has no member to choose.
 set content to files.read("data.rb")
 might fail files.write("output.rb", content)
 might fail files.append("log.rb", "new line")
+set lines to files.lines("data.rb")  // one entry per line
+files.copy("data.rb", "copy.rb")
+files.rename("copy.rb", "moved.rb")
+files.delete("moved.rb")
 if files.exists("config.rb")
     // ...
 end
 ```
 
+`files.copy` and `files.rename` refuse rather than write half a file: a copy
+whose source is not there, or a rename onto a path that cannot be written, is an
+`IoError` naming the path. `files.rename` moves as well as renames, so a copy
+written to a temporary path and then renamed is one file at the end rather than
+two.
+
 ### list
 
 ```redblue
 set doubled to list.map([1, 2, 3], to (x) give back x * 2)
+set size to list.length([1, 2, 3])  // 3
 ```
 
-`list.filter` and `list.reduce` are registered but not implemented. `list.map`
-is the only higher-order builtin, and it works in all three spellings:
-`map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`.
+`filter` and `reduce` are registered as flat builtins and neither is
+implemented, so neither is a member of `list`: `list.filter(xs, f)` is
+`Module 'list' has no function 'filter'`, the same refusal as `math.random`
+above. A builtin that cannot answer is not a module member — the alternative is a
+spelling the analyzer accepts and the runtime can only refuse.
+
+`list.map` is the only higher-order builtin, and it works in all three spellings:
+`map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`. `list.length` is `length` under
+its module spelling, as § text writes it for a text.
 
 ### network
 
@@ -1125,10 +1163,14 @@ this section used to carry did not parse. See "Asynchronous Programming" above.
 ### json and csv
 
 ```redblue
-set obj to json.parse('{"name": "Alice"}')
-set text to json.stringify(obj)
-set rows to csv.parse("name,age\nAlice,30")
+set obj to json.parse("{ \"name\": \"Alice\" }")  // {name: Alice}
+set text to json.stringify(obj)                   // {"name": "Alice"}
+set rows to csv.parse("name,age\nAlice,30")       // [[name, age], [Alice, 30]]
 ```
+
+A text is written between double quotes, and a quote *inside* one is escaped
+`\"` — there are no single-quoted strings, so `'{"name": "Alice"}'` is a
+`LexerError` at the first quote rather than a JSON document.
 
 There is no `formats` module. JSON and CSV are their own modules, spelled
 `json.*` and `csv.*`.
