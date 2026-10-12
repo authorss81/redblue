@@ -1324,6 +1324,79 @@ fn edge_a_module_function_refuses_bad_arguments_by_name() {
     }
 }
 
+/// The same bad calls again, this time where the program can see them.
+///
+/// The test above proves the call is *refused*; it does not prove the refusal is
+/// something a program can carry on from. Those are different properties, and a
+/// run that ends the process is the worse one — `list.map` on a list of the wrong
+/// shape should be a case a caller can write `try ... catch error` around, not a
+/// case that kills everything the caller had already done.
+///
+/// `catch error` binds nothing, so the message cannot be read back here; the test
+/// above is where the *name* in the message is pinned. What is asserted here is
+/// that the handler runs and the statement after the `try` runs too — `after` is
+/// on stdout only if the failure was caught rather than fatal, so a program that
+/// aborts at the call fails this even though it "printed" something.
+///
+/// The unknown-module case is deliberately absent from this list: an
+/// `AnalyzerError` is not a `RuntimeError`, so `try` does not catch one, and a
+/// `catch error` around `nosuchmodule.read("x")` leaves the program dead.
+/// `edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` is where that
+/// name is pinned, and this test is what says why the two are not the same row.
+#[test]
+fn edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort() {
+    let cases = [
+        // No arguments, too many, and a wrong type — the same three ways of
+        // being wrong as the test above, one per kind.
+        r#"say text.uppercase()"#,
+        r#"say list.map([1], to (x) give back x, 5)"#,
+        r#"say files.read(1)"#,
+    ];
+
+    for source in cases {
+        let program =
+            format!("try\n    {source}\ncatch error\n    say \"caught\"\nend\nsay \"after\"\n");
+        let (ok, stdout, stderr) = run_named("caught_module_error", &program);
+        assert!(
+            ok,
+            "a bad call to a module function ended the program instead of being \
+             catchable:\n{source}\n--- stderr\n{stderr}"
+        );
+        assert_eq!(
+            stdout, "caught\nafter\n",
+            "the failure did not reach the program's own `catch error`, or the \
+             statement after the `try` did not run, so the program could not carry \
+             on:\n{source}\n--- stdout\n{stdout}\n--- stderr\n{stderr}"
+        );
+    }
+
+    // The boundary the row above sits on: an error the analyzer raises is not
+    // catchable, and pretending otherwise would be the wrong thing to promise.
+    // `try` leaves the program dead here, so the process exits non-zero and
+    // `caught` is never printed — which is what makes the three rows above a
+    // statement about `RuntimeError` rather than about errors in general.
+    let (ok, stdout, _) = run_named(
+        "uncaught_analyzer_error",
+        r#"try
+    say nosuchmodule.read("x")
+catch error
+    say "caught"
+end
+say "after"
+"#,
+    );
+    assert!(
+        !ok,
+        "an AnalyzerError was caught by `catch error`, so the rows above prove \
+         nothing about RuntimeError being catchable:\n--- stdout\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("after"),
+        "the program carried on past an error `catch error` did not handle:\n\
+         --- stdout\n{stdout}"
+    );
+}
+
 /// A bare receiver that is not a module is refused in the spelling the program
 /// wrote.
 ///

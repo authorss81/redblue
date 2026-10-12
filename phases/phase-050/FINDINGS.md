@@ -154,8 +154,27 @@ not one of the three documents this phase reconciles.
 It lives at `../rbops/verify.sh`, outside this project checkout, and the run
 instructions for this phase state that the pipeline that invoked it must not be
 inspected and that no tool call is to be spent on it. It was therefore not
-invoked. The gates that can be run from inside the checkout were, and their
-real output is in `REPORT.md`: `cargo fmt --all -- --check`, `cargo clippy
---all-targets -- -D warnings`, `cargo test --all-targets` (1422 passed, 0
-failed), and `rb run` over every file in `examples/` and `modules/` (9 files, 0
-failures). `REPORT.md` claims nothing about `verify.sh`.
+invoked. Confirmed in round 4: this checkout has no `rbops/` directory at all
+(`ls: cannot access 'rbops': No such file or directory`). The gates that can be
+run from inside the checkout were, and their real output is in `REPORT.md`:
+`cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --all-targets` (1427 passed, 0 failed), and `rb run` over every file
+in `examples/` and `modules/` (9 files, 0 failures). `REPORT.md` claims nothing
+about `verify.sh`.
+
+## 8. `catch error` binds nothing, so a program cannot read what went wrong
+
+`try … catch error` runs the handler and hands it no value. `catch error as e` is
+a `ParserError: Unexpected token 'as'`. A program can therefore see that a module
+call failed and carry on, but it cannot put the failure message in its own
+output, log it, or decide between two `catch` clauses by error type.
+
+This is not this phase's to fix — `SPEC.md` § Error handling documents the
+language's `try`/`catch`/`finally`, and changing what `catch` binds is a
+grammar and semantics question, not a module-name reconciliation. It is recorded
+because round 4 had to work around it: the "caught `RuntimeError` naming the
+function" requirement is split across two tests, because only half of it is
+expressible inside a Redblue program. `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort`
+proves the error is catchable; `edge_a_module_function_refuses_bad_arguments_by_name`
+reads the name out of the process's stderr instead of out of the program.
+

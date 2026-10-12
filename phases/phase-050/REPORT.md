@@ -42,9 +42,11 @@ What *did* reproduce, and was still true on `main`:
 | `README.md` | +29 −1 | `### Formats` → `### JSON and CSV` (the stale name), plus `### Bytes` (`README.md:190`) and `### Sys` (`README.md:205`). Round 2 added `### Console` (`README.md:239`) and `### List` (`README.md:248`). |
 | `tests/stdlib_module_names_test.rs` | +746 | New: the extraction test, one program per documented module, and the edge tests. Round 3 made the module table's expected output mandatory and gave `network` a loopback server. |
 | `tests/stdlib_module_docs_test.rs` | +5 −2 | `time_unix` and `console_clear` out of `KNOWN_GAPS`: both answer, so their entries were permissions to stop checking names that work. Round 3 took eleven more out and made the list self-checking. |
+| `nope` | −1 | A one-byte (`0x01`) file committed at the repository root by an earlier round of this phase: a `bytes.write` program that named a path relative to the working directory, which is why round 3 gave every such program an absolute path. Deleted, and a full `cargo test --all-targets` now leaves `git status` clean. |
+| `tests/stdlib_module_names_test.rs` | +74 | Round 4: `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` — the bad-argument cases again, inside the program's own `try ... catch error`. See round 4 below. |
 
-Round 2 and round 3 moved every one of the round-1 `SPEC.md`/`README.md` line
-numbers; those below are the current ones.
+Round 2, round 3 and round 4 moved every one of the round-1 `SPEC.md`/`README.md`
+line numbers; those below are the current ones.
 
 No interpreter behaviour changed. `MODULES` itself is unchanged — every name in
 it answers and every name the documents name was already in it. `src/runtime.rs`
@@ -128,20 +130,26 @@ is withdrawn (FINDINGS.md §4).
 
 ## Tests added
 
-All in `tests/stdlib_module_names_test.rs` — 9 `#[test]` functions, 7 named
-`edge_*`.
+All in `tests/stdlib_module_names_test.rs` — 14 `#[test]` functions, 12 named
+`edge_*`. (The previous round's table listed 9; the five it omitted are rows 4,
+5, 8, 10 and the round-4 row 13, and are restored here.)
 
-| Test | Edge class covered |
-|---|---|
-| `edge_a_module_the_documents_name_is_in_the_registry` | forward reconciliation, **per document** — a documented name absent from `MODULES` |
-| `edge_a_module_in_the_registry_is_named_by_a_document` | reverse reconciliation, per document — a `MODULES` name one of the two documents does not name |
-| `edge_no_module_in_the_registry_has_nothing_behind_it` | a namespace with no function behind it |
-| `every_module_the_documents_name_answers_a_call` | one `.rb` per documented name through `rb run`, exit 0 **and the output it must print**, with no row allowed to opt out; `network` is answered by a loopback server this test owns and its request lines are asserted; the table is itself checked against each document in both directions |
-| `edge_the_documented_console_lines_answer` | every line of SPEC.md § console's code block, read out of the document and run; plus the newline difference between `say` and `print`, `console.log` answering `nothing`, `console.error` on stderr, and `ask` refused |
-| `the_text_and_math_examples_answer_what_the_spec_claims` | the `text`/`math` values SPEC.md's own comments claim, incl. `by ","` spellings |
-| `edge_the_bytes_module_answers_a_round_trip_at_both_ends` | empty, singleton, unicode, byte-range boundaries, out-of-range, non-UTF-8 |
-| `edge_a_module_function_refuses_bad_arguments_by_name` | no arguments, too many, wrong type — each a `RuntimeError` naming the function, each asserted not to have panicked |
-| `edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` | `nosuchmodule.read("x")` is refused, and the message says `nosuchmodule`, not the internal `nosuchmodule_read` |
+| # | Test | Edge class covered |
+|---|---|---|
+| 1 | `edge_a_module_the_documents_name_is_in_the_registry` | forward reconciliation, **per document** — a documented name absent from `MODULES` |
+| 2 | `edge_a_module_in_the_registry_is_named_by_a_document` | reverse reconciliation, per document — a `MODULES` name one of the two documents does not name |
+| 3 | `edge_no_module_in_the_registry_has_nothing_behind_it` | a namespace with no function behind it |
+| 4 | `edge_the_member_table_covers_exactly_the_modules_that_are_registered` | the table row 3 walks is itself the surface — a module missing from it would be skipped, not checked |
+| 5 | `edge_a_member_the_documents_name_is_a_function_the_registry_has` | a member a document spells that resolves to no builtin — accepted by the analyzer, refused at run time |
+| 6 | `every_module_the_documents_name_answers_a_call` | one `.rb` per documented name through `rb run`, exit 0 **and the output it must print**, with no row allowed to opt out; `network` is answered by a loopback server this test owns and its request lines are asserted; the table is itself checked against each document in both directions |
+| 7 | `edge_the_documented_console_lines_answer` | every line of SPEC.md § console's code block, read out of the document and run; plus the newline difference between `say` and `print`, `console.log` answering `nothing`, `console.error` on stderr, and `ask` refused |
+| 8 | `edge_input_reads_one_line_and_answers_it` | resource/state — `input` with a line typed, with no newline at end of input, with `\r\n`, and with EOF |
+| 9 | `the_text_and_math_examples_answer_what_the_spec_claims` | the `text`/`math` values SPEC.md's own comments claim, incl. `by ","` spellings |
+| 10 | `edge_length_counts_bytes_in_both_arms` | the two implementations of `length` must agree; a `é` is 2 bytes and not 1 character |
+| 11 | `edge_the_bytes_module_answers_a_round_trip_at_both_ends` | empty, singleton, unicode, byte-range boundaries, out-of-range, non-UTF-8 |
+| 12 | `edge_a_module_function_refuses_bad_arguments_by_name` | no arguments, too many, wrong type — each a `RuntimeError` naming the function, each asserted not to have panicked |
+| 13 | `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` | the same three refusals **inside the program's own `try … catch error`** — stdout must be exactly `caught\nafter\n`, so a refusal that ended the process fails it; plus the boundary, that an `AnalyzerError` is *not* catchable |
+| 14 | `edge_an_unknown_module_name_is_refused_in_its_dotted_spelling` | `nosuchmodule.read("x")` is refused, and the message says `nosuchmodule`, not the internal `nosuchmodule_read` |
 
 The failing-test-first sequence, with the real output:
 
@@ -187,19 +195,56 @@ old-form exit=0
 and the last row shows the fix for finding 3 is self-enforcing: putting an
 implemented name back on the gap list fails on its own.
 
+### Round 4 — this run
+
+The four gates were run first, against the tree the previous rounds left. `cargo
+fmt --check`, `cargo clippy --all-targets -D warnings` and `cargo test
+--all-targets` were already green. Two things were not finished:
+
+| # | Severity | What was wrong | What changed |
+|---|---|---|---|
+| 1 | MAJOR | The phase's definition of done asks for "each a **caught** `RuntimeError` naming the function, never a panic". `edge_a_module_function_refuses_bad_arguments_by_name` proved the *refusal* — non-zero exit, the function named in stderr, no `panicked` — which is the process-level half. Nothing proved the other half: that the refusal is something a program can catch and carry on from. A builtin that unwound instead of raising would have passed it. | `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` runs three of the same bad calls — `text.uppercase()` (no arguments), `list.map(…, 5)` (too many), `files.read(1)` (wrong type) — inside `try … catch error`, and asserts stdout is exactly `caught\nafter\n`. `after` is on stdout only if the statement past the `try` ran, so a fatal refusal fails the assertion even though the program printed something. |
+| 2 | MAJOR | The same test's sibling — and this is what makes #1 mean something — the unknown-module case is a different kind of failure. `nosuchmodule.read("x")` is an `AnalyzerError`, raised before the program starts, so `catch error` does not catch it. Lumping the two together would have claimed "module errors are catchable" on the strength of a row that is not a runtime error at all. | The new test asserts the boundary directly: the same program with `nosuchmodule.read("x")` inside the `try` exits non-zero and never prints `after`. So the three rows above are a claim about `RuntimeError` specifically, and a future change that made analyzer errors catchable — which would be wrong — fails this. |
+
+A third item was not a finding but debris: a one-byte file `nope` (`0x01`) sat
+committed at the repository root, written by an earlier round's `bytes.write`
+program because it named a path relative to the working directory. Round 3
+already fixed that class of bug in the test; the artifact it had left was never
+cleaned up. Deleted. `git status` is clean after a full `cargo test
+--all-targets`, which is the check that says the class is gone.
+
+#### Round 4's failing-test-first sequence
+
+The defect was introduced, the test run, and the change undone:
+
+| Reintroduced | Test | Real output |
+|---|---|---|
+| `uppercase` in `src/stdlib.rs:477` made to answer `""` instead of `None` when called with no arguments — i.e. a bad call that no longer fails at all | `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` | `left: "\nafter\n" right: "caught\nafter\n"` — `caught` was never printed, because nothing failed |
+
+Both the reconciliation gates were re-proven against the same tree while round 4
+was open, since a test file that passes proves nothing about the tree it reads:
+
+| Reintroduced | Test | Real output |
+|---|---|---|
+| `"zap"` added to `stdlib::MODULES` | `edge_a_module_in_the_registry_is_named_by_a_document`, `edge_the_member_table_covers_exactly_the_modules_that_are_registered` | both FAILED |
+| `"text"` removed from `stdlib::MODULES` | 7 tests in `stdlib_module_names_test`, including `edge_a_module_the_documents_name_is_in_the_registry` and `every_module_the_documents_name_answers_a_call` | `the documented module 'text' does not answer a call:` / `AnalyzerError: Unknown variable 'text'; did you mean 'test'?` |
+
 ## Gates
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, exit 0, no warnings |
-| `cargo test --all-targets` | **1422 passed, 0 failed, 0 ignored** across 53 result lines |
+| `cargo test --all-targets` | **1427 passed, 0 failed, 0 ignored** across 53 result lines |
 | `rb run` over `examples/*.rb` and `modules/*.rb` | 9 files, 0 failures |
-| `rbops/verify.sh phase-050` | **not run** — it lives at `../rbops/verify.sh`, outside this checkout, and the run instructions forbid spending a tool call on the pipeline. Recorded as FINDINGS.md §7, as phase-049 did. Nothing is claimed about it. |
+| `rbops/verify.sh phase-050` | **not run** — there is no `rbops/` directory in this checkout (`ls: cannot access 'rbops': No such file or directory`), and the run instructions forbid spending a tool call on the pipeline that lives elsewhere. Recorded as FINDINGS.md §7, as phase-049 did. Nothing is claimed about it. |
 
-1422 is 1421 plus the one test round 3 added, `edge_a_known_gap_is_still_a_gap`.
-Nothing else moved: the same 53 result lines, the same counts in every other
-file.
+1427 is the 1426 this run measured on the inherited tree plus the one test round 4
+added, `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort`. Nothing
+else moved: the same 53 result lines, and every count in every other file is the
+one the previous round recorded. (The 1422 the previous round wrote was four
+short of what the same tree measures; it is corrected here rather than carried
+forward.)
 
 ## Invariants touched
 
@@ -216,13 +261,13 @@ file.
 | singleton | covered — `bytes.from_text("H")` is `[72]`, one byte |
 | boundary | covered — bytes `0` and `255` round-trip and are written to a file read back as `[0, 255]` |
 | out_of_bounds | covered — `bytes.text([256])` and `bytes.text([-1])` are refusals naming the value, not wrapped values |
-| type_mismatch | covered — `files.read(1)`, `math.sqrt("a")`, `text.split("a", 1)`, `bytes.from_text(1)` |
+| type_mismatch | covered — `files.read(1)`, `math.sqrt("a")`, `text.split("a", 1)`, `bytes.from_text(1)`; and each of those three is run a second time inside `try … catch error`, so the refusal is also proved to be catchable rather than fatal |
 | numeric_boundary | covered — the byte range is the numeric boundary this module has: 0, 255, 256, −1, 300; `time.format(0, "%Y")` is `1970` |
-| unicode | covered — `bytes.from_text("é")` is `[195, 169]` and back |
+| unicode | covered — `bytes.from_text("é")` is `[195, 169]` and back; `length("héllo")` is 6 in both arms |
 | nesting_recursion | N/A — no new nesting or recursion; the documents' only higher-order builtin (`list.map`) is covered by the too-many-arguments case |
 | duplicate_missing_keys | N/A — no record key handling changed; no module takes a record |
-| malformed_input | covered — `bytes.text([0, 255])` is bytes in range that are not UTF-8, refused by name |
-| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges |
+| malformed_input | covered — `bytes.text([0, 255])` is bytes in range that are not UTF-8, refused by name; `time.unix("")` is not a date and is refused; a bare `nosuchmodule` receiver is refused in the spelling the program wrote |
+| resource_limit | N/A — this phase adds no recursion, no loop, no allocation and no limit; the existing call-depth and step budgets are untouched and unchanged. The loopback server round 3 adds is bounded by a 30-second accept deadline and a 10-second read deadline, and holds at most two exchanges. Round 4 adds none |
 | process_control | N/A — nothing signals or exits; `network` is the only module that starts anything, and its transport is a loopback listener owned by the test |
 
 ## Known gaps / follow-ups
@@ -244,3 +289,9 @@ file.
   per module rather than one per line. Running every line of every section is
   the honest version and is not done.
 - `ROADMAP.md` still writes `formats.parse_json` → FINDINGS.md §5.
+- `catch error` binds nothing. There is no `catch error as e`, so a program can
+  tell *that* a module call failed and can carry on, but cannot read the message
+  and cannot choose to handle one error and re-raise another. That is why
+  `edge_a_bad_module_call_is_a_catchable_error_and_not_an_abort` pins catchability
+  in one test and the error's wording in another: the second property is not
+  reachable from inside the program. → FINDINGS.md §8.
