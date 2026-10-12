@@ -1045,29 +1045,86 @@ end
 ### console
 
 ```redblue
-say "Hello"           // Print with newline
-print "Hello"         // Print without newline
-ask "Your name?"      // Get user input
+say "Hello"                      // print with a newline
+print "Hello"                    // print without one
+console.log("Hello")             // `say` under its module spelling
+console.error("Could not read")  // diagnostics go to stderr
+console.clear()                  // clear the screen
+set name to input("Your name? ")  // read one line from the terminal
 ```
+
+`say` and `print` are keywords rather than module functions, so there is no
+`console.say` and no `console.print`: a module has the functions that are spelled
+`<module>_<member>` in the registry, and those two are not. `console.log` is the
+module spelling of `say` and answers `nothing`, so `say console.log("x")` prints
+`x` and then `nothing`. `console.error` writes to stderr rather than stdout, so a
+program that collects its output can keep its diagnostics separate from it.
+`console.clear` writes the terminal's clear sequence to stdout and answers
+`nothing`; on a stream that is not a terminal the sequence is still written.
+
+`input` is the whole of the language's input: it writes its first argument as a
+prompt, reads one line from the terminal, and answers that line as text with the
+line terminator removed — `"abc"` from `abc\n` and from `abc` alike, since a pipe
+whose last line has no newline is still a line. At the end of the input it
+answers the empty text rather than refusing, so a program that runs out of input
+sees an empty answer instead of an error. The prompt is optional:
+`input()` reads a line and asks nothing. It is a registered builtin rather than a
+module function, so there is no `console.input` — the same rule as for `say` and
+`print` — and it takes parentheses like any other call.
+
+There is no `ask`. It was a reserved word with no rule in the parser to read it,
+which is how this section came to name it, and it is an ordinary identifier
+again — `set ask to 1` is a program. Both spellings are refused: `ask("n")` is
+`Unknown function 'ask'`, and `ask "n"` — which is not a call at all, because a
+function is only called with parentheses — is `Unknown variable 'ask'`.
 
 ### text
 
 ```redblue
 set upper to text.uppercase("hello")  // "HELLO"
 set lower to text.lowercase("HELLO")  // "hello"
+set trimmed to text.trim("  hi  ")    // "hi"
 set parts to text.split("a,b,c", by ",")  // ["a", "b", "c"]
 set joined to text.join(["a", "b", "c"], by ",")  // "a,b,c"
+set holds to text.contains("abc", "b")  // yes
+set starts to text.starts_with("abc", "ab")  // yes
+set ends to text.ends_with("abc", "bc")  // yes
+set swapped to text.replace("a-b", "-", "+")  // "a+b"
+set size to text.length("héllo")  // 6
 ```
+
+`length` counts **bytes**, which is what a text is made of: `length("héllo")` is
+6 and `length("世界")` is 6, not 2. The same number is spelled as a list by
+`length(bytes.from_text("héllo"))`, so a program that wants the byte values
+rather than the count asks § bytes below for them. `tests/test_text.rb` pins this
+in six tests and `corpus/unicode-0001..0008` record it, including the case the
+rule exists for: `é` — an `e` and a combining acute accent — is one glyph, three
+bytes and a length of 3.
+
+`length` answers a text and a list, and it is the same function under each of the
+three spellings: `length(xs)`, `text.length(xs)` and `list.length(xs)`. A record is
+not a length — `length({a: 1})` is `RuntimeError: length requires a list or text`,
+in all three spellings, and `tests/test_text.rb` pins the refusal as a caught
+error. Both dotted spellings are module members, so both are written
+above and in README.md — a name that answers without a document saying so is
+surface nobody agreed to.
 
 ### math
 
 ```redblue
 set pi to PI
 set e to E
+set absolute to math.abs(-3)   // 3
+set floored to math.floor(1.7)  // 1
+set ceiling to math.ceil(1.2)  // 2
 set sqrt2 to math.sqrt(2)
 set rounded to math.round(3.7)  // 4
 set powered to math.pow(2, 10)  // 1024
-set floored to math.floor(1.7)  // 1
+set s to math.sin(0)  // 0
+set c to math.cos(0)  // 1
+set t to math.tan(0)  // 0
+set lg to math.log(1)  // 0
+set raised to math.exp(0)  // 1
 ```
 
 `PI` and `E` are globals, not module members: a module has functions, so
@@ -1108,20 +1165,43 @@ refuses an empty list, since it has no member to choose.
 set content to files.read("data.rb")
 might fail files.write("output.rb", content)
 might fail files.append("log.rb", "new line")
+set lines to files.lines("data.rb")  // one entry per line
+files.copy("data.rb", "copy.rb")
+files.rename("copy.rb", "moved.rb")
+files.delete("moved.rb")
 if files.exists("config.rb")
     // ...
 end
 ```
 
+`files.copy` and `files.rename` refuse rather than write half a file: a copy
+whose source is not there, or a rename onto a path that cannot be written, is an
+`IoError` naming the path. `files.rename` moves as well as renames, so a copy
+written to a temporary path and then renamed is one file at the end rather than
+two.
+
 ### list
 
 ```redblue
 set doubled to list.map([1, 2, 3], to (x) give back x * 2)
+set size to list.length([1, 2, 3])  // 3
 ```
 
-`list.filter` and `list.reduce` are registered but not implemented. `list.map`
-is the only higher-order builtin, and it works in all three spellings:
-`map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`.
+`filter` and `reduce` are registered as flat builtins and neither is
+implemented, so neither is a member of `list`: `list.filter(xs, f)` is
+`Module 'list' has no function 'filter'`, the same refusal as `math.random`
+above. A builtin that cannot answer is not a module member — the alternative is a
+spelling the analyzer accepts and the runtime can only refuse.
+
+`list.map` is the only higher-order builtin, and it works in three spellings:
+`map(xs, f)`, `list.map(xs, f)` and `[1, 2, 3].map(f)`. `list.length` is `length`
+under its module spelling, as § text writes it for a text.
+
+The third spelling takes its receiver **literally**. A dotted call resolves its
+receiver against modules and objects, and a list held in a variable is a value
+rather than either of those, so `xs.map(f)` is refused as
+`Module 'xs' has no function 'map'` — the same refusal `list.filter` gives above.
+A list written out in full is the only one a `.` can be put in front of.
 
 ### network
 
@@ -1137,13 +1217,67 @@ this section used to carry did not parse. See "Asynchronous Programming" above.
 ### json and csv
 
 ```redblue
-set obj to json.parse('{"name": "Alice"}')
-set text to json.stringify(obj)
-set rows to csv.parse("name,age\nAlice,30")
+set obj to json.parse("{ \"name\": \"Alice\" }")  // {name: Alice}
+set text to json.stringify(obj)                   // {"name": "Alice"}
+set rows to csv.parse("name,age\nAlice,30")       // [[name, age], [Alice, 30]]
 ```
+
+A text is written between double quotes, and a quote *inside* one is escaped
+`\"` — there are no single-quoted strings, so `'{"name": "Alice"}'` is a
+`LexerError` at the first quote rather than a JSON document.
 
 There is no `formats` module. JSON and CSV are their own modules, spelled
 `json.*` and `csv.*`.
+
+### bytes
+
+```redblue
+set data to bytes.from_text("Hi")        // [72, 105] — a byte list
+set back to bytes.text(data)             // "Hi"
+bytes.write("out.bin", data)             // write a byte list to a file
+```
+
+A byte is the whole number 0 to 255. `files.write` writes the UTF-8 encoding of
+a text, so `bytes` is how a program writes a byte it cannot spell — which a
+compiler writing a bytecode file cannot avoid. A value that is not a byte, or a
+byte list that is not valid UTF-8, is a refusal naming the byte rather than a
+wrapped value or a replacement character three files later.
+
+### sys
+
+```redblue
+for each argument in sys.argv()
+    say argument
+end
+```
+
+`sys.argv()` is the list of arguments after the program path, and it is empty
+for a program run from the REPL or from a test, because only `rb run` collects
+them.
+
+### time
+
+```redblue
+set stamp to time.now()                  // a record: seconds, nanoseconds
+time.sleep(0.5)                          // pause for half a second
+say time.format(1704067200, "%Y-%m-%d")  // "2024-01-01"
+say time.unix("2024-01-01 00:00:00")     // 1704067200
+```
+
+`time.now()` is a record of `seconds` and `nanoseconds` since
+1970-01-01T00:00:00Z, and `time.sleep` answers `nothing` once the pause is over.
+`time.format` takes a number of seconds since the same instant and a format
+string; with no format string it writes `%Y-%m-%d %H:%M:%S`. `time.unix` is the
+other direction: it takes `YYYY-MM-DD HH:MM:SS` and answers the seconds since
+the same instant, read as UTC whichever time zone the machine is in, so the
+answer is the same on the machine that wrote the text and on one that reads it.
+
+`time.sleep` is the one call in this section that blocks — the other three are
+computed and returned immediately, so `time.format` and `time.unix` cost no wall
+time whatever the clock says. A program that wants a timer rather than a pause
+has to read the clock itself — `time.now()` twice and `time.sleep` between them.
+The calls that block besides `time.sleep` are `network.get` and `network.post`,
+which wait for a response.
 
 ---
 

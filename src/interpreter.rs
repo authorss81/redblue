@@ -1020,12 +1020,19 @@ impl Vm {
         Ok(())
     }
 
-    /// Whether `name` names a module this program can call into: a module file
-    /// it imported, a module it declared, or a builtin namespace.
-    fn is_module_name(&self, name: &str) -> bool {
-        self.modules.contains_key(name)
-            || self.declared_modules.contains_key(name)
-            || stdlib::is_module(name)
+    /// Whether `name` names a module this program built: a module file it
+    /// imported, or a `module … end` it declared.
+    ///
+    /// This is the half of "is this a namespace" the program's own declarations
+    /// answer, and it is what tells a module the program wrote apart from one
+    /// [`stdlib::is_module`] lists. The two are asked apart on purpose: the
+    /// stdlib's member table is the agreed surface of *its* modules, and applying
+    /// it to a module the program declared refuses members the program just
+    /// published — `module text … end` publishing `greet` is not
+    /// `Module 'text' has no function 'greet'`. Where the two meet is
+    /// [`stdlib::dotted_call_reaches`].
+    fn is_declared_module(&self, name: &str) -> bool {
+        self.modules.contains_key(name) || self.declared_modules.contains_key(name)
     }
 
     /// The value of a name a module body declares, or `None` when it declares
@@ -2000,7 +2007,9 @@ impl Vm {
     }
 
     /// `map(list, function)` — the higher-order builtin, in the three spellings
-    /// `SPEC.md` uses: `map(xs, f)`, `list.map(xs, f)` and `xs.map(f)`.
+    /// `SPEC.md` uses: `map(xs, f)`, `list.map(xs, f)` and `[1, 2, 3].map(f)`.
+    /// The third takes its receiver literally, so `xs.map(f)` is not one of them
+    /// and is refused as `Module 'xs' has no function 'map'`.
     ///
     /// It lives here rather than in `runtime::builtin` because applying a
     /// Redblue function needs this walker's captured scopes and its call-depth
@@ -2019,11 +2028,18 @@ impl Vm {
     }
 
     /// Applies `function` to every element of `items`, in order.
+    ///
+    /// The call is reported under `function.name` rather than under a fixed
+    /// "anonymous function", so a limit reached inside a `map` of a *named* `to`
+    /// function names that function — which is what the bytecode VM says, and
+    /// what a reader needs to be told. A function *literal* carries
+    /// [`ANONYMOUS_FUNCTION`] as its name already, so it says the same thing
+    /// either way.
     fn apply_map(&mut self, items: &[Value], function: &FunctionValue) -> Result<Value> {
         let mut mapped = Vec::with_capacity(items.len());
         for item in items {
             mapped.push(self.call_user_function(
-                ANONYMOUS_FUNCTION,
+                &function.name,
                 function,
                 std::slice::from_ref(item),
             )?);
@@ -2094,15 +2110,32 @@ impl Vm {
                     .cloned()
                     .unwrap_or_else(|| name.clone());
                 let qualified = qualified_member(&module, method);
-                // See the bytecode VM's identical check: a documented builtin
-                // spelled as a module member is answerable through
-                // `stdlib::resolve` whether or not the table holds the
-                // `module_member` name.
-                let answered_by_builtin = stdlib::module_member_name(&qualified).is_some();
-                if self.get_var(&qualified).is_none()
-                    && !answered_by_builtin
-                    && self.is_module_name(&module)
-                {
+                // The whole rule for a receiver that is not an object lives in
+                // `stdlib::dotted_call_reaches`, which the bytecode VM asks
+                // through the same function; see
+                // [`crate::bytecode::vm::BytecodeVm::call_method`].
+                //
+                // Three things it decides, and each of them was a way for a
+                // dotted call to answer something the language does not have:
+                //
+                // - the receiver has to name a module. It used not to: any
+                //   `<receiver>_<member>` in the registry was enough to make the
+                //   call, so every qualified builtin was a namespace and
+                //   `random.seed(1)` answered through `random_seed`.
+                // - a module the program declared or imported owns the name, so
+                //   `stdlib::MODULE_MEMBERS` does not decide it. That table is
+                //   the agreed surface of the *stdlib's* modules and says
+                //   nothing about the members a program publishes.
+                // - a stdlib module answers only for a pair the table holds, so
+                //   `files_read` being registered is not by itself a reason
+                //   `files.read` answers.
+                if !stdlib::dotted_call_reaches(
+                    &module,
+                    method,
+                    self.is_declared_module(&module),
+                    self.get_var(&qualified).is_some(),
+                    stdlib::module_member_name(&qualified).is_some(),
+                ) {
                     return Err(Error::Runtime(
                         format!("Module '{module}' has no function '{method}'"),
                         self.span(),

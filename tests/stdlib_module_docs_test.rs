@@ -17,9 +17,28 @@
 //! So every test here goes through a real `run`, never through
 //! `builtin_function`. That is the whole point of the file.
 
+use std::io::{Read, Write};
 use std::process::Command;
 
 use redblue::bytecode::vm::BytecodeVm;
+
+/// The environment variables that decide whether `network` talks to a proxy.
+///
+/// Removed from every child, for the same reason
+/// `tests/stdlib_module_names_test.rs` removes them: `reqwest`'s default client
+/// builder reads them, so a runner with `HTTP_PROXY` set would send the loopback
+/// request somewhere else and the `network` rows below would fail on the
+/// environment rather than on the language.
+const PROXY_ENV: &[&str] = &[
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
 
 /// Runs `source` and returns `(exit success, stdout, stderr)`.
 ///
@@ -27,17 +46,24 @@ use redblue::bytecode::vm::BytecodeVm;
 /// scratch path would be a race: `cargo test` runs these in parallel, and one
 /// test's program would be another's when both reach the filesystem at once —
 /// which shows up as a failure in a test that did nothing wrong.
+///
+/// Stdin is closed rather than inherited, so the `input` row reads end-of-input
+/// immediately instead of waiting on a terminal nobody is sitting at.
 fn run_named(tag: &str, source: &str) -> (bool, String, String) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/p32docs");
     std::fs::create_dir_all(&dir).expect("scratch directory");
     let file = dir.join(format!("{tag}.rb"));
     std::fs::write(&file, source).expect("the program is written");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_rb"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rb"));
+    command
         .arg("run")
         .arg(&file)
-        .output()
-        .expect("rb runs");
+        .stdin(std::process::Stdio::null());
+    for name in PROXY_ENV {
+        command.env_remove(name);
+    }
+    let out = command.output().expect("rb runs");
 
     (
         out.status.success(),
@@ -240,56 +266,562 @@ fn edge_the_bytecode_vm_answers_the_same_builtins_the_walker_does() {
 
 // ============================================================ the surface itself
 
-/// `builtins()` registers a name; something has to answer it. This walks the
-/// registry and asks each name whether the language can call it, so a builtin
-/// added to the table without an implementation fails here rather than in a
-/// user's program.
+/// A loopback HTTP server that answers `NETWORK_BODY` to two requests, and the
+/// thread answering them.
 ///
-/// The list of names that are *deliberately* registered but unreachable is
-/// spelled out, with the reason, rather than being skipped silently — that is
-/// what makes this a test of the surface instead of a test of today's surface.
-#[test]
-fn edge_no_registered_builtin_is_unreachable_from_a_program() {
-    // Names `builtins()` registers that no program can call today. Each is
-    // listed with why it is registered: these are declared-but-unimplemented,
-    // and FINDINGS.md §2 carries them as work for a later phase.
-    const KNOWN_GAPS: &[&str] = &[
-        // Higher-order: they must call a Redblue function, which needs a walker's
-        // captured scopes. `map` is implemented in the walker; these are not.
-        "filter",
-        "reduce",
-        "list_map", // `map` is handled by `Vm::map_builtin`.
-        // List builtins with no agreed semantics in SPEC.md yet.
-        "pop",
-        "shift", // Type predicates and conversions: registered, not implemented.
-        "is_number",
-        "is_text",
-        "is_list",
-        "is_record",
-        "to_list", // Module members that are documented but not implemented.
-        "console_clear",
-        "time_unix",
-        "csv_parse",
-        "network_get",
-        "network_post",
+/// `network_get` and `network_post` are the only two builtins whose answer is not
+/// a function of their arguments, so they cannot be probed with a literal. They
+/// are probed with a listener on `127.0.0.1:0` — an ephemeral port on the
+/// loopback interface, from which no packet leaves the machine — which makes the
+/// answer a constant the test owns instead of a thing it must not check.
+///
+/// `accept` is non-blocking with a deadline rather than blocking, so the thread
+/// ends even if no program ever arrives.
+fn loopback_http() -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    listener
+        .set_nonblocking(true)
+        .expect("the listener accepts without blocking");
+    let address = format!(
+        "http://{}",
+        listener.local_addr().expect("the loopback address")
+    );
+
+    let handle = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        for _ in 0..2 {
+            let mut stream = None;
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((accepted, _)) => {
+                        stream = Some(accepted);
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("the loopback listener failed: {error}"),
+                }
+            }
+            let Some(mut stream) = stream else { break };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .expect("a read deadline");
+
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let head_end = loop {
+                if let Some(at) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break at + 4;
+                }
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break raw.len(),
+                    Ok(read) => raw.extend_from_slice(&chunk[..read]),
+                }
+            };
+
+            let head = String::from_utf8_lossy(&raw).into_owned();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            let mut payload = raw[head_end.min(raw.len())..].to_vec();
+            while payload.len() < length {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => payload.extend_from_slice(&chunk[..read]),
+                }
+            }
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{NETWORK_BODY}",
+                NETWORK_BODY.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("the response can be written");
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+
+    (address, handle)
+}
+
+/// The body the loopback server answers, and the answer those two rows are
+/// pinned against.
+const NETWORK_BODY: &str = r#"{"ok":true}"#;
+
+/// A working call for **every** name `stdlib::builtins()` registers as a
+/// `Value::Builtin`, with the exact output the program has to print.
+///
+/// This table is the answer to the question `builtins() registers a name;
+/// something has to answer it`, and it replaced a walk that asked the question
+/// in a way almost nothing could fail. That walk ran `say <name>()` — no
+/// arguments — and accepted any error that was not `Unknown function`, throwing
+/// the exit status away with `let _ = ok;`. A builtin that refuses *every*
+/// argument passed: `files_read()` is `files.read requires a text path`, which
+/// is neither an unknown name nor a failure, so a `files.read` with no
+/// implementation at all would have gone green. Nearly every row in the old walk
+/// was that row.
+///
+/// So each name carries a program that *uses* it, and the output it must print.
+/// A name whose program is refused fails; a name whose program answers something
+/// else fails; and a name that is in neither this table nor [`known_gaps`] fails
+/// the coverage assertion below, so the table cannot fall behind the registry
+/// the way the skip-list did.
+fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
+    let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/p32docs");
+    std::fs::create_dir_all(&scratch).expect("scratch directory");
+    let path = |name: &str| scratch.join(name).display().to_string();
+
+    let rows: Vec<(&str, String, String)> = vec![
+        ("abs", "say abs(-3)".into(), "3\n".into()),
+        ("floor", "say floor(1.7)".into(), "1\n".into()),
+        ("ceil", "say ceil(1.2)".into(), "2\n".into()),
+        ("round", "say round(1.5)".into(), "2\n".into()),
+        ("sqrt", "say sqrt(9)".into(), "3\n".into()),
+        ("pow", "say pow(2, 10)".into(), "1024\n".into()),
+        // The trigonometric and logarithmic functions answer a number or nothing
+        // at all, and `nothing` is a refusal by name — so the row asks whether
+        // the answer is a number rather than pinning a value that would differ
+        // by machine.
+        ("sin", "say is_number(sin(0))".into(), "yes\n".into()),
+        ("cos", "say is_number(cos(0))".into(), "yes\n".into()),
+        ("tan", "say is_number(tan(0))".into(), "yes\n".into()),
+        ("log", "say is_number(log(1))".into(), "yes\n".into()),
+        ("exp", "say is_number(exp(1))".into(), "yes\n".into()),
+        ("uppercase", r#"say uppercase("hi")"#.into(), "HI\n".into()),
+        ("lowercase", r#"say lowercase("HI")"#.into(), "hi\n".into()),
+        ("trim", r#"say trim("  x  ")"#.into(), "x\n".into()),
+        (
+            "split",
+            r#"say split("a,b", ",")"#.into(),
+            "[a, b]\n".into(),
+        ),
+        (
+            "join",
+            r#"say join(["a", "b"], "-")"#.into(),
+            "a-b\n".into(),
+        ),
+        (
+            "contains",
+            r#"say contains("hello", "ell")"#.into(),
+            "yes\n".into(),
+        ),
+        (
+            "starts_with",
+            r#"say starts_with("hello", "he")"#.into(),
+            "yes\n".into(),
+        ),
+        (
+            "ends_with",
+            r#"say ends_with("hello", "lo")"#.into(),
+            "yes\n".into(),
+        ),
+        (
+            "replace",
+            r#"say replace("a-b", "-", "+")"#.into(),
+            "a+b\n".into(),
+        ),
+        (
+            "length",
+            r#"say length("abcd")
+say length(bytes.from_text("héllo"))"#
+                .into(),
+            "4\n6\n".into(),
+        ),
+        // `push` answers the longer list rather than mutating the one it was
+        // given — Redblue's lists are copy-on-write — so the row prints the
+        // answer, not the binding it was handed.
+        ("push", "say push([1], 2)".into(), "[1, 2]\n".into()),
+        // `append` is the one builtin that takes a *name*: it has to bind.
+        (
+            "append",
+            "set xs to [1]\nappend(\"xs\", 2)\nsay xs".into(),
+            "[1, 2]\n".into(),
+        ),
+        ("pop", "say pop([1, 2, 3])".into(), "3\n".into()),
+        ("shift", "say shift([1, 2, 3])".into(), "1\n".into()),
+        (
+            "map",
+            "say map([1, 2], to (x) give back x + 1 end)".into(),
+            "[2, 3]\n".into(),
+        ),
+        (
+            "list_map",
+            "say list.map([1, 2], to (x) give back x + 1 end)".into(),
+            "[2, 3]\n".into(),
+        ),
+        ("is_number", "say is_number(1)".into(), "yes\n".into()),
+        ("is_text", r#"say is_text("a")"#.into(), "yes\n".into()),
+        ("is_list", "say is_list([1])".into(), "yes\n".into()),
+        ("is_record", "say is_record({a: 1})".into(), "yes\n".into()),
+        ("to_text", "say to_text(1)".into(), "1\n".into()),
+        ("to_number", r#"say to_number("2")"#.into(), "2\n".into()),
+        ("to_list", r#"say to_list("a b")"#.into(), "[a, b]\n".into()),
+        ("type_of", "say type_of(1)".into(), "number\n".into()),
+        (
+            "files_read",
+            format!(
+                r#"files.write("{}", "written")
+say files.read("{}")"#,
+                path("rows_read.txt"),
+                path("rows_read.txt")
+            ),
+            "written\n".into(),
+        ),
+        (
+            "files_write",
+            format!(
+                r#"files.write("{}", "a")
+say files.exists("{}")"#,
+                path("rows_write.txt"),
+                path("rows_write.txt")
+            ),
+            "yes\n".into(),
+        ),
+        (
+            "files_append",
+            format!(
+                r#"files.write("{}", "a")
+files.append("{}", "b")
+say files.read("{}")"#,
+                path("rows_append.txt"),
+                path("rows_append.txt"),
+                path("rows_append.txt")
+            ),
+            "ab\n".into(),
+        ),
+        (
+            "files_exists",
+            format!(r#"say files.exists("{}")"#, path("rows_absent.txt")),
+            "no\n".into(),
+        ),
+        (
+            "files_lines",
+            format!(
+                r#"files.write("{}", "a\nb")
+say files.lines("{}")"#,
+                path("rows_lines.txt"),
+                path("rows_lines.txt")
+            ),
+            "[a, b]\n".into(),
+        ),
+        (
+            "files_delete",
+            format!(
+                r#"files.write("{}", "a")
+files.delete("{}")
+say files.exists("{}")"#,
+                path("rows_delete.txt"),
+                path("rows_delete.txt"),
+                path("rows_delete.txt")
+            ),
+            "no\n".into(),
+        ),
+        (
+            "files_copy",
+            format!(
+                r#"files.write("{}", "a")
+files.copy("{}", "{}")
+say files.exists("{}")"#,
+                path("rows_copy.txt"),
+                path("rows_copy.txt"),
+                path("rows_copy_to.txt"),
+                path("rows_copy_to.txt")
+            ),
+            "yes\n".into(),
+        ),
+        (
+            "files_rename",
+            format!(
+                r#"files.write("{}", "a")
+files.rename("{}", "{}")
+say files.exists("{}")"#,
+                path("rows_rename.txt"),
+                path("rows_rename.txt"),
+                path("rows_renamed.txt"),
+                path("rows_renamed.txt")
+            ),
+            "yes\n".into(),
+        ),
+        // `time.now()` is a clock: the row asks what kind of answer it is, not
+        // what the clock said.
+        (
+            "time_now",
+            "say is_record(time.now())".into(),
+            "yes\n".into(),
+        ),
+        (
+            "time_sleep",
+            r#"time.sleep(0)
+say "slept""#
+                .into(),
+            "slept\n".into(),
+        ),
+        (
+            "time_format",
+            r#"say time.format(0, "%Y")"#.into(),
+            "1970\n".into(),
+        ),
+        (
+            "time_unix",
+            r#"say time.unix("2024-01-01 00:00:00")"#.into(),
+            "1704067200\n".into(),
+        ),
+        (
+            "json_parse",
+            r#"say json.parse("{}")"#.into(),
+            "{}\n".into(),
+        ),
+        (
+            "json_stringify",
+            "say json.stringify(1)".into(),
+            "1\n".into(),
+        ),
+        (
+            "csv_parse",
+            r#"say csv.parse("a,b")"#.into(),
+            "[[a, b]]\n".into(),
+        ),
+        (
+            "network_get",
+            format!(r#"say network.get("{address}/greeting")"#),
+            format!("{NETWORK_BODY}\n"),
+        ),
+        (
+            "network_post",
+            format!(r#"say network.post("{address}/echo", "ping")"#),
+            format!("{NETWORK_BODY}\n"),
+        ),
+        (
+            "expect",
+            "expect 1 to be 1\nsay \"expected\"".into(),
+            "expected\n".into(),
+        ),
+        (
+            "assert",
+            "assert 1 is 1\nsay \"asserted\"".into(),
+            "asserted\n".into(),
+        ),
+        ("console_log", r#"console.log("hi")"#.into(), "hi\n".into()),
+        (
+            "console_error",
+            "console.error(\"e\")\nsay \"kept\"".into(),
+            "kept\n".into(),
+        ),
+        (
+            "console_clear",
+            "console.clear()".into(),
+            "\u{1b}[2J\u{1b}[1H".into(),
+        ),
+        // Seeding first makes each draw reproducible; what is pinned is the *kind*
+        // of answer, because a whole number from 1 to 6 is not a constant.
+        (
+            "random",
+            "random_seed(42)\nsay is_number(random(1, 6))".into(),
+            "yes\n".into(),
+        ),
+        (
+            "random_seed",
+            "random_seed(42)\nsay \"seeded\"".into(),
+            "seeded\n".into(),
+        ),
+        (
+            "random_number",
+            "random_seed(42)\nsay is_number(random_number(0, 1))".into(),
+            "yes\n".into(),
+        ),
+        (
+            "random_choice",
+            "say random_choice([1])".into(),
+            "1\n".into(),
+        ),
+        (
+            "random_shuffle",
+            "say length(random_shuffle([1, 2]))".into(),
+            "2\n".into(),
+        ),
+        (
+            "bytes_from_text",
+            r#"say bytes.from_text("hi")"#.into(),
+            "[104, 105]\n".into(),
+        ),
+        (
+            "bytes_write",
+            format!(
+                r#"bytes.write("{}", [0, 255])
+say files.exists("{}")"#,
+                path("rows_write.bin"),
+                path("rows_write.bin")
+            ),
+            "yes\n".into(),
+        ),
+        (
+            "bytes_text",
+            "say bytes.text([104, 105])".into(),
+            "hi\n".into(),
+        ),
+        ("sys_argv", "say length(sys.argv())".into(), "0\n".into()),
+        // Standard input is closed for every child `run_named` starts, so this
+        // row reads end-of-input and gets the empty text. That is an answer, and
+        // answering is the claim: the alternative — refusing — would be a
+        // `RuntimeError` and the row would fail.
+        ("input", "say length(input())".into(), "0\n".into()),
     ];
 
-    for (name, value) in redblue::stdlib::builtins() {
-        let redblue::Value::Builtin(builtin) = value else {
-            continue;
-        };
-        if KNOWN_GAPS.contains(&builtin.as_str()) {
-            continue;
-        }
-        // `say <name>()` with no arguments: a name nothing answers says
-        // `Unknown function`, and a name something answers says what it wanted.
-        let (ok, _, stderr) = run_named(&format!("surface_{name}"), &format!("say {name}()"));
+    rows.into_iter()
+        .map(|(name, source, expected)| (name.to_string(), source, expected))
+        .collect()
+}
+
+/// Names `builtins()` registers that no program can call today, each with a
+/// program that is the shape a caller would write.
+///
+/// The second half is the point. A name alone in a skip-list is a permission to
+/// stop checking that never expires on its own, and this one did not expire:
+/// eleven of its entries — `pop`, `shift`, `is_number`, `is_text`, `is_list`,
+/// `is_record`, `to_list`, `csv_parse`, `network_get`, `network_post` and
+/// `list_map` — had been implemented in `src/stdlib.rs` and were still listed,
+/// while `edge_every_flat_builtin_the_stdlib_registers_answers` above was
+/// asserting several of them by name. Carrying the program means
+/// `edge_a_known_gap_is_still_a_gap` can run it, so an entry that starts
+/// answering fails here instead of sitting in a list that reads as current.
+///
+/// Each is a higher-order builtin: it has to call a Redblue function, which
+/// needs a walker's captured scopes. `map` has them, and `list.map` is the same
+/// builtin under its module spelling — which is why `list_map` left this list
+/// when it was found answering.
+fn known_gaps() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            "filter",
+            "say filter([1, 2, 3], to (x) give back x > 1 end)",
+        ),
+        (
+            "reduce",
+            "say reduce([1, 2, 3], to (a, b) give back a + b end, 0)",
+        ),
+    ]
+}
+
+/// `builtins()` registers a name; something has to answer it.
+///
+/// The names are reconciled with the registry in **both** directions before any
+/// of them is run: a name in the registry that appears in neither
+/// [`answerable_builtins`] nor [`known_gaps`] is a builtin nothing checks, and a
+/// row for a name the registry does not hold is a test of a name that is gone.
+/// That is the property the old skip-list version could not have: adding a
+/// builtin to `stdlib::builtins()` without a program here fails immediately.
+#[test]
+fn edge_no_registered_builtin_is_unreachable_from_a_program() {
+    let (address, server) = loopback_http();
+    let rows = answerable_builtins(&address);
+
+    let registry = redblue::stdlib::builtins();
+    let registered: Vec<&str> = registry
+        .iter()
+        .filter_map(|(name, value)| match value {
+            redblue::Value::Builtin(_) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    for (name, _) in known_gaps() {
+        assert!(
+            redblue::stdlib::is_builtin(name),
+            "KNOWN_GAPS lists `{name}` and stdlib::is_builtin does not know it, so \
+             the skip has nothing to skip: either the builtin was renamed or the \
+             entry is left over from a name that is gone."
+        );
+    }
+
+    for name in &registered {
+        let answered = rows.iter().any(|(row, _, _)| row == name);
+        let skipped = known_gaps().iter().any(|(gap, _)| gap == name);
+        assert!(
+            answered || skipped,
+            "`{name}` is registered in stdlib::builtins and nothing checks it: it \
+             is neither in answerable_builtins() nor in known_gaps(). Add a program \
+             it answers — with the output it must print — or, if it is deliberately \
+             unimplemented, add it to known_gaps() with the program that still fails."
+        );
+    }
+
+    for (name, _, _) in &rows {
+        assert!(
+            registered.contains(&name.as_str()),
+            "answerable_builtins() has a row for `{name}` and stdlib::builtins does \
+             not register it, so the table is testing a name that is gone. Drop the \
+             row, or register the builtin."
+        );
+    }
+
+    for (name, source, expected) in &rows {
+        assert!(
+            !expected.is_empty(),
+            "the row for `{name}` pins no output, so a builtin that answers something \
+             other than nothing still passes it. Every row carries the exact stdout \
+             the program has to print; there is no 'no expected output' case left."
+        );
+        let (ok, stdout, stderr) = run_named(&format!("surface_{name}"), source);
+        assert!(
+            ok,
+            "`{name}` is registered in stdlib::builtins and its program was refused:\n\
+             {source}\n--- stderr\n{stderr}\nEither implement it, or add it to \
+             known_gaps() in this file with the program that still fails."
+        );
+        assert_eq!(
+            stdout, *expected,
+            "`{name}` answered something else than the output it is pinned to:\n\
+             {source}\n--- stdout\n{stdout}--- stderr\n{stderr}"
+        );
+    }
+
+    server.join().expect("the loopback server thread");
+}
+
+/// Every name in [`known_gaps`] is still a gap.
+///
+/// Without this the skip-list is a claim rather than a check: `edge_no_registered_
+/// builtin_is_unreachable_from_a_program` skips whatever it names and never asks
+/// again, so an entry that begins answering is invisible. This runs each entry's
+/// own program and fails if it succeeds — which is the moment the entry has to
+/// come out of the list and into the table above.
+///
+/// The eleven names that came out of this list were not found answering during
+/// this phase — they had been answering for some time, and the list had simply
+/// stopped asking. Putting one back is the check: `("pop", "say pop([1, 2, 3])")`
+/// added to [`known_gaps`] answers `3` and fails here with *"`pop` is listed as
+/// unreachable in KNOWN_GAPS and answered"*.
+#[test]
+fn edge_a_known_gap_is_still_a_gap() {
+    for (name, source) in known_gaps() {
+        let (ok, _, stderr) = run_named(&format!("gap_{name}"), source);
+        assert!(
+            !ok,
+            "`{name}` is listed as unreachable in KNOWN_GAPS and answered:\n{source}\n\
+             It is implemented, so it must come out of the list rather than go on \
+             skipping a builtin that works."
+        );
+        assert!(
+            stderr.contains(name),
+            "the refusal does not name '{name}', so it cannot say which call was \
+             wrong:\n{source}\n--- stderr\n{stderr}"
+        );
         assert!(
             !stderr.contains("Unknown function"),
-            "`{name}` is registered in stdlib::builtins and answered by nothing.\n\
-             Either implement it or add it to KNOWN_GAPS in this file with its reason.\n\
-             stderr was:\n{stderr}"
+            "`{name}` was dropped rather than implemented — nothing implements it \
+             any more, and its entry in stdlib::builtins should go with it.\n\
+             --- stderr\n{stderr}"
         );
-        let _ = ok;
     }
 }

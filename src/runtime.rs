@@ -714,11 +714,18 @@ fn random_range(span: Span, name: &str, args: &[Value], default_max: f64) -> Res
     }
 }
 
-/// `input`/`ask`: the prompt goes out, one line comes back.
+/// `input`: the prompt goes out, one line comes back.
 ///
 /// The prompt goes through [`crate::wasm::emit`] for the same reason `say` does
 /// — a page that can collect the answer's program but not its prompt would show
 /// a program reading input with nothing to show for it.
+///
+/// `ask` is not a second spelling of this. It is a **freed keyword**: the lexer
+/// reserved it, no parser arm read it, and phase-049 gave it back as an
+/// ordinary identifier — `tests/keyword_reservation_test.rs` pins that a program
+/// may write `set ask to 1`. Registering it here would take back a word the
+/// language has promised to give away, so `ask "n"` is `Unknown variable 'ask'`
+/// and stays that way. `input` is the name; there is no `console.input`.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_line(args: &[Value], span: Span) -> Result<String> {
     if let Some(Value::Text(prompt)) = args.first() {
@@ -728,8 +735,14 @@ fn read_line(args: &[Value], span: Span) -> Result<String> {
     std::io::stdin()
         .read_line(&mut input)
         .map_err(|e| Error::Runtime(e.to_string(), span))?;
-    input.pop(); // Remove newline
-    Ok(input)
+    // Only the line terminator goes, and only when there is one. `read_line`
+    // keeps whatever it read, so a pipe that ends without a newline — `printf
+    // abc`, or a file whose last line has none — hands back `"abc"`, and
+    // `input.pop()` dropped its `c`: the answer was a different text from the
+    // one that was typed. A `\r` is dropped only after a `\n`, so a lone `\r`
+    // inside the text stays where it is.
+    let line = input.strip_suffix('\n').unwrap_or(&input);
+    Ok(line.strip_suffix('\r').unwrap_or(line).to_string())
 }
 
 /// The playground refuses, the way `network` and `time.sleep` do.
@@ -776,6 +789,20 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             if let Some(Value::List(items)) = args.first().cloned() {
                 Ok(Some(Value::Number(items.len() as f64)))
             } else if let Some(Value::Text(s)) = args.first().cloned() {
+                // Bytes, and that is the stated contract rather than a slip:
+                // `tests/test_text.rb` names it in six tests
+                // (`edge_text_length_counts_bytes_not_characters` and its
+                // neighbours) and `corpus/unicode-0001..0008` record it. A
+                // program's answer to `length` is a number it can compare and
+                // index by, and the bytes are what the string is made of —
+                // `bytes.from_text("héllo")` is the same 6, spelled as a list.
+                //
+                // `stdlib::builtin_function` counted characters, so the two
+                // implementations disagreed by a factor of two to four for any
+                // text outside ASCII. Only this one was reachable, which is why
+                // nothing noticed — and it would have surfaced the day `length`
+                // stopped being handled early, as a silent change to every
+                // program that measures a string.
                 Ok(Some(Value::Number(s.len() as f64)))
             } else {
                 Err(Error::Runtime(
@@ -784,7 +811,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ))
             }
         }
-        "input" | "ask" => read_line(args, span).map(|line| Some(Value::Text(line))),
+        "input" => read_line(args, span).map(|line| Some(Value::Text(line))),
         "random" => {
             let (min, max) = random_range(span, "random", args, 100.0)?;
             random_int(span, min, max).map(Some)
