@@ -1626,6 +1626,19 @@ impl Parser {
         }) = self.current()
         {
             self.advance();
+            // SPEC.md § Error Handling writes the handler as `catch error`, and
+            // `error` is a word to the lexer like any other — so the word after
+            // `catch` is read as the name it binds, and `catch error` binds a
+            // name spelled `error`. The spelled-out `catch error <name>` is the
+            // same handler with the binder written after the word: it is a second
+            // identifier on the *same line*, which is the only place two
+            // identifiers sit next to each other here. Reading it this way keeps
+            // `catch error` binding `error` — a `catch` followed by its body on
+            // the next line, where the body starts with a name, is not
+            // `catch error e`.
+            if self.catch_keyword_ahead() {
+                self.advance(); // consume 'error'
+            }
             if let Some(Token {
                 kind: TokenKind::Identifier(name),
                 ..
@@ -1904,6 +1917,32 @@ impl Parser {
                 kind: TokenKind::Identifier(found),
                 ..
             }) if found == word
+        )
+    }
+
+    /// Whether the current position is the `error` word of a spelled-out
+    /// `catch error <name>` rather than a name in its own right.
+    ///
+    /// It is the word `error` followed by a second identifier *on the same
+    /// line*. `catch error` alone — SPEC.md's own handler, and the spelling
+    /// every example in the language uses — is the word with nothing after it,
+    /// so it goes on binding a name spelled `error`. So does a `catch error`
+    /// whose body starts on the next line with a name: the body's first word is
+    /// on another line, so there is no second identifier here to be a binder.
+    fn catch_keyword_ahead(&self) -> bool {
+        if !self.is_word_ahead(0, "error") {
+            return false;
+        }
+        let Some(first) = self.current() else {
+            return false;
+        };
+        matches!(
+            self.tokens.get(self.pos + 1),
+            Some(Token {
+                kind: TokenKind::Identifier(_),
+                line,
+                ..
+            }) if *line == first.line
         )
     }
 
@@ -3245,6 +3284,87 @@ mod tests {
             marked("no braces here"),
             vec![false; 14],
             "a literal without braces has no opens to mark"
+        );
+    }
+
+    /// The name a `catch` binds, read straight off the tree. `error` is a word
+    /// to the lexer like any other, so the word after `catch` is the name it
+    /// binds unless a second identifier follows it on the *same line* — the
+    /// whole of `catch_keyword_ahead`, at the level it decides.
+    fn catch_binder(source: &str) -> Option<String> {
+        let tokens = Lexer::tokenize(source).expect("the source should lex");
+        let program = parse(tokens).expect("the source should parse");
+        for stmt in &program.statements {
+            if let Statement::Try { catch_var, .. } = &stmt.statement {
+                return catch_var.clone();
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_a_catch_binds_the_word_after_it() {
+        assert_eq!(
+            catch_binder("try\nsay 1 / 0\ncatch\nsay 1\nend\n"),
+            None,
+            "a bare `catch` binds nothing"
+        );
+        assert_eq!(
+            catch_binder("try\nsay 1 / 0\ncatch e\nsay e\nend\n"),
+            Some("e".to_string()),
+            "`catch e` binds the name after the keyword"
+        );
+        assert_eq!(
+            catch_binder("try\nsay 1 / 0\ncatch error\nsay error\nend\n"),
+            Some("error".to_string()),
+            "`catch error` is a name spelled `error`, as every example writes it"
+        );
+    }
+
+    #[test]
+    fn test_catch_error_name_binds_the_name_after_the_keyword() {
+        for binder in ["e", "problem", "_e", "error"] {
+            let source = format!("try\nsay 1 / 0\ncatch error {binder}\nsay 1\nend\n");
+            assert_eq!(
+                catch_binder(&source),
+                Some(binder.to_string()),
+                "`catch error {binder}` binds `{binder}`"
+            );
+        }
+    }
+
+    /// The handler word is compared exactly. Folding case would silently rebind
+    /// a program's own variables: `catch ERROR err` has to stay a `catch` that
+    /// binds `ERROR`, with `err` left as the orphan it is.
+    #[test]
+    fn edge_the_handler_word_is_matched_exactly_and_not_by_case() {
+        assert_eq!(
+            catch_binder("try\nsay 1 / 0\ncatch ERROR err\nsay 1\nend\n"),
+            Some("ERROR".to_string()),
+            "`ERROR` is a name, not the handler word"
+        );
+        assert_eq!(
+            catch_binder("try\nsay 1 / 0\ncatch Error err\nsay 1\nend\n"),
+            Some("Error".to_string()),
+            "only the exact word `error` is the handler word"
+        );
+    }
+
+    /// The boundary the same-line rule draws: a second identifier on the *next*
+    /// line is the body's first word, not a binder, however much it looks like
+    /// one. A body that starts with a name under a bare `catch error` is still
+    /// the body's.
+    #[test]
+    fn edge_a_second_identifier_on_the_next_line_is_the_body_not_a_binder() {
+        assert_eq!(
+            catch_binder("try\nsay 1 / 0\ncatch error\nn is 5\nsay n\nend\n"),
+            Some("error".to_string()),
+            "a body on the next line leaves `catch error` binding `error`"
+        );
+        assert_eq!(
+            catch_binder("try\nsay 1 / 0\ncatch\nn is 5\nsay n\nend\n"),
+            None,
+            "a nameless catch with a body still binds nothing"
         );
     }
 }
