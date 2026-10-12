@@ -79,7 +79,7 @@ parsed, analyzed or executed.
 | **`files.*` / `bytes.write`** | `std::fs`, against the disk | an in-memory filesystem (`src/vfs.rs`): flat path to bytes, gone when the page closes |
 | **module `import`** | `std::fs`, against the disk | the same in-memory filesystem, so a program can write a module and then import it |
 | **`network.get` / `network.post`** | `reqwest`'s blocking client | a clean `Runtime` error naming what is missing |
-| **`input` / `ask`** | `std::io::stdin` | a clean `Runtime` error: there is no terminal to read from |
+| **`input`** | `std::io::stdin` | a clean `Runtime` error: there is no terminal to read from |
 | **`time.sleep`** | `std::thread::sleep` | a clean `Runtime` error: the module has one thread and blocking it would freeze the page |
 | **`time.now()`** | `SystemTime::now()` | the host's clock, handed in through `rb_set_clock` before each run |
 | **output past 4 MiB in one run** | never reached — the terminal is the limit | refused with a `Limit` message rather than truncated |

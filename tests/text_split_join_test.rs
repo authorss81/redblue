@@ -331,11 +331,22 @@ fn refuse_on_both_engines(name: &str, source: &str) -> (bool, String, String) {
 /// carries the call to make under each spelling plus the value that call must
 /// produce, so neither form is asserted only against the other: if both broke
 /// the same way, a comparison of the two would still pass.
+///
+/// The two spellings are named separately, because for a qualified builtin they
+/// are different words: `json.parse` is a member of `json`, while the name the
+/// registry holds is `json_parse`, and the flat spelling a program writes is
+/// `json_parse`. Building the dotted spelling by pasting the module onto the
+/// registered name wrote `json.json_parse(..)`, which answered only because
+/// `stdlib::module_member_name` used to unwrap *any* module against *any*
+/// builtin — so the row was passing on a hole in the name resolution rather
+/// than on the spelling a reader would write. It is refused now, as it should be.
 struct Reach {
     /// The name `src/stdlib.rs` registers, which is also the flat spelling.
     builtin: &'static str,
     /// The module a reader reaches for dotted.
     module: &'static str,
+    /// The member, as the dotted spelling spells it — `parse` for `json_parse`.
+    member: &'static str,
     /// The argument list, used verbatim in both spellings.
     args: &'static str,
     /// What the call must produce.
@@ -361,84 +372,98 @@ const REACH: &[Reach] = &[
     Reach {
         builtin: "split",
         module: "text",
+        member: "split",
         args: "\"a,b\", by \",\"",
         answer: Answer::Cells(&["a", "b"]),
     },
     Reach {
         builtin: "join",
         module: "text",
+        member: "join",
         args: "[\"a\", \"b\"], by \",\"",
         answer: Answer::Text("a,b"),
     },
     Reach {
         builtin: "uppercase",
         module: "text",
+        member: "uppercase",
         args: "\"aB\"",
         answer: Answer::Text("AB"),
     },
     Reach {
         builtin: "lowercase",
         module: "text",
+        member: "lowercase",
         args: "\"aB\"",
         answer: Answer::Text("ab"),
     },
     Reach {
         builtin: "trim",
         module: "text",
+        member: "trim",
         args: "\" a \"",
         answer: Answer::Text("a"),
     },
     Reach {
         builtin: "contains",
         module: "text",
+        member: "contains",
         args: "\"abc\", \"b\"",
         answer: Answer::YesNo(true),
     },
     Reach {
         builtin: "starts_with",
         module: "text",
+        member: "starts_with",
         args: "\"abc\", \"ab\"",
         answer: Answer::YesNo(true),
     },
     Reach {
         builtin: "ends_with",
         module: "text",
+        member: "ends_with",
         args: "\"abc\", \"bc\"",
         answer: Answer::YesNo(true),
     },
     Reach {
         builtin: "replace",
         module: "text",
+        member: "replace",
         args: "\"aXa\", \"X\", \"b\"",
         answer: Answer::Text("aba"),
     },
     Reach {
         builtin: "length",
         module: "list",
+        member: "length",
         args: "\"abc\"",
         answer: Answer::Number(3.0),
     },
     Reach {
         builtin: "sqrt",
         module: "math",
+        member: "sqrt",
         args: "9",
         answer: Answer::Number(3.0),
     },
     Reach {
         builtin: "json_parse",
         module: "json",
+        member: "parse",
         args: "\"{\\\"a\\\": 1}\"",
         answer: Answer::Record,
     },
     Reach {
         builtin: "csv_parse",
         module: "csv",
+        member: "parse",
         args: "\"a,b\\n1,2\"",
         answer: Answer::Rows(&[&["a", "b"], &["1", "2"]]),
     },
     Reach {
         builtin: "files_read",
         module: "files",
+        member: "read",
         args: "\"examples/hello.rb\"",
         answer: Answer::HelloFile,
     },
@@ -602,16 +627,34 @@ fn reachability_table_holds_for_every_row() {
             "`{}` should be a module name",
             row.module
         );
+        // ...and the dotted spelling is one of that module's members. The dotted
+        // call below would be refused otherwise, which is the point: a module's
+        // members are enumerated in `stdlib::MODULE_MEMBERS` rather than being
+        // every flat builtin that happens to be registered.
+        assert!(
+            redblue::stdlib::module_has_member(row.module, row.member),
+            "`{}.{}` is not a member of `{}` in stdlib::MODULE_MEMBERS, so the dotted \
+             row below is asserting a spelling the language does not have",
+            row.module,
+            row.member,
+            row.module
+        );
+        assert!(
+            redblue::stdlib::member_resolves(row.module, row.member),
+            "`{}.{}` resolves to no builtin, so the dotted row below cannot answer",
+            row.module,
+            row.member
+        );
 
         let expected = row.answer.expected();
 
         // Dotted: `text.split(..)` resolves to the bare builtin through
-        // `stdlib::resolve` (src/stdlib.rs:541), so it is ONE function reached
-        // two ways, not two that look alike.
+        // `stdlib::resolve`, so it is ONE function reached two ways, not two that
+        // look alike.
         let dotted = eval(&format!(
             "import {m}\n{m}.{b}({a})\n",
             m = row.module,
-            b = row.builtin,
+            b = row.member,
             a = row.args
         ));
         assert_eq!(
@@ -619,7 +662,7 @@ fn reachability_table_holds_for_every_row() {
             expected,
             "`{m}.{b}` is wrong dotted",
             m = row.module,
-            b = row.builtin
+            b = row.member
         );
 
         // Flat: the same builtin under its own name, with no import at all.

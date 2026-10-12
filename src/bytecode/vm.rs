@@ -2744,17 +2744,24 @@ impl BytecodeVm {
                 .cloned()
                 .unwrap_or_else(|| object_name.to_string());
             let qualified = qualified_member(&module, method);
-            // A module member that names a documented builtin is answerable even
-            // when the global table holds no `module_member` entry for it:
-            // `text.uppercase` is stored as nothing and resolves through
-            // `stdlib::resolve` to `uppercase`. Refusing it here named a
-            // function that exists, so the walker and this engine disagreed
-            // about whether `text.uppercase` is in the language at all.
-            let answered_by_builtin = crate::stdlib::module_member_name(&qualified).is_some();
-            if self.get_var(&qualified).is_none()
-                && !answered_by_builtin
-                && self.is_module_name(&module)
-            {
+            // The whole rule for a receiver that is not an object lives in
+            // `stdlib::dotted_call_reaches`, which the tree-walking VM asks
+            // through the same function; see
+            // [`crate::interpreter::Vm::call_method`].
+            //
+            // Three things it decides, and each of them was a way for a dotted
+            // call to answer something the language does not have: the receiver
+            // has to name a module at all (`random.seed(1)` used to answer
+            // through `random_seed`), a module the program declared or imported
+            // owns the name rather than `stdlib::MODULE_MEMBERS`, and a stdlib
+            // module answers only for a pair that table holds.
+            if !crate::stdlib::dotted_call_reaches(
+                &module,
+                method,
+                self.is_declared_module(&module),
+                self.get_var(&qualified).is_some(),
+                crate::stdlib::module_member_name(&qualified).is_some(),
+            ) {
                 return Err(Error::Runtime(
                     format!("Module '{module}' has no function '{method}'"),
                     self.span(),
@@ -3539,12 +3546,16 @@ impl BytecodeVm {
         Ok(())
     }
 
-    /// Whether `name` names a module this program can call into: a module file it
-    /// imported, a module it declared, or a builtin namespace.
-    fn is_module_name(&self, name: &str) -> bool {
-        self.modules.contains(name)
-            || self.declared_modules.contains_key(name)
-            || stdlib::is_module(name)
+    /// Whether `name` names a module this program built: a module file it
+    /// imported, or a `module … end` it declared.
+    ///
+    /// The half of "is this a namespace" the program's own declarations answer,
+    /// and what tells a module the program wrote apart from one
+    /// [`crate::stdlib::is_module`] lists. The two are kept apart so the stdlib's
+    /// member table does not refuse members a program just published; where they
+    /// meet is [`crate::stdlib::dotted_call_reaches`].
+    fn is_declared_module(&self, name: &str) -> bool {
+        self.modules.contains(name) || self.declared_modules.contains_key(name)
     }
 
     /// `MODULE`: runs a `module NAME ... end` declaration's body block.
