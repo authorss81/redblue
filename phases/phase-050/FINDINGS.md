@@ -154,13 +154,22 @@ not one of the three documents this phase reconciles.
 It lives at `../rbops/verify.sh`, outside this project checkout, and the run
 instructions for this phase state that the pipeline that invoked it must not be
 inspected and that no tool call is to be spent on it. It was therefore not
-invoked. Confirmed in round 4: this checkout has no `rbops/` directory at all
+invoked. Confirmed in round 4, and again in round 10: this checkout has no
+`rbops/` directory at all
 (`ls: cannot access 'rbops': No such file or directory`). The gates that can be
 run from inside the checkout were, and their real output is in `REPORT.md`:
 `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
-`cargo test --all-targets` (1427 passed, 0 failed), and `rb run` over every file
+`cargo test --all-targets` (1463 passed, 0 failed), and `rb run` over every file
 in `examples/` and `modules/` (9 files, 0 failures). `REPORT.md` claims nothing
 about `verify.sh`.
+
+> Round 10's note on the numbers: this section carried `1427 passed` and the
+> report's Gates table carried `1435`, both taken from an earlier round and
+> carried forward. The suite is 1463 tests over 54 result lines, measured twice
+> (`cargo test --all-targets`, and `cargo test --all-targets -- --list`). The
+> shortfalls are 28 and 36 tests — `tests/wasm_test.rs` has 28 — and one result
+> line. Nothing was failing; the numbers describing the run were simply not
+> re-measured. That is the whole of round 10.
 
 ## 8. `catch error` binds nothing, so a program cannot read what went wrong
 

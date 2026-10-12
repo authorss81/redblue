@@ -65,6 +65,7 @@ What *did* reproduce, and was still true on `main`:
 | `src/bytecode/codegen.rs`, `src/bytecode/opcode.rs` | +8 −4 | Round 9: comments only. Both said a bare method name was "the one shape the language rejects"; a list literal receiver is now answered, so they say a bare name says the receiver was not a name at all and point at the runtime that answers it. |
 | `tests/differential_test.rs` | +130 | Round 9: `edge_a_higher_order_call_answers_the_same_way_on_both_engines` — eleven cases asked on **both** engines, comparing the two outcomes rather than asking whether each succeeded. This is the gate that makes the fix unfalsifiable-by-refusal. |
 | `tests/stdlib_module_names_test.rs` | +220 (round 9) | Round 9: `edge_every_spelling_the_spec_promises_for_map_answers` now walks `ENGINES` instead of `rb run` alone — the gate round 8 wrote on one engine, widened once the defect it named was fixed. The rest of round 9's additions are the `xs` receiver case and the closure-expression note in the doc comment. |
+| `phases/phase-050/REPORT.md` | +122 −4 (round 10) | Round 10: **documentation only.** No production code and no test changed — the Gates table reported 1435 tests over 53 result lines where the suite is 1463 over 54, and the correction is to the table. Plus the two gates below, shown failing on the defects they name. |
 
 Round 2, round 3, round 4 and round 5 moved every one of the round-1
 `SPEC.md`/`README.md` line numbers; those below are the current ones.
@@ -450,6 +451,13 @@ round 7 recorded. `rbops/verify.sh` still does not exist in this checkout. So th
 previous round's *green* claims held; what was left was the question of whether
 they were **complete**, and one answer was no.
 
+> **Round 10 corrects the number.** The same command on the same tree reports
+> **1463 passed across 54 result lines**. 1433 is short by 28, which is exactly
+> `tests/wasm_test.rs`, and 53 is short by one result line. This round could not
+> determine whether that suite ran and was miscounted or did not run at all; what
+> it can say is that the figure recorded here is not the suite's size, and every
+> later round's total was copied forward from it rather than re-measured.
+
 The hole is the third kind of dotted receiver. Round 7 added the registry's
 prefixes to the set of things a gate refuses, and round 5–6 bounded the ones that
 are modules, and the code-block runner runs what is inside a code block — which
@@ -598,28 +606,132 @@ Nothing was weakened to get here: `ENGINES` gained no skip, no test was deleted,
 nothing was `#[ignore]`d, and no lint was allowed. The one gate that changed is
 the same gate widened from one engine to two.
 
+### Round 10 — a report that did not match its own gate
+
+The three gates that exist in this checkout were run first, before anything was
+changed:
+
+```
+$ cargo fmt --all -- --check          # exit 0, no diff
+$ cargo clippy --all-targets -- -D warnings   # exit 0, no warnings
+$ cargo test --all-targets            # 1463 passed, 0 failed, 0 ignored
+```
+
+So round 9's work is green and nothing in it regressed. What this round found was
+in the report rather than in the tree: the Gates table said **1435 passed across
+53 result lines**, and that number was wrong.
+
+```
+$ cargo test --all-targets -- --list | grep -c ": test$"
+1463
+$ ls tests/*.rs | wc -l
+52                       # + the library + the rb binary = 54 result lines
+$ cargo test --all-targets | grep -c '^test result'
+54
+```
+
+Three independent measurements agree on 1463 over 54 result lines. The table was
+short by 28 tests and by one result line, and 28 is exactly `tests/wasm_test.rs` —
+a suite that has existed since phase-047 and is not gated on anything. The figure
+in the table was round 7's, carried forward through rounds 8 and 9 as a running
+total of gates added rather than re-measured each round, and a total nobody
+re-read is the one number in a report that can drift furthest from the truth
+without anything turning red.
+
+That is the whole of round 10's findings: **no line of production code changed,
+and no test changed.** The correction is to the table, and it is measured rather
+than asserted. It is worth naming what kind of finding this is, because it is the
+one AGENTS.md § 4 calls fake completion and because a gate cannot catch it: a
+wrong count is not a failing assertion, it is a sentence nobody is checking. The
+suite was green and complete the whole time; the *report* was not.
+
+### Round 10's two gates, shown failing
+
+A green suite says nothing on its own about whether a gate can fail, and round 9 is
+the round whose claims sit on top of that stale count. So both of round 10's checks
+were made to fail on purpose, on the defect each one names, and then undone.
+
+**The reconciliation gate, against a drifted document.** `SPEC.md:1258` reads
+`### time`; it was changed to `### wall clock` and nothing else:
+
+```
+$ cargo test --test stdlib_module_names_test
+test edge_a_module_the_documents_name_is_in_the_registry ... FAILED
+SPEC.md names the module `clock` and stdlib::MODULES does not, so a program using
+it dies as 'Unknown variable 'clock''. Add `clock` to stdlib::MODULES, or correct
+the document.
+test every_module_the_documents_name_answers_a_call ... FAILED
+test result: FAILED. 20 passed; 2 failed; 0 ignored
+```
+
+`SPEC.md` was restored from a copy taken before the edit, and `git status` says so.
+
+**The round-9 parity gate, against the round-9 fix itself.** `call_named`'s early
+answer for `map`/`list_map` — the four lines that stop the shared resolver from
+claiming the name first — were disabled with `if false &&`:
+
+```
+$ cargo test --test differential_test edge_a_higher_order_call
+test edge_a_higher_order_call_answers_the_same_way_on_both_engines ... FAILED
+the flat spelling: the two engines disagree.
+failed: RuntimeError: map was called with arguments it cannot use at 5:1
+test result: FAILED. 0 passed; 1 failed
+```
+
+on the **first** of the eleven cases, with the exact message §15 records. Round 9
+reported the defect and the fix but not this, and a gate whose failure nobody has
+watched is a gate this phase would be asked about, so round 10 watched it.
+`src/bytecode/vm.rs` was restored from a copy taken before the edit and is
+byte-identical to `HEAD`.
+
+Two things this round checked rather than assumed, because round 9's claims were
+the ones on the table:
+
+```
+$ cargo run --quiet --bin rb -- run target/tmp/p50/m.rb   # the three spellings
+[2, 4, 6]
+[2, 4, 6]
+[2, 4, 6]
+$ cargo run --quiet --bin rb -- compile target/tmp/p50/m.rb -o target/tmp/p50/m.rbc
+$ cargo run --quiet --bin rb -- vm target/tmp/p50/m.rbc  # the bytecode VM
+[2, 4, 6]
+[2, 4, 6]
+[2, 4, 6]
+$ cargo run --quiet --bin rb -- run target/tmp/p50/nope.rb   # say nosuchmodule.read("x")
+Error: AnalyzerError: Unknown variable 'nosuchmodule'
+exit=1
+$ for f in examples/*.rb modules/*.rb; do cargo run --quiet --bin rb -- run "$f"; done
+9 files, exit 0 each
+$ git status --short      # after all of the above
+(empty)
+```
+
+`git status` being empty is the check worth keeping: round 1 left a one-byte file
+at the repository root and round 3 had to delete it, so a run that reports nine
+green files and a dirty tree would be telling the reader something the table above
+does not.
+
 ## Gates
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass, exit 0, no warnings |
-| `cargo test --all-targets` | **1435 passed, 0 failed, 0 ignored** across 53 result lines |
+| `cargo test --all-targets` | **1463 passed, 0 failed, 0 ignored** across 54 result lines |
+| `cargo test --all-targets -- --list \| grep -c ": test$"` | 1463 — the same total, counted without running anything |
 | `rb run` over `examples/*.rb` and `modules/*.rb` | 9 files, 0 failures |
 | `rbops/verify.sh phase-050` | **not run** — there is no `rbops/` directory in this checkout (`ls: cannot access 'rbops': No such file or directory`), and the run instructions forbid spending a tool call on the pipeline that lives elsewhere. Recorded as FINDINGS.md §7, as phase-049 did. Nothing is claimed about it. |
 
-1435 is the 1433 round 7 recorded plus round 8's two gates;
-`tests/stdlib_module_names_test.rs` is 22. The count per file is otherwise
-unchanged: the same 53 result lines, `tests/text_split_join_test.rs` still 20,
-`tests/stdlib_modules_test.rs` still 39, and `tests/stdlib_module_docs_test.rs`
-still 10.
+**The 1435 and 53 this table used to carry were wrong, and round 10 found it.** See
+"Round 10 — a report that did not match its own gate" below: the figure was 28
+short by exactly the size of `tests/wasm_test.rs`, and one result line short of the
+52 test binaries plus the library and the `rb` binary that the command runs. The
+corrected total is measured twice above, and `tests/stdlib_module_names_test.rs`
+is 22 of it.
 
-The three runnable gates were also run **before** any change was made, on the tree
-round 7 left: `fmt` clean, `clippy` exit 0, `cargo test --all-targets` 1433 passed
-/ 0 failed. The previous round's green claims held.
-
-`git status` is clean after the full run apart from this phase's own three files —
-no program left a file at the repository root.
+`git status` is clean after the full run apart from this phase's own files — no
+program left a file at the repository root. Round 10 re-ran all nine
+`examples/`/`modules/` files and re-checked that.
 
 ## Invariants touched
 
@@ -706,6 +818,11 @@ no program left a file at the repository root.
     of a list instead of the failure the program asked to catch. The gate carries
     both directions (`a guard takes a failure raised inside an element`, and the
     mapped function writing to the program's output).
+- **Round 10 changed nothing the interpreter can observe.** No line under `src/`
+  and no line under `tests/` changed: the round corrected a number in this
+  document, and `git status` carries the two files it touched and nothing else.
+  The two mutations it ran were undone from copies taken before the edit, and
+  `src/bytecode/vm.rs` is byte-identical to `HEAD`.
 
 ## Test-requirement matrix
 
