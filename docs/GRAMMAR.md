@@ -318,12 +318,19 @@ method_decl      = 'to' 'can' identifier [ '(' [ parameter { ',' parameter } ] '
 ```
 try_statement    = 'try'
                     { statement }
-                    { 'catch' [ identifier ] [ 'of' identifier ]
+                    { 'catch' [ identifier [ identifier ] ]
                       { statement } }
                     [ 'finally'
                       { statement } ]
                     'end'
 ```
+
+A `catch` names what it caught by naming it, and the name is an `identifier` like
+any other — `error` is not a keyword. So `catch e` binds `e`, `catch error` binds
+a name spelled `error`, and `catch error e` is the same handler with the name
+written after the word, which is read when a second identifier follows `error` on
+the same line. There is no `catch error of <Type>`: `of` is not a word in the
+language.
 
 The `catch` is optional, and a `try` without one is not a handler: the `finally`
 is still owed however its region is left — a failure runs it before the failure is
