@@ -10,14 +10,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  # The fast tier. Everything here is cheap and catches the mistakes that
+  # happen most often: a lint, a type error, a doc example that no longer runs,
+  # a claim in README.md that has drifted from the corpus.
+  fast:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-${{ hashFiles('Cargo.lock') }}-
       - run: cargo build --verbose
-      - run: cargo test
       - run: cargo clippy -- -D warnings
+      # Unit tests only. The integration targets are sharded below because they
+      # hold the 361-program corpus differential harness, which dominates.
+      - run: cargo test --lib
       # Docs that can't go stale: every ```redblue block in README.md is a real
       # program and must exit 0. Reference-style fences (no language tag) are
       # illustrative API listings and are not executed. Each block runs in its
@@ -56,3 +67,111 @@ jobs:
           readme=$(grep -oE '[0-9]+ programs on both' README.md | grep -oE '[0-9]+')
           echo "corpus programs: $n, README says: $readme"
           [ "$n" = "$readme" ] || { echo "::error::corpus has $n programs but README says $readme"; exit 1; }
+
+  # The slow tier, sharded. 53 integration targets, one of which
+  # (differential_test) runs the whole corpus through both engines, so a single
+  # job's wall clock is set almost entirely by one target while 52 others sit
+  # idle. Sharding by a stable hash of the target name keeps the partition
+  # total and non-overlapping by construction: a target belongs to exactly the
+  # shard its name hashes to.
+  #
+  # A target is listed in exactly one shard, and adding one target changes only
+  # its own shard. That is why this is a hash and not a round-robin: round-robin
+  # would shift every later target when a new file is added.
+  shard:
+    needs: fast
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['0', '1', '2', '3', '4']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-${{ hashFiles('Cargo.lock') }}-
+      - name: Select this shard's targets
+        env:
+          SHARD: ${{ matrix.shard }}
+          N: '5'
+        shell: bash
+        run: |
+          # Heavy targets get their own job below rather than sharing a shard:
+          # they cost enough to be the critical path on their own.
+          HEAVY="differential_test bootstrap_selfhost_test bootstrap_ship_test"
+          mine=""
+          count=0
+          for f in tests/*.rs; do
+            t="$(basename "$f" .rs)"
+            case " $HEAVY " in *" $t "*) continue;; esac
+            h=$(printf '%s' "$t" | sha256sum | cut -c1-8)
+            h=$(( 16#$h % N ))
+            if [ "$h" = "$SHARD" ]; then
+              mine="$mine $t"
+              count=$((count + 1))
+            fi
+          done
+          echo "shard $SHARD: $count targets:$mine"
+          echo "TARGETS<<RBEOF" >> "$GITHUB_ENV"
+          echo "$mine" >> "$GITHUB_ENV"
+          echo "RBEOF" >> "$GITHUB_ENV"
+      - name: Run this shard's targets
+        shell: bash
+        run: |
+          if [ -z "${TARGETS// /}" ]; then
+            echo "shard $SHARD has no targets"
+            exit 0
+          fi
+          rc=0
+          for t in $TARGETS; do
+            echo "::group::$t"
+            if ! cargo test --test "$t"; then
+              echo "::endgroup::"
+              echo "::error::target $t failed"
+              rc=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $rc
+
+  # The corpus differential harness on its own, because it is the long pole and
+  # sharing it with 50 other targets would serialise the whole suite behind it.
+  corpus:
+    needs: fast
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-${{ hashFiles('Cargo.lock') }}-
+      - run: cargo test --test differential_test
+      - run: cargo test --test bootstrap_selfhost_test
+      - run: cargo test --test bootstrap_ship_test
+
+  # Fails the workflow when any tier failed. Without this a matrix job can
+  # fail while the run is still reported green, which is the exact failure mode
+  # this job exists to prevent.
+  result:
+    needs: [shard, corpus]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any shard or the corpus job failed
+        shell: bash
+        run: |
+          rc=0
+          for r in shard corpus; do
+            if [ "${{ needs.$r.result }}" != "success" ]; then
+              echo "::error::$r finished as ${{ needs.$r.result }}"
+              rc=1
+            fi
+          done
+          exit $rc
