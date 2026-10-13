@@ -1,0 +1,10 @@
+Welcome to Redblue v0.1.0 - Interactive REPL
+Type 'help' for commands, 'quit' to exit
+
+>>> >>> 5
+>>> Variables:
+  x = 5
+>>> Error: AnalyzerError: Unknown variable 'nope'
+  --> 1:1
+>>> Unknown command 'nosuchcommand'. Type :help for available commands.
+>>> Goodbye!
