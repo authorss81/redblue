@@ -1849,7 +1849,18 @@ impl Vm {
             Expr::Call { name, args } => {
                 let arg_values: Result<Vec<Value>> =
                     args.iter().map(|a| self.evaluate(a)).collect();
-                self.call(name, &arg_values?)
+                let arg_values = arg_values?;
+                // A call written without a receiver cannot be one of the
+                // registry's `<module>_<member>` encodings: `files.read(..)`
+                // reaches this VM through `call_method` below and builds the same
+                // string, and the two are told apart here because this is the one
+                // place the program wrote a bare name. The bytecode VM asks at its
+                // `CALL` instruction for the same reason; see
+                // [`crate::bytecode::vm::BytecodeVm::call`].
+                if let Some(refusal) = stdlib::encoding_written_without_a_receiver(name) {
+                    return Err(Error::Runtime(refusal, self.span()));
+                }
+                self.call(name, &arg_values)
             }
             Expr::MethodCall {
                 receiver,

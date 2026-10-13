@@ -70,6 +70,31 @@ pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("extends", TokenKind::Extends),
 ];
 
+/// The pairs of words the language spells as **one** keyword, in the order a
+/// program writes them.
+///
+/// `give back` and `might fail` are each two words that lex to one token, and
+/// the language writes each pair as the pair: `might f()` is refused by name
+/// rather than read as a guard (`Parser::parse_might_fail`), so offering `might`
+/// and `fail` as two words to complete would hand a user a half-guard. Every
+/// table that reads the keyword vocabulary — the REPL's completer, most
+/// obviously — joins a pair into the phrase, and the order in the pair is the
+/// order the phrase is written in.
+///
+/// **The pairs are declared here rather than derived from [`KEYWORDS`].** The
+/// derivation was adjacency: two adjacent entries sharing a `TokenKind` are one
+/// keyword. That reads well and is wrong, because nothing in `KEYWORDS` promises
+/// adjacency — it is a table of words, grouped for a reader, not a sequence —
+/// and alphabetising it silently turned `give back` into `give` and `back` in
+/// every table that read it, with the count of multi-word entries as the only
+/// thing that noticed. Declaring the pairs makes the join independent of the
+/// order of `KEYWORDS`; the two are held in step by
+/// `tests/keyword_reservation_test.rs`, in both directions: a declared pair whose
+/// words are not keywords, or do not share a kind, fails — and so does a pair of
+/// adjacent same-kind words that is not declared here, which is what a new
+/// two-token keyword would be until someone says which phrase it is written as.
+pub const KEYWORD_PHRASES: &[(&str, &str)] = &[("give", "back"), ("might", "fail")];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals

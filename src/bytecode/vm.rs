@@ -2690,9 +2690,20 @@ impl BytecodeVm {
     // -- calls --------------------------------------------------------------
 
     /// `CALL`: a builtin, or a function the program declared.
+    ///
+    /// A name written **without a receiver** cannot be one of the registry's
+    /// `<module>_<member>` encodings. `files.read(..)` is a `CALL_METHOD`, and
+    /// that path builds the same string and hands it to the same resolver, so
+    /// this is the only place the two can be told apart — which is why the
+    /// refusal lives here and not in [`crate::stdlib::builtin`]. The tree-walking
+    /// VM asks the same question on its `Expr::Call`; see
+    /// [`crate::interpreter::Vm`].
     fn call(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let name = self.constant_text(instruction.arg)?;
         let args = self.pop_n(instruction.aux)?;
+        if let Some(refusal) = crate::stdlib::encoding_written_without_a_receiver(&name) {
+            return Err(Error::Runtime(refusal, self.span()));
+        }
         self.call_named(&name, &args, frame)
     }
 

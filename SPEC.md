@@ -1042,6 +1042,21 @@ end
 
 ## Standard Library
 
+A module function is written `<module>.<member>`, and that is the only spelling
+a program may use. Each one is stored in the registry under the name
+`<module>_<member>` — `files.read` as `files_read` — and that encoding is an
+internal name rather than a second spelling: a program that writes it without a
+receiver is refused with
+
+```
+RuntimeError: files_read is not a name on its own: it is how files.read is stored
+```
+
+The refusal names the spelling that works, and it is the same on both engines.
+The encoding used to answer, which meant the REPL was withholding names a program
+could write and `flat_builtin_names` was not the set of names a program could
+write; it does not answer now.
+
 ### console
 
 ```redblue

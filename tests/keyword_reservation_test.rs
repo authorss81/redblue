@@ -13,7 +13,7 @@
 //! keyword the lexer reserves, so adding a word to `KEYWORDS` without giving the
 //! parser a rule for it fails this test rather than shipping.
 
-use redblue::lexer::{Lexer, TokenKind, KEYWORDS};
+use redblue::lexer::{Lexer, TokenKind, KEYWORDS, KEYWORD_PHRASES};
 use redblue::Error;
 
 const PARSER_SOURCE: &str = include_str!("../src/parser.rs");
@@ -601,6 +601,153 @@ fn words_owned_by_other_phases_still_fail_the_same_way() {
             PARSER_SOURCE.contains(&format!("TokenKind::{}", kind)),
             "`{}` should be handled by phase-038/040, not by this phase",
             word
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Which words pair up: the declaration, and the table it is read beside
+// ---------------------------------------------------------------------------
+
+/// The kind the lexer gives `word`, or a failure naming the word.
+fn kind_of(word: &str) -> &TokenKind {
+    KEYWORDS
+        .iter()
+        .find(|(listed, _)| *listed == word)
+        .map(|(_, kind)| kind)
+        .unwrap_or_else(|| panic!("{word} is not a keyword the lexer reserves"))
+}
+
+/// The pairs of adjacent keywords that lex to the same kind — the pairs a reader
+/// of `KEYWORDS` would take to be one keyword written as two words.
+///
+/// `yes` and `no` are the control: they are adjacent and share a *variant*, but
+/// their kinds carry different values (`YesNo(true)` and `YesNo(false)`), so they
+/// are two words, and the table below is what says so rather than leaving it to
+/// a rule about adjacency.
+fn adjacent_pairs_sharing_a_kind() -> Vec<(&'static str, &'static str)> {
+    KEYWORDS
+        .windows(2)
+        .filter(|pair| pair[0].1 == pair[1].1)
+        .map(|pair| (pair[0].0, pair[1].0))
+        .collect()
+}
+
+/// The two-word keywords are **declared**, and the declaration is what every
+/// table that reads the vocabulary reads — so it cannot be an accident of the
+/// order `KEYWORDS` happens to list its words in.
+///
+/// It used to be derived: two adjacent entries sharing a `TokenKind`. That reads
+/// well and is wrong, because nothing in `KEYWORDS` promises adjacency. It is a
+/// table of words, grouped for a reader, and the day it is alphabetised — the
+/// obvious tidy-up for a table of 47 short lines — `give back` silently became
+/// `give` and `back` in every table that read it, and the only thing that noticed
+/// was a count of how many entries contained a space.
+///
+/// So [`KEYWORD_PHRASES`] is the declaration, and this holds it to the table in
+/// both directions, which is what makes the difference a change in the language
+/// rather than a change in one reader's opinion:
+///
+/// - **declared → table**: both words are keywords the lexer reserves, and they
+///   lex to the *same* kind. A phrase of two words is one keyword only while the
+///   lexer agrees the two words are one token.
+/// - **table → declared**: every adjacent same-kind pair is declared. This is the
+///   direction that would have caught the alphabetisation — a new two-token
+///   keyword enters `KEYWORDS` as two adjacent same-kind lines, and until someone
+///   declares the phrase a program writes, this fails and asks them what it is.
+///
+/// The declared order is the order the phrase is *written* in, not the order the
+/// table lists the words: `give back` and not `back give`, whatever `KEYWORDS`
+/// says.
+#[test]
+fn edge_a_declared_keyword_phrase_is_two_keywords_of_one_kind_and_every_pair_is_declared() {
+    let declared: Vec<(&str, &str)> = KEYWORD_PHRASES.to_vec();
+    let spelled: Vec<String> = declared
+        .iter()
+        .map(|(head, tail)| format!("{head} {tail}"))
+        .collect();
+    assert_eq!(
+        spelled,
+        TWO_WORD.to_vec(),
+        "the language's two-word keywords are the two the lexer gives one kind, and this \
+         table is what says so: {spelled:?}"
+    );
+
+    for (head, tail) in &declared {
+        assert_eq!(
+            kind_of(head),
+            kind_of(tail),
+            "{head} {tail} is one keyword written as two words, so the lexer has to give \
+             both the same kind — otherwise they are two keywords and the phrase is a \
+             spelling nobody can write"
+        );
+    }
+
+    let mut seen: Vec<&str> = Vec::new();
+    for (head, tail) in &declared {
+        for word in [head, tail] {
+            assert!(
+                !seen.contains(word),
+                "{word} is in two declared phrases, so it is offered as both"
+            );
+            seen.push(word);
+        }
+    }
+
+    let undeclared: Vec<(&str, &str)> = adjacent_pairs_sharing_a_kind()
+        .into_iter()
+        .filter(|pair| !declared.contains(pair))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "{} adjacent pair(s) of keywords lex to one kind but no phrase is declared for \
+         them in lexer::KEYWORD_PHRASES: {}. Two words the lexer reads as one keyword are \
+         one keyword to a reader of the language, so declare the phrase they are written \
+         as — or, if they are two words after all, give them kinds of their own",
+        undeclared.len(),
+        undeclared
+            .iter()
+            .map(|(head, tail)| format!("{head} {tail}"))
+            .collect::<Vec<String>>()
+            .join(", ")
+    );
+}
+
+/// A declared phrase is a phrase in the language, not only in the lexer's table:
+/// `might f()` is refused by name rather than read as a guard, and `give 1` is
+/// accepted while no document writes it.
+///
+/// This runs each form that separates a pair and each that keeps it together, so
+/// a change to either the parser's rule or the declaration is visible as a
+/// behaviour rather than as a table that agrees with itself.
+#[test]
+fn edge_the_declared_phrases_are_the_spellings_the_language_writes() {
+    for (head, tail) in KEYWORD_PHRASES {
+        // The half a declaration has to match: `might f()` is refused by name,
+        // because `might` is only the start of a guard.
+        if *head == "might" {
+            let message = parse_error("set n to might 1\n")
+                .unwrap_or_else(|| panic!("`might` alone must be refused"));
+            assert!(
+                message.contains("might"),
+                "the refusal of `might 1` has to name the word: {message}"
+            );
+        }
+
+        // And the phrase itself is a program: the two words appear together and
+        // the lexer reads them as the one token the parser's guard arm wants.
+        let tokens = Lexer::tokenize(&format!("{head} {tail}\n"))
+            .unwrap_or_else(|error| panic!("`{head} {tail}` should lex: {error:?}"));
+        assert!(
+            tokens
+                .iter()
+                .filter(
+                    |token| token.kind == TokenKind::GiveBack || token.kind == TokenKind::MightFail
+                )
+                .count()
+                >= 2,
+            "`{head} {tail}` is declared a phrase, so the lexer has to produce its kind for \
+             both words: {tokens:?}"
         );
     }
 }

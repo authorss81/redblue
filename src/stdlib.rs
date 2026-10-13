@@ -764,6 +764,186 @@ pub fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name)
 }
 
+/// Whether `name` is the registry's `<module>_<member>` encoding of a module
+/// function rather than a spelling a program writes.
+///
+/// `files.read` is stored as `files_read`, and that encoding is an internal name:
+/// a program writes `files.read`, so the encoding is what a table offering names
+/// to a user has to leave out. Membership in [`BUILTIN_NAMES`] is the opposite
+/// answer for the same name — `is_builtin("files_read")` is true, because that is
+/// how the function is reached — and the two together are what make the pair
+/// checkable from either side.
+///
+/// **And the encoding is refused where a program calls it without a receiver.**
+/// `say files_read(path)` is `files_read is not a name on its own: it is how
+/// files.read is stored`, on both engines, by [`encoding_written_without_a_receiver`].
+/// It used to answer — the flat path reached the registry entry through
+/// [`crate::runtime::builtin`] and the analyzer accepts the name — so this
+/// predicate and the language disagreed about which spellings exist, and a
+/// completion that withheld a working name was hiding a hole rather than
+/// keeping a promise.
+///
+/// The test is **a module that has that member**, not a prefix that happens to be
+/// one, and an underscore alone is not enough either. `random_seed`,
+/// `random_number`, `random_choice` and `random_shuffle` carry one and no module:
+/// there is no `random` module — `random.seed(1)` is refused by name — so those
+/// four are flat spellings a program writes as they are and are offered as such.
+/// The same holds for `is_number`, `to_text` and `type_of`, whose prefixes are
+/// words rather than namespaces.
+pub fn is_module_member_encoding(name: &str) -> bool {
+    name.split_once('_')
+        .is_some_and(|(module, member)| is_module(module) && module_has_member(module, member))
+}
+
+/// The refusal a program is given for **calling** `name` without a receiver, when
+/// `name` is the registry's `<module>_<member>` encoding rather than a spelling
+/// a program writes, and `None` when it is an ordinary name.
+///
+/// Both engines ask this on the path a call takes **without a receiver** —
+/// [`crate::interpreter::Vm`]'s `Expr::Call` and `BytecodeVm`'s `CALL`
+/// instruction — which is the only place the two can tell apart, because the
+/// dotted path builds the same string and hands it to the same resolver. So
+/// `files.read(..)` answers and `files_read(..)` does not, on either engine,
+/// rather than on whichever one happened to check.
+///
+/// The message names the spelling that works, because the encoding is not a name
+/// anyone chose: a user who types it was shown it by something, and the answer
+/// to "I typed that and it does not work" has to be the name to type instead.
+///
+/// This is the other half of [`flat_builtin_names`], and it is what makes that
+/// table's name true: every registered builtin outside it is either this or
+/// [`is_unimplemented`], so the names a program may write flat and the names the
+/// REPL offers flat are one set rather than two that happen to overlap.
+pub fn encoding_written_without_a_receiver(name: &str) -> Option<String> {
+    if !is_module_member_encoding(name) {
+        return None;
+    }
+    let (module, member) = name.split_once('_')?;
+    Some(format!(
+        "{name} is not a name on its own: it is how {module}.{member} is stored"
+    ))
+}
+
+/// The registered builtins that no engine answers.
+///
+/// `filter` and `reduce` are in [`BUILTIN_NAMES`], so `is_builtin` says true and
+/// the analyzer lets a program write them — and nothing dispatches them:
+/// `say filter([1, 2, 3], to (x) give back x > 1 end)` is `filter was called with
+/// arguments it cannot use`, on both engines, and `list.filter` is refused by name
+/// for the same reason it is not in [`MODULE_MEMBERS`]. SPEC.md § list writes the
+/// position down: registered, not implemented, and therefore not a member of
+/// `list`.
+///
+/// This is therefore the other half of [`is_builtin`]. That one answers "is this
+/// name spelled correctly", which a table offering names to a user cannot use on
+/// its own: it is true for both of these, and every call to either of them is a
+/// refusal. A name here is registered **and** dead.
+///
+/// It is not a free-standing list. `tests/stdlib_module_docs_test.rs` holds the set
+/// equality between this table and its own `known_gaps()` in both directions, and
+/// that table *runs* each gap's program and fails if one starts answering — so
+/// implementing `filter` takes it out of both, and leaving a new dead builtin out
+/// of this one fails [`flat_builtin_names`]'s gate.
+pub const UNIMPLEMENTED_BUILTINS: &[&str] = &["filter", "reduce"];
+
+/// The program each name in [`UNIMPLEMENTED_BUILTINS`] is still refused by.
+///
+/// A gap is a *claim* about a name, and a claim has to be re-runnable or it
+/// decays into a comment. What each of these entries carries is the program
+/// **in the shape a program writes it** — the two- and three-argument
+/// higher-order call, `filter([1, 2, 3], to (x) give back x > 1 end)`, not
+/// `filter([1, 2])`.
+///
+/// The distinction is the whole of it. A one-argument call is refused by
+/// *arity*: `filter([1, 2])` answers `filter was called with arguments it cannot
+/// use` today and answers the same thing after somebody implements `filter`,
+/// because an implemented `filter` still cannot take one argument. So a gate
+/// written that way stays green through the exact change it exists to catch —
+/// the name is implemented, the refusal is still a refusal, and the test passes.
+/// Only the program the language is documented to write can tell an
+/// implementation from a stub, which is why the programs live beside the names
+/// they belong to rather than being spelled out in each gate that runs them.
+///
+/// Three gates read this table and all three have to be right: the REPL's own
+/// (`src/repl/completer.rs`), the public surface one
+/// (`tests/repl_module_completion_test.rs`), and `known_gaps()` in
+/// `tests/stdlib_module_docs_test.rs` — which holds its **own** copy of these
+/// programs and is gated on the two being the same table, so a program edited in
+/// one file and not the other fails rather than quietly running something else.
+pub const UNIMPLEMENTED_BUILTIN_PROGRAMS: &[(&str, &str)] = &[
+    (
+        "filter",
+        "say filter([1, 2, 3], to (x) give back x > 1 end)",
+    ),
+    (
+        "reduce",
+        "say reduce([1, 2, 3], to (a, b) give back a + b end, 0)",
+    ),
+];
+
+/// The program `name` is refused by, or `None` when `name` is not a name this
+/// table has a gap for.
+///
+/// The lookup is by name rather than by index so a gap cannot be reordered under
+/// a program, and a name in [`UNIMPLEMENTED_BUILTINS`] with no program here is a
+/// gate failure rather than a silently unchecked claim.
+pub fn unimplemented_program(name: &str) -> Option<&'static str> {
+    UNIMPLEMENTED_BUILTIN_PROGRAMS
+        .iter()
+        .find(|(listed, _)| *listed == name)
+        .map(|(_, program)| *program)
+}
+
+/// Whether `name` is registered and nothing implements it — the answer a table
+/// offering names to a user needs where [`is_builtin`] is not enough.
+pub fn is_unimplemented(name: &str) -> bool {
+    UNIMPLEMENTED_BUILTINS.contains(&name)
+}
+
+/// Every name the REPL may offer **flat**: a registered builtin that answers, and
+/// is not the internal encoding of a module function.
+///
+/// This is the answer to "which builtins can a person type without a module in
+/// front of them", derived from [`BUILTIN_NAMES`] by two filters, so it is a list
+/// nothing has to remember to change. A table written out by hand is how the REPL's
+/// completer came to be short by twenty-one of them while offering five flat names
+/// that answer `Unknown function` — `read`, `write` and `exists` are real functions
+/// that live under `files.` — and a sixth, `formats`, that answers `Unknown
+/// variable`. The registry is the whole answer and this is the filter that says
+/// which half of it is spelled flat.
+///
+/// **And it is the whole of the flat-answerable set, because the two filters are
+/// also the language's two refusals.** Every name in [`BUILTIN_NAMES`] that this
+/// drops is a call no program may make without a receiver: an encoding by
+/// [`encoding_written_without_a_receiver`], which names the dotted spelling that
+/// works, and a dead builtin by [`is_unimplemented`], which names the one it is.
+/// That is the property the table's name claims, and
+/// `edge_every_registered_builtin_outside_this_table_is_refused_flat`
+/// (`src/repl/completer.rs`) walks the two halves against the language.
+///
+/// The two filters are two different reasons, and dropping either puts a name back
+/// that a table should not offer:
+///
+/// - [`is_module_member_encoding`] — `files_read` is how `files.read` is stored,
+///   and no document writes it. A program that writes it anyway is refused by
+///   name; see [`encoding_written_without_a_receiver`].
+/// - [`is_unimplemented`] — `filter` is registered and every call to it is a
+///   refusal. This filter is the one the REPL's completion promise needs: a
+///   completion is the language inviting a name, and offering a registered name
+///   that answers nothing is the defect the completer's own gate could not see,
+///   because `is_builtin` is true for both.
+///
+/// What this still does not decide is whether a *name* outside the registry is
+/// written flat — `read` and `write` are refused by the analyzer, which is a
+/// different refusal from the one above and is not this table's business.
+pub fn flat_builtin_names() -> Vec<&'static str> {
+    BUILTIN_NAMES
+        .iter()
+        .copied()
+        .filter(|name| !is_module_member_encoding(name) && !is_unimplemented(name))
+        .collect()
+}
+
 /// Resolves `module.member` to the builtin name behind it.
 ///
 /// The internal encoding of a module function is `module_member` — that is what

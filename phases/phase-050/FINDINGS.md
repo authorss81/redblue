@@ -519,3 +519,202 @@ run:
 The round-8 trade ("a gate that asserts a known defect is a gate that will stop
 passing once the defect is fixed") is why this is now a defect that is fixed
 rather than a gate that is narrow.
+
+## 16. The completer's **keyword** table has drifted the same way its builtin table had — found in round 11, **fixed in round 12**
+
+Round 11 fixed the builtin half of `src/repl/completer.rs` (the module names and
+the six unanswerable entries). The `keywords:` table six lines above it is the
+same kind of hand-kept copy and had drifted the same way, so it was recorded here
+rather than fixed: it is a question about statements, not about module names, and
+AGENTS.md §1.7 did not let that round answer it.
+
+**Round 12 answered it, and the review that asked the question found a second
+defect next to it: the flat half of the builtin table was hand-kept too**, so 21
+builtins that answer completed to nothing while every gate stayed green — the
+existing gate only asks whether an offered name is *real*, and a name that is
+merely *absent* is neither right nor wrong. That half is FINDINGS.md below, §17.
+
+Evidence, measured against `lexer::KEYWORDS` (`src/lexer.rs:23`) — the table the
+lexer actually lexes from:
+
+| Direction | Words |
+|---|---|
+| offered by the completer, **not** a keyword (`src/repl/completer.rs:27-77`) | `are`, `when`, `by`, `ask`, `new`, `async`, `wait`, `parallel`, `done` (and the two-token `give back`) |
+| a keyword the completer does **not** offer | `constant`, `give`, `back`, `might`, `fail`, `as`, `test`, `expect` |
+
+Four of the nine offered words start nothing:
+
+```
+$ rb run one-word.rb          # say when
+Error: AnalyzerError: Unknown variable 'when'; did you mean 'then'?
+$ rb run one-word.rb          # say new      → Unknown variable 'new'
+$ rb run one-word.rb          # say async    → Unknown variable 'async'
+$ rb run one-word.rb          # say done     → Unknown variable 'done'
+$ rb run one-word.rb          # say ask      → Unknown variable 'ask'; did you mean 'as'?
+```
+
+(Round 12 measured all eight and every one is `Unknown variable` — `are`,
+`when`, `ask`, `new`, `async`, `wait`, `parallel` and `done`. The fifth command
+above is not a separate claim; the list above it undercounted.)
+
+So a user who types `as` and presses Tab is offered `ask`, and one who types
+`ne` is offered `new`. That is the same defect the builtin table had, on the
+other half of the same struct.
+
+Two things a fixing phase has to decide, which is why the obvious "read
+`lexer::KEYWORDS`" is not the whole answer:
+
+- `give back` is **two** keywords (`give`, `back`) and the completer deliberately
+  offers it whole — `edge_completion_ignores_the_case_of_the_prefix`'s neighbour
+  `complete_matches_a_keyword` pins that as "a multi-word keyword is offered
+  whole". A table read from `KEYWORDS` has to join that pair rather than offer
+  `give` and `back` separately.
+- `by` is **not** in `KEYWORDS` because the parser reads it positionally
+  (`src/parser.rs:943`). Whether it belongs in a keyword table at all is a
+  decision about the grammar, not about a list.
+
+The one-line shape the builtin table already demonstrates is at
+`src/repl/completer.rs:11`: read the vocabulary from the table that decides it, and
+put a gate beside it that fails when the two drift apart
+(`edge_the_command_vocabulary_is_the_parsers_own_table`, `src/repl/completer.rs:505`).
+Round 11's `edge_the_repl_offers_no_builtin_a_program_cannot_call` is the same
+gate for the builtin half.
+
+### How round 12 answered both
+
+- `keyword_names()` (`src/repl/completer.rs:89`) reads `lexer::KEYWORDS`, and
+  **words that share a `TokenKind` are offered joined** — which is what makes
+  `give back` whole and brings `might fail` with it, since the lexer gives that
+  pair one token too and `Parser::parse_might_fail` refuses `might f()` by name.
+  The join is a rule rather than a special case, and the gate that says so counts
+  the phrases rather than naming them.
+- The **tail** of a pair is not offered as a word of its own. Completion is a
+  prefix match, so `back` would only match after `give back` had been typed and
+  would complete it to a second `back`. `fail` is the same.
+- `by` is **kept**, as the one word in `POSITIONAL_KEYWORDS`
+  (`src/repl/completer.rs:57`), with the decision written down where it is made:
+  it is not a reserved word because `Parser::at_range_step_marker` reads it
+  positionally, and reserving it would refuse `to can grow(by)`. It still starts
+  two clauses a program writes — `for each i from 0 to 10 by 5` and
+  `split("a,b", by ",")` — and
+  `edge_the_one_non_reserved_keyword_is_a_word_the_parser_reads` runs both, so the
+  exception is a claim about the language rather than a preference.
+- The gates, all four of them watched failing on a mutation first:
+  `edge_the_keyword_vocabulary_is_the_lexers_own_table` (both directions, beside
+  the table), `edge_a_half_of_a_two_word_keyword_is_not_offered_on_its_own`,
+  `edge_a_two_word_keyword_is_offered_whole_from_its_first_word`, and through the
+  public surface `edge_every_keyword_the_lexer_reserves_is_offered_by_the_repl`
+  and `edge_a_word_the_lexer_does_not_reserve_is_not_offered_as_a_keyword` — the
+  last of which **runs** the eight words and is refused, so none of them can come
+  back from memory.
+
+## 17. The completer's **flat** builtin table was hand-kept too, and its gate only asked one of the two questions — found in the review of round 11, fixed in round 12
+
+Round 11 read the *module* half of `builtins:` from `stdlib::MODULES` and left the
+flat half as a written-out `vec!`, so the struct kept two tables where it now has
+one. It was short 21 registered callables, and **nothing in the suite could see
+it**: `edge_the_repl_offers_no_builtin_a_program_cannot_call` walks the table and
+asks whether each entry is a module, a registered builtin or a global. That is the
+only direction it can ask. A builtin that answers and is *absent* is neither wrong
+nor right, so the gate was green the whole time the table was short.
+
+The absent twenty-one, all of which answer and none of which completed:
+`log`, `exp`, `starts_with`, `ends_with`, `replace`, `append`, `shift`,
+`is_number`, `is_text`, `is_list`, `is_record`, `to_text`, `to_number`, `to_list`,
+`type_of`, `expect`, `assert`, `input`, `random_number`, `random_choice`,
+`random_shuffle`. Two of the four `random_*` names carry the underscore that marks
+a registry encoding and are still flat, because **there is no `random` module** —
+`random.seed(1)` is refused by name — which is exactly why the filter round 12
+wrote asks whether the prefix *is a module with that member* rather than whether
+there is an underscore.
+
+Round 11 recorded this as a deliberate trade ("offering all 69 is a decision about
+how much a completion list should contain … never guarantee to offer one that
+can"). The review called that trade the defect, and round 12 reversed it: a
+completion is a promise in both directions, and the same table is trusted for what
+it offers as for what it does not.
+
+- `stdlib::is_module_member_encoding` and `stdlib::flat_builtin_names`
+  (`src/stdlib.rs:784`, `:807`) derive the flat half from `BUILTIN_NAMES`, minus
+  the 25 `<module>_<member>` encodings — which are internal names behind a dotted
+  call, so `files_read` is not offered while `files` is.
+- The gates that make it unfalsifiable: `edge_every_flat_builtin_the_language_has_is_offered`
+  and `edge_no_module_function_is_offered_under_its_registry_encoding` beside the
+  table, plus `edge_every_dropped_encoding_is_reachable_through_the_module_offered`
+  so dropping an encoding cannot quietly drop a function, and the three
+  public-surface twins in `tests/repl_module_completion_test.rs`. Dropping
+  `type_of` from the table fails two of them; offering `files_read` fails two.
+
+One thing round 12 did **not** do, and it is a real limit rather than a decision:
+completing `files` offers the module and nothing after it. The member surface is
+`MODULE_MEMBERS`, and no gate carries it to the completer. Dotted completion is an
+absent feature, not a wrong name, so nothing the completer promises is untrue —
+but a user who types `files.` and presses Tab gets nothing, which is the one way
+the table can still be short of what the language has.
+
+## 18. Every `<module>_<member>` encoding the completer withholds **answers** when written flat — found in the review of round 12, **fixed in round 14**
+
+`§17`'s rule — a completion is a promise in both directions — was applied to
+`filter` and `reduce` in round 13 and not applied to the twenty-five encodings
+round 12 had already decided about. Those were withheld on the grounds that they
+are "internal names behind a dotted call", and that is what they are *for*; nothing
+refuses them. Run it:
+
+```
+$ say files_read("/etc/hostname")
+runnervmmprz5
+
+$ say list_map([1, 2], to (x) give back x + 1 end)
+[2, 3]
+```
+
+Both on the tree-walker and on the bytecode VM. The path is the flat one:
+`stdlib::builtin` resolves the name to itself (`module_member_name` refuses to
+unwrap a name `BUILTIN_NAMES` already holds), `runtime::builtin` matches
+`files_read`, and the analyzer accepts the name because `is_builtin` is true for
+it. So `flat_builtin_names()` is not "every name a program may write flat": it is
+the flat half of the registry **minus the twenty-five spellings no document
+uses**, and a program may write all twenty-five.
+
+The direction of the fix is a decision, not a detail, so it was recorded rather
+than taken in a review round:
+
+- **Refuse them where they are written without a receiver.** `say files_read(..)`
+  becomes what `say list.filter(..)` already is — a name the analyzer accepts and
+  the runtime refuses, ideally by naming the dotted spelling that works. That is a
+  behaviour change on both engines (the flat path has to be distinguished from the
+  dotted one, and both call `stdlib::builtin` with the same name today), and it
+  touches twenty-five names at once: the same kind of change as rounds 5 and 6,
+  where it belonged.
+- **Offer them.** Then the completer teaches `list_map`, and
+  `edge_no_module_function_is_offered_under_its_registry_encoding` — a gate this
+  phase wrote and this report defends — is wrong. Not taken.
+
+What round 13 did instead: the doc comments that claimed the stronger thing now say
+what is true (`is_module_member_encoding` and `flat_builtin_names` in
+`src/stdlib.rs`, `edge_no_module_function_is_offered_under_its_registry_encoding`
+in `src/repl/completer.rs`), and the gate's own doc says it holds the *offer* and
+nothing about the language's answer. No gate was weakened to accommodate it, and
+nothing in the completer is wrong: what it offers is a name a program calls and
+that call answers, which is the promise round 13 enforced. The half that is still
+untrue is the language's, and it was untrue before this phase.
+
+**Round 14 took the first direction.** `stdlib::encoding_written_without_a_receiver`
+gives the refusal and both engines ask it on the path a call takes *without* a
+receiver — `Expr::Call` in the tree-walker, the `CALL` instruction in the bytecode
+VM — which is the only place the two can be told apart, because the dotted path
+builds the same string and hands it to the same resolver:
+
+```
+$ say files_read("/etc/hostname")
+RuntimeError: files_read is not a name on its own: it is how files.read is stored
+
+$ say files.read("/etc/hostname")
+runnervmmprz5
+```
+
+The second option — offering the encodings — was not taken and would still be
+wrong: it would teach `list_map`, and the gate round 12 wrote is right. What
+changed is that the gate is now a statement about the language rather than a
+judgement about what to hand a user, and `flat_builtin_names` means what its name
+says.

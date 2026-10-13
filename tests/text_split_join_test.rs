@@ -341,7 +341,16 @@ fn refuse_on_both_engines(name: &str, source: &str) -> (bool, String, String) {
 /// builtin — so the row was passing on a hole in the name resolution rather
 /// than on the spelling a reader would write. It is refused now, as it should be.
 struct Reach {
-    /// The name `src/stdlib.rs` registers, which is also the flat spelling.
+    /// The name `src/stdlib.rs` registers.
+    ///
+    /// For a flat builtin that is also the spelling a program writes. For a
+    /// module function it is the `<module>_<member>` **encoding** — `json_parse`
+    /// is how `json.parse` is stored — and there is no flat spelling of it at
+    /// all: a program writing `json_parse(..)` is refused, by
+    /// [`redblue::stdlib::encoding_written_without_a_receiver`], with the dotted
+    /// spelling in the message. So the flat half of a row asserts one of two
+    /// things, decided by the row and not by the table it came from: an answer
+    /// for a flat builtin, and that refusal for an encoding.
     builtin: &'static str,
     /// The module a reader reaches for dotted.
     module: &'static str,
@@ -665,8 +674,28 @@ fn reachability_table_holds_for_every_row() {
             b = row.member
         );
 
-        // Flat: the same builtin under its own name, with no import at all.
-        let flat = eval(&format!("{b}({a})\n", b = row.builtin, a = row.args));
+        // Flat: the same builtin under its own name, with no import at all —
+        // for a builtin that *has* a flat spelling. `json_parse` is not one:
+        // it is the registry's encoding of `json.parse`, so a program writing it
+        // without a receiver is refused, and the refusal has to name the dotted
+        // spelling that works. It used to answer, which is what made this row
+        // assert a name no document writes.
+        let program = format!("{b}({a})\n", b = row.builtin, a = row.args);
+        if redblue::stdlib::is_module_member_encoding(row.builtin) {
+            let error = eval_err(&program);
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("{m}.{b_}", m = row.module, b_ = row.member)),
+                "{b} is the registry's encoding of {m}.{b_}, so a program writing it flat \
+                 has to be refused with the spelling that works in the message, got: {message}",
+                b = row.builtin,
+                m = row.module,
+                b_ = row.member
+            );
+            continue;
+        }
+
+        let flat = eval(&program);
         assert_eq!(flat, expected, "`{b}` is wrong flat", b = row.builtin);
     }
 }

@@ -21,6 +21,7 @@ use std::io::{Read, Write};
 use std::process::Command;
 
 use redblue::bytecode::vm::BytecodeVm;
+use redblue::repl::ReplCompleter;
 
 /// The environment variables that decide whether `network` talks to a proxy.
 ///
@@ -40,7 +41,15 @@ const PROXY_ENV: &[&str] = &[
     "no_proxy",
 ];
 
-/// Runs `source` and returns `(exit success, stdout, stderr)`.
+/// The scratch directory this file's own runs share: `target/tmp/p32docs`.
+///
+/// A test that needs to *run* rows out of [`answerable_builtins`] passes a
+/// different one, so two gates walking the same table cannot reach the same file
+/// at once — `cargo test` runs them in parallel.
+const SCRATCH: &str = "p32docs";
+
+/// Runs `source` in the scratch directory `scratch` and returns
+/// `(exit success, stdout, stderr)`.
 ///
 /// Each run gets its own file, named for the test that asked. A single shared
 /// scratch path would be a race: `cargo test` runs these in parallel, and one
@@ -49,8 +58,10 @@ const PROXY_ENV: &[&str] = &[
 ///
 /// Stdin is closed rather than inherited, so the `input` row reads end-of-input
 /// immediately instead of waiting on a terminal nobody is sitting at.
-fn run_named(tag: &str, source: &str) -> (bool, String, String) {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/p32docs");
+fn run_in(scratch: &str, tag: &str, source: &str) -> (bool, String, String) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/tmp")
+        .join(scratch);
     std::fs::create_dir_all(&dir).expect("scratch directory");
     let file = dir.join(format!("{tag}.rb"));
     std::fs::write(&file, source).expect("the program is written");
@@ -70,6 +81,11 @@ fn run_named(tag: &str, source: &str) -> (bool, String, String) {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+/// [`run_in`] in this file's shared scratch directory.
+fn run_named(tag: &str, source: &str) -> (bool, String, String) {
+    run_in(SCRATCH, tag, source)
 }
 
 /// Runs `source` under `tag` and asserts it printed `expected`.
@@ -362,6 +378,11 @@ const NETWORK_BODY: &str = r#"{"ok":true}"#;
 /// A working call for **every** name `stdlib::builtins()` registers as a
 /// `Value::Builtin`, with the exact output the program has to print.
 ///
+/// `scratch` is the directory the paths below are built in, and it is a parameter
+/// because two gates in this file now *run* rows out of this table: `cargo test`
+/// runs them in parallel, and one gate's `files.write` reaching another's scratch
+/// file is a failure neither did anything to deserve.
+///
 /// This table is the answer to the question `builtins() registers a name;
 /// something has to answer it`, and it replaced a walk that asked the question
 /// in a way almost nothing could fail. That walk ran `say <name>()` — no
@@ -377,10 +398,12 @@ const NETWORK_BODY: &str = r#"{"ok":true}"#;
 /// else fails; and a name that is in neither this table nor [`known_gaps`] fails
 /// the coverage assertion below, so the table cannot fall behind the registry
 /// the way the skip-list did.
-fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
-    let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/p32docs");
-    std::fs::create_dir_all(&scratch).expect("scratch directory");
-    let path = |name: &str| scratch.join(name).display().to_string();
+fn answerable_builtins(address: &str, scratch: &str) -> Vec<(String, String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/tmp")
+        .join(scratch);
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    let path = |name: &str| dir.join(name).display().to_string();
 
     let rows: Vec<(&str, String, String)> = vec![
         ("abs", "say abs(-3)".into(), "3\n".into()),
@@ -713,6 +736,85 @@ fn known_gaps() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+/// This list and [`redblue::stdlib::UNIMPLEMENTED_BUILTINS`] are the same set,
+/// checked in both directions.
+///
+/// The second list is what the language itself reads: [`flat_builtin_names`]
+/// drops a name in it, so the REPL does not offer a name whose every call is a
+/// refusal, and that filter is a *promise* — a completion says a name can be
+/// called. A promise gated by a list in a test file is a promise that expires
+/// when the test file is not read, so the two are held equal here and the other
+/// half of the property is held by the two gates below: `known_gaps()` runs each
+/// entry and fails when one starts answering, and
+/// `edge_every_builtin_the_repl_offers_is_run_and_answers` fails when a name the
+/// completer offers has no row here.
+///
+/// So a name implemented comes out of both, and a new dead builtin has to go into
+/// both, or one of the three fails.
+///
+/// [`flat_builtin_names`]: redblue::stdlib::flat_builtin_names
+#[test]
+fn edge_the_gap_list_is_the_set_of_builtins_the_language_calls_unimplemented() {
+    let gaps: Vec<&str> = known_gaps().iter().map(|(name, _)| *name).collect();
+    let unimplemented = redblue::stdlib::UNIMPLEMENTED_BUILTINS;
+
+    assert_eq!(
+        gaps.len(),
+        unimplemented.len(),
+        "known_gaps() and stdlib::UNIMPLEMENTED_BUILTINS have to be the same set: the \
+         first is checked by running each entry, the second is what the completer reads \
+         to decide not to offer a name that answers nothing"
+    );
+
+    for name in unimplemented {
+        assert!(
+            gaps.contains(name),
+            "{name} is in stdlib::UNIMPLEMENTED_BUILTINS, so it has a program in \
+             known_gaps() that is still refused. Without one nothing runs it, and the \
+             list can outlive the gap it names the way thirteen of its entries did."
+        );
+    }
+    for (name, _) in known_gaps() {
+        assert!(
+            unimplemented.contains(name),
+            "{name} is in known_gaps() and not in stdlib::UNIMPLEMENTED_BUILTINS, so the \
+             REPL still offers it: the completer reads the second list to decide what \
+             not to offer, and this entry is not on it."
+        );
+    }
+
+    // And the *programs* are the same programs, not merely the same names.
+    //
+    // `stdlib::UNIMPLEMENTED_BUILTIN_PROGRAMS` is the copy the library itself
+    // reads — the REPL's own gates run it, from `src/repl/completer.rs` and
+    // `tests/repl_module_completion_test.rs` — so a gap is checkable from the
+    // code that depends on it rather than only from a test file nobody opens
+    // when the language changes. That makes this list a second copy, and a
+    // second copy that drifts is worse than none: `filter` would be run as a
+    // two-argument call by one file and a one-argument call by the other, and the
+    // one-argument form is refused for its *arity* by an implemented `filter`
+    // too — so the copy that had drifted would be the one that stayed green
+    // through the implementation. Hence the equality, in both directions.
+    let mine: Vec<(&str, &str)> = known_gaps().to_vec();
+    let theirs = redblue::stdlib::UNIMPLEMENTED_BUILTIN_PROGRAMS;
+    for (name, program) in &mine {
+        assert_eq!(
+            redblue::stdlib::unimplemented_program(name),
+            Some(*program),
+            "known_gaps() runs `{program}` for {name} and the library runs a different \
+             program for it, so the two gates are not testing the same claim"
+        );
+    }
+    for (name, program) in theirs {
+        assert!(
+            mine.iter().any(|(listed, _)| listed == name),
+            "{name} has a program in stdlib::UNIMPLEMENTED_BUILTIN_PROGRAMS and none in \
+             known_gaps(), so `{program}` is run by the REPL's gates and by no gate that \
+             checks the documentation"
+        );
+    }
+}
+
 /// `builtins()` registers a name; something has to answer it.
 ///
 /// The names are reconciled with the registry in **both** directions before any
@@ -724,7 +826,7 @@ fn known_gaps() -> &'static [(&'static str, &'static str)] {
 #[test]
 fn edge_no_registered_builtin_is_unreachable_from_a_program() {
     let (address, server) = loopback_http();
-    let rows = answerable_builtins(&address);
+    let rows = answerable_builtins(&address, SCRATCH);
 
     let registry = redblue::stdlib::builtins();
     let registered: Vec<&str> = registry
@@ -822,6 +924,96 @@ fn edge_a_known_gap_is_still_a_gap() {
             "`{name}` was dropped rather than implemented — nothing implements it \
              any more, and its entry in stdlib::builtins should go with it.\n\
              --- stderr\n{stderr}"
+        );
+    }
+}
+
+/// The address [`answerable_builtins`] writes into its two `network` rows.
+///
+/// Nothing runs them here: `network_get` and `network_post` are the registry's
+/// encodings of `network.get` and `network.post`, so neither is a flat builtin and
+/// no name the completer offers reaches them. The loopback server is therefore not
+/// started, and this is never dialled — it is spelled out rather than left to be
+/// inferred from the two signatures.
+const UNUSED_ADDRESS: &str = "http://127.0.0.1:1";
+
+/// Every builtin the REPL offers is a name a program calls, and the call answers.
+///
+/// This is the gate the completer's own parity test could not be. That one walks
+/// the offered list and asks whether each entry is *registered* — and
+/// `filter` and `reduce` are registered, so they passed while every call to either
+/// of them is `filter was called with arguments it cannot use`. A completion is the
+/// one place the language invites a name, so "it is spelled correctly" is not the
+/// promise; "calling it works" is.
+///
+/// So this runs the offered names rather than asking the registry about them. For
+/// each one it takes the row [`answerable_builtins`] carries — the only table in
+/// this file that holds a program which *uses* a builtin and the output it must
+/// print — and runs it, pinning both halves. Three failures are all it takes to
+/// break it, and each is a way the defect comes back:
+///
+/// - a name is offered with no row: the panic names it, and says to add a row or
+///   to add the name to [`known_gaps`] and [`redblue::stdlib::UNIMPLEMENTED_BUILTINS`];
+/// - a row stops answering: the second assertion fails with the program's output,
+///   for an offered name only — the coverage gate above asks the same of every
+///   registered name, gap or not;
+/// - a name that answers nothing is offered at all: taken out of
+///   `UNIMPLEMENTED_BUILTINS` while [`known_gaps`] still lists it, `filter` has no
+///   row, so it fails here — and it fails
+///   `edge_the_gap_list_is_the_set_of_builtins_the_language_calls_unimplemented`
+///   first, which names the drift rather than the missing row.
+///
+/// It walks `complete("")` rather than [`redblue::stdlib::flat_builtin_names`]
+/// because the list has to be the completer's own answer: a builtin the completer
+/// stops offering has to fail the *other* gate, and one it starts offering has to
+/// fail this one. Keywords and REPL commands come back from that call too and are
+/// not builtins, so the walk keeps the names the registry holds; whether every
+/// offered word is a word the language has is
+/// `edge_the_repl_offers_no_builtin_a_program_cannot_call`
+/// (`src/repl/completer.rs`) and `edge_no_name_the_repl_offers_is_one_a_program_
+/// cannot_call` (`tests/repl_module_completion_test.rs`).
+#[test]
+fn edge_every_builtin_the_repl_offers_is_run_and_answers() {
+    let rows = answerable_builtins(UNUSED_ADDRESS, "p32offered");
+    let offered = ReplCompleter::new().complete("");
+
+    let builtins = offered
+        .iter()
+        .filter(|name| redblue::stdlib::BUILTIN_NAMES.contains(&name.as_str()))
+        .collect::<Vec<&String>>();
+    assert!(
+        builtins.len() > 30,
+        "the completer offers most of the registry, so this is checking something rather \
+         than nothing: {builtins:?}"
+    );
+
+    for name in builtins {
+        let Some((_, source, expected)) = rows.iter().find(|(row, _, _)| row == name) else {
+            panic!(
+                "{name} is offered by the REPL and nothing here checks that a program can \
+                 call it. Add a row to answerable_builtins() with the output it must print, \
+                 or — if it is deliberately unimplemented — add it to known_gaps() and to \
+                 stdlib::UNIMPLEMENTED_BUILTINS, which is what stops it being offered."
+            );
+        };
+        let (ok, stdout, stderr) = run_in("p32offered", &format!("offered_{name}"), source);
+        assert!(
+            ok,
+            "{name} is offered by the REPL, so the program a caller would write has to \
+             answer:\n{source}\n--- stderr\n{stderr}\nEither implement it, or take it out \
+             of stdlib::UNIMPLEMENTED_BUILTINS so the completer stops offering it."
+        );
+        assert_eq!(
+            stdout, *expected,
+            "{name} is offered by the REPL and answered something else:\n{source}\n\
+             --- stdout\n{stdout}--- stderr\n{stderr}"
+        );
+    }
+
+    for (name, _) in known_gaps() {
+        assert!(
+            !offered.contains(&name.to_string()),
+            "{name} answers nothing, so the completer must not offer it: {offered:?}"
         );
     }
 }
