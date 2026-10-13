@@ -1197,6 +1197,148 @@ mod tests {
             .expect("an editor that never reads a line should be creatable")
     }
 
+    /// A source that asks what TAB would offer at a chosen prefix before a
+    /// chosen read, through the *same* live-names snapshot the read loop
+    /// refreshes.
+    ///
+    /// The editor's own tests hand it a name list by hand, so they can say what
+    /// the completer does with a name but not whether a name the session binds
+    /// ever reaches it. That is the wiring [`Repl::session_loop`] owns, and it is
+    /// only observable from inside the loop.
+    struct ProbingSource {
+        lines: std::collections::VecDeque<io::Result<Line>>,
+        editor: crate::repl::editor::EditSource,
+        /// `(read number, prefix)` — what to offer completions for, asked at the
+        /// top of that read, which is where the loop refreshes the names.
+        probes: std::collections::VecDeque<(usize, String)>,
+        /// What each probe was offered, in the order they were asked.
+        offered: Vec<Vec<String>>,
+        read: usize,
+    }
+
+    impl ProbingSource {
+        fn new(
+            names: &crate::repl::editor::SessionNames,
+            lines: Vec<io::Result<Line>>,
+            probes: Vec<(usize, &str)>,
+        ) -> Self {
+            Self {
+                lines: lines.into_iter().collect(),
+                editor: crate::repl::editor::EditSource::new(Rc::clone(names), None)
+                    .expect("an editor that never reads a line should be creatable"),
+                probes: probes
+                    .iter()
+                    .map(|(read, prefix)| (*read, (*prefix).to_string()))
+                    .collect(),
+                offered: Vec::new(),
+                read: 0,
+            }
+        }
+    }
+
+    impl LineSource for ProbingSource {
+        fn read_line(&mut self, _prompt: &str) -> io::Result<Line> {
+            if self
+                .probes
+                .front()
+                .is_some_and(|(read, _)| *read == self.read)
+            {
+                let (_, prefix) = self.probes.pop_front().expect("just checked");
+                self.offered
+                    .push(self.editor.complete(&prefix, prefix.len()));
+            }
+            self.read += 1;
+            self.lines.pop_front().unwrap_or(Ok(Line::Eof))
+        }
+    }
+
+    /// Runs the read loop over a source that reports what TAB offers at a read.
+    fn drive_probing(
+        repl: &mut Repl,
+        names: &crate::repl::editor::SessionNames,
+        source: &mut ProbingSource,
+    ) -> SessionEnd {
+        repl.session_loop(source, names)
+    }
+
+    #[test]
+    fn a_name_the_session_binds_reaches_the_line_editor() {
+        let names: crate::repl::editor::SessionNames = Rc::new(RefCell::new(Vec::new()));
+        let mut repl = Repl::new();
+        let mut source = ProbingSource::new(
+            &names,
+            vec![
+                Ok(Line::Text("set fresh_bound to 1".to_string())),
+                Ok(Line::Text("set another to 2".to_string())),
+                Ok(Line::Eof),
+            ],
+            vec![(0, "fresh"), (1, "fresh"), (2, "another")],
+        );
+
+        assert_eq!(
+            drive_probing(&mut repl, &names, &mut source),
+            SessionEnd::Eof
+        );
+
+        assert_eq!(
+            source.offered[0],
+            Vec::<String>::new(),
+            "a name the session has not bound yet is not offered"
+        );
+        assert_eq!(
+            source.offered[1],
+            vec!["fresh_bound".to_string()],
+            "once `set fresh_bound to 1` has run, TAB after `fresh` offers it — the \
+             editor is completing against what the session bound, not against the \
+             names it was built with"
+        );
+        assert_eq!(
+            source.offered[2],
+            vec!["another".to_string()],
+            "and the second name is offered alongside the first"
+        );
+    }
+
+    #[test]
+    fn edge_a_name_bound_inside_a_block_is_offered_once_the_block_has_run() {
+        // The block is three reads, and nothing is bound until the `end` is read.
+        // The snapshot has to be the session's state at the *next* prompt, not the
+        // line before it, or TAB offers names for a program that has not run yet.
+        let names: crate::repl::editor::SessionNames = Rc::new(RefCell::new(Vec::new()));
+        let mut repl = Repl::new();
+        let mut source = ProbingSource::new(
+            &names,
+            vec![
+                Ok(Line::Text("if 1 = 1 then".to_string())),
+                Ok(Line::Text("set inner_bound to 5".to_string())),
+                Ok(Line::Text("end".to_string())),
+                Ok(Line::Eof),
+            ],
+            vec![(1, "inner"), (2, "inner"), (3, "inner")],
+        );
+
+        assert_eq!(
+            drive_probing(&mut repl, &names, &mut source),
+            SessionEnd::Eof
+        );
+
+        assert_eq!(
+            source.offered[0],
+            Vec::<String>::new(),
+            "the line that opens a block binds nothing, so there is nothing to offer"
+        );
+        assert_eq!(
+            source.offered[1],
+            Vec::<String>::new(),
+            "nor does the `set` inside it, which has not run yet"
+        );
+        assert_eq!(
+            source.offered[2],
+            vec!["inner_bound".to_string()],
+            "and once `end` has run the block, the name is offered"
+        );
+    }
+
     #[test]
     fn a_session_restores_what_a_previous_one_typed_and_not_the_history_files_header() {
         let path = scratch_path("restored", "history");
