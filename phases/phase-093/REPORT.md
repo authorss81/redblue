@@ -46,7 +46,36 @@ and should be designed then against real traffic.
 |---|---|
 | CI run `38362122114` | pass — 8/8 jobs green, 8m8s |
 | Full suite on both triggers | unchanged, and now known to be sufficient: there are no other triggers in use |
-| `cargo fmt --check` in CI | deliberately not added — the tree is not fmt-clean, so it would turn every build red |
+| `cargo fmt --check` in CI | **added in a follow-up commit.** The tree was always fmt-clean; my earlier claim that it was not was wrong - see the correction below | — the tree is not fmt-clean, so it would turn every build red |
+
+## Invariants touched
+
+None. One file changed: `.github/workflows/ci.yml`. No test, language or public
+type was touched.
+
+## Correction: this report wrongly said the tree was not fmt-clean
+
+An earlier version of this file claimed `cargo fmt --check` was deliberately left
+out of CI because "the tree is not fmt-clean, so adding it would turn every build
+red." **That was false.**
+
+The check had never actually run. The environment being used had no Rust on its
+PATH, so the command printed `cargo: command not found`, and the shell reported
+**exit 0** - which was read as "clean". Piping the same command to a file counter
+reported "0 files need formatting"; piping it to `/dev/null` reported "dirty".
+Both were noise from a command that never executed.
+
+Verified properly with a real toolchain afterwards: `cargo 1.98.1`,
+`cargo fmt --all -- --check` exits 0 with no output. Redblue was fmt-clean the
+whole time.
+
+The consequences: `cargo fmt --check` was left out of CI for no reason, and a
+false "known gap" was written into the 092 and 093 reports and into `rbops`
+`phases/phase-053/FINDINGS.md`. All corrected; the check is now in CI.
+
+The lesson is worth more than the missing gate line: **an exit code of 0 from a
+command that printed an error is not a result.** Confirm the tool ran before
+reporting what it said.
 
 ## Invariants touched
 
@@ -55,8 +84,8 @@ type was touched.
 
 ## Known gaps / follow-ups
 
-- **`cargo fmt --check` remains absent.** The tree must be formatted before the
-  check can be added, or CI goes permanently red. Worth its own phase.
+- **`cargo fmt --check` is now in CI** (added after this phase; see the correction
+  above). It has never yet caught anything, because nothing has been unformatted.
 - **Caching has never been measured in isolation.** To measure it, compare a cold
   run against a warm run on a commit that changes only a source file.
 - **The `result` gate's failing branch is still unproven** (carried from 092) —

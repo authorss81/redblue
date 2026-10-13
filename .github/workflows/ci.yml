@@ -25,6 +25,12 @@ jobs:
           restore-keys: |
             cargo-target-${{ hashFiles('Cargo.lock') }}-
       - run: cargo build --verbose
+      # Formatting is cheap and it is gate #1 in AGENTS.md, so it belongs in the
+      # fast tier: a misformatted line should fail in seconds rather than after
+      # the slowest shard. This used to be omitted on the claim that the tree was
+      # not fmt-clean. That claim was wrong - the check had never run - and the
+      # tree passes today.
+      - run: cargo fmt --all -- --check
       - run: cargo clippy -- -D warnings
       # Unit tests only. The integration targets are sharded below because they
       # hold the 361-program corpus differential harness, which dominates.

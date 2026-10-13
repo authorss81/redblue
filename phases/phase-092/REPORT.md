@@ -97,10 +97,14 @@ Both failures were mine, and the first was invisible:
 
 ## Known gaps / follow-ups
 
-- **`cargo fmt --check` is deliberately NOT in CI.** The tree is not currently
-  fmt-clean, so adding it would turn every build red. That is a separate
-  decision (format the tree, or accept drift) and is recorded rather than
-  silently omitted.
+- **`cargo fmt --check` was deliberately left out of CI, on a false premise.**
+  This report originally said the tree was not fmt-clean and that adding the
+  check would turn every build red. **That was wrong.** The check had never run:
+  the environment had no Rust on its PATH, so it printed `cargo: command not
+  found` and the shell reported exit 0, which was misread as "clean". Verified
+  afterwards with a real toolchain: `cargo fmt --all -- --check` exits 0 with no
+  output. The tree was always fmt-clean. The check has since been added to CI, so
+  this gap no longer exists.
 - **`actions/cache` is keyed on the commit SHA as well as the lockfile.** A
   second push on the same lockfile restores the most recent matching cache via
   `restore-keys`, so the common case hits; an exact-lockfile hit on a
