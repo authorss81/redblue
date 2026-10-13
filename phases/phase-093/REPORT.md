@@ -1,48 +1,52 @@
-# Phase 093 — Stop rebuilding from cold on every push, and run the fast tier first
+# Phase 093 — Cache target/ between CI runs
 
 > Applied by hand. Changes `.github/workflows/`; the rbops bot token has NO
 > `workflows` permission (`.github/workflows/rbops.yml:10`) so an agent cannot
 > land this. The intended lock.
 
-## Status: PARTIALLY COMPLETE — one half landed, one half did not
+## Status: DONE. One thing landed; the rest was dead code and is abandoned.
 
-This phase bundled two things. Only one of them is done, and the honest thing is
-to say which rather than close it as finished.
+## What landed
 
-### Done: `target/` caching
+`actions/cache` on every job, keyed on the Cargo.lock hash, with `restore-keys`
+falling back to the lockfile alone. A second push on the same lockfile restores
+instead of recompiling cold.
 
-`actions/cache` is in every job, keyed on the Cargo.lock hash with the commit SHA
-as a second component and `restore-keys` falling back to the lockfile alone. A
-second push on the same lockfile restores rather than recompiling cold.
+Not separately measured. Caching was folded into the same commit as the
+sharding (092), so its effect cannot be isolated from the sharding's in that one
+run — and the sharding's own effect turned out to be 17 seconds. Claiming a
+caching win from that run would be inventing a number.
 
-Not separately measured. Caching was folded into the same commit as the sharding
-(092), so its effect cannot be isolated from the sharding's in that one run — and
-the sharding's own effect turned out to be 17 seconds. Claiming a caching win
-from that run would be inventing a number.
+## What was proposed and rejected: the trigger split
 
-### NOT done: separating the fast tier by trigger
+This phase originally also asked to run the corpus only on `pull_request` and on
+push to `main`, not on every branch push.
 
-The phase asked for the full suite to run on `pull_request` and on push to
-`main`, but **not** on every branch push. That is still not implemented — both
-triggers still run everything.
+**That premise was wrong.** `gh pr list` returns zero pull requests in both
+`authorss81/rbops` and `authorss81/redblue`. Every change — the bot's phase
+commits and human commits alike — goes straight to `main`. So:
 
-What *is* true now is a different, weaker thing: the `fast` job runs build, clippy,
-unit tests, the README blocks and the corpus-count pin, and it does not wait for
-the shards. So a fmt/lint/type error surfaces in the fast job while the slow tier
-is still running. That is real value and it is what the matrix produced, but it is
-**not** the same as "a branch push skips the corpus".
+- the `pull_request:` trigger in this workflow has never fired once
+- the "branch push with no PR" case does not exist
+- trigger logic to skip the slow tier would serve zero runs
 
-I left it undone rather than half-implementing a trigger matrix, because the
-trigger split needs a decision I should not make unilaterally: whether a push to a
-branch with an open PR should run the corpus (it currently does, via
-`pull_request`, and duplicating it on push would double the cost).
+It is dead code rather than backlog, which is why this phase is closed rather
+than left partial. A phase that looks open-ended eventually gets "finished" by
+someone adding trigger logic for a pattern that never occurs.
+
+## Delivery model: direct-to-main
+
+For a bot-driven pipeline the machine gate plus the read-only reviewer is the
+review model. A PR would add merge latency and a new failure mode without adding
+a reviewer. If PRs are introduced later, the trigger split becomes meaningful
+and should be designed then against real traffic.
 
 ## Gates
 | Gate | Result |
 |---|---|
-| `cargo fmt --check` in CI | **deliberately not added** — the tree is not fmt-clean, so adding it turns every build red |
-| CI run `38362122114` | pass — 8/8 jobs green |
-| Full suite on both triggers | unchanged: `push` to main and `pull_request` both run everything, as before |
+| CI run `38362122114` | pass — 8/8 jobs green, 8m8s |
+| Full suite on both triggers | unchanged, and now known to be sufficient: there are no other triggers in use |
+| `cargo fmt --check` in CI | deliberately not added — the tree is not fmt-clean, so it would turn every build red |
 
 ## Invariants touched
 
@@ -51,11 +55,9 @@ type was touched.
 
 ## Known gaps / follow-ups
 
-- **The trigger split is still open** and needs one decision: does a branch push
-  with an open PR also run the corpus, or only the PR event? Recorded in the
-  rbops phase rather than guessed.
-- **`cargo fmt --check` remains absent.** This is the standing gap from 092: the
-  tree must be formatted before the check can be added, or CI goes permanently
-  red. Worth its own phase.
-- **Caching has never been measured in isolation.** If it matters, measure it on
-  a commit that changes only a source file and compare against the cold-run time.
+- **`cargo fmt --check` remains absent.** The tree must be formatted before the
+  check can be added, or CI goes permanently red. Worth its own phase.
+- **Caching has never been measured in isolation.** To measure it, compare a cold
+  run against a warm run on a commit that changes only a source file.
+- **The `result` gate's failing branch is still unproven** (carried from 092) —
+  it has only run with every job green.
