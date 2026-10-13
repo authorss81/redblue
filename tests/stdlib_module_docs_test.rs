@@ -380,7 +380,13 @@ const NETWORK_BODY: &str = r#"{"ok":true}"#;
 fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
     let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/p32docs");
     std::fs::create_dir_all(&scratch).expect("scratch directory");
-    let path = |name: &str| scratch.join(name).display().to_string();
+    // Forward slashes, always. The path is interpolated into Redblue source,
+    // where a backslash starts an escape — so on Windows a `\t` in the path
+    // became a tab and `\r` a carriage return, and `files.write` was handed a
+    // filename with the separators eaten out of it. The Windows API takes `/`
+    // everywhere, so this is the same path on every platform and the test does
+    // not need a branch for it.
+    let path = |name: &str| scratch.join(name).to_string_lossy().replace('\\', "/");
 
     let rows: Vec<(&str, String, String)> = vec![
         ("abs", "say abs(-3)".into(), "3\n".into()),
