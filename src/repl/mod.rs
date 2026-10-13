@@ -1,3 +1,4 @@
+pub mod color;
 pub mod commands;
 pub mod completer;
 pub mod editor;
@@ -18,6 +19,7 @@ use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepM
 use crate::interpreter::Vm;
 use crate::lexer::Lexer;
 use crate::parser::{open_block_depth, Parser, Program};
+use crate::repl::color::{ColorMode, Paint, Style};
 use crate::value::Value;
 
 /// How many lines a session keeps before the oldest is dropped. A terminal
@@ -226,10 +228,25 @@ pub struct Repl {
     /// the last program stopped in. Shared with the hook the VM calls, so a
     /// `:frame` typed after the program has run reads the frame that stop left.
     debug: SharedDebugSession,
+    /// Whether this session paints, and in what colour.
+    ///
+    /// Resolved once when the session is built, out of the environment and the
+    /// terminal — and again by `:colors`. It is a value rather than a question
+    /// asked per line, so painting a result costs a field read and a format.
+    style: Style,
 }
 
 impl Repl {
     pub fn new() -> Self {
+        Self::with_color_mode(ColorMode::Auto)
+    }
+
+    /// A session that starts in `mode` rather than in `auto`.
+    ///
+    /// A mode can be asked for before a session exists, which is what a caller
+    /// that has already read `NO_COLOR` itself wants, and what keeps the two
+    /// ways in — the environment and `:colors` — from being two code paths.
+    pub fn with_color_mode(mode: ColorMode) -> Self {
         Self {
             vm: Vm::new(),
             variables: HashMap::new(),
@@ -239,7 +256,58 @@ impl Repl {
             multiline_buffer: Vec::new(),
             in_multiline: false,
             debug: DebugSession::shared(),
+            style: Style::detect(mode),
         }
+    }
+
+    /// The colour mode in force, and the resolved style with it.
+    pub fn color_mode(&self) -> ColorMode {
+        self.style.mode()
+    }
+
+    /// The resolved style: whether this session paints, and how.
+    pub fn color_style(&self) -> Style {
+        self.style
+    }
+
+    /// Whether this session is painting.
+    pub fn paints_color(&self) -> bool {
+        self.style.enabled()
+    }
+
+    /// Switches the session to `mode`, re-deciding against the terminal.
+    ///
+    /// The terminal is asked again rather than cached from startup, so
+    /// `:colors auto` after `:colors on` lands where the environment says it
+    /// lands now, which is not necessarily where it landed then.
+    pub fn set_color_mode(&mut self, mode: ColorMode) {
+        self.style = Style::detect(mode);
+    }
+
+    /// `:colors on`, `:colors off`, `:colors auto` — or the refusal.
+    ///
+    /// A word that names no mode is named back and changes nothing. Defaulting
+    /// it would leave the session painted in a colour the user did not choose,
+    /// which is the one outcome a refusal exists to prevent.
+    fn set_color_argument(&mut self, argument: &str) {
+        match ColorMode::parse(argument) {
+            Some(mode) => {
+                self.set_color_mode(mode);
+                println!("Colors {}.", mode);
+            }
+            None => println!(
+                "{}",
+                self.style.paint(
+                    Paint::Error,
+                    &format!("':colors' takes on, off or auto, not '{argument}'.")
+                )
+            ),
+        }
+    }
+
+    /// One line of the `:help` output about colour: the mode, and why.
+    pub fn color_report(&self) -> String {
+        self.style.report()
     }
 
     /// Completes `word` against the session: the language's own keywords and
@@ -327,13 +395,14 @@ impl Repl {
             }
 
             let prompt = if self.in_multiline { "..  " } else { ">>> " };
+            let prompt = self.style.paint(Paint::Prompt, prompt);
 
             // The editor completes against the names the session has bound, and
             // it cannot be lent them while they are being borrowed to read a
             // line, so it is given a snapshot refreshed here.
             *names.borrow_mut() = self.session_names();
 
-            let line = match source.read_line(prompt) {
+            let line = match source.read_line(&prompt) {
                 Ok(Line::Text(text)) => text,
                 // Ctrl-C throws away the line being written, not the session.
                 Ok(Line::Interrupted) => continue,
@@ -466,13 +535,27 @@ impl Repl {
             }
             ReplCommand::NotACommand => false,
             ReplCommand::MissingArgument { command, usage } => {
-                println!("Usage: :{} {}", command, usage);
+                println!(
+                    "{}",
+                    self.style
+                        .paint(Paint::Error, &format!("Usage: :{} {}", command, usage))
+                );
+                true
+            }
+            ReplCommand::Colors(argument) => {
+                self.set_color_argument(&argument);
                 true
             }
             ReplCommand::Unknown(word) => {
                 println!(
-                    "Unknown command '{}'. Type :help for available commands.",
-                    word
+                    "{}",
+                    self.style.paint(
+                        Paint::Error,
+                        &format!(
+                            "Unknown command '{}'. Type :help for available commands.",
+                            word
+                        )
+                    )
                 );
                 true
             }
@@ -597,12 +680,21 @@ impl Repl {
         match result {
             Ok(value) => {
                 if !matches!(value, Value::Nothing) {
-                    println!("= {}", value);
+                    println!(
+                        "{}",
+                        self.style.paint(Paint::Result, &format!("= {}", value))
+                    );
                     self.variables.insert("_".to_string(), value);
                 }
             }
             Err(e) => {
-                println!("Error: {}", e);
+                // The colour goes round the message, never into it: every
+                // assertion about what the REPL says on an error holds whether
+                // or not this session is painting.
+                println!(
+                    "{}",
+                    self.style.paint(Paint::Error, &format!("Error: {}", e))
+                );
             }
         }
     }
@@ -684,7 +776,10 @@ impl Repl {
     }
 
     fn print_help(&self) {
-        println!("Redblue REPL Commands:");
+        println!(
+            "{}",
+            self.style.paint(Paint::Heading, "Redblue REPL Commands:")
+        );
         println!();
         // Every line of this list comes from the one table the parser accepts
         // commands in, aliases included. It was written out separately, so `:q`,
@@ -704,7 +799,7 @@ impl Repl {
              — {alt}quit is :quit."
         );
         println!();
-        println!("Quick Reference:");
+        println!("{}", self.style.paint(Paint::Heading, "Quick Reference:"));
         for (caption, source) in QUICK_REFERENCE {
             println!("  // {}", caption);
             for line in source.lines() {
@@ -712,6 +807,10 @@ impl Repl {
             }
         }
         println!();
+        // Where the session is on colour, and why. The mode is the first thing a
+        // user asks for when a session is not painting and the second when it
+        // is, and without this line neither has anywhere to look.
+        println!("{}", self.color_report());
     }
 
     /// Every name the session has bound, with the value it holds, in name order.
@@ -761,9 +860,9 @@ impl Repl {
             return;
         };
 
-        println!("Variables:");
+        println!("{}", self.style.paint(Paint::Heading, "Variables:"));
         for line in lines {
-            println!("{}", line);
+            println!("{}", self.style.paint(Paint::Value, &line));
         }
     }
 
@@ -789,9 +888,9 @@ impl Repl {
             return;
         };
 
-        println!("Functions:");
+        println!("{}", self.style.paint(Paint::Heading, "Functions:"));
         for line in lines {
-            println!("{}", line);
+            println!("{}", self.style.paint(Paint::Name, &line));
         }
     }
 
@@ -1110,12 +1209,14 @@ impl Default for Repl {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::io;
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{farewell, Repl, SessionEnd};
+    use crate::repl::color::ColorMode;
     use crate::repl::editor::{Line, LineSource};
     use crate::value::Value;
 
@@ -2222,5 +2323,122 @@ mod tests {
                 caption
             );
         }
+    }
+
+    /// A source that keeps the prompt it was handed, so the prompt is something a
+    /// test can read rather than something only a terminal ever sees.
+    struct PromptRecordingSource {
+        prompts: Vec<String>,
+        remaining: VecDeque<String>,
+    }
+
+    impl PromptRecordingSource {
+        fn new(lines: &[&str]) -> Self {
+            PromptRecordingSource {
+                prompts: Vec::new(),
+                remaining: lines.iter().map(|line| (*line).to_string()).collect(),
+            }
+        }
+    }
+
+    impl LineSource for PromptRecordingSource {
+        fn read_line(&mut self, prompt: &str) -> io::Result<Line> {
+            self.prompts.push(prompt.to_string());
+            Ok(match self.remaining.pop_front() {
+                Some(line) => Line::Text(line),
+                None => Line::Eof,
+            })
+        }
+    }
+
+    /// The prompt a session waits at is the one its style paints, and a session
+    /// that does not paint shows the four plain characters it always showed.
+    ///
+    /// Written against [`Repl::color_style`] rather than against a literal escape
+    /// sequence so the assertion holds on a platform whose console cannot be told
+    /// to show colour: there the style paints nothing, and the prompt is the plain
+    /// one, which is the whole point of the gate.
+    #[test]
+    fn edge_the_prompt_is_painted_only_when_the_session_paints() {
+        let mut painted = Repl::with_color_mode(ColorMode::On);
+        let mut painted_source = PromptRecordingSource::new(&["set painted_prompt to 1"]);
+        let names = Rc::new(RefCell::new(Vec::new()));
+        painted.session_loop(&mut painted_source, &names);
+
+        let expected = painted.color_style().paint(super::Paint::Prompt, ">>> ");
+        assert_eq!(
+            painted_source.prompts.first().map(String::as_str),
+            Some(expected.as_str()),
+            "the prompt a session shows is the one its style paints"
+        );
+
+        let mut plain = Repl::with_color_mode(ColorMode::Off);
+        let mut plain_source = PromptRecordingSource::new(&["set plain_prompt to 1"]);
+        plain.session_loop(&mut plain_source, &names);
+
+        assert_eq!(
+            plain_source.prompts.first().map(String::as_str),
+            Some(">>> "),
+            "a session with colour off waits at the prompt it always waited at"
+        );
+    }
+
+    /// `:colors` moves the session between the three modes, and the mode survives
+    /// into `:help` — including the one it refuses.
+    #[test]
+    fn a_session_carries_the_color_mode_it_was_given_into_its_help() {
+        let mut repl = Repl::with_color_mode(ColorMode::Auto);
+
+        assert_eq!(repl.color_mode(), ColorMode::Auto, "auto is the default");
+        assert!(
+            repl.color_report().starts_with("Colors: auto"),
+            "and :help says so: {}",
+            repl.color_report()
+        );
+
+        assert!(repl.handle_command(":colors off"));
+        assert_eq!(repl.color_mode(), ColorMode::Off);
+        assert!(!repl.paints_color());
+        assert_eq!(repl.color_report(), "Colors: off.");
+
+        assert!(repl.handle_command(":colors on"));
+        assert_eq!(repl.color_mode(), ColorMode::On);
+        assert_eq!(repl.color_report(), "Colors: on.");
+
+        assert!(repl.handle_command(":colors auto"));
+        assert_eq!(repl.color_mode(), ColorMode::Auto);
+    }
+
+    /// A word that names no mode is refused and changes nothing, and `:colors`
+    /// with no word at all is the usage line rather than a mode.
+    #[test]
+    fn edge_colors_refuses_a_word_that_names_no_mode() {
+        let mut repl = Repl::with_color_mode(ColorMode::Off);
+
+        assert!(
+            repl.handle_command(":colors chartreuse"),
+            "the command is still a command, and is handled rather than run as source"
+        );
+        assert_eq!(
+            repl.color_mode(),
+            ColorMode::Off,
+            "a mode the user did not type must not be applied"
+        );
+        assert!(!repl.paints_color());
+
+        for argument in ["on extra", "1", "yellow"] {
+            repl.handle_command(&format!(":colors {}", argument));
+            assert_eq!(
+                repl.color_mode(),
+                ColorMode::Off,
+                "{argument:?} names no mode either, and must leave the session alone"
+            );
+        }
+
+        assert!(
+            repl.handle_command(":colors"),
+            ":colors with no argument is a usage line, not a crash and not a mode"
+        );
+        assert_eq!(repl.color_mode(), ColorMode::Off);
     }
 }
