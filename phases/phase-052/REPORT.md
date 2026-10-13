@@ -31,6 +31,7 @@ line. `Repl::complete()` was a live, tested engine nothing called, and
 | `src/repl/editor.rs` | +635 (new) | `LineSource`, `Line`, `PlainSource`, `EditSource`, the `ReplCompleter` adapter, `~/.redblue/history` |
 | `src/repl/mod.rs` | +239 −16 | the `read_line` loop becomes `Repl::session_loop`, which reads a `Line` from any source; `run` picks the source from the terminal and prints `farewell(SessionEnd)` |
 | `src/repl/completer.rs` | +1 | `#[derive(Clone)]` so the editor and the test hook can hold the same completer |
+| `src/repl/mod.rs` | +142 | second run: pins the loop→editor wiring with a source that asks what TAB offers at a chosen read |
 
 The seam is one trait, `LineSource`. `PlainSource` is the reader a session with
 no terminal gets and is the old code verbatim; `EditSource` is a `rustyline`
@@ -72,6 +73,66 @@ The session-level tests drive the loop through a `ScriptedSource` that returns
 `Line::Text` / `Line::Interrupted` / `Line::Eof` / `Err` on demand, so Ctrl-C,
 Ctrl-D and a failed read are pinned without a terminal.
 
+## Second run — the one thing that was not pinned
+
+The finding was re-verified before anything was changed, and the first
+implementation commit already answered it. Re-running it against a real pty
+(`target/debug/rb` through `pty.fork()`, HOME redirected into the checkout):
+
+```
+  set foo to 1     -> 'set foo to 1'
+  say fo + TAB     -> '>>> say foo'   # completed, then ran: printed 1
+  say to_up + TAB  -> \x07            # bell: to_uppercase is not bound, and only live names are offered
+  set half to
+  CTRL-C           -> new prompt, session alive
+  after ctrl-c     -> 'alive'         # the next line ran
+  CTRL-D           -> 'Goodbye!'
+  ~/.redblue/history = ['#V2', 'set foo to 1', 'say foo', 'say to_up', 'say "alive"']
+```
+
+The abandoned `set half to ` is not in the file. So the behaviour is real and
+the Definition of Done is met by the existing code.
+
+What was missing was a **test**, not a fix. The line that carries a name the
+session bound to the editor that offers it —
+`src/repl/mod.rs:334`, `*names.borrow_mut() = self.session_names()` — was
+exercised only by the hand-run pty above. Every Rust test handed the editor a
+name list by hand, so deleting that line left the whole suite green while TAB
+silently stopped offering anything the session had just bound. That is the
+"untested branch" the reviewer hunts, and it is the first Definition-of-Done
+checkbox ("a `set foo` line makes TAB after `fo` offer `foo`").
+
+So this run added the two tests that pin it, and changed no production code.
+
+| File | Lines | What |
+|---|---|---|
+| `src/repl/mod.rs` | +142 | `ProbingSource`, a `LineSource` that holds a real `EditSource` sharing the loop's `SessionNames` and asks it what TAB offers at a numbered read; `drive_probing`; the two tests below |
+
+| Test | Edge class covered |
+|---|---|
+| `a_name_the_session_binds_reaches_the_line_editor` | **the wiring** — `fo` offers nothing before `set fresh_bound to 1`, offers exactly `fresh_bound` after, and `another` is offered alongside it on the next read |
+| `edge_a_name_bound_inside_a_block_is_offered_once_the_block_has_run` | boundary — the name is not offered at the two reads of an `if … then` block and is offered at the read after `end` |
+
+Both were watched red. Replacing `self.session_names()` at `src/repl/mod.rs:334`
+with `Vec::new()` fails exactly these two and nothing else:
+
+```
+test repl::tests::a_name_the_session_binds_reaches_the_line_editor ... FAILED
+test repl::tests::edge_a_name_bound_inside_a_block_is_offered_once_the_block_has_run ... FAILED
+test result: FAILED. 107 passed; 2 failed; 0 ignored
+```
+
+with `left: []  right: ["fresh_bound"]`. Restored, both pass.
+
+A note on what is deliberately *not* asserted: an `import`ed module's `constant`
+is **not** offered. `import MathUtils` makes `say TAU` work, but the VM holds it
+as `MathUtils_TAU`, which `Vm::user_names` filters as a qualified member
+(`src/interpreter.rs:890`) — by design, since a program writes `TAU` through its
+import table rather than as a global. A test asserting it *is* offered was
+written, watched fail, and dropped rather than left asserting the wrong thing.
+Module *functions* are the same case (`MathUtils.circle_area` is offered neither).
+`src/repl/mod.rs`'s doc comment on `session_names` describes this correctly.
+
 ### Also verified by hand, on a real pty
 
 `target/debug/rb` driven through `pty.fork()`:
@@ -104,18 +165,21 @@ session had something to write (`EditSource::save` now creates it, pinned by
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass, zero warnings |
-| `cargo test --all-targets` | 1486 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 1488 passed, 0 failed, 0 ignored |
 | `cargo test --doc` | 2 passed, 0 failed |
-| `./rbops/verify.sh phase-052` | **not run** — `rbops/` is not present in this checkout (the pipeline that invoked this run keeps it elsewhere, and the phase instructions say not to go looking for it). The four commands above are the three gates I could run, plus the documented doc-test run. This phase must be re-gated by `verify.sh` before it is `.done`. |
+| `./rbops/verify.sh phase-052` | **not runnable** — `rbops/` is not present in this checkout (the pipeline that invoked this run keeps it elsewhere, and the phase instructions say not to go looking for it). The four rows above are every gate that could be run here. **This phase must still be re-gated by `verify.sh` before it is `.done`.** |
 
 ## Test requirements — rows ticked
 
 - **empty** — covered: `edge_tab_on_an_empty_prefix_offers_the_whole_vocabulary`,
   `the_read_loop_trims_and_skips_a_blank_line_exactly_as_the_pipe_did`.
 - **singleton** — covered: `tab_completes_a_builtin_and_only_the_names_the_session_has_bound`
-  (exactly one candidate), `history_survives_a_restart_of_the_session` (one entry).
+  (exactly one candidate), `history_survives_a_restart_of_the_session` (one entry),
+  `a_name_the_session_binds_reaches_the_line_editor` (exactly one name offered).
 - **boundary** — covered: `completion_looks_at_the_word_under_the_cursor_and_not_the_whole_line`
-  (start offset 4 at the last word), `the_default_history_path_is_under_the_home_directory`.
+  (start offset 4 at the last word), `the_default_history_path_is_under_the_home_directory`,
+  `edge_a_name_bound_inside_a_block_is_offered_once_the_block_has_run` (the read
+  immediately before a name is bound, and the one immediately after).
 - **out_of_bounds** — covered: `edge_completion_inside_a_multi_byte_character_offers_nothing`
   (cursor past the end of the word / inside a character), `edge_tab_with_no_match_offers_nothing_and_does_not_panic`.
   There is no indexing to go out of bounds on: the completer slices with `str::get`,
@@ -137,7 +201,9 @@ session had something to write (`EditSource::save` now creates it, pinned by
   cell (`SessionNames`) is overwritten wholesale each line rather than keyed, so it
   cannot hold a duplicate or miss one. `tab_completes_a_builtin_and_only_the_names_the_session_has_bound`
   pins the overlap case that does exist: a live name that is also a builtin is
-  offered once.
+  offered once. `a_name_the_session_binds_reaches_the_line_editor` pins the
+  two-names-in-one-snapshot case: `another` is offered while `fresh_bound` is still
+  bound, so the snapshot is not being truncated to one name.
 - **malformed_input** — covered: `edge_an_unclosed_block_is_still_reported_at_end_of_input`
   (an unclosed block at EOF), `edge_a_read_that_fails_ends_the_session_and_is_reported_as_a_failure`
   (a reader that is not producing input), and the history file whose
@@ -157,8 +223,8 @@ text came from.
 
 ## Known gaps / follow-ups
 
-- **`rbops/verify.sh phase-052` was not run** — see the Gates table. It has to pass
-  before this phase is `.done`.
+- **`rbops/verify.sh phase-052` could not be run** — see the Gates table. It has to
+  pass before this phase is `.done`.
 - The `:save` / `:restore` commands (`src/repl/mod.rs`) still write and read the
   in-session `ReplHistory`; they are unchanged. A terminal session now also has the
   editor's file-backed history, and `Repl::restore_history` seeds `Repl::history`
