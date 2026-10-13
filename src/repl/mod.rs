@@ -1,12 +1,16 @@
 pub mod commands;
 pub mod completer;
+pub mod editor;
 pub mod history;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::rc::Rc;
 
 pub use commands::ReplCommand;
 pub use completer::ReplCompleter;
+pub use editor::{Line, LineSource, SessionNames};
 pub use history::ReplHistory;
 
 use crate::analyzer;
@@ -186,6 +190,30 @@ const EXAMPLES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Why a session's read loop stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// `:quit`. The user asked for it.
+    Quit,
+    /// Ctrl-D on an empty line, or input that ran out.
+    Eof,
+    /// The line source could not read. Not a quit: the session did not stop
+    /// because it was told to.
+    InputError,
+}
+
+/// What a session says as it ends.
+///
+/// Every ending says the same thing, and has since the REPL existed — the
+/// differences are why a session ended, which the user just saw happen. Kept as
+/// a function of the ending so that is a thing a test can pin rather than a
+/// `println!` nothing can observe.
+fn farewell(end: SessionEnd) -> &'static str {
+    match end {
+        SessionEnd::Quit | SessionEnd::Eof | SessionEnd::InputError => "Goodbye!",
+    }
+}
+
 pub struct Repl {
     vm: Vm,
     variables: HashMap<String, Value>,
@@ -258,29 +286,65 @@ impl Repl {
         println!("Welcome to Redblue v0.1.0 - Interactive REPL");
         println!("Type 'help' for commands, 'quit' to exit\n");
 
+        let names: SessionNames = Rc::new(RefCell::new(Vec::new()));
+        let mut source = editor::line_source(Rc::clone(&names));
+        self.restore_history(&*source);
+        let end = self.session_loop(&mut *source, &names);
+        if let Err(error) = source.flush_history() {
+            eprintln!("Warning: could not save history: {}", error);
+        }
+
+        println!("{}", farewell(end));
+    }
+
+    /// Reads back what a previous session left behind, so `:history` answers
+    /// about the lines this one can actually walk back to.
+    ///
+    /// The lines come from the line source rather than from re-reading its file:
+    /// the editor's history file is *its* format, and reading it as one line per
+    /// entry would put its version header in front of the user as if they had
+    /// typed it.
+    fn restore_history(&mut self, source: &dyn LineSource) {
+        for line in source.history() {
+            self.history.push(line);
+        }
+    }
+
+    /// The read-evaluate-print loop, over whatever is reading the lines.
+    ///
+    /// Nothing here knows about terminals: the interrupt that abandons a line,
+    /// the end of input that ends the session and the failed read that ends it
+    /// early all arrive as a [`Line`], which is what lets a test drive all three
+    /// without one.
+    pub fn session_loop<S: LineSource + ?Sized>(
+        &mut self,
+        source: &mut S,
+        names: &SessionNames,
+    ) -> SessionEnd {
         loop {
             if !self.running {
-                break;
+                return SessionEnd::Quit;
             }
 
             let prompt = if self.in_multiline { "..  " } else { ">>> " };
 
-            print!("{}", prompt);
-            if io::stdout().flush().is_err() {
-                break;
-            }
+            // The editor completes against the names the session has bound, and
+            // it cannot be lent them while they are being borrowed to read a
+            // line, so it is given a snapshot refreshed here.
+            *names.borrow_mut() = self.session_names();
 
-            let mut input = String::new();
-            match io::stdin().read_line(&mut input) {
-                Ok(0) => {
+            let line = match source.read_line(prompt) {
+                Ok(Line::Text(text)) => text,
+                // Ctrl-C throws away the line being written, not the session.
+                Ok(Line::Interrupted) => continue,
+                Ok(Line::Eof) => {
                     self.report_unclosed_block();
-                    break;
+                    return SessionEnd::Eof;
                 }
-                Ok(_) => {}
-                Err(_) => break,
-            }
+                Err(_) => return SessionEnd::InputError,
+            };
 
-            let input = input.trim();
+            let input = line.trim();
             if input.is_empty() {
                 continue;
             }
@@ -293,8 +357,6 @@ impl Repl {
 
             self.execute_line(input);
         }
-
-        println!("Goodbye!");
     }
 
     /// Runs one command line, returning whether `input` was a command rather
@@ -1047,10 +1109,14 @@ impl Default for Repl {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::io;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::Repl;
+    use super::{farewell, Repl, SessionEnd};
+    use crate::repl::editor::{Line, LineSource};
     use crate::value::Value;
 
     /// Where the `.rb` file under test is written, inside the project checkout
@@ -1095,6 +1161,186 @@ mod tests {
             repl.history.push(line.to_string());
             repl.execute_line(line);
         }
+    }
+
+    /// A line source that answers with what the test tells it to, so the read
+    /// loop can be driven through the parts a terminal owns — an interrupt, end
+    /// of input, a failed read — without one.
+    struct ScriptedSource {
+        lines: std::collections::VecDeque<io::Result<Line>>,
+    }
+
+    impl ScriptedSource {
+        fn new(lines: Vec<io::Result<Line>>) -> Self {
+            Self {
+                lines: lines.into_iter().collect(),
+            }
+        }
+    }
+
+    impl LineSource for ScriptedSource {
+        fn read_line(&mut self, _prompt: &str) -> io::Result<Line> {
+            self.lines.pop_front().unwrap_or(Ok(Line::Eof))
+        }
+    }
+
+    /// Runs the read loop over `source`, the way [`Repl::run`] runs it over a
+    /// terminal.
+    fn drive(repl: &mut Repl, source: &mut ScriptedSource) -> SessionEnd {
+        let names = Rc::new(RefCell::new(repl.session_names()));
+        repl.session_loop(source, &names)
+    }
+
+    /// An editor with no names and no history file of its own, over `path`.
+    fn editor_at(path: Option<PathBuf>) -> crate::repl::editor::EditSource {
+        crate::repl::editor::EditSource::new(Rc::new(RefCell::new(Vec::new())), path)
+            .expect("an editor that never reads a line should be creatable")
+    }
+
+    #[test]
+    fn a_session_restores_what_a_previous_one_typed_and_not_the_history_files_header() {
+        let path = scratch_path("restored", "history");
+        std::fs::remove_file(&path).expect("the empty scratch file should be removable");
+
+        let mut previous = editor_at(Some(path.clone()));
+        previous.record("set restored_probe to 1");
+        previous
+            .save(&path)
+            .expect("the history file should be writable");
+
+        let restored = editor_at(Some(path));
+        let mut repl = Repl::new();
+        repl.restore_history(&restored);
+
+        assert_eq!(
+            repl.history.search("set restored_probe to 1"),
+            Some("set restored_probe to 1".to_string()),
+            "the line the previous session typed is in this session's history"
+        );
+        assert_eq!(
+            repl.history.search("#"),
+            None,
+            "and the history file's own version header is not a line anyone typed"
+        );
+    }
+
+    #[test]
+    fn interrupt_abandons_the_line_and_keeps_the_session_alive() {
+        let mut repl = Repl::new();
+        let mut source = ScriptedSource::new(vec![
+            Ok(Line::Text("set half_written to ".to_string())),
+            Ok(Line::Interrupted),
+            Ok(Line::Text("set after_interrupt to 7".to_string())),
+            Ok(Line::Eof),
+        ]);
+
+        let end = drive(&mut repl, &mut source);
+
+        assert_eq!(
+            end,
+            SessionEnd::Eof,
+            "Ctrl-C does not end the session; the run after it still reached end of input"
+        );
+        assert!(
+            repl.complete("after_interrupt")
+                .contains(&"after_interrupt".to_string()),
+            "the line typed after the interrupt ran"
+        );
+        assert!(
+            !repl
+                .complete("half_written")
+                .contains(&"half_written".to_string()),
+            "the line the interrupt abandoned did not run"
+        );
+        assert_eq!(repl.history.search("half_written"), None);
+    }
+
+    #[test]
+    fn edge_control_d_ends_the_session_with_the_farewell_it_always_printed() {
+        let mut repl = Repl::new();
+        let mut source =
+            ScriptedSource::new(vec![Ok(Line::Text("2 + 3".to_string())), Ok(Line::Eof)]);
+
+        assert_eq!(
+            drive(&mut repl, &mut source),
+            SessionEnd::Eof,
+            "end of input ends the session cleanly"
+        );
+        assert_eq!(
+            farewell(SessionEnd::Eof),
+            "Goodbye!",
+            "and it is the farewell the session has always printed"
+        );
+        assert_eq!(farewell(SessionEnd::Quit), "Goodbye!");
+        assert_eq!(
+            farewell(SessionEnd::InputError),
+            "Goodbye!",
+            "even a terminal that goes away is a session that ends, not a panic"
+        );
+    }
+
+    #[test]
+    fn edge_a_read_that_fails_ends_the_session_and_is_reported_as_a_failure() {
+        let mut repl = Repl::new();
+        let mut source = ScriptedSource::new(vec![Err(io::Error::other("no terminal"))]);
+
+        let end = drive(&mut repl, &mut source);
+
+        assert_eq!(
+            end,
+            SessionEnd::InputError,
+            "a failed read ends the session rather than being read as an empty line"
+        );
+        assert!(
+            repl.running,
+            "but it is not a quit: the session was not asked to stop"
+        );
+        assert_eq!(repl.history.len(), 0, "and nothing was recorded as typed");
+    }
+
+    #[test]
+    fn edge_an_unclosed_block_is_still_reported_at_end_of_input() {
+        let mut repl = Repl::new();
+        let mut source = ScriptedSource::new(vec![
+            Ok(Line::Text("if 1 = 1 then".to_string())),
+            Ok(Line::Text("say \"inside\"".to_string())),
+            Ok(Line::Eof),
+        ]);
+
+        assert_eq!(
+            drive(&mut repl, &mut source),
+            SessionEnd::Eof,
+            "end of input still ends the session"
+        );
+        assert!(
+            !repl.in_multiline,
+            "and the block it was holding open is given up rather than left dangling"
+        );
+        assert!(
+            repl.multiline_buffer.is_empty(),
+            "the abandoned block is not held onto after the session ends"
+        );
+    }
+
+    #[test]
+    fn the_read_loop_trims_and_skips_a_blank_line_exactly_as_the_pipe_did() {
+        let mut repl = Repl::new();
+        let mut source = ScriptedSource::new(vec![
+            Ok(Line::Text("   ".to_string())),
+            Ok(Line::Text("  set padded to 5  ".to_string())),
+            Ok(Line::Eof),
+        ]);
+
+        assert_eq!(drive(&mut repl, &mut source), SessionEnd::Eof);
+        assert!(
+            repl.complete("padded").contains(&"padded".to_string()),
+            "the line runs with its surrounding whitespace trimmed"
+        );
+        assert_eq!(
+            repl.history.get(0).map(String::as_str),
+            Some("set padded to 5"),
+            "and the history holds what was run, not what was typed around it"
+        );
     }
 
     #[test]

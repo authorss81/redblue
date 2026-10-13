@@ -15,6 +15,7 @@ fn module_names() -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone)]
 pub struct ReplCompleter {
     keywords: Vec<String>,
     builtins: Vec<String>,
