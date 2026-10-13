@@ -167,11 +167,13 @@ jobs:
       - name: Fail if any shard or the corpus job failed
         shell: bash
         run: |
+          # Each `needs` job is named literally. GitHub expressions cannot do
+          # `needs.$var.result` - a dynamic index is not valid syntax and the
+          # whole workflow fails to parse with no useful message, which is
+          # exactly how this job's first version took the build down.
           rc=0
-          for r in shard corpus; do
-            if [ "${{ needs.$r.result }}" != "success" ]; then
-              echo "::error::$r finished as ${{ needs.$r.result }}"
-              rc=1
-            fi
-          done
+          [ "${{ needs.shard.result }}" = "success" ] || {
+            echo "::error::shard matrix finished as ${{ needs.shard.result }}"; rc=1; }
+          [ "${{ needs.corpus.result }}" = "success" ] || {
+            echo "::error::corpus finished as ${{ needs.corpus.result }}"; rc=1; }
           exit $rc
