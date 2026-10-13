@@ -41,6 +41,14 @@ pub enum ReplCommand {
     Ast(String),
     Tokens(String),
     Example,
+    /// Sets the session's colour mode to the one named: `on`, `off` or `auto`.
+    ///
+    /// A word that is not one of those three reaches this command intact and is
+    /// refused by name rather than guessed at, which is the point of taking the
+    /// whole remainder: `Auto` is a [`ColorMode`](super::color::ColorMode) and
+    /// guessing it from a typo would paint a session the user did not ask to be
+    /// painted.
+    Colors(String),
     /// A command that was recognised but not given what it needs.
     ///
     /// Not [`ReplCommand::Unknown`]: the command *is* known, its argument is
@@ -227,6 +235,12 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         description: "Show example code",
         usage: None,
         build: |_| ReplCommand::Example,
+    },
+    CommandSpec {
+        names: &["colors", "color"],
+        description: "Colour the session: on, off or auto",
+        usage: Some("<on|off|auto>"),
+        build: |argument| ReplCommand::Colors(argument.unwrap_or_default()),
     },
 ];
 
