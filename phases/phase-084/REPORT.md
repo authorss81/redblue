@@ -3,37 +3,42 @@
 ## Reproduction (before any change)
 
 ```
-$ git show 55f7187^:opencode.json
-fatal: path 'opencode.json' exists on disk, but not in '55f7187^'
-$ git log --oneline --diff-filter=A -- opencode.json
-55f7187 resume phase-084: adopt preserved work
+$ git show d1f2163^:opencode.json
+fatal: path 'opencode.json' exists on disk, but not in 'd1f2163^'
 $ git ls-files | grep -i opencode
 opencode.json
+$ git log --oneline --diff-filter=A -- opencode.json
+d1f2163 resume phase-084: adopt preserved work
 ```
 
-The checkout shipped no opencode config at any project scope. Project config is
+`opencode.json` was absent from every parent of this phase's own commit: the
+checkout shipped no opencode config at any project scope. Project config is
 `./opencode.json` (or `.jsonc`, or `.opencode/opencode.json`) read from the
 working directory outward; global config is `~/.config/opencode/opencode.json`;
 the two are deep-merged with the project overriding the global. With no project
 file, `--agent reviewer` and `--agent verifier` resolve nothing in the project
 scope and inherit the global `default_agent: build`, whose `edit` and `bash` are
 `allow`. The reviewer is contractually read-only, and the only thing expressing
-that was prose in a prompt. The finding reproduces.
+that was prose in a prompt. The finding reproduced.
 
-The fix landed in `55f7187` (adopted from the previous attempt). This run
-verified that fix and closed the gaps the previous REPORT.md left.
+The fix landed in `d1f2163`. This run re-verified it, repaired one stale
+acknowledgement the gate caught, and closed the one reporting gap the previous
+REPORT.md carried.
 
 ## What changed
 
 | File | Lines | What |
 |---|---|---|
-| `opencode.json` | +21 −0 | **New**, at the repository root (commit `55f7187`). `agent.reviewer.permission` = `edit: "deny"`, `bash: "deny"`; `agent.verifier.permission` = `edit: "allow"`, `bash: "allow"`. No `default_agent`. |
-| `tests/agent_permissions_test.rs` | +44 −4 | 14 `#[test]` functions (2 added this run). Reads the shipped file and asserts all four permission values; 10 drive the pure checker over deliberately broken documents. |
-| `tests/unreviewed_work_ack_test.rs` | +1 −0 | Acknowledgement entry for `55f71878…`, the resume commit that carries this phase's unreviewed work. See "Pre-existing red test" below. |
+| `opencode.json` | +21 −0 | **New**, at the repository root (commit `d1f2163`). `agent.reviewer.permission` = `edit: "deny"`, `bash: "deny"`; `agent.verifier.permission` = `edit: "allow"`, `bash: "allow"`. No `default_agent`. |
+| `tests/agent_permissions_test.rs` | +395 −0 | 14 `#[test]` functions (carried from `d1f2163`). Reads the shipped file and asserts all four permission values; 11 drive the pure checker over deliberately broken documents and assert a failure is produced. |
+| `tests/unreviewed_work_ack_test.rs` | +1 −1 | Acknowledgement entry repointed at `d1f21633394cc27b5bcd35ec73bc4a14a16e5b3f`, the resume commit that carries this phase's unreviewed work. See "Pre-existing red test" below. |
+| `phases/phase-084/REPORT.md` | rewritten | Prior report cited `55f7187`, a commit that is not in this history, and overstated one count. Corrected. |
 
-No file under `src/`, `rbops/`, `.github/workflows/`, `.opencode/agent/` or
-`rbops/phases.json` was touched. `git status --short` after this run lists
-exactly two modified files, both under `tests/`.
+This run's own diff is **one line in one file**, both under `tests/`. No file
+under `src/`, `rbops/`, `.github/workflows/`, `.opencode/agent/` or
+`rbops/phases.json` was touched. `git diff --name-only d1f2163` lists exactly
+`tests/unreviewed_work_ack_test.rs`, which satisfies this phase's
+`must_touch: ["tests/"]`.
 
 ### Why the file is at the root and not under `.opencode/agent/`
 
@@ -55,14 +60,27 @@ opencode resolves configuration in two scopes, project first:
 >
 > Configs from each scope are deep-merged. Project overrides global.
 
-Citation: opencode's configuration reference, "Where files live" — the same
+Citation: opencode's configuration reference, "Where files live" — the
 directory-of-configs table that ships with the `customize-opencode` reference
-bundled with opencode, and the schema it publishes at
-<https://opencode.ai/config.json>. The shipped file was validated against that
-schema with `jsonschema.validate` before the commit: **SCHEMA VALID**.
-`$schema`, `agent`, `description`, `mode` and `permission` are all members of
-the published `Config`/`AgentConfig`/`PermissionConfig` definitions, and
-`"allow"`/`"deny"` are members of the `PermissionActionConfig` enum.
+bundled with opencode. The machine-checkable half of the citation is the
+published JSON Schema at <https://opencode.ai/config.json>, fetched and applied
+to the shipped file **this session** with `jsonschema` 4.10.3 (Draft 2020-12,
+the remote `models.dev` `$ref` that this document does not reach stripped for
+offline validation):
+
+```
+ERRORS: none
+SCHEMA VALID
+agent keys: ['reviewer', 'verifier'] | default_agent present: False
+```
+
+The schema confirms the three claims the fix rests on: `Config.agent` is an
+object whose `additionalProperties` are `AgentConfig`, so arbitrarily named
+agents are legal; `AgentConfig.mode` enumerates `["subagent","primary","all"]`,
+so `primary` is legal; and `AgentConfig.permission` accepts `edit` and `bash`
+with values from the `PermissionActionConfig` enum `["ask","allow","deny"]`.
+opencode hard-fails to start on a config that fails this schema, so this is
+checked rather than assumed.
 
 Because the merge is *deep*, the global file's permissive top-level `permission`
 block still contributes keys underneath this file. Per-agent `permission:`
@@ -91,86 +109,113 @@ recorded in FINDINGS.md, not attempted here, since `rbops/` is off-limits.
 | `project_config_declares_no_default_agent` | `default_agent` absent — implementer agent cannot be repointed |
 | `edge_missing_config_file_is_rejected` | the reproduction itself: no file → failure |
 | `edge_missing_agent_key_is_rejected` | empty — `{}` and `{"$schema":"x"}`, both lack `agent` |
-| `edge_missing_reviewer_is_rejected` | duplicate/missing keys — only verifier declared |
-| `edge_missing_verifier_is_rejected` | duplicate/missing keys — only reviewer declared |
+| `edge_missing_reviewer_is_rejected` | singleton — only verifier declared |
+| `edge_default_agent_key_is_rejected` | missing keys — a `default_agent` naming `build` or `reviewer` |
+| `edge_agent_block_of_wrong_type_is_rejected` | type mismatch — `agent` holding an array or a string |
+| `edge_missing_verifier_is_rejected` | singleton — only reviewer declared |
 | `edge_permission_flipped_to_allow_is_rejected` | the damaging edit — all four values flipped, each caught by name |
-| `edge_default_agent_key_is_rejected` **(new)** | missing keys — a `default_agent` naming `build` or `reviewer` |
-| `edge_agent_block_of_wrong_type_is_rejected` **(new)** | type mismatch — `agent` holding an array or a string |
 | `edge_reviewer_without_permission_block_is_rejected` | nesting — `agent.reviewer` declared, `permission` absent |
 | `edge_permission_value_of_wrong_type_is_rejected` | type mismatch — boolean, number, nested object, null |
 | `edge_duplicate_permission_key_resolves_to_the_last_value` | duplicate keys — repeated `edit`, last value wins |
 | `edge_malformed_config_is_rejected` | malformed — empty file, truncated, trailing comma, BOM, array, bare string |
 
-Ten of the fourteen assert a **failure** is produced (`expect_err` on a
-`Result`). The five failing documents the phase requires are present as separate
-tests: file missing, `agent` key missing, `reviewer` missing, `verifier`
-missing, one permission flipped to allow.
+14 `#[test]` functions, 11 of them `edge_*`. **11 assert a failure is produced**
+(`expect_err` on a `Result`) — counted this run, not estimated. The five failing
+documents the phase requires are present as separate tests: file missing,
+`agent` key missing, `reviewer` missing, `verifier` missing, one permission
+flipped to allow.
 
-### Mutation check — run and observed this session
+### Mutation check — the shipped file itself, mutated, run and observed this session
 
-Reviewing the suite found three branches of the checker with no test reaching
-them: the `default_agent` rejection, the "`agent` must be an object" rejection,
-and `kind(Value::String)`. Two tests and one malformed case were added for
-them, then the checker was stubbed with `return Ok(());` at the top of
-`check_document` to prove the new tests can fail:
+The previous run proved the tests fail by stubbing the checker. This run proved
+the stronger claim, because the phase's definition of done is phrased about the
+*file*: it mutated the shipped `opencode.json` on disk and ran the suite against
+it, then restored the file byte-for-byte.
+
+**Mutation 1 — one `deny` becomes `allow`** (`"bash": "deny"` → `"allow"`):
 
 ```
-$ cargo test --test agent_permissions_test      # with the checker stubbed
-test edge_agent_block_of_wrong_type_is_rejected ... FAILED
-test edge_duplicate_permission_key_resolves_to_the_last_value ... FAILED
-test edge_malformed_config_is_rejected ... FAILED
-test edge_default_agent_key_is_rejected ... FAILED
-test edge_missing_agent_key_is_rejected ... FAILED
-test edge_missing_reviewer_is_rejected ... FAILED
-test edge_missing_verifier_is_rejected ... FAILED
 test edge_permission_flipped_to_allow_is_rejected ... FAILED
-test edge_permission_value_of_wrong_type_is_rejected ... FAILED
-test edge_reviewer_without_permission_block_is_rejected ... FAILED
-test result: FAILED. 4 passed; 10 failed
+test project_config_pins_reviewer_read_only_and_verifier_privileged ... FAILED
+test project_config_ships_at_the_repository_root ... FAILED
+test result: FAILED. 11 passed; 3 failed; 0 ignored
 ```
 
-Every `expect_err` test fails when the checker stops rejecting, so none of them
-can pass vacuously. `edge_missing_config_file_is_rejected` correctly still
-passed: it exercises `check_file`'s read branch, which runs before
-`check_document`. The stub was removed immediately; `cargo test --test
-agent_permissions_test` is 14/14 green again.
+**Mutation 2 — a `default_agent` is inserted** pointing at `reviewer`:
+
+```
+test project_config_declares_no_default_agent ... FAILED
+test project_config_ships_at_the_repository_root ... FAILED
+test edge_permission_flipped_to_allow_is_rejected ... FAILED
+test result: FAILED. 11 passed; 3 failed; 0 ignored
+```
+
+The third casualty in both runs is `check_file` seeing a document that no longer
+satisfies the contract, which is the redundant path by design. Restored:
+
+```
+$ cp target/tmp/opencode.json.bak opencode.json && git diff --stat -- opencode.json
+OPENCODE_RESTORED_CLEAN          # no output from git diff --stat
+$ cargo test --test agent_permissions_test
+test result: ok. 14 passed; 0 failed; 0 ignored
+```
+
+Every `expect_err` test likewise fails when the checker stops rejecting, so none
+of them can pass vacuously.
 
 ## Pre-existing red test this run had to fix
 
-`cargo test --all-targets` at commit `55f7187` was **red**, before any edit in
+`cargo test --all-targets` at commit `d1f2163` was **red**, before any edit in
 this run:
 
 ```
 ---- unreviewed_work_in_head_history_is_acknowledged stdout ----
-unreviewed-work commits selected: 23 | acknowledged: 22 | unacknowledged: 1 | stale entries: 0 | UNACKNOWLEDGED: 55f71878d905105dfbdd715365f3f74aa6d88bb5	resume phase-084: adopt preserved work
+unreviewed-work commits selected: 23 | acknowledged: 23 | unacknowledged: 1 | stale entries: 1 | UNACKNOWLEDGED: d1f21633394cc27b5bcd35ec73bc4a14a16e5b3f	resume phase-084: adopt preserved work | STALE: 55f71878d905105dfbdd715365f3f74aa6d88bb5
 ```
 
-`tests/unreviewed_work_ack_test.rs` requires every commit whose subject matches
-`resume phase-` or `checkpoint` to be listed in `ACKNOWLEDGED` with a reason.
-The resume commit that carries this phase's own work was not listed. The test's
-own failure message prescribes the remedy — "Add each one with a reason saying
-what it carries and that it was deliberately not rewritten" — so the entry was
-added with `git show --numstat` figures. No assertion was touched, nothing was
-skipped, and no threshold moved. After the entry:
-`selected: 23 | acknowledged: 23 | unacknowledged: 0 | stale entries: 0`.
+Two defects, one line. The previous run had added an entry for `55f7187…`; this
+tree's HEAD carries `d1f2163…` instead, a commit of the same subject from an
+earlier delivery of this phase. So the entry was unacknowledged *and* the old
+one had gone stale — and the test rejects stale entries precisely because "an
+entry pointing at nothing is how the list decays into a comment".
+
+The entry at `tests/unreviewed_work_ack_test.rs:88` was repointed at the SHA that
+is actually in this history, with figures taken from `git show --numstat
+d1f2163` (+699/−0, 5 files, none under `src/`), and the reason records what it
+replaces. No assertion was touched, nothing was skipped, and no threshold
+moved. After the change: `selected: 23 | acknowledged: 23 | unacknowledged: 0 |
+stale entries: 0`, 13/13 green.
+
+A first run of that binary instead reported `history is shallow and completing
+the clone did not make it complete`. That was a transient reading taken while
+another git process held the repository; `git rev-parse
+--is-shallow-repository` returns `false` on this clone and every re-run since has
+taken the non-shallow branch. Not a product defect, but recorded because it is
+what the first output said.
 
 ## Gates
 
 | Gate | Result |
 |---|---|
-| `cargo fmt --all -- --check` | pass — clean, no diff |
-| `cargo clippy --all-targets -- -D warnings` | pass — clean, no warnings, no `allow(` added |
-| `cargo test --all-targets` | **1571 passed, 0 failed, 0 ignored** across 60 test binaries, exit 0 (14 in `agent_permissions_test`) |
+| `cargo fmt --all -- --check` | **pass** — exit 0, no output, no diff |
+| `cargo clippy --all-targets -- -D warnings` | **pass** — exit 0, clean, no warnings; no `allow(clippy::` added (`git diff \| grep -c "allow(clippy::"` → `0`) |
+| `cargo test --all-targets` | **pass** — exit 0, **1571 passed, 0 failed, 0 ignored** across 60 test binaries (14 in `agent_permissions_test`) |
 | `./rbops/verify.sh phase-084` | **NOT RUN — absent from this checkout** |
 
-On the fourth gate: `./rbops/verify.sh` does not exist here. `ls -d rbops
-.opencode` → `No such file or directory` for both; the pipeline that dispatched
-this phase lives outside the working directory and the phase brief instructs
-that it not be inspected. Reported as not run rather than claimed as passed.
-What it enforces that I can check by hand: no path under `.github/workflows/`,
-`rbops/`, `.opencode/agent/` or `rbops/phases.json` is in the diff; no test is
-skipped, ignored, deleted or weakened; no `allow(clippy::` was added; the diff
-touches `tests/`, the area this phase declares.
+On the fourth gate: `./rbops/verify.sh` does not exist here.
+`find . -name verify.sh -not -path "./target/*"` returns nothing, and
+`ls -d rbops .opencode` reports `No such file or directory` for both. The
+pipeline that dispatched this phase lives outside the working directory and the
+phase brief instructs that it not be inspected. Reported as not run rather than
+claimed as passed. What it enforces that I can check by hand: no path under
+`.github/workflows/`, `rbops/`, `.opencode/agent/` or `rbops/phases.json` is in
+the diff; no test is skipped, ignored, deleted or weakened (`git diff -U0`
+contains no `#[ignore]`, `// skip` or `.skip(`); no `allow(clippy::` was added;
+the diff touches `tests/`, the area this phase declares.
+
+The `error` lines in the `cargo test` log are a Redblue test fixture's own
+program output (a minesweeper-style example printing its error token), not build
+errors — the suite exits 0 with 0 `FAILED` occurrences.
 
 ## Test-requirement matrix
 
@@ -203,11 +248,14 @@ under `src/`. `README.md` and `ROADMAP.md` are untouched.
   permissions are `deny`/`deny` before handing it the diff. → FINDINGS.md
 - `reviewer` is declared `mode: "primary"`, matching a CLI `--agent`
   invocation. If dispatch ever invokes it as a subagent instead, the mode is
-  wrong. Nothing in this checkout can tell which it does. → FINDINGS.md
+  wrong — `mode: "all"` would cover both readings at the cost of precision.
+  Nothing in this checkout can tell which it does. → FINDINGS.md
 - `reviewer` is granted neither `webfetch` nor `write`, so it falls back to the
   global defaults for those. This phase pins only `edit` and `bash`, which is
   what the finding names. Tightening the rest is a separate concern. →
   FINDINGS.md
 - The commit the pipeline makes for *this* run, if its subject contains
   `resume phase-` or `checkpoint`, will need its own entry in `ACKNOWLEDGED`,
-  exactly as `55f7187…` needed one above. → FINDINGS.md
+  exactly as `d1f2163…` needed one above, and the entry for `d1f2163…` will go
+  stale if the history is rewritten. Only the dispatcher, which knows the SHA,
+  can add the line. → FINDINGS.md

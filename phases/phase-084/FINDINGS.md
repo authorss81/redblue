@@ -41,9 +41,13 @@ be a change to what the reviewer can do, which belongs in its own phase.
 `tests/unreviewed_work_ack_test.rs` fails on any commit in `HEAD`'s history
 whose subject contains `resume phase-` or `checkpoint` and that is not listed in
 its `ACKNOWLEDGED` data. The resume commit carrying this phase's own work,
-`55f71878d905105dfbdd715365f3f74aa6d88bb5`, was unlisted, so `cargo test` was
-red at that commit before any phase code ran. This run added the entry at
-`tests/unreviewed_work_ack_test.rs:88`.
+`d1f21633394cc27b5bcd35ec73bc4a14a16e5b3f`, was unlisted, so `cargo test` was
+red at that commit before any phase code ran. The same line had carried an
+earlier SHA, `55f71878d905105dfbdd715365f3f74aa6d88bb5`, from a previous delivery
+of this phase; that SHA is not in this history, so the entry was *also* stale and
+both halves of the test failed at once. The entry at
+`tests/unreviewed_work_ack_test.rs:88` now names the SHA this history actually
+contains.
 
 The test also rejects *stale* entries, so the next one cannot be pre-registered:
 the dispatcher, not the phase, is the component that can add the line, because
@@ -64,6 +68,12 @@ rather than claimed as passing. The gates that were run, this session:
 clean, `cargo test --all-targets` 1571 passed / 0 failed / 0 ignored, exit 0.
 
 The shipped `opencode.json` was validated against the live published schema at
-<https://opencode.ai/config.json> using `jsonschema.validate`: **SCHEMA VALID**.
-opencode hard-fails to start on an invalid config, so this was checked before
-the file was committed rather than assumed.
+<https://opencode.ai/config.json> using `jsonschema` 4.10.3 (Draft 2020-12, with
+the remote `models.dev` `$ref` this document does not reach stripped for offline
+validation): **SCHEMA VALID**. Re-run independently this session, same result.
+The schema confirms the three claims the fix rests on — `Config.agent.additionalProperties`
+is `AgentConfig` (arbitrary agent names legal), `AgentConfig.mode` enumerates
+`["subagent","primary","all"]`, and `AgentConfig.permission` accepts `edit` and
+`bash` from the `PermissionActionConfig` enum `["ask","allow","deny"]`. opencode
+hard-fails to start on an invalid config, so this is checked before the file was
+committed rather than assumed.
