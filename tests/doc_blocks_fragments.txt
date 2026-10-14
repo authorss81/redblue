@@ -1,0 +1,82 @@
+# The FRAGMENT bucket — documentation code blocks this suite does not execute.
+#
+# Read by `tests/doc_blocks_test.rs`. Every ```redblue block in SPEC.md,
+# README.md, PHILOSOPHY.md, HANDOUT.md and docs/GRAMMAR.md must appear in
+# exactly one of `this file` and `tests/doc_blocks_known_fail.txt`. A block in
+# neither fails the suite, so neither list can quietly shrink.
+#
+# WHAT FRAGMENT MEANS
+# The block is not executed, and the reason is written beside it. Two kinds of
+# reason appear here, and they are not the same thing:
+#
+#   excerpt - the block is not a program. It has an elided `end`, a placeholder
+#             body (`// statements`, `// ...`, `// Implementation`), or names
+#             that only the surrounding prose introduces. Nothing about running
+#             it is promised, so there is nothing for the interpreter to answer.
+#
+#   network - the block is a program, and it performs a live HTTP request. This
+#             suite runs no network (AGENTS.md § 3.1.4), so the block is
+#             classified rather than executed and its outcome is unverified.
+#             Two entries below say so; a reader must not take them for
+#             "this runs".
+#
+# A block that IS a whole program and still fails belongs in the KNOWN-FAIL
+# file with the first line of stderr it prints today, not here. Calling a
+# broken example a fragment is how a documentation promise rots unnoticed.
+#
+# FORMAT
+#   <doc>:<line><TAB><reason>
+# `line` is the line of the opening ```redblue fence, counted from 1. That
+# makes the entry brittle on purpose: editing a document above a block moves it,
+# and a moved block fails this suite rather than quietly losing its bucket.
+#
+# COUNTS, as of the run that wrote this file
+#   SPEC.md 28 · docs/GRAMMAR.md 2 · PHILOSOPHY.md 8 · README.md 0 · HANDOUT.md 0
+#   38 of 101 blocks. The other 63 are 48 RUNS and 15 KNOWN-FAIL.
+
+# --- SPEC.md ---------------------------------------------------------------
+
+SPEC.md:147	excerpt - a type-declaration catalogue: `list of number` and `record { x: number, y: number }` are not Redblue syntax, and SPEC.md's own keyword table lists no type keywords
+SPEC.md:170	excerpt - an "Explicit Types" illustration; `as number` is not a form the parser accepts, and the block above it says the same thing without it
+SPEC.md:181	excerpt - `value` is introduced by the prose about rebinding and bound nowhere in the block
+SPEC.md:189	excerpt - `new_value` is introduced by the prose and bound nowhere in the block
+SPEC.md:275	excerpt - a comparison catalogue: ten bare `if` headers, no bodies and no `end`; this is a table of spellings, not a program
+SPEC.md:292	excerpt - a boolean-operator catalogue: three bare `if` headers, no bodies and no `end`; the operators `and`, `or` and `not` are spelled correctly, only the statements around them are not there
+SPEC.md:300	excerpt - `name`, `x` and `y` are introduced by the prose about interpolation and bound nowhere in the block
+SPEC.md:307	excerpt - `person` and `point` are introduced by the prose about field access and bound nowhere in the block
+SPEC.md:321	excerpt - `items` and `words` are bound nowhere, and the closing `if "hello" is in words` has no body and no `end`. The `items at 0` and `length of items` forms this block documents are covered one at a time by tests/index_words_test.rs; the block as written is not a program
+SPEC.md:378	excerpt - placeholder bodies (`// statements`, `// then branch`) and an unbound `condition`
+SPEC.md:400	excerpt - `when` is documented as NOT IMPLEMENTED in docs/GRAMMAR.md § 4.3, where `when` is an ordinary identifier; `value` is also bound nowhere
+SPEC.md:410	excerpt - `is_valid` is introduced by the prose about `unless` and bound nowhere in the block
+SPEC.md:418	excerpt - `items` is introduced by the prose about `for each ... in` and bound nowhere in the block
+SPEC.md:464	excerpt - `x` is introduced by the prose about `while` and bound nowhere in the block
+SPEC.md:472	excerpt - `x` is introduced by the prose about `repeat`/`until` and bound nowhere in the block
+SPEC.md:480	excerpt - `items` and `process` are bound nowhere in the block
+SPEC.md:517	excerpt - `names` and `record` are bound nowhere in the block
+SPEC.md:534	excerpt - `break` on its own, shown to document the loop-control keyword; it is only valid inside a loop
+SPEC.md:586	excerpt - placeholder body (`// parameters`) plus `default`, which the parser does not accept in a parameter list
+SPEC.md:599	excerpt - a type-annotated signature; `a as number` and `as number` are not forms the parser accepts
+SPEC.md:698	excerpt - `Employee extends Person` with no `Person` in the block; the parent is declared elsewhere
+SPEC.md:841	excerpt - `process` is bound nowhere in the block, and `config.rb` is a file the block never creates
+SPEC.md:894	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
+SPEC.md:903	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
+SPEC.md:993	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
+SPEC.md:1169	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
+SPEC.md:1197	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
+SPEC.md:1241	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
+
+# --- docs/GRAMMAR.md --------------------------------------------------------
+
+docs/GRAMMAR.md:520	excerpt - the guarded read is bound to `report`, but the third line reads `body`, which is bound nowhere. The first two lines are the forms this block documents
+docs/GRAMMAR.md:600	excerpt - `age` is bound in the preceding block and not in this one, so the two are one fragment written as two
+
+# --- PHILOSOPHY.md ----------------------------------------------------------
+
+PHILOSOPHY.md:9	excerpt - illustrative pseudo-English, not Redblue: `allow user to vote` and `user age` are not forms the parser accepts, and `user` is bound nowhere
+PHILOSOPHY.md:16	excerpt - the block PHILOSOPHY.md itself shows is NOT Redblue: braces, `;` and `vote()` from another language
+PHILOSOPHY.md:142	excerpt - `temperature` is introduced by the prose about `else if` and bound nowhere in the block
+PHILOSOPHY.md:153	excerpt - `people`, `person name` and `item price` are not Redblue spellings, and none is bound
+PHILOSOPHY.md:177	excerpt - illustrative pseudo-code: `to calculate total(items)`, `to might fail fetch data(url)` and `request.get` are not Redblue forms
+PHILOSOPHY.md:198	excerpt - `has purchase history`, `to can email others(message)` and `this purchase count` are not Redblue spellings; `to can email others` also has a placeholder body (`// Implementation`)
+PHILOSOPHY.md:228	excerpt - the block PHILOSOPHY.md itself shows is NOT Redblue: `async`, `wait`, `parallel` and `until done`
+PHILOSOPHY.md:246	excerpt - `process` and `close connections` are bound nowhere in the block

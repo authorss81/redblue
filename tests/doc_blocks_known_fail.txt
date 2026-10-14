@@ -1,0 +1,50 @@
+# The KNOWN-FAIL bucket — documentation blocks that are whole programs and
+# still fail today.
+#
+# Read by `tests/doc_blocks_test.rs`. Every ```redblue block in SPEC.md,
+# README.md, PHILOSOPHY.md, HANDOUT.md and docs/GRAMMAR.md must appear in
+# exactly one of this file and `tests/doc_blocks_fragments.txt`. A block in
+# neither fails the suite.
+#
+# WHAT KNOWN-FAIL MEANS
+# The block is a program — every name it reads is bound somewhere above it in
+# the same block — and this suite wrote it to a file and ran it, and it exited
+# non-zero. The second column is the exact first line of stderr, so an entry
+# goes stale the moment the behaviour changes: fixing any of these without
+# re-running the suite fails here, and so does the failure moving, or changing
+# its wording, or being reclassified as a fragment.
+#
+# This is the list a human can act on. Each entry is a sentence in a document
+# that `rb` contradicts. Nothing here is implemented by this phase and nothing
+# here is fixed by it: AGENTS.md § 1.7, one phase one concern.
+#
+# FORMAT
+#   <doc>:<line><TAB><first line of stderr>
+#
+# COUNTS, as of the run that wrote this file
+#   SPEC.md 8 · PHILOSOPHY.md 1 · HANDOUT.md 6 · docs/GRAMMAR.md 0 · README.md 0
+#   15 of 101 blocks.
+
+# --- SPEC.md ---------------------------------------------------------------
+
+SPEC.md:89	Error: ParserError: Expected field name
+SPEC.md:570	Error: ParserError: Expected 'then' but got 'give'
+SPEC.md:607	Error: RuntimeError: Module 'numbers' has no function 'map'
+SPEC.md:631	Error: ParserError: Expected 'end' but got Eof
+SPEC.md:977	Error: ParserError: Expected 'then' but got 'say'
+SPEC.md:1015	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
+SPEC.md:1066	Error: AnalyzerError: Unknown variable 'async'
+SPEC.md:1267	Error: ParserError: Expected variable name, found reserved word 'back'
+
+# --- PHILOSOPHY.md ----------------------------------------------------------
+
+PHILOSOPHY.md:132	Error: ParserError: Expected variable name, found reserved word 'is'
+
+# --- HANDOUT.md -------------------------------------------------------------
+
+HANDOUT.md:42	Error: ParserError: Expected 'then' but got 'say'
+HANDOUT.md:133	Error: RuntimeError: Module 'math' has no function 'random'
+HANDOUT.md:140	Error: ParserError: Expected 'then' but got 'say'
+HANDOUT.md:149	Error: LexerError: Unexpected character '\''
+HANDOUT.md:155	Error: RuntimeError: Module 'list' has no function 'filter'
+HANDOUT.md:161	Error: AnalyzerError: Unknown variable 'ask'; did you mean 'as'?

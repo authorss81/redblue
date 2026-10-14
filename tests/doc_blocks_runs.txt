@@ -1,0 +1,79 @@
+# The RUNS bucket — documentation code blocks this suite executes and that exit 0.
+#
+# Read by `tests/doc_blocks_test.rs`. Every ```redblue block in SPEC.md,
+# README.md, PHILOSOPHY.md, HANDOUT.md and docs/GRAMMAR.md must appear in
+# exactly one of this file, `tests/doc_blocks_fragments.txt` and
+# `tests/doc_blocks_known_fail.txt`. A block in none of them fails the suite.
+#
+# Being listed HERE is a promise the suite keeps by running the block: if one of
+# these stops exiting 0, `running_every_block_agrees_with_the_bucket_it_is_in`
+# fails and the block has to move to the KNOWN-FAIL file, with the first line of
+# stderr it now prints. That is the whole point of listing the working blocks
+# at all: without this file a block that stopped working would silently join the
+# fragments, and a documentation promise would rot without a word.
+#
+# FORMAT
+#   <doc>:<line>
+# `line` is the line of the opening ```redblue fence, counted from 1. Editing a
+# document above a block moves it, and a moved block fails this suite rather
+# than quietly losing its bucket.
+#
+# COUNTS, as of the run that wrote this file
+#   SPEC.md 32 · docs/GRAMMAR.md 7 · README.md 7 · HANDOUT.md 2 · PHILOSOPHY.md 0
+#   48 of 101 blocks. The other 53 are 38 fragments and 15 known failures.
+
+# --- SPEC.md ---------------------------------------------------------------
+SPEC.md:40
+SPEC.md:58
+SPEC.md:120
+SPEC.md:163
+SPEC.md:195
+SPEC.md:206
+SPEC.md:314
+SPEC.md:426
+SPEC.md:456
+SPEC.md:562
+SPEC.md:619
+SPEC.md:647
+SPEC.md:670
+SPEC.md:681
+SPEC.md:749
+SPEC.md:766
+SPEC.md:780
+SPEC.md:788
+SPEC.md:800
+SPEC.md:853
+SPEC.md:885
+SPEC.md:919
+SPEC.md:943
+SPEC.md:1030
+SPEC.md:1045
+SPEC.md:1080
+SPEC.md:1116
+SPEC.md:1147
+SPEC.md:1218
+SPEC.md:1252
+SPEC.md:1281
+SPEC.md:1293
+
+# --- docs/GRAMMAR.md-----------------------------------------------------
+docs/GRAMMAR.md:541
+docs/GRAMMAR.md:588
+docs/GRAMMAR.md:593
+docs/GRAMMAR.md:609
+docs/GRAMMAR.md:616
+docs/GRAMMAR.md:625
+docs/GRAMMAR.md:640
+
+# --- HANDOUT.md----------------------------------------------------------
+HANDOUT.md:126
+HANDOUT.md:249
+
+# --- README.md-----------------------------------------------------------
+README.md:9
+README.md:33
+README.md:46
+README.md:57
+README.md:117
+README.md:128
+README.md:140
