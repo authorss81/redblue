@@ -228,7 +228,7 @@ fn edge_missing_agent_key_is_rejected() {
         ("empty document", "{}"),
         ("agent key absent", r#"{"$schema":"x"}"#),
     ] {
-        let error = check_document(text).expect_err("{label} declares no agents");
+        let error = check_document(text).expect_err(&format!("{label} declares no agents"));
         assert!(
             error.contains("`agent` key"),
             "{label}: the error must name the missing `agent` key, got: {error}"
@@ -246,6 +246,39 @@ fn edge_missing_reviewer_is_rejected() {
         error.contains("`agent.reviewer` is not declared"),
         "the error must name the missing reviewer, got: {error}"
     );
+}
+
+/// A `default_agent` in the project config is the one key that can repoint the
+/// agent every phase runs as, so it is rejected whatever it names.
+#[test]
+fn edge_default_agent_key_is_rejected() {
+    for name in ["build", "reviewer"] {
+        let mut config = shipped_config();
+        config["default_agent"] = Value::String(name.to_string());
+        let error = check_document(&config.to_string())
+            .expect_err("a `default_agent` must not be accepted, whatever it names");
+        assert!(
+            error.contains("`default_agent`"),
+            "the error must name the offending key, got: {error}"
+        );
+    }
+}
+
+/// The `agent` key present but unusable is the same failure as its absence: no
+/// name resolves.
+#[test]
+fn edge_agent_block_of_wrong_type_is_rejected() {
+    for (label, text) in [
+        ("an array of names", r#"{"agent":["reviewer","verifier"]}"#),
+        ("a bare string", r#"{"agent":"reviewer"}"#),
+    ] {
+        let error =
+            check_document(text).expect_err(&format!("`agent` holding {label} declares no agents"));
+        assert!(
+            error.contains("`agent` must be an object"),
+            "{label}: the error must explain the expected shape, got: {error}"
+        );
+    }
 }
 
 /// Only the reviewer declared is the same gap for the verifier, which has to
@@ -317,8 +350,9 @@ fn edge_permission_value_of_wrong_type_is_rejected() {
             r#"{"agent":{"reviewer":{"permission":null},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
         ),
     ] {
-        let error =
-            check_document(text).expect_err("a {label} permission must not be read as an action");
+        let error = check_document(text).expect_err(&format!(
+            "a {label} permission must not be read as an action"
+        ));
         assert!(
             error.contains("must be"),
             "{label}: the error must explain the expected shape, got: {error}"
@@ -349,8 +383,10 @@ fn edge_malformed_config_is_rejected() {
         ("trailing comma", r#"{"agent":{},}"#),
         ("byte order mark", "\u{feff}{\"agent\":{}}"),
         ("not an object", r#"["agent"]"#),
+        ("a bare string", r#""reviewer""#),
     ] {
-        let error = check_document(text).expect_err("a {label} config must not be accepted");
+        let error =
+            check_document(text).expect_err(&format!("a {label} config must not be accepted"));
         assert!(
             error.contains(CONFIG_FILE) || error.contains("must be an object"),
             "{label}: the error must say what is wrong with the file, got: {error}"

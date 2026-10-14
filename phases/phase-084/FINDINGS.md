@@ -36,14 +36,32 @@ read-only reviewer arguably should also `deny` `write`, `webfetch` and
 `external_directory`, but that is broader than this phase's finding and would
 be a change to what the reviewer can do, which belongs in its own phase.
 
+## Every resume commit costs one line in `ACKNOWLEDGED`
+
+`tests/unreviewed_work_ack_test.rs` fails on any commit in `HEAD`'s history
+whose subject contains `resume phase-` or `checkpoint` and that is not listed in
+its `ACKNOWLEDGED` data. The resume commit carrying this phase's own work,
+`55f71878d905105dfbdd715365f3f74aa6d88bb5`, was unlisted, so `cargo test` was
+red at that commit before any phase code ran. This run added the entry at
+`tests/unreviewed_work_ack_test.rs:88`.
+
+The test also rejects *stale* entries, so the next one cannot be pre-registered:
+the dispatcher, not the phase, is the component that can add the line, because
+only it knows the SHA the commit will get. If a phase is gated on `cargo test`
+after its own commit lands, either the commit subject avoids `resume phase-` /
+`checkpoint`, or `ACKNOWLEDGED` gains that SHA's line first. Evidence: the
+module docs at `tests/unreviewed_work_ack_test.rs:1`, the list at
+`tests/unreviewed_work_ack_test.rs:66`, the selector
+`is_unreviewed_subject`, and the assertion in
+`tests/unreviewed_work_ack_test.rs:466`.
+
 ## Verification note for whoever runs `rbops/verify.sh`
 
-`./rbops/verify.sh` does not exist in this checkout — `test -x rbops/verify.sh`
-returns absent, and `ls -d rbops .opencode` finds neither directory. The fourth
-gate was reported as NOT RUN in `REPORT.md` rather than claimed as passing. The
-gates that were run: `cargo fmt --all -- --check` clean, `cargo clippy
---all-targets -- -D warnings` clean, `cargo test --all-targets` 1569 passed /
-0 failed / 0 ignored.
+`./rbops/verify.sh` does not exist in this checkout — `ls -d rbops .opencode`
+finds neither directory. The fourth gate was reported as NOT RUN in `REPORT.md`
+rather than claimed as passing. The gates that were run, this session:
+`cargo fmt --all -- --check` clean, `cargo clippy --all-targets -- -D warnings`
+clean, `cargo test --all-targets` 1571 passed / 0 failed / 0 ignored, exit 0.
 
 The shipped `opencode.json` was validated against the live published schema at
 <https://opencode.ai/config.json> using `jsonschema.validate`: **SCHEMA VALID**.
