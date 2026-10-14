@@ -85,6 +85,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("e26659d49097210a2d1ab8abecc97d61698afebe", "resume phase-048: adopt preserved work. Carries unreviewed code (+1223/-16, 8 files, +120 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
     ("09dd1020443e166a765991815c75c024a5ccd45b", "resume phase-049: adopt preserved work. Carries unreviewed code (+1437/-173, 35 files, +263 lines under src/) - the widest file count on this list. Deliberately not rewritten."),
     ("10f97506426673e83119b6e0ec21f6754bddf75c", "resume phase-050: adopt preserved work. Carries unreviewed code (+5410/-126, 15 files, +596 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
+    ("55f71878d905105dfbdd715365f3f74aa6d88bb5", "resume phase-084: adopt preserved work. Carries unreviewed code (+611/-0, 4 files, none under src/ - the root opencode.json plus tests/agent_permissions_test.rs and the phase's own REPORT.md and FINDINGS.md). It changes what opencode resolves for `--agent reviewer`, so the reviewer must read it. Deliberately not rewritten."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
