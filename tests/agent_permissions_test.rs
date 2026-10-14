@@ -94,6 +94,39 @@ fn check_agent(agents: &Map<String, Value>, name: &str, action: &str) -> Result<
     Ok(())
 }
 
+/// Reject a grant to the read-only agent for any tool this phase does not pin.
+///
+/// [`check_agent`] looks up exactly [`TOOLS`], so a third key added beside them
+/// is never visited: `{"edit":"deny","bash":"deny","webfetch":"allow"}` reads as
+/// a reviewer that cannot act and is one that can. The reviewer is read-only in
+/// full, so every other key must deny as well.
+fn check_no_grants_beyond(agents: &Map<String, Value>, name: &str) -> Result<(), String> {
+    let permissions = agents
+        .get(name)
+        .and_then(|agent| agent.get("permission"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("`agent.{name}.permission` must be an object"))?;
+    for (tool, value) in permissions {
+        if TOOLS.contains(&tool.as_str()) {
+            continue;
+        }
+        let found = value.as_str().ok_or_else(|| {
+            format!(
+                "`agent.{name}.permission.{tool}` must be a string action, found {}",
+                kind(value)
+            )
+        })?;
+        if found != "deny" {
+            return Err(format!(
+                "`agent.{name}.permission.{tool}` is {found:?}: {name} is read-only, so no \
+                 tool beyond {} may be granted to it",
+                TOOLS.join(" and ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The whole contract, as one fallible check, so a failure names the exact key
 /// that is wrong instead of reporting a pile of assertions.
 fn check_document(text: &str) -> Result<(), String> {
@@ -118,6 +151,7 @@ fn check_document(text: &str) -> Result<(), String> {
         )
     })?;
     check_agent(agents, "reviewer", "deny")?;
+    check_no_grants_beyond(agents, "reviewer")?;
     check_agent(agents, "verifier", "allow")?;
     Ok(())
 }
@@ -372,6 +406,24 @@ fn edge_duplicate_permission_key_resolves_to_the_last_value() {
         error.contains("`agent.reviewer.permission.edit` is \"allow\""),
         "the error must report the value that survives, got: {error}"
     );
+}
+
+/// The reviewer is read-only in full, not read-only for the two tools this file
+/// happens to name. A third tool granted alongside them is still a reviewer
+/// that can act, and every assertion above looks straight past it.
+#[test]
+fn edge_a_tool_granted_to_the_reviewer_besides_edit_and_bash_is_rejected() {
+    for tool in ["webfetch", "*", "write", "todowrite"] {
+        let mut config = shipped_config();
+        config["agent"]["reviewer"]["permission"][tool] = Value::String("allow".to_string());
+        let error = check_document(&config.to_string()).expect_err(&format!(
+            "the reviewer is read-only: `permission.{tool}` must not be grantable"
+        ));
+        assert!(
+            error.contains(&format!("`agent.reviewer.permission.{tool}`")),
+            "the error must name the extra grant, got: {error}"
+        );
+    }
 }
 
 /// Malformed files, including the ones a half-written checkout produces.
