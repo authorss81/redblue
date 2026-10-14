@@ -1,0 +1,47 @@
+# Acknowledgement list for checkpoint ancestry in redblue `main`.
+#
+# Audited by `tests/checkpoint_ancestry_test.rs`. Parsed, not skimmed: an
+# entry without a `|`-separated reason is rejected, so a SHA cannot be
+# recorded without saying why it is tolerated.
+#
+# WHAT THIS FILE IS
+# `rbops/dispatch.sh` resumes an interrupted phase with a real `git merge`, so
+# a phase checkpointed mid-flight reached `main` without passing the reviewer.
+# The commits below are those checkpoints. All of them carry code that no human
+# reviewed.
+#
+# WHAT IS DELIBERATELY *NOT* DONE
+# Published history is not rewritten. No rebase, no filter-branch, no reset, no
+# amend of an already-published commit. No force-push is attempted by this file,
+# by the audit, or by any gate - AGENTS.md §1.6 forbids it. Erasing these
+# commits would make the audit green by destroying the evidence, which is the
+# opposite of what it is for.
+#
+# WHAT TO DO IF A NEW ONE APPEARS
+# A new line here means somebody has looked at what the commit introduced and
+# decided it can stay. A new commit WITHOUT a line here fails the audit.
+
+# --- rbops: phase-NNN checkpoint commits in main's ancestry -----------------
+#
+# Each reached main through `Merge remote-tracking branch 'origin/rbops-wip/...'`
+# (see wip_merges_on_main below). dispatch.sh now resumes with
+# `git merge --squash`, so that path is closed; these six predate it.
+
+7fdea15f13a0cc2021c5cc69a65a126879e2d554|phase-019 checkpoint, tolerated: published via a resume merge that the reviewer never saw. Code is in examples/ and bootstrap/ only; no language semantics or public type changed. Recorded rather than rewritten.
+074c95e24fbf8b1101219bc1f10c520d8b7acd24|phase-019 checkpoint, tolerated: the earlier of the two phase-019 checkpoints, superseded by 7fdea15. Nothing reviewed; kept only so main's ancestry stays intact.
+563a3513c7fba2d2a39e759632415fef4bb60eb5|phase-018 checkpoint, tolerated: published via a resume merge that the reviewer never saw. No language semantics or public type changed. Recorded rather than rewritten.
+286fccd537d963cb9ad1bcbb051bce45d537a683|phase-016 checkpoint, tolerated: published via a resume merge that the reviewer never saw. No language semantics or public type changed. Recorded rather than rewritten.
+32d52ad3d50859c97db57dd10542c653f9962ea4|phase-004 checkpoint, tolerated: the oldest checkpoint on main, below the boundary the original finding's `git log` could reach, so the finding undercounted it. Recorded rather than rewritten.
+97b4043cd92e7b2b8a7511a6600b8e73ba9d2596|phase-004 checkpoint, tolerated: the earlier of the two phase-004 checkpoints, superseded by 32d52ad. Recorded rather than rewritten.
+
+# --- The recurrence path, measured separately ------------------------------
+#
+# `Merge remote-tracking branch 'origin/rbops-wip/...'` commits on main. This is
+# the route by which the six checkpoints above were published. dispatch.sh now
+# resumes with `git merge --squash`, which creates no merge commit, so this
+# number can only move if something merges a wip branch onto main again.
+#
+# Raising it deliberately is fine: add the sha to the list above with a reason,
+# then bump this number in the same commit. The audit fails until you do.
+
+wip_merges_on_main=6
