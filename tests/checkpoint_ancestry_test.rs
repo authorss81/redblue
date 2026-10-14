@@ -27,12 +27,36 @@
 //! It lives in [`ACK_FILE`] and is parsed. Each entry is `<sha>|<reason>`; the
 //! reason is required and must be non-empty, so "somebody wrote a SHA down" is
 //! not enough — they have to say why it is tolerated. A checkpoint SHA with no
-//! entry fails the audit by name.
+//! entry fails the audit by name, and an entry naming a commit `main` does not
+//! contain fails it too — the other half of the same promise, because a list of
+//! SHAs that satisfy nothing is a comment with a `.txt` extension.
+//!
+//! # The audit never measures a truncated log
+//!
+//! A depth-1 clone's `git log main` is one commit long, and one commit long
+//! reads as a spotless history. So a shallow clone is never measured on what it
+//! has: the audit completes it first (`git fetch --unshallow`), then reads the
+//! depth *again* and refuses if the history is still short. Completing a clone
+//! is not tolerating a short one. What the audit will never do is report "no
+//! checkpoints found" out of a log it knows is incomplete.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+
+/// One history repair at a time.
+///
+/// `cargo test` runs the tests in a binary on parallel threads and three of
+/// them audit `main`, so on a shallow clone all three would run
+/// `git fetch --unshallow` at the same instant and collide on
+/// `.git/shallow.lock`. From the outside that is indistinguishable from the
+/// "clone cannot be completed" refusal this audit is built around, so the
+/// repair is serialised: it happens once, and the threads behind it find the
+/// clone already complete.
+static HISTORY_REPAIR: Mutex<()> = Mutex::new(());
 
 /// The checked-in acknowledgement list. Parsed, not skimmed.
 const ACK_FILE: &str = "tests/checkpoint_ancestry_ack.txt";
@@ -51,7 +75,8 @@ struct Audit {
     checkpoints: Vec<String>,
     /// Of those, the ones with no acknowledgement entry. Must be empty.
     unacknowledged: Vec<String>,
-    /// Acknowledged SHAs that `main` no longer contains. Reported, not fatal.
+    /// Acknowledged SHAs that `main` no longer contains. Must be empty: an entry
+    /// pointing at nothing is how the list stops being data.
     stale_acknowledgements: Vec<String>,
     /// `Merge remote-tracking branch 'origin/rbops-wip/...'` commits on `main`.
     wip_merges: usize,
@@ -84,24 +109,130 @@ fn git(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Is this clone shallow?
+///
+/// `git rev-parse --is-shallow-repository` answers exactly `true` or `false`.
+/// Anything else is not a depth reading, it is a git we do not understand, and
+/// it is an error rather than a `false` — a `false` here would launder a
+/// truncated log into a clean history.
+fn is_shallow() -> Result<bool, String> {
+    let out = git(&["rev-parse", "--is-shallow-repository"])?;
+    match out.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!(
+            "`git rev-parse --is-shallow-repository` said {other:?}, which is neither \
+             `true` nor `false`; refusing to guess whether the history is complete"
+        )),
+    }
+}
+
+/// Make the clone able to answer for `main`'s whole history, or refuse.
+///
+/// `is_shallow` reports the depth and `complete` is the one repair the audit is
+/// allowed to attempt. Both are parameters so this decision can be driven from
+/// fixtures instead of from a network, and so the refusal after a failed repair
+/// is testable without one.
+///
+/// This is **not** a tolerance for shallow history. A depth-1 clone's `git log
+/// main` is one commit long, and one commit long reads as a spotless history —
+/// the exact false pass this audit exists to prevent. So a shallow clone is
+/// never measured on what it has: it is completed first, and if it is still
+/// short afterwards the audit refuses instead of reporting a truncated log.
+fn ensure_history(
+    is_shallow: &dyn Fn() -> Result<bool, String>,
+    complete: &dyn Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    if !is_shallow()? {
+        return Ok(());
+    }
+    complete().map_err(|e| {
+        format!(
+            "history is shallow and it could not be completed: {e}. The audit refuses \
+             to read a truncated `git log main`, because a truncated log reads as a \
+             clean one."
+        )
+    })?;
+    if is_shallow()? {
+        return Err(
+            "history is shallow and completing the clone did not make it complete: \
+             `git log main` would return a truncated log, and a truncated log reads \
+             as a clean one. Run `git fetch --unshallow` before auditing."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// The real accessor: this clone, and the single repair the audit may attempt.
+///
+/// A CI checkout is a depth-1 clone (`actions/checkout@v4` defaults to
+/// `fetch-depth: 1`), so without this the audit would fail on every run. The
+/// repair is a fetch with an explicit refspec rather than a relaxed check: it
+/// gets the missing history instead of pretending the history it has is
+/// enough, and it leaves a branch to audit behind even when the checkout is a
+/// pull request's detached merge ref, which has no local `main`.
+fn ensure_full_history() -> Result<(), String> {
+    let _guard = match HISTORY_REPAIR.lock() {
+        Ok(guard) => guard,
+        // The lock guards a subprocess call, not state. A thread that panicked
+        // leaves nothing half-written in the repository, so the next thread
+        // may carry on rather than turn one failure into three.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    ensure_history(&is_shallow, &|| {
+        git(&[
+            "fetch",
+            "--unshallow",
+            "--quiet",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ])
+        .map(|_| ())
+    })
+}
+
+/// The branch to audit: `main`, wherever this clone keeps it.
+///
+/// CI checks a pull request out as a detached merge ref, so there is no local
+/// `refs/heads/main` there — only the remote-tracking `origin/main`. Both name
+/// the same commits, so reading whichever exists is the same audit, not a
+/// substitute for it. If neither exists there is no main here, and the audit
+/// says so instead of measuring whatever branch it happens to be sitting on.
+fn resolve_main() -> Result<String, String> {
+    for candidate in ["refs/heads/main", "refs/remotes/origin/main"] {
+        if git(&["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err("no main here: this clone has neither refs/heads/main nor \
+         refs/remotes/origin/main, so there is no main history to audit"
+        .into())
+}
+
 /// The full `main` log, or the reason it could not be read.
 ///
 /// Refuses on a shallow clone. A depth-1 `git log main` is one commit long, so a
 /// shallow checkout would look exactly like a clean one — and "the audit found
 /// nothing" is the answer we most need to distrust. Truncated history is
 /// reported, never laundered into a pass.
+///
+/// Callers that mean to audit this repository go through [`audit_main`], which
+/// completes a shallow clone first ([`ensure_full_history`]) rather than
+/// skipping the audit.
 fn read_main_log() -> Result<String, String> {
     if !repo_root().join(".git").exists() {
         return Err("no .git here: this is not a repository, so there is no main".into());
     }
-    let shallow = git(&["rev-parse", "--is-shallow-repository"])?;
-    if shallow.trim() != "false" {
-        return Err(format!(
-            "history is shallow (git rev-parse --is-shallow-repository = {})",
-            shallow.trim()
-        ));
+    if is_shallow()? {
+        return Err(
+            "history is shallow (git rev-parse --is-shallow-repository = true); \
+             `git log main` on it is a truncated log, which reads as a clean one"
+                .into(),
+        );
     }
-    git(&["log", "--format=%H%x09%s", "main"])
+    let main = resolve_main()?;
+    git(&["log", "--format=%H%x09%s", main.as_str()])
 }
 
 /// Refuse a history we cannot vouch for, whatever the log says.
@@ -133,6 +264,12 @@ struct AckFile {
 /// must be an entry with a non-empty sha **and** a non-empty reason — an entry
 /// that records no reason is a comment wearing a data file's clothes, and is
 /// rejected.
+///
+/// A line is a directive only when its `=` comes before any `|`. A `=` inside a
+/// reason belongs to the reason: `deadbeef|tolerated: old_gate=true` is an
+/// entry, and reading it as a directive would reject a perfectly good
+/// acknowledgement as an unknown one — which is the failure mode where a real
+/// entry silently cannot be recorded at all.
 fn parse_ack_file(text: &str) -> Result<AckFile, String> {
     let mut entries: Vec<Acknowledgement> = Vec::new();
     let mut merges: Option<usize> = None;
@@ -144,7 +281,14 @@ fn parse_ack_file(text: &str) -> Result<AckFile, String> {
         }
         let lineno = idx + 1;
 
-        if let Some((key, value)) = line.split_once('=') {
+        // `find` returns char boundaries, so slicing at them cannot panic on a
+        // multi-byte character.
+        let directive_at = line
+            .find('=')
+            .filter(|eq| line.find('|').is_none_or(|pipe| pipe > *eq));
+
+        if let Some(eq) = directive_at {
+            let (key, value) = (&line[..eq], &line[eq + 1..]);
             match key.trim() {
                 "wip_merges_on_main" => {
                     let n: usize = value.trim().parse().map_err(|_| {
@@ -272,11 +416,12 @@ fn load_ack_file() -> Result<AckFile, String> {
 
 /// Run the whole audit against `main`, printing what it measured.
 fn audit_main() -> Result<(Audit, AckFile), String> {
-    let shallow = git(&["rev-parse", "--is-shallow-repository"])
-        .map(|s| s.trim() == "true")
-        .unwrap_or(true);
-    let log = check_history(shallow, read_main_log());
-    let log = log?;
+    // A shallow clone is completed before anything is measured, never measured
+    // short. `ensure_full_history` is the only repair, and it refuses if the
+    // repair does not take, so the depth is checked twice: once to decide, and
+    // once by `check_history` below to refuse.
+    ensure_full_history()?;
+    let log = check_history(is_shallow()?, read_main_log())?;
     let ack = load_ack_file()?;
     let result = audit(&log, &ack)?;
     Ok((result, ack))
@@ -329,6 +474,17 @@ fn checkpoint_ancestry_on_main_is_acknowledged() {
          `<sha>|<reason>` once a human has looked at what it introduced.",
         result.unacknowledged.len(),
         result.unacknowledged.join(", ")
+    );
+
+    assert!(
+        result.stale_acknowledgements.is_empty(),
+        "{} entry/entries in {ACK_FILE} name a commit that is not a \
+         `rbops: phase-NNN checkpoint` in main's ancestry: {}. An entry pointing at \
+         nothing is how the list decays into a comment — an abbreviated SHA, a \
+         mistyped one, or a commit that was rewritten (which AGENTS.md forbids) all \
+         parse fine and would satisfy nothing. Correct the SHA or delete the entry.",
+        result.stale_acknowledgements.len(),
+        result.stale_acknowledgements.join(", ")
     );
 
     for measured in [
@@ -604,4 +760,409 @@ fn checked_in_acknowledgement_file_parses() {
 fn acknowledgement_file_lives_under_tests() {
     assert!(ACK_FILE.starts_with("tests/"), "{ACK_FILE}");
     assert!(repo_root().join(ACK_FILE).exists(), "{ACK_FILE} is missing");
+}
+
+// ---------------------------------------------------------------------------
+// Boundary cases the first pass through this file did not reach.
+// ---------------------------------------------------------------------------
+
+/// One phase, checkpointed twice, both checkpoints must be listed.
+///
+/// This is not hypothetical: `7fdea15` and `074c95e` are both
+/// `rbops: phase-019 checkpoint`, and `32d52ad` and `97b4043` are both
+/// `rbops: phase-004 checkpoint`. A list keyed on the *phase number* would
+/// acknowledge one and silently tolerate the other, so the key is the SHA.
+#[test]
+fn edge_a_phase_checkpointed_twice_needs_both_shas() {
+    let ack = parse_ack_file(concat!(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|phase-019, first checkpoint\n",
+        "wip_merges_on_main=2\n",
+    ))
+    .expect("one of the pair is listed");
+    let log = concat!(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trbops: phase-019 checkpoint 1791227938\n",
+        "cccccccccccccccccccccccccccccccccccccccc\trbops: phase-019 checkpoint 1791198338\n",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tMerge remote-tracking branch \
+         'origin/rbops-wip/phase-019'\n",
+        "dddddddddddddddddddddddddddddddddddddddd\tMerge remote-tracking branch \
+         'origin/rbops-wip/phase-019'\n",
+    );
+    let result = audit(log, &ack).expect("a well-formed fixture log");
+
+    assert_eq!(
+        result.checkpoints.len(),
+        2,
+        "both checkpoints are in the log"
+    );
+    assert_eq!(
+        result.unacknowledged,
+        vec!["cccccccccccccccccccccccccccccccccccccccc".to_string()],
+        "listing one checkpoint of a phase does not acknowledge its sibling"
+    );
+}
+
+/// An abbreviated SHA must not stand in for the commit it names.
+///
+/// The data file holds full SHAs. An entry of `7fdea15` would match nothing in
+/// `git log --format=%H`, and the audit would report the real commit as
+/// unacknowledged while looking like it had been listed — the exact silent
+/// failure the phase exists to prevent.
+#[test]
+fn edge_an_abbreviated_sha_does_not_acknowledge_its_commit() {
+    let ack = parse_ack_file(concat!(
+        "7fdea15|phase-019, tolerated: abbreviated by mistake\n",
+        "wip_merges_on_main=0\n",
+    ))
+    .expect("an abbreviated sha is well formed data");
+    let log = "7fdea15f13a0cc2021c5cc69a65a126879e2d554\trbops: phase-019 checkpoint 1791227938\n";
+    let result = audit(log, &ack).expect("a well-formed fixture log");
+
+    assert!(
+        result.unacknowledged.len() == 1,
+        "the abbreviated entry must not satisfy the full sha, got {:?}",
+        result.unacknowledged
+    );
+    assert_eq!(
+        result.stale_acknowledgements,
+        vec!["7fdea15".to_string()],
+        "the abbreviated entry points at nothing on main"
+    );
+}
+
+/// A reason made only of whitespace is no reason at all.
+#[test]
+fn edge_a_whitespace_only_reason_is_rejected() {
+    for body in ["deadbeef|   \n", "deadbeef|\t\n", "deadbeef|\u{a0}\n"] {
+        assert!(
+            parse_ack_file(&format!("{body}wip_merges_on_main=0\n")).is_err(),
+            "a blank reason must be rejected, got accepted: {body:?}"
+        );
+    }
+    // A reason that merely *contains* a separator is still a reason:
+    // `split_once` splits at the first `|`, so the rest is the reason verbatim.
+    let kept = parse_ack_file("deadbeef|see the other note | here\nwip_merges_on_main=0\n")
+        .expect("a reason may contain a pipe");
+    assert_eq!(kept.entries[0].reason, "see the other note | here");
+}
+
+/// A data file of nothing but comments acknowledges nothing, and says so.
+#[test]
+fn edge_a_comment_only_acknowledgement_file_is_rejected() {
+    let err = parse_ack_file("# every one of them is fine\n# really\n")
+        .expect_err("comments are not acknowledgements");
+    assert!(err.contains("wip_merges_on_main"), "got: {err}");
+
+    // And with the directive supplied, it parses but acknowledges nothing — which
+    // the real audit must notice rather than report as a clean main.
+    let ack = parse_ack_file("# nothing here\nwip_merges_on_main=0\n")
+        .expect("a comment-only file with the pinned count parses");
+    assert!(ack.entries.is_empty());
+
+    let log = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trbops: phase-016 checkpoint 1791156132\n";
+    let result = audit(log, &ack).expect("a well-formed fixture log");
+    assert_eq!(
+        result.unacknowledged.len(),
+        1,
+        "an empty list acknowledges nothing"
+    );
+    assert_eq!(result.stale_acknowledgements, Vec::<String>::new());
+}
+
+/// A pinned merge count must be a count, not a number-shaped string.
+#[test]
+fn edge_the_pinned_merge_count_must_be_a_number() {
+    for bad in [
+        "wip_merges_on_main=-1\n",
+        "wip_merges_on_main=6x\n",
+        "wip_merges_on_main=\n",
+    ] {
+        let err = parse_ack_file(bad).expect_err("a bad count is not a count");
+        assert!(
+            err.contains("not a number"),
+            "expected a not-a-number error for {bad:?}, got: {err}"
+        );
+    }
+    // 0 is a legitimate count: main with no wip merges is exactly the state
+    // dispatch.sh's `git merge --squash` resume leaves behind.
+    assert_eq!(
+        parse_ack_file("wip_merges_on_main=0\n")
+            .expect("zero is a count")
+            .wip_merges_on_main,
+        0
+    );
+}
+
+/// A CRLF checkout must not make every entry look like it has a reason of `\r`.
+///
+/// The parser is what is under test here, so the fixture is written by hand
+/// rather than read off disk. Whether the *checked-in* file arrives with CRLF
+/// is a property of the checkouter's EOL normalisation (`core.autocrlf`), not
+/// of this parser, and asserting on it would couple the audit to how somebody
+/// cloned the repository — a test that fails on a Windows clone for a reason no
+/// code can fix. `lines()` plus `trim` make the two forms identical; that is
+/// the whole claim.
+#[test]
+fn edge_crlf_line_endings_in_the_acknowledgement_file_parse() {
+    let lf = parse_ack_file("deadbeef|tolerated\nwip_merges_on_main=0\n").expect("lf parses");
+    let crlf = parse_ack_file("deadbeef|tolerated\r\nwip_merges_on_main=0\r\n")
+        .expect("crlf parses the same as lf");
+    assert_eq!(
+        lf, crlf,
+        "a \\r must not become part of the sha or the reason"
+    );
+
+    // Every entry, not just the sha: a `\r` that survived `trim` would sit at
+    // the end of the reason and make two different files compare unequal.
+    assert_eq!(crlf.entries[0].sha, "deadbeef");
+    assert_eq!(crlf.entries[0].reason, "tolerated");
+    assert_eq!(crlf.wip_merges_on_main, 0);
+}
+
+/// Subjects the audit must never mistake for a checkpoint, whatever they contain.
+///
+/// The sha/subject split is a tab, so a subject containing spaces, quotes or a
+/// pipe — all of which the acknowledgement file itself uses — stays intact.
+#[test]
+fn edge_subject_content_after_the_marker_is_ignored() {
+    for subject in [
+        "rbops: phase-019 checkpoint 1791227938",
+        "rbops: phase-019 checkpoint\tsubject with a tab",
+        "rbops: phase-019 checkpoint |a pipe| and \"quotes\"",
+        "rbops: phase-019 checkpoint",
+    ] {
+        let log = format!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t{subject}\n");
+        let ack = parse_ack_file("wip_merges_on_main=0\n").expect("a bare directive file");
+        let result = audit(&log, &ack).expect("a well-formed fixture log");
+        assert_eq!(
+            result.checkpoints.len(),
+            1,
+            "should still select: {subject:?}"
+        );
+    }
+}
+
+/// An `=` inside a reason is part of the reason, not a directive.
+///
+/// The separator decides what a line is, not the `=`. Reading `=` first meant
+/// `deadbeef|a=b` was tried as `key=value`, failed as an "unknown directive",
+/// and could not be recorded at all — so the exact entries that need the most
+/// careful prose are the ones the data file refuses.
+#[test]
+fn edge_an_equals_sign_in_a_reason_is_not_read_as_a_directive() {
+    let ack = parse_ack_file(concat!(
+        "deadbeef|phase-019, tolerated: the old gate=true is what shipped\n",
+        "wip_merges_on_main=0\n",
+    ))
+    .expect("an `=` in a reason must not turn the line into a directive");
+    assert_eq!(ack.entries.len(), 1, "the entry survived");
+    assert_eq!(ack.entries[0].sha, "deadbeef");
+    assert_eq!(
+        ack.entries[0].reason, "phase-019, tolerated: the old gate=true is what shipped",
+        "the reason is kept verbatim, `=` and all"
+    );
+    assert_eq!(
+        ack.wip_merges_on_main, 0,
+        "the directive still parsed as a directive"
+    );
+
+    // A reason that quotes the directive by name, is still a reason — and the
+    // real directive on the next line is not mistaken for a duplicate.
+    let ack = parse_ack_file(concat!(
+        "deadbeef|wip_merges_on_main=99 was the old pinned value\n",
+        "wip_merges_on_main=1\n",
+    ))
+    .expect("a reason quoting a directive is still a reason");
+    assert_eq!(ack.entries.len(), 1);
+    assert_eq!(
+        ack.entries[0].reason,
+        "wip_merges_on_main=99 was the old pinned value"
+    );
+    assert_eq!(ack.wip_merges_on_main, 1, "the real directive sets the pin");
+
+    // A leading `=` still makes a line a directive candidate, and an unknown one
+    // is still rejected: the rule is about ORDER, not about refusing `=` lines.
+    assert!(parse_ack_file("wip_merge_on_main=0\n")
+        .expect_err("a misspelled directive must not be ignored")
+        .contains("unknown directive"));
+    assert!(parse_ack_file("=0\n")
+        .expect_err("an empty directive name is not a directive")
+        .contains("unknown directive"));
+
+    // And the sha side is untouched: a `|` before an `=` means entry, whatever
+    // the reason is.
+    let ack = parse_ack_file("deadbeef|a=b=c\nwip_merges_on_main=0\n")
+        .expect("only the first `=` would ever have been a separator");
+    assert_eq!(ack.entries[0].reason, "a=b=c");
+}
+
+/// A shallow clone is completed, and a repair that does not take is a refusal.
+///
+/// The depth-1 log is the premise: measured as-is it audits clean, which is why
+/// the audit may never be handed one. Everything below drives [`ensure_history`]
+/// from fixtures, so the "refuses" half is asserted without a network.
+#[test]
+fn edge_a_shallow_clone_is_completed_rather_than_audited_short() {
+    let ack = parse_ack_file("wip_merges_on_main=0\n").expect("a bare directive file");
+    let truncated: Result<String, String> =
+        Ok("dddddddddddddddddddddddddddddddddddddddd\tci: add cargo fmt --check\n".to_string());
+    assert!(
+        audit(&truncated.clone().expect("a short log still parses"), &ack)
+            .expect("a short log still parses")
+            .unacknowledged
+            .is_empty(),
+        "premise: the depth-1 log the audit must refuse audits as a clean main"
+    );
+
+    // Complete already: no repair is attempted, so nothing is invented.
+    let repairs = Cell::new(0usize);
+    ensure_history(&|| Ok(false), &|| {
+        repairs.set(repairs.get() + 1);
+        Ok(())
+    })
+    .expect("a complete clone is audit-ready");
+    assert_eq!(repairs.get(), 0, "a complete clone must not be 'repaired'");
+
+    // Shallow and the repair fails: an error, and git's own reason survives it.
+    let err = ensure_history(&|| Ok(true), &|| {
+        Err("fatal: 'origin' does not appear to be a git repository".into())
+    })
+    .expect_err("a shallow clone that cannot be completed is not auditable");
+    assert!(
+        err.contains("shallow"),
+        "the refusal must say the history was short, got: {err}"
+    );
+    assert!(
+        err.contains("truncated"),
+        "and what refusing to do protects against, got: {err}"
+    );
+    assert!(
+        err.contains("does not appear to be a git repository"),
+        "the underlying git reason must not be swallowed, got: {err}"
+    );
+
+    // Shallow, the repair runs, and the clone is STILL short: refused, not
+    // audited. This is the case that would otherwise be the false pass.
+    let attempts = Cell::new(0usize);
+    let err = ensure_history(&|| Ok(true), &|| {
+        attempts.set(attempts.get() + 1);
+        Ok(())
+    })
+    .expect_err("a clone that is still shallow reads as a clean one, so it is refused");
+    assert_eq!(
+        attempts.get(),
+        1,
+        "the repair is attempted exactly once, not retried"
+    );
+    assert!(err.contains("truncated"), "got: {err}");
+
+    // Shallow, the repair runs, and the clone is now complete: audited.
+    let reads = Cell::new(0usize);
+    ensure_history(
+        &|| {
+            reads.set(reads.get() + 1);
+            Ok(reads.get() == 1)
+        },
+        &|| Ok(()),
+    )
+    .expect("a clone that was completed is audit-ready");
+    assert_eq!(
+        reads.get(),
+        2,
+        "the depth is re-read after the repair, not assumed"
+    );
+
+    // An unreadable depth is an error, not a `false` that would launder a
+    // truncated log into a clean history.
+    assert!(
+        ensure_history(&|| Err("not a repository".into()), &|| Ok(()))
+            .expect_err("an unknown depth is not a depth of zero")
+            .contains("not a repository")
+    );
+
+    // And the real accessor: this checkout is complete, so nothing is fetched.
+    ensure_full_history().expect("this checkout's history is complete, so no fetch is needed");
+}
+
+/// The branch the audit reads is `main`, and only `main`.
+///
+/// A pull-request CI checkout is a detached merge ref with no local `main`, so
+/// the audit reads the remote-tracking `origin/main` instead. That is the same
+/// branch, not a substitute — and anything else would be the audit measuring
+/// whatever ref it happened to be sitting on.
+#[test]
+fn edge_the_audited_ref_resolves_to_main_and_nothing_else() {
+    // Same precondition the audit itself has: a full history, or a refusal.
+    ensure_full_history().expect("this clone's history is complete, or was completed");
+
+    let main = resolve_main().expect("this clone has a main to audit");
+    assert!(
+        main == "refs/heads/main" || main == "refs/remotes/origin/main",
+        "the audit must read main, got {main:?}"
+    );
+
+    let head = git(&["rev-parse", main.as_str()]).expect("the resolved ref resolves");
+    assert_eq!(
+        head.trim().len(),
+        40,
+        "a full sha, not a partial ref: {:?}",
+        head.trim()
+    );
+
+    // And it really is main's history, not some other branch: the six measured
+    // checkpoint commits are reachable from it.
+    let log = git(&["log", "--format=%H%x09%s", main.as_str()]).expect("main logs");
+    for measured in [
+        "7fdea15f13a0cc2021c5cc69a65a126879e2d554",
+        "97b4043cd92e7b2b8a7511a6600b8e73ba9d2596",
+    ] {
+        assert!(
+            log.lines().any(|l| l.starts_with(measured)),
+            "{measured} must be reachable from the audited ref {main:?}"
+        );
+    }
+}
+
+/// An acknowledgement that points at nothing is a list decaying into a comment.
+///
+/// This is the assertion `edge_an_abbreviated_sha_does_not_acknowledge_its_commit`
+/// proves is computed, made fatal in the audit itself: junk entries parse, so
+/// nothing but an assertion stops them accumulating in the checked-in file.
+#[test]
+fn edge_an_acknowledgement_that_points_at_nothing_is_reported_as_stale() {
+    let ack = parse_ack_file(concat!(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|tolerated: real checkpoint\n",
+        "deadbeef|tolerated: typo, or a commit that was rewritten\n",
+        "7fdea15|tolerated: abbreviated by mistake\n",
+        "wip_merges_on_main=0\n",
+    ))
+    .expect("junk entries are well-formed data, which is the problem");
+    assert_eq!(
+        ack.entries.len(),
+        3,
+        "premise: an abbreviated sha, a typo sha and a real sha all parse"
+    );
+
+    let log = concat!(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trbops: phase-016 checkpoint 1791156132\n",
+        "7fdea15f13a0cc2021c5cc69a65a126879e2d554\trbops: phase-019 checkpoint 1791227938\n",
+    );
+    let result = audit(log, &ack).expect("a well-formed fixture log");
+
+    assert_eq!(
+        result.unacknowledged,
+        vec!["7fdea15f13a0cc2021c5cc69a65a126879e2d554".to_string()],
+        "the abbreviated entry does not acknowledge its commit, so the commit is \
+         reported as unacknowledged AND the entry is reported as stale — neither \
+         reading is a pass"
+    );
+    assert_eq!(
+        result.stale_acknowledgements,
+        vec!["deadbeef".to_string(), "7fdea15".to_string()],
+        "both junk entries are reported, and neither is silently tolerated"
+    );
+    let summary = describe(&result, &ack);
+    assert!(
+        summary.contains("STALE") && summary.contains("deadbeef"),
+        "the summary must name the stale entries, got: {summary}"
+    );
 }
