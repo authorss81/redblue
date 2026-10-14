@@ -85,6 +85,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("e26659d49097210a2d1ab8abecc97d61698afebe", "resume phase-048: adopt preserved work. Carries unreviewed code (+1223/-16, 8 files, +120 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
     ("09dd1020443e166a765991815c75c024a5ccd45b", "resume phase-049: adopt preserved work. Carries unreviewed code (+1437/-173, 35 files, +263 lines under src/) - the widest file count on this list. Deliberately not rewritten."),
     ("10f97506426673e83119b6e0ec21f6754bddf75c", "resume phase-050: adopt preserved work. Carries unreviewed code (+5410/-126, 15 files, +596 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
+    ("48d5bf0183fac60b08e50633aab0aee1b8e846d9", "resume phase-084: adopt preserved work. Carries unreviewed code (+820/-0, 5 files, none under src/ - the root opencode.json, tests/agent_permissions_test.rs, this file's own acknowledgement line, and the phase's REPORT.md and FINDINGS.md). It changes what opencode resolves for `--agent reviewer`, so the reviewer must read it. Deliberately not rewritten. Replaces entries for 05c77d1, ffa1f29, d1f21633 and 55f71878: commits of the same subject from earlier deliveries of this phase, none of which is in this history (`git merge-base --is-ancestor` exits 1 for each)."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -168,6 +169,10 @@ const MEASURED: &[(&str, &str)] = &[
     (
         "10f97506426673e83119b6e0ec21f6754bddf75c",
         "resume phase-050",
+    ),
+    (
+        "48d5bf0183fac60b08e50633aab0aee1b8e846d9",
+        "resume phase-084",
     ),
     (
         "3fbf7396de1d2355267ddcfda9a40a00277a4687",
