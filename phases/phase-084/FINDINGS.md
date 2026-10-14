@@ -54,12 +54,17 @@ The sequence, recorded so the pattern is visible:
 | 1 | `55f71878d905105dfbdd715365f3f74aa6d88bb5` | first recorded |
 | 2 | `d1f21633394cc27b5bcd35ec73bc4a14a16e5b3f` | repointed; `55f71878` went stale |
 | 3 | `ffa1f29ab36c05f452eca84b69f93b039c295abd` | repointed; `d1f21633` went stale |
+| 4 | `05c77d1a0e2860b1970b4cee93577fefd462aa02` | repointed again; `ffa1f29` went stale |
 
 At every delivery `cargo test` was red *before any phase code ran*: once because
 the new SHA was unlisted, and (from delivery 2 on) simultaneously because the
 previous SHA was stale. The entry at `tests/unreviewed_work_ack_test.rs:88` now
-names the SHA this history actually contains, and its reason records both SHAs
-it replaces.
+names the SHA this history actually contains (`05c77d1…`, measured this run with
+`git merge-base --is-ancestor ffa1f29 HEAD` → exit 1), its reason records the
+three SHAs it replaces, and the same SHA was added to `MEASURED`, which is the
+list that file requires to name every commit it was measured on. Delivery 4 is
+the fourth consecutive observation of the same defect: this is now a measured
+pattern, not a prediction.
 
 **The fix is not another one-line repair.** Either the resume commit's subject
 should avoid the `resume phase-` / `checkpoint` shapes the selector matches, or
