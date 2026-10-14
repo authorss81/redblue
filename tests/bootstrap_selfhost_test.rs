@@ -320,6 +320,226 @@ fn edge_source_shapes_are_byte_identical() {
     );
 }
 
+/// `nothing` heads an expression, and a stage-2 table that forgets it writes a
+/// *different program* rather than reporting a difference.
+///
+/// `Parser::kind_starts_expression` (`src/parser.rs`) and `is_expression_start`
+/// (`bootstrap/compiler.rb`) are the same table and have to be answered by the
+/// same entries. `Nothing` was in the Rust one and missing from the Redblue one,
+/// and the result was silence on both sides: `say xs at nothing` was one `say`
+/// of one `index` under stage 1 — 213 bytes — and a `say xs` followed by two
+/// stray statements under stage 2 — 246 bytes. Neither run reported anything,
+/// because each engine produced a file, and no corpus program wrote `at nothing`
+/// in it, so nothing compared them.
+///
+/// That is why these are named rather than left to the corpus walk. A token the
+/// table omits does not fail a compilation; it compiles to another program, and
+/// the only evidence that says so is the bytes.
+///
+/// Every program below was written to fail on the pre-fix stage 2: the first two
+/// emitted a different file, the third was refused outright. The last two are the
+/// controls — the bracketed and pre-bound spellings, which never consult the
+/// table and were already byte-identical. They are here so that a future change
+/// to `nothing`'s handling is caught in the arm it actually moved.
+#[test]
+fn edge_nothing_heads_an_expression_on_both_engines() {
+    // The worded index, the line the finding names: `at` followed by `nothing`.
+    // Stage 1 parses it as one `index` whose operand is `nothing`; the pre-fix
+    // stage 2 stopped the postfix loop at `at` and made two statements of the
+    // rest.
+    assert_identical(
+        "edge_nothing_as_a_worded_index_operand",
+        "set xs to [1, 2, 3]\nsay xs at nothing\n",
+    );
+
+    // The same operand behind a `give back`. This is the second use of the table
+    // and it was wrong in the same way: without `nothing`, `give back` read as
+    // the valueless form, left `nothing` to the statement loop, and the function
+    // gained a statement it was never written with.
+    assert_identical(
+        "edge_nothing_as_a_give_back_value",
+        "to nothing_at_all()\n    give back nothing\nend\nsay nothing_at_all()\n",
+    );
+
+    // The third use: the operand check behind `length of`. Here the pre-fix
+    // stage 2 refused the program rather than compiling it differently, which is
+    // the better of the two failures and still a disagreement about whether an
+    // expression starts there.
+    assert_identical(
+        "edge_nothing_as_a_worded_length_operand",
+        "say length of nothing\n",
+    );
+
+    // Control: the bracketed index reads its operand through `parse_expression`
+    // and never asked the table, so it was identical before the fix and must stay
+    // identical. If this one ever differs, the change is somewhere else.
+    assert_identical(
+        "edge_nothing_as_a_bracketed_index_operand",
+        "set xs to [1, 2, 3]\nsay xs[nothing]\n",
+    );
+
+    // Control: the same operand through a name bound by `set`, which is a
+    // `parse_expression` call that also never asks the table.
+    assert_identical(
+        "edge_nothing_through_a_name_bound_by_set",
+        "set xs to [1, 2, 3]\nsay length of xs\nset n to nothing\nsay xs at n\n",
+    );
+}
+
+/// **The worded index and the worded length do not swallow a comparison, and
+/// both engines agree about that.**
+///
+/// This is the round-2 blocker. `xs at 0 is 10` and `length of xs is 3` are
+/// ordinary programs, and both engines used to read them as `xs at (0 is 10)`
+/// and `length(xs is 3)` — an index by a boolean and a measurement of a
+/// comparison, so both failed at run time while `xs[0] is 10` and `length(xs) is
+/// 3` answered. Stage 1 and stage 2 agreed about *that*, so this class of defect
+/// is invisible to a byte-identity test: two engines making the same mistake
+/// still produce the same bytes.
+///
+/// So the property is pinned directly — the worded spelling and the spelling it
+/// stands for must be one program — and the operand level is pinned on both
+/// sides: the comparison must fall *outside* the operand, and the arithmetic must
+/// stay inside it. The arithmetic rows were byte-identical before the fix and are
+/// here so that tightening the level cannot quietly take `at n + 1` with it.
+#[test]
+fn edge_a_comparison_after_a_worded_index_is_the_same_program_on_both_engines() {
+    // The defect: the comparison belongs to the statement, not to the operand.
+    assert_identical(
+        "edge_worded_index_then_a_comparison",
+        "set xs to [10, 20, 30]\nsay xs at 0 is 10\n",
+    );
+    assert_identical(
+        "edge_worded_index_then_a_worded_comparison",
+        "set xs to [10, 20, 30]\nsay xs at 0 is greater than 5\n",
+    );
+    assert_identical(
+        "edge_worded_index_then_a_conjunction",
+        "set xs to [10, 20, 30]\nsay xs at 1 is 20 and xs at 2 is 30\n",
+    );
+    assert_identical(
+        "edge_worded_index_then_a_disjunction",
+        "set xs to [10, 20, 30]\nsay xs at 0 is 99 or xs at 2 is 30\n",
+    );
+    assert_identical(
+        "edge_worded_length_then_a_comparison",
+        "set xs to [1, 2, 3]\nsay length of xs is 3\n",
+    );
+
+    // The controls: arithmetic stays in the operand, and the bracket and call
+    // spellings never consulted the level at all.
+    assert_identical(
+        "edge_worded_index_with_an_arithmetic_operand",
+        "set xs to [10, 20, 30]\nset n to 1\nsay xs at n + 1\n",
+    );
+    assert_identical(
+        "edge_worded_length_with_an_arithmetic_operand",
+        "say length of \"ab\" + \"cd\"\n",
+    );
+    assert_identical(
+        "edge_worded_index_against_the_bracket_spelling",
+        "set xs to [10, 20, 30]\nsay xs[0] is 10\n",
+    );
+
+    // And the disagreement has to be *run-time* about the comparison rather than
+    // about the index, so the operand is pinned as the element and not as the
+    // answer to a question. Run stage 1's file: `yes` is the only answer that
+    // says `xs[0]` was read and compared.
+    let name = "edge_worded_index_then_a_comparison";
+    let run = stage2(name, "set xs to [10, 20, 30]\nsay xs at 0 is 10\n");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("vm")
+        .arg(scratch(&format!("{name}.rbc")))
+        .output()
+        .expect("the rb binary runs the compiled file");
+    assert!(
+        output.status.success(),
+        "stage 2's own file does not run: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "yes",
+        "`xs at 0 is 10` must read the element and compare it, not index by the answer"
+    );
+    assert!(run.succeeded, "stage 2 refused the program: {}", run.stderr);
+}
+
+/// **A construct stage 2 cannot compile is refused, never silently mistranslated.
+///
+/// `might fail <call>` is compiled by stage 1 and refused by stage 2 — a
+/// pre-existing gap (FINDINGS.md § 4) — and the tables that decide whether a
+/// token may head an expression touched it. The table said yes while
+/// `parse_primary` had no arm for it, so `xs at might fail f()` became an index
+/// whose operand was a guard under stage 1 and fell off the end of the primary
+/// chain under stage 2.
+///
+/// The property worth pinning is not that stage 2 supports the guard — it does
+/// not — but that the disagreement is a **refusal**, and that neither engine
+/// invents a program out of a token it cannot read. The failure this test exists
+/// to prevent is a stage 2 that sees a token it cannot compile and carries on,
+/// writing a file that differs from stage 1's in bytes nobody looks at.
+#[test]
+fn edge_a_construct_stage_two_cannot_compile_is_refused_rather_than_mistranslated() {
+    let source =
+        "to f()\n    give back might fail g()\nend\nto g()\n    give back 1\nend\nsay f()\n";
+
+    // Stage 1 compiles and runs it: the guard is a language construct.
+    assert!(
+        redblue::compile_source(source).is_ok(),
+        "stage 1 must compile `might fail`, or the disagreement this test pins is not there"
+    );
+
+    // Stage 2 refuses it, and says which construct it cannot read. `parse_primary`
+    // has a deliberate arm for the guard rather than letting it fall through to
+    // `unexpected token mightfail`, which names the symptom rather than the gap.
+    let run = stage2("edge_might_fail_behind_a_give_back", source);
+    assert!(
+        !run.succeeded,
+        "stage 2 compiled `might fail`, which parse_primary refuses to read; a \
+         compiler that carries on past a token it does not understand writes a file \
+         that differs from stage 1's in bytes nobody looks at"
+    );
+    assert!(
+        run.bytes.is_empty(),
+        "stage 2 left a {} byte .rbc for the program it refused",
+        run.bytes.len()
+    );
+    assert!(
+        run.stderr.contains("might fail"),
+        "stage 2 refused the program without naming the construct:\n{}",
+        run.stderr
+    );
+
+    // And the *worded* form, where the two tables used to be consulted by code
+    // this phase added. `xs at might fail f()` is not an index: a worded operand
+    // is read at level 3 and `might fail` is not a primary at that level, so `at`
+    // is the name it has always been — and both engines agree on that, stage 1 by
+    // refusing the unbound `at` and stage 2 by refusing the guard. Neither one
+    // compiles it, which is the honest answer and the one a reader can act on.
+    let worded = "to f()\n    give back 1\nend\nset xs to [1, 2, 3]\nsay xs at might fail f()\n";
+    match redblue::run_source(worded) {
+        Err(redblue::Error::Analyzer(message, _)) => assert!(
+            message.contains("'at'"),
+            "`at` is an ordinary name again, so this is the unbound-name refusal: {}",
+            message
+        ),
+        other => panic!(
+            "a worded operand is read at level 3, so `at` is the variable it has always been; \
+             stage 1 gave {:?}",
+            other
+        ),
+    }
+    let run = stage2("edge_might_fail_as_a_worded_index_operand", worded);
+    assert!(
+        !run.succeeded && run.bytes.is_empty(),
+        "stage 2 must refuse `xs at might fail f()` rather than compile an index: \
+         succeeded={} bytes={}",
+        run.succeeded,
+        run.bytes.len()
+    );
+}
+
 /// A stage-2 compiler that cannot fail is not a compiler: it writes a file for
 /// every input, and the file is wrong for the inputs it did not understand.
 ///
@@ -431,16 +651,16 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
     // missing without anything noticing, because `refused == 9` and
     // `checked >= 300` are both still true afterwards.
     assert_eq!(
-        checked, 306,
+        checked, 314,
         "only {checked} corpus programs were compared; stage 2 is byte-identical on \
-         every program of the corpus the frontend accepts, which is 306 of the 315 in \
+         every program of the corpus the frontend accepts, which is 314 of the 323 in \
          the families above — the other 9 are refused by the frontend, and the 46 in \
          `malformed` are refused too"
     );
     assert_eq!(
         checked + refused,
-        315,
-        "the 15 families above hold 315 programs between them; this walk saw \
+        323,
+        "the 15 families above hold 323 programs between them; this walk saw \
          {checked} compared and {refused} refused, which is not all of them — a file \
          has been added or removed and the counts below still hold"
     );
@@ -931,7 +1151,7 @@ fn edge_the_bytecode_vm_reports_a_bad_invocation_as_a_failure() {
 /// The corpus here is a *sample* of each family, so that the shapes a stage-2
 /// run is most likely to get wrong are named one by one.
 /// `edge_stage3_is_byte_identical_on_every_corpus_program` is the same comparison
-/// over all 306, and `edge_stage3_is_byte_identical_on_the_awkward_shapes` is it
+/// over all 314, and `edge_stage3_is_byte_identical_on_the_awkward_shapes` is it
 /// over the statement shapes the corpus families do not all reach.
 ///
 /// `name` is the scratch file's stem, so it must be flat — a name carrying the
@@ -1143,7 +1363,7 @@ fn edge_stage3_is_byte_identical_on_the_awkward_shapes() {
 /// the tree-walker executing the compiler. This one makes it with the bytecode VM
 /// executing the compiler, which is the only execution path S3 has: a stage 2
 /// that is byte-identical under one engine and wrong under the other is not a
-/// compiler, it is a coincidence. 306 programs, about 23 seconds.
+/// compiler, it is a coincidence. 312 programs, about 24 seconds.
 #[test]
 fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
@@ -1166,8 +1386,8 @@ fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     // saw the whole corpus rather than a subset of it.
     let total = entries.len();
     assert_eq!(
-        total, 315,
-        "the corpus holds 315 programs outside `malformed`, and this walk found {total}; \
+        total, 323,
+        "the corpus holds 323 programs outside `malformed`, and this walk found {total}; \
          a family has been added or removed and the counts below are not the whole \
          corpus any more"
     );
@@ -1213,9 +1433,9 @@ fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     // program the frontend accepts is byte-identical through the bytecode path.
     // A floor cannot carry that claim — only the count itself can.
     assert_eq!(
-        checked, 306,
+        checked, 314,
         "{checked} corpus programs were compared through the bytecode path, not the \
-         306 of the 315 outside `malformed` that the frontend accepts; stage 2 run \
+         314 of the 323 outside `malformed` that the frontend accepts; stage 2 run \
          as bytecode is byte-identical on every one of them"
     );
     assert_eq!(

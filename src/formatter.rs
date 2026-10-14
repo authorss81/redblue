@@ -748,8 +748,12 @@ impl Formatter {
                 self.write(method);
                 self.write_arguments(args);
             }
-            // `object at index` is not syntax the parser accepts; only the
-            // bracketed form reads back as an index.
+            // `object at index` is the spelling SPEC.md § List Operations
+            // documents, and the parser reads both it and `object[index]` as
+            // one `Expr::Index`. The bracketed form is written back because it
+            // is the one that is also valid on a line whose expression has not
+            // been fully parenthesised — canonicalising to one spelling is the
+            // formatter's job, and the two are the same operation.
             Expr::Index { object, index } => {
                 self.format_expression_at(object, PRECEDENCE_PRIMARY);
                 self.write("[");

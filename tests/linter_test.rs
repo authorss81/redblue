@@ -84,7 +84,13 @@ fn a_variable_that_is_read_is_not_reported() {
 
 #[test]
 fn function_parameter_is_not_a_false_positive() {
-    let source = "to greet(name)\n    say \"hello\"\nend\n\ngreet with \"world\"\n";
+    // `greet("world")`, not `greet with "world"`: there is no `with` syntax, so
+    // the old fixture was a program `rb` cannot run — the analyzer refused it
+    // with `Unknown variable 'with'`. `rb lint` used to stay silent about that
+    // only because it stopped at the syntax tree; now it reports a file the
+    // analyzer refuses, which is the point. The parameter is still unread, so
+    // the assertion this test exists for is unchanged.
+    let source = "to greet(name)\n    say \"hello\"\nend\n\ngreet(\"world\")\n";
     assert!(
         every_message(source).is_empty(),
         "an unread function parameter is part of the signature, not an unused variable: {:?}",
@@ -248,10 +254,22 @@ fn reassignment_inside_a_loop_is_not_shadowing() {
 
 #[test]
 fn edge_a_parameter_that_hides_an_outer_variable_is_reported() {
-    let source = "set value to 1\nto show(value)\n    say value\nend\nshow with 2\nsay value\n";
+    // The call is written `show(2)`, not `show with 2`: there is no `with`
+    // syntax, so the latter parsed as three expressions and made this a program
+    // `rb` cannot run. It was already one — `rb lint` simply never asked, and now
+    // it does — so the test would have gone on asserting a rule about a parameter
+    // it could never reach. The rule under test is the warning, and a fixture
+    // that cannot run tests nothing.
+    let source = "set value to 1\nto show(value)\n    say value\nend\nshow(2)\nsay value\n";
     assert_eq!(
         warnings(source),
         vec!["Parameter 'value' shadows an outer variable"]
+    );
+    assert_eq!(
+        errors(source),
+        Vec::<String>::new(),
+        "the fixture must be a program rb can run: {:?}",
+        errors(source)
     );
 }
 
@@ -770,5 +788,137 @@ fn edge_rb_lint_prints_the_line_of_a_syntax_error_and_exits_nonzero() {
     assert!(
         stderr.contains("line 4"),
         "the syntax error must name the line it is on: {stderr}"
+    );
+}
+
+/// `rb lint` and `rb run` must agree about whether a file runs, **whatever else
+/// the linter has to say about it**.
+///
+/// `lint()` used to ask the analyzer whether the file ran only when the tree walk
+/// had produced neither an error nor a warning. That made the pairing conditional
+/// on the file being otherwise clean, which is the one condition under which a
+/// reader is most likely to act on the verdict: `set u to unknown_name` with `u`
+/// unread is dirty, so the analyzer was never asked, `rb lint` printed one
+/// warning and exited **0**, and `rb run` refused the same file. The diagnostic
+/// disappeared the moment the file had a second, unrelated complaint.
+///
+/// So the test is a *pair* — the same source through both tools — and it uses a
+/// source that triggers a warning and an analyzer refusal at once. A source that
+/// triggers only one of them passes under the old shape too, which is exactly
+/// why the original fixture did not catch this.
+#[test]
+fn edge_a_warning_does_not_hide_the_analyzer_s_refusal() {
+    // `u` is bound and never read; `unknown_name` is read and never bound. The
+    // warning and the refusal are independent: fixing either one leaves the
+    // other, so neither can be argued away.
+    let source = "set u to unknown_name\n";
+
+    // The half that was true before: the file does not run.
+    let (lint_errors, lint_warnings) = lint(source);
+    assert_eq!(
+        lint_warnings
+            .iter()
+            .map(|w| w.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Unused variable: 'u'"],
+        "the linter's own finding must survive the analyzer's refusal: it did \
+         under the old shape too, and it must not be traded away for it"
+    );
+    assert_eq!(
+        lint_warnings[0].line, 1,
+        "the warning must still point at the `set` that introduced `u`"
+    );
+
+    // The half that was false before: the analyzer's refusal is reported, so
+    // `rb lint` fails on a file `rb run` refuses.
+    assert!(
+        lint_errors
+            .iter()
+            .any(|e| e.message.starts_with("Analysis error:")),
+        "a warning must not suppress the analyzer's refusal, so a file that \
+         cannot run exits 0 when it also has a warning; got {lint_errors:?}"
+    );
+
+    // And the pairing, end to end, through the binary: the two tools must reach
+    // the same verdict on this file.
+    let (code, stderr) = lint_on_the_binary(source);
+    assert_eq!(
+        code, 1,
+        "rb lint exited 0 on a file rb run refuses, because the file also had \
+         a warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("Unused variable: 'u'") && stderr.contains("Analysis error:"),
+        "both findings must reach the reader, not one of them: {stderr}"
+    );
+}
+
+/// The two entry points are one entry point. `rb lint` and `rb diagnostics`
+/// answer the same question — what is wrong with this file — about the same
+/// source, and they disagreed.
+///
+/// `lint_program` — the one `rb diagnostics` calls, because an editor has the
+/// tree already and must not lex and parse the file twice — walked the tree and
+/// stopped. The analyzer's verdict lived only in `lint`, so on every file the
+/// analyzer refuses the two tools reported different things: `rb lint` gave the
+/// linter's findings *and* the refusal, `rb diagnostics` gave the refusal alone
+/// and threw the findings away. A reader with the file open in an editor and the
+/// same file open in a terminal was being told two different things about it.
+///
+/// Asserted through both APIs and through the binary, because the divergence was
+/// between entry points rather than inside either of them: a fix applied to one
+/// of them alone is the shape this test exists to catch.
+#[test]
+fn edge_the_two_lint_entry_points_report_the_same_file_the_same_way() {
+    // A file with all three things at once: a warning the tree walk finds, a name
+    // the analyzer refuses, and nothing the parser objects to.
+    let source = "set u to unknown_name\n";
+
+    let (lint_errors, lint_warnings) = lint(source);
+    let from_diagnostics: Vec<(String, String)> = redblue::lsp::diagnostics(source)
+        .into_iter()
+        .map(|d| (format!("{:?}", d.severity), d.message))
+        .collect();
+
+    let from_lint: Vec<(String, String)> = lint_errors
+        .iter()
+        .map(|e| ("Error".to_string(), e.message.clone()))
+        .chain(
+            lint_warnings
+                .iter()
+                .map(|w| ("Warning".to_string(), w.message.clone())),
+        )
+        .collect();
+
+    assert_eq!(
+        from_diagnostics, from_lint,
+        "`rb diagnostics` and `rb lint` must agree about the same source"
+    );
+
+    // Stated rather than left as "they match": the analyzer's verdict is in both,
+    // and so is the linter's own finding, which is what the early return used to
+    // delete from the editor's answer.
+    assert!(
+        from_lint
+            .iter()
+            .any(|(_, message)| message.starts_with("Analysis error:")),
+        "the analyzer's refusal must reach both entry points, got {from_lint:?}"
+    );
+    assert!(
+        from_lint
+            .iter()
+            .any(|(_, message)| message == "Unused variable: 'u'"),
+        "the linter's own finding must survive into both, got {from_lint:?}"
+    );
+
+    // And the binary, which is what a reader actually types.
+    let (code, stderr) = lint_on_the_binary(source);
+    assert_eq!(
+        code, 1,
+        "`rb lint` must fail on a file `rb run` refuses: {stderr}"
+    );
+    assert!(
+        stderr.contains("Unused variable: 'u'") && stderr.contains("Analysis error:"),
+        "both findings must reach the reader, not one of them: {stderr}"
     );
 }

@@ -390,7 +390,19 @@ primary          = identifier
                  | list_literal
                  | record_literal
                  | function_literal
+                 | 'length' 'of' additive                  // worded length
 ```
+
+`length` and `at` are ordinary identifiers. `length 'of'` is the worded form
+only as the two words together, and `postfix 'at' additive` is the worded index
+only when an operand follows `at` on the same line — otherwise `at` is the name
+it has always been.
+
+The operand of both is an **additive** expression (§ 5.5), not a whole
+expression. That is what makes `length of xs is 3` and `length(xs) is 3` the same
+program rather than one that measures a comparison, and it is the only difference
+from the bracketed and called spellings, which take an `expression` because a
+closing `]` or `)` already ends them.
 
 ### 5.2 Postfix Expressions
 
@@ -399,8 +411,23 @@ postfix          = primary
                  | postfix '.' identifier              // property access
                  | postfix '(' [ argument { ',' argument } ] ')'  // function call
                  | postfix '[' expression ']'         // indexing
-                 | postfix 'of' expression            // generic type
+                 | postfix 'at' additive               // indexing, worded
 ```
+
+The index of `'at'` is the additive expression that follows it, so `xs at n + 1`
+indexes by `n + 1` while `xs at 0 is 10` compares the element with `10` —
+`is`, `and` and `or` are looser than the operand and stay outside it. A second
+`at` belongs to that index rather than to `xs`, so `xs at 1 at 0` is
+`xs at (1 at 0)`: the two spellings of the operator do not agree on associativity,
+which is why the precedence table below gives them separate rows. Bind the
+intermediate value to step twice (`set row to xs at 1`, then `row at 0`), or write
+the bracketed form `xs[1][0]`.
+
+Neither worded form takes its operand from the next line. `xs at` at the end of a
+line is the variable `at` (§ 5.1), so the line ends there and the analyzer
+refuses it; `length of` at the end of a line is a syntax error where it is
+written. The two answers differ because `at` is an ordinary name and `length of`
+is not.
 
 ### 5.3 Prefix Expressions
 
@@ -549,8 +576,9 @@ object_literal   = 'new' identifier '(' [ argument { ',' argument } ] ')'
 | 5 | `+`, `-` | Left |
 | 6 | `*`, `/`, `mod`, `%` | Left |
 | 7 | `not`, unary `-` | Right |
-| 8 | `of` | Left |
-| 9 | property access, call, index | Left |
+| 8 | `length of` | — (primary, operand is an additive) |
+| 9 | property access, call, index `xs[...]` | Left |
+| 10 | worded index `xs at ...` | Right — the operand is an additive, so a second `at` belongs to the first: `xs at 1 at 0` is `xs at (1 at 0)`. See § 5.2 |
 
 ---
 

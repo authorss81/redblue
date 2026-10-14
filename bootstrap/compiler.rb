@@ -1073,6 +1073,21 @@ to parse_return(tokens, pos, line)
 end
 
 // `Parser::is_expression_start`: what may follow a `give back` with no value.
+//
+// This table is the stage-1 `Parser::kind_starts_expression`, arm for arm and in
+// the same order. It has to be, and not merely be close: a kind missing here is
+// a kind the stage-2 parser will not read as the head of an expression, so a
+// stage-2 run silently produces a *different program* rather than an error. That
+// is what happened with `nothing`: `say xs at nothing` became one `say` of one
+// `index` under stage 1 and a `say xs` plus two stray statements under stage 2,
+// and the two wrote files of 213 and 246 bytes.
+//
+// `nothing` is a primary here, so it is in the table; `might fail` is *not* a
+// primary here — `parse_primary` refuses it in a sentence that says which runner
+// does compile it, exactly as it refuses a function literal — but it is in the
+// table anyway, because the table's job is to say what an expression may start
+// with, and a table that has to be re-edited the day stage 2 gains the primary
+// is a table that will be re-edited late.
 to is_expression_start(tokens, pos)
     set is_expression_start_k to token_kind(tokens, pos)
     set is_expression_start_starts to no
@@ -1086,6 +1101,9 @@ to is_expression_start(tokens, pos)
         set is_expression_start_starts to yes
     end
     if is_expression_start_k is "no" then
+        set is_expression_start_starts to yes
+    end
+    if is_expression_start_k is "nothing" then
         set is_expression_start_starts to yes
     end
     if is_expression_start_k is "id" then
@@ -1109,7 +1127,62 @@ to is_expression_start(tokens, pos)
     if is_expression_start_k is "to" then
         set is_expression_start_starts to yes
     end
+    if is_expression_start_k is "mightfail" then
+        set is_expression_start_starts to yes
+    end
     give back is_expression_start_starts
+end
+
+// `Parser::kind_starts_operand`: what may be the operand of a worded form, the
+// thing that follows the `at` of `xs at 0` and the `of` of `length of xs`.
+//
+// The same table as `is_expression_start` less `mightfail`, and for the same
+// reason it is a table of its own on the Rust side: a worded operand is read at
+// level 3 — `+ -` and everything tighter — so `is`, `and` and `or` stay outside
+// it, and `might fail` is not something that level can read at all. Asking
+// `is_expression_start` instead is what made `xs at might fail f()` an index
+// under stage 1 and a refusal under stage 2: the two engines disagreeing about
+// whether a program is well formed, over a token neither of them can use there.
+to is_operand_start(tokens, pos)
+    set is_operand_start_k to token_kind(tokens, pos)
+    set is_operand_start_starts to no
+    if is_operand_start_k is "num" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "text" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "yes" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "no" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "nothing" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "id" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "lparen" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "lbrack" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "lbrace" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "not" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "minus" then
+        set is_operand_start_starts to yes
+    end
+    if is_operand_start_k is "to" then
+        set is_operand_start_starts to yes
+    end
+    give back is_operand_start_starts
 end
 
 // `set NAME to <expr>` and `set NAME.field to <expr>`.
@@ -1921,6 +1994,39 @@ to parse_postfix(tokens, pos, depth)
     give back parse_postfix_more(tokens, parse_postfix_base[1], depth, parse_postfix_base[0])
 end
 
+// The word `at` followed by an operand **on the same line**. Same rule as the
+// Rust parser's `Parser::at_index_ahead`, and for the same reason: `at` is not a
+// reserved word and must not become one, so `set at to 0`, `say at` and
+// `xs at at` are the names they have always been. `is_operand_start`, not
+// `is_expression_start`: the operand is read at level 3, so a token that level
+// cannot read must not be swallowed as an index here.
+to at_index_ahead(tokens, pos)
+    set at_index_ahead_ok to no
+    if word_at(tokens, pos) is "at" then
+        if is_operand_start(tokens, pos + 1) then
+            if token_line(tokens, pos + 1) is token_line(tokens, pos) then
+                set at_index_ahead_ok to yes
+            end
+        end
+    end
+    give back at_index_ahead_ok
+end
+
+// The words `length of` on the same line — the only shape in which `length` is
+// the worded form rather than the variable, the builtin, or a program's own
+// binding of the name.
+to length_of_ahead(tokens, pos)
+    set length_of_ahead_ok to no
+    if word_at(tokens, pos) is "length" then
+        if word_at(tokens, pos + 1) is "of" then
+            if token_line(tokens, pos + 1) is token_line(tokens, pos) then
+                set length_of_ahead_ok to yes
+            end
+        end
+    end
+    give back length_of_ahead_ok
+end
+
 to parse_postfix_more(tokens, pos, depth, node)
     set parse_postfix_more_out to nothing
     if token_kind(tokens, pos) is "dot" then
@@ -1943,6 +2049,24 @@ to parse_postfix_more(tokens, pos, depth, node)
             set parse_postfix_more_next to {k: "index", o: node, i: parse_postfix_more_index[0]}
             set parse_postfix_more_q to expect_kind(tokens, parse_postfix_more_index[1], "rbrack")
             set parse_postfix_more_out to parse_postfix_more(tokens, parse_postfix_more_q, depth, parse_postfix_more_next)
+        end
+    end
+    // `xs at 0` — the worded index SPEC.md § List Operations documents. It is
+    // the same `index` node as `[0]`, not a second kind, so stage 1 and stage 2
+    // cannot answer differently about its bounds. `at_index_ahead` is what keeps
+    // `at` an ordinary name.
+    //
+    // The operand is read at level 3, not level 0, and that is the whole point:
+    // `xs at 0 is 10` is `(xs at 0) is 10`, the same reading `xs[0] is 10` gets.
+    // Read at level 0 it was `xs at (0 is 10)`, which indexes by a comparison and
+    // fails `Index must be a number` — while the bracket spelling of the very
+    // same operation worked. `at n + 1` still indexes by `n + 1`, because level 3
+    // is `+ -` and everything tighter.
+    if type_of(parse_postfix_more_out) is "nothing" then
+        if at_index_ahead(tokens, pos) then
+            set parse_postfix_more_worded to parse_expression(tokens, pos + 1, 3, depth + 1)
+            set parse_postfix_more_next to {k: "index", o: node, i: parse_postfix_more_worded[0]}
+            set parse_postfix_more_out to parse_postfix_more(tokens, parse_postfix_more_worded[1], depth, parse_postfix_more_next)
         end
     end
     if type_of(parse_postfix_more_out) is "nothing" then
@@ -2022,6 +2146,27 @@ to parse_primary(tokens, pos, depth)
             set parse_primary_out to [{k: "nothing"}, pos + 1]
         end
     end
+    // `length of x` — the worded length. It compiles to the same `call` node as
+    // `length(x)`, so the builtin stays the one place that answers and the two
+    // spellings cannot drift. Checked before the plain-identifier arm below,
+    // because `length` reaches that arm as an ordinary name when it is not
+    // followed by `of`.
+    //
+    // The operand is read at level 3 for the reason `xs at 0 is 10` is: at level
+    // 0, `length of xs is 3` measured the comparison `xs is 3` and failed
+    // `length requires a list or text`, while `length(xs) is 3` answered `yes`.
+    if type_of(parse_primary_out) is "nothing" then
+        if length_of_ahead(tokens, pos) then
+            if is_operand_start(tokens, pos + 2) is not yes then
+                refuse(token_line(tokens, pos), "expected something to measure after 'length of'")
+            end
+            set parse_primary_operand to parse_expression(tokens, pos + 2, 3, depth + 1)
+            // `tokens[pos].b`, not the text "length": a name reaches the constant
+            // pool as bytes, and a text would intern a different entry and put a
+            // different length in the encoded chunk.
+            set parse_primary_out to [{k: "call", n: tokens[pos].b, args: [parse_primary_operand[0]]}, parse_primary_operand[1]]
+        end
+    end
     // `this` is a plain variable that only a method call binds.
     if type_of(parse_primary_out) is "nothing" then
         if token_kind(tokens, pos) is "id" then
@@ -2058,6 +2203,20 @@ to parse_primary(tokens, pos, depth)
     if type_of(parse_primary_out) is "nothing" then
         if token_kind(tokens, pos) is "to" then
             refuse(token_line(tokens, pos), "'to (x) ... end' as an expression is not compiled yet; run programs that use one with 'rb run'")
+        end
+    end
+    // `might fail <call>` is refused the same way, and for the same reason: the
+    // guard needs a jump, a patched recovery and a constant, and stage 2 emits
+    // none of those here, so a program that uses one is said to be refused rather
+    // than compiled to something the bytecode VM would read differently. The
+    // `mightfail` entry in `is_expression_start` is what makes this the arm that
+    // catches it: without it the guard fell through to the arm below and the
+    // refusal read `unexpected token mightfail`, which names the symptom and not
+    // the gap. Either way stage 2 refuses, so the disagreement with stage 1 is
+    // visible — which is the property `tests/bootstrap_selfhost_test.rs` pins.
+    if type_of(parse_primary_out) is "nothing" then
+        if token_kind(tokens, pos) is "mightfail" then
+            refuse(token_line(tokens, pos), "'might fail <call>' is not compiled yet; run programs that use one with 'rb run'")
         end
     end
     if type_of(parse_primary_out) is "nothing" then

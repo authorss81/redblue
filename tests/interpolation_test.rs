@@ -406,7 +406,15 @@ fn edge_the_linter_sees_a_name_used_only_inside_braces() {
     // this program warned "Unused variable: 'name'". Reading the node is what
     // makes the warning fire here and stay quiet there.
     let used = "set name to \"x\"\nsay \"hi {name}\"\n";
-    let unused = "set name to \"x\"\nsay \"hi {name2}\"\n";
+    // `name2` is bound. The fixture used to read `set name to "x"` and
+    // `say "hi {name2}"` with no `name2` anywhere, which is a program `rb run`
+    // refuses with `Unknown variable 'name2'`; the `assert!(errors.is_empty())`
+    // below passed only because `rb lint` asked the analyzer whether the file
+    // ran *only* when the tree walk had found nothing, and this file had a
+    // warning. The pairing now holds, so the fixture has to be a program that
+    // runs: binding `name2` keeps the assertion and the intent — a name nothing
+    // reads is reported, a name read inside braces is not — exactly as they were.
+    let unused = "set name to \"x\"\nset name2 to \"y\"\nsay \"hi {name2}\"\n";
     let warnings = |source: &str| -> Vec<String> {
         let (errors, warnings) = redblue::linter::lint(source);
         assert!(errors.is_empty(), "{source:?} must be valid: {errors:?}");

@@ -323,12 +323,45 @@ set result to math.sqrt(2)
 set first to items at 0
 set last to items at -1
 
+// Bracketed indexing — the same operation
+set first to items[0]
+set last to items[-1]
+
 // Length
 set count to length of items
+set same to length(items)
 
 // Contains
 if "hello" is in words
 ```
+
+`items at N` and `items[N]` are one indexing operation written two ways, and
+one set of bounds behind both: an index that names no element is the same
+runtime error either way, naming the index as it was written. A negative index
+counts from the end, so `items at -1` is the last element — the same answer
+`items[-1]` has always given.
+
+The index is the **arithmetic** after `at`: `items at 0` and `items at n + 1`
+index by the value of `0` and of `n + 1`. A comparison is not part of the index —
+`items at 0 is 10` is `items at 0` compared with `10`, exactly as `items[0] is 10`
+is — so `is`, `and` and `or` stay outside it. A second `at` is therefore part of
+that index rather than a second step: `items at 1 at 0` asks for `1 at 0` first,
+which is not a list, and fails `Cannot index non-list`. To step twice, bind the
+step in between (`set row to items at 1` then `row at 0`), or write the bracketed
+form `items[1][0]`.
+
+`at` and `length` are ordinary names, not reserved words. `at` is read as an
+index only when an operand follows it on the same line, so `set at to 0` and
+`say at` are the variable they have always been and `items at at` is an index
+whose operand is that variable. `length of` is read only as the two words
+together, so `length(items)`, `say length`, and a program that binds its own
+`length` are untouched. Neither form takes its operand from the next line:
+`items at` at the end of a line is the variable `at`, and `length of` at the end
+of a line is a syntax error where it is written.
+
+`length of X` is `length(X)`, which is a builtin and nothing else: a text
+answers its length in bytes and a list answers its element count, and anything
+else is the runtime error `length requires a list or text`.
 
 `is in` tests **list membership**: the right side must be a `list`, and the
 answer is `yes` when the left side equals one of its elements by value. There

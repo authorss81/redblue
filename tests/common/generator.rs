@@ -660,6 +660,30 @@ const LISTS: &[&str] = &[
     "set xs to [1, 2, 3]\nsay xs[9]\n",
     "set xs to [1]\nsay xs[1]\n",
     "set xs to []\nsay xs[0]\n",
+    // `at` and `length of` — the two word forms SPEC.md § List Operations
+    // documents. They are here, in the same family as the bracket form they
+    // stand for, so the differential harness runs them on **both** engines and
+    // diffs the answers rather than taking either engine's word for them.
+    //
+    // The first three are the documented lines themselves. The last three are
+    // the edges: the negative index with nothing to point at, the index whose
+    // operand is a variable named `at`, and the index that names no element
+    // because it is not a whole number.
+    "set xs to [10, 20, 30]\nsay xs at 0\nsay xs at 2\nsay xs at -1\nset first to xs at 0\nset last to xs at -1\nsay first\nsay last\n",
+    "set xs to [10, 20, 30]\nsay length of xs\nsay length of []\nsay length of \"héllo\"\nset count to length of xs\nsay count\n",
+    "set xs to [10, 20, 30]\nsay xs at 3\n",
+    "set xs to []\nsay xs at -1\n",
+    "set at to 2\nset xs to [1, 2, 3]\nsay xs at at\n",
+    "set xs to [10, 20, 30]\nsay xs at 0.5\n",
+    // A comparison, a conjunction and a disjunction *after* the worded forms,
+    // each written twice: once in the worded spelling and once in the spelling
+    // it stands for. Before the operand level was fixed these were `xs at
+    // (0 is 10)` and `length(xs is 3)` — an index by a boolean — and both engines
+    // made the mistake together, so the corpus could not have caught it by
+    // diffing them. Writing both spellings into one program means a disagreement
+    // is a disagreement *within* a program's output, on both engines.
+    "set xs to [10, 20, 30]\nsay xs at 0 is 10\nsay xs[0] is 10\nsay xs at 1 is 20 and xs at 2 is 30\nsay xs[1] is 20 and xs[2] is 30\nsay xs at 0 is 99 or xs at 2 is 30\nsay xs[0] is 99 or xs[2] is 30\n",
+    "set xs to [10, 20, 30]\nsay length of xs is 3\nsay length(xs) is 3\nset n to 1\nsay xs at n + 1\nsay xs[n + 1]\n",
 ];
 
 fn lists(out: &mut Vec<(String, String)>) {

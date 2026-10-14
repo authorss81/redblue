@@ -432,38 +432,90 @@ impl Default for Linter {
 }
 
 /// Lints `source`, lexing and parsing it first. Returns no findings when the
-/// source does not parse: there is no program to lint.
+/// source does not get that far: there is no program to lint.
+///
+/// Everything past the parser is [`lint_program`], so `rb lint`, `rb diagnostics`
+/// and any other caller that already has a tree all get the same answer to "can
+/// `rb` run this file" — the analyzer's verdict included. See
+/// [`lint_program`] for why that verdict is appended rather than substituted.
+///
+/// The lexer and the parser have no shared equivalent, because neither has a
+/// tree to hand on: a source that does not lex or does not parse is reported
+/// here and nowhere else.
 pub fn lint(source: &str) -> (Vec<LintError>, Vec<LintWarning>) {
     let tokens = match Lexer::tokenize(source) {
         Ok(t) => t,
-        Err(e) => return (vec![syntax_error(&e)], Vec::new()),
+        Err(e) => return (vec![stage_error("Syntax error", &e)], Vec::new()),
     };
 
     let mut parser = crate::parser::Parser::new(tokens);
     let program = match parser.parse() {
         Ok(p) => p,
-        Err(e) => return (vec![syntax_error(&e)], Vec::new()),
+        Err(e) => return (vec![stage_error("Syntax error", &e)], Vec::new()),
     };
 
     lint_program(&program)
 }
 
-/// Lints an already-parsed [`Program`], for a caller that has the AST in hand
-/// — [`crate::lsp::diagnostics`], which lexes and parses the file once for its
-/// own diagnostics, must not make the linter do it again.
+/// Lints an already-parsed [`Program`], for a caller that has the AST in hand —
+/// [`crate::lsp::diagnostics`], which lexes and parses the file once for its own
+/// diagnostics, must not make the linter do it again.
+///
+/// **This is the one place the analyzer is asked, and every entry point goes
+/// through it.** The analyzer is always asked whether `rb` could run the program,
+/// and its refusal is **merged into** the report rather than consulted only when
+/// the report is otherwise empty. `rb lint` is the tool a reader reaches for when
+/// `rb run` refuses a file, and it used to say nothing at all about one the
+/// analyzer rejected — `set x to items at 0` produced an empty report and exit
+/// 0, so a file that cannot run was reported as a file with nothing wrong with
+/// it.
+///
+/// **Why here and not in `lint`.** When the append lived only in `lint`, the two
+/// entry points answered differently about every file the analyzer refuses:
+/// `rb lint` reported the linter's findings *and* the refusal, while
+/// `rb diagnostics` — which calls this function — reported the refusal alone and
+/// threw the findings away. Two tools, one language, two answers to the same
+/// question about the same file, and the REPORT's claim that `rb lint` reports
+/// the refusal was true of only one of them. The shared step is the fix: there is
+/// now no way to reach the linter without the analyzer's verdict.
+///
+/// **Merged, not substituted.** An earlier shape asked the analyzer only when the
+/// tree walk had found nothing at all, and that made the pairing conditional on
+/// the very thing that makes a file dirty: `set u to unknown_name` with `u`
+/// unread produced one *warning* and no error, so `rb lint` still exited 0 on a
+/// file `rb run` refuses — the diagnostic disappeared the moment the file had a
+/// second, unrelated complaint. And returning early would be worse still: it
+/// deletes the linter's own findings on every file the analyzer refuses, which
+/// is what `tests/linter_test.rs` pins against in
+/// `edge_extends_of_an_undeclared_parent_is_still_a_plain_read`. So the analyzer
+/// always runs and its refusal is **appended**: nothing that used to be
+/// reported is dropped, and a file that cannot run is reported whether or not
+/// the tree walk had anything of its own to say.
 pub fn lint_program(program: &Program) -> (Vec<LintError>, Vec<LintWarning>) {
     let mut linter = Linter::new();
     linter.lint(program);
 
-    (linter.get_errors(), linter.get_warnings())
+    let mut errors = linter.get_errors();
+    if let Err(e) = crate::analyzer::analyze(program) {
+        errors.push(stage_error("Analysis error", &e));
+    }
+
+    (errors, linter.get_warnings())
 }
 
-/// Turns a failure from the lexer or the parser into a lint error, so that a
-/// file which does not parse is reported instead of being silently passed over.
-fn syntax_error(error: &Error) -> LintError {
+/// Turns a failure from the lexer, the parser or the analyzer into a lint
+/// error, so that a file which does not run is reported instead of being
+/// silently passed over.
+///
+/// `prefix` names the stage that refused it, which is the difference a reader
+/// acts on: `Syntax error` means the file is not Redblue, `Analysis error` means
+/// it is Redblue and means something the language has no value for.
+fn stage_error(prefix: &str, error: &Error) -> LintError {
     let rendered;
     let (message, span) = match error {
-        Error::Lexer(message, span) | Error::Parser(message, span) => (message.as_str(), *span),
+        Error::Lexer(message, span)
+        | Error::Parser(message, span)
+        | Error::Analyzer(message, span) => (message.as_str(), *span),
         other => {
             rendered = other.to_string();
             (rendered.as_str(), Span::unknown())
@@ -471,7 +523,7 @@ fn syntax_error(error: &Error) -> LintError {
     };
 
     LintError {
-        message: format!("Syntax error: {}", message),
+        message: format!("{}: {}", prefix, message),
         line: span.line,
         column: span.column,
     }

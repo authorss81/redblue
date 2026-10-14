@@ -109,15 +109,24 @@ impl Diagnostic {
 /// Every problem the compiler finds in `source`, in the order an editor should
 /// show them.
 ///
-/// The compile stages stop at the first failure — there is no program to
-/// analyze once lexing fails — so at most one error is reported, followed by
-/// the linter's findings when the program does parse.
+/// The source is lexed and parsed exactly once: the tree the linter reads is the
+/// one just parsed ([`crate::linter::lint_program`]), so `rb diagnostics` does not
+/// run the frontend twice per file. The findings are in a fixed order for a
+/// given source — the linter sorts its unused-variable warnings by name — so the
+/// JSON an editor diffs between saves does not churn.
 ///
-/// The source is lexed and parsed exactly once: the AST that clears the
-/// analyzer is the one the linter reads ([`crate::linter::lint_program`]), so
-/// `rb diagnostics` does not run the frontend twice per file. The findings are
-/// in a fixed order for a given source — the linter sorts its unused-variable
-/// warnings by name — so the JSON an editor diffs between saves does not churn.
+/// The compile stages stop at the first failure — there is no program to analyze
+/// once lexing or parsing fails — so at most one error comes from the frontend
+/// itself. Once the program parses, everything else comes from
+/// [`crate::linter::lint_program`], **which asks the analyzer too**: an editor and
+/// `rb lint` must not give two answers about the same file.
+///
+/// This used to run the analyzer here and `return` on its refusal, which dropped
+/// the linter's own findings for every file the analyzer refuses — the one case
+/// where a reader editing a half-written file most wants to see both the blocking
+/// error and what else is wrong. The analyzer's verdict now arrives through the
+/// same shared step `rb lint` uses, and it arrives first among the errors,
+/// because the linter's own tree walk produces warnings only.
 pub fn diagnostics(source: &str) -> Vec<Diagnostic> {
     let mut found = Vec::new();
 
@@ -136,11 +145,6 @@ pub fn diagnostics(source: &str) -> Vec<Diagnostic> {
             return found;
         }
     };
-
-    if let Err(error) = crate::analyzer::analyze(&ast) {
-        found.push(Diagnostic::from_error(&error));
-        return found;
-    }
 
     let (errors, warnings) = crate::linter::lint_program(&ast);
     for error in errors {

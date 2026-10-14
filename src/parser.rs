@@ -1795,6 +1795,75 @@ impl Parser {
         }
     }
 
+    /// Whether a token of this kind can begin the **operand** of a worded form —
+    /// what follows the `at` of `items at 0` and what follows the `of` of
+    /// `length of items`.
+    ///
+    /// This is [`Parser::kind_starts_expression`] without `MightFail`, and the
+    /// difference is the whole point of the separate table. A worded index and a
+    /// worded length read their operand one precedence level *below* every
+    /// comparison ([`Parser::parse_worded_operand`]), and `might fail` is not a
+    /// primary at that level: it is a prefix `parse_expression` handles above the
+    /// whole chain. Asking the expression table instead made `items at might fail
+    /// f()` an index whose operand is a guarded call in stage 1 and a parse the
+    /// second engine could not read at all — the two engines disagreeing about
+    /// whether a program is well formed, over a token neither of them can use
+    /// there. The operand table is the positive answer to the question actually
+    /// asked, and `might fail` is simply not in it.
+    fn kind_starts_operand(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Number(_)
+                | TokenKind::Text(_)
+                | TokenKind::YesNo(_)
+                | TokenKind::Nothing
+                | TokenKind::Identifier(_)
+                | TokenKind::LeftParen
+                | TokenKind::LeftBracket
+                | TokenKind::LeftBrace
+                | TokenKind::Not
+                | TokenKind::Minus
+                | TokenKind::To
+        )
+    }
+
+    fn is_operand_start(&self) -> bool {
+        self.current()
+            .map(|token| Self::kind_starts_operand(&token.kind))
+            .unwrap_or(false)
+    }
+
+    /// The operand of a worded form: everything `at` and `of` take, read at the
+    /// additive level and no tighter, no looser.
+    ///
+    /// **Why not the whole expression.** The operand used to be parsed with
+    /// [`Parser::parse_expression`], which made every operator after `at` or `of`
+    /// part of the operand instead of part of the enclosing expression:
+    /// `say xs at 0 is 10` became `say xs at (0 is 10)` and `say length of xs is
+    /// 3` became `say length(xs is 3)`. Both are programs no reader wrote — they
+    /// fail at runtime with `Index must be a number` and `length requires a list
+    /// or text` — while the bracket and call spellings of the very same
+    /// operations (`xs[0] is 10`, `length(xs) is 3`) worked. Two spellings of one
+    /// operation cannot be allowed to disagree about which expression they are
+    /// part of.
+    ///
+    /// **Why the additive level.** It is the level below every comparison
+    /// (`docs/GRAMMAR.md` § 5.5 and the precedence table), so `at n + 1` and `of
+    /// "ab" + "cd"` still read the whole arithmetic the writer meant, and it still
+    /// reaches down through `* / mod`, `not`, unary `-` and every postfix form.
+    /// What it no longer reaches is `is`, `and` and `or`, which are the operators
+    /// that make the operand *not* an operand.
+    ///
+    /// The nesting budget is spent exactly as it was, so a worded operand that
+    /// nests without end is still a diagnostic with a position rather than a
+    /// stack overflow.
+    fn parse_worded_operand(&mut self) -> Result<Expr> {
+        self.enter_nesting()?;
+        let operand = self.parse_addition()?;
+        self.leave_nesting(1);
+        Ok(operand)
+    }
+
     fn parse_expression(&mut self) -> Result<Expr> {
         if self.current().map(|t| &t.kind) == Some(&TokenKind::MightFail) {
             return self.parse_might_fail();
@@ -2219,6 +2288,65 @@ impl Parser {
         self.parse_postfix()
     }
 
+    /// Whether the current position is the `at` of a spelled-out `items at 0`
+    /// rather than the variable `at`.
+    ///
+    /// It is the word `at` followed by **an operand on the same line**. The
+    /// operand is what makes the disambiguation, exactly as it does for
+    /// [`Parser::catch_keyword_ahead`]: `at` is not a reserved word and must not
+    /// become one, so `set at to 0`, `say at` and `items at at` — whose operand
+    /// is the variable — keep working. Only the third has an operand that is
+    /// not itself the name, and all three read back as what they always were.
+    ///
+    /// "Operand" is [`Parser::kind_starts_operand`], not the wider expression
+    /// table, because the operand is what [`Parser::parse_worded_operand`] can
+    /// actually read. A token the operand parser would refuse must not be
+    /// swallowed as an index here, or the failure moves from the operator to
+    /// somewhere the writer did not write it.
+    ///
+    /// Same line matters for the same reason: a program that writes `at` at the
+    /// end of one line and an expression on the next is two statements, and
+    /// joining them would silently move the expression into this one.
+    fn at_index_ahead(&self) -> bool {
+        if !self.is_word_ahead(0, "at") {
+            return false;
+        }
+        let Some(first) = self.current() else {
+            return false;
+        };
+        let operand = self.tokens.get(self.pos + 1);
+        match operand {
+            Some(Token { kind, line, .. }) => {
+                *line == first.line && Self::kind_starts_operand(kind)
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the current position is the `length` of a spelled-out
+    /// `length of x` rather than the variable `length`.
+    ///
+    /// The word `length` followed by the word `of` on the same line. `length` is
+    /// the name of a builtin and may be bound by a program of its own, so only
+    /// the two-word spelling is the word form: `length(x)`, `say length` and a
+    /// program that shadows the name are untouched.
+    fn length_of_ahead(&self) -> bool {
+        if !self.is_word_ahead(0, "length") {
+            return false;
+        }
+        let Some(first) = self.current() else {
+            return false;
+        };
+        matches!(
+            self.tokens.get(self.pos + 1),
+            Some(Token {
+                kind: TokenKind::Identifier(found),
+                line,
+                ..
+            }) if found == "of" && *line == first.line
+        )
+    }
+
     fn parse_postfix(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
 
@@ -2349,6 +2477,31 @@ impl Parser {
                     object: Box::new(expr),
                     index: Box::new(index),
                 };
+            } else if self.at_index_ahead() {
+                // `items at 0` — SPEC.md § List Operations writes this as the
+                // indexing form and nothing about it worked, because `at` is an
+                // ordinary identifier: `set first to items at 0` reached the
+                // statement parser, which read `set first to items` as one
+                // statement and left `at 0` for the next, so the line became
+                // three statements and the analyzer then reported
+                // `Unknown variable 'at'`.
+                //
+                // It becomes an index rather than a new expression kind, so
+                // there is exactly one indexing operation with exactly one set
+                // of bounds, error messages and bytecodes behind the two
+                // spellings.
+                //
+                // The operand is read by [`Parser::parse_worded_operand`], at the
+                // additive level rather than as a whole expression, so that
+                // `xs at 0 is 10` compares `xs[0]` with `10` exactly as
+                // `xs[0] is 10` does. Reading it as a whole expression made
+                // every `is`/`and`/`or` after `at` part of the *index*.
+                self.advance(); // consume 'at'
+                let index = self.parse_worded_operand()?;
+                expr = Expr::Index {
+                    object: Box::new(expr),
+                    index: Box::new(index),
+                };
             } else {
                 break;
             }
@@ -2381,6 +2534,38 @@ impl Parser {
                 Ok(Expr::Nothing)
             }
             TokenKind::Identifier(name) => {
+                // `length of x` — SPEC.md § List Operations writes it as the
+                // length form, and it did not work: `of` is an ordinary
+                // identifier, so the line became a `set` that stopped at
+                // `length` and an `of x` of its own, and the analyzer reported
+                // `Unknown variable 'of'`.
+                //
+                // It becomes the call `length(x)` rather than a new expression
+                // kind, so the builtin stays the one place that answers and the
+                // two spellings cannot drift apart — a list's element count and
+                // a text's byte count are decided once, in `stdlib.rs`.
+                //
+                // The operand is read by [`Parser::parse_worded_operand`], for
+                // the reason `xs at 0 is 10` is: read as a whole expression,
+                // `length of xs is 3` measured a *comparison* and failed with
+                // `length requires a list or text`, while `length(xs) is 3` —
+                // the same operation written the other way — answered `yes`.
+                if self.length_of_ahead() {
+                    let span = self.span();
+                    self.advance(); // consume 'length'
+                    self.advance(); // consume 'of'
+                    if !self.is_operand_start() {
+                        return Err(Error::Parser(
+                            "Expected something to measure after `length of`".to_string(),
+                            span,
+                        ));
+                    }
+                    let operand = self.parse_worded_operand()?;
+                    return Ok(Expr::Call {
+                        name: name.clone(),
+                        args: vec![operand],
+                    });
+                }
                 self.advance();
                 Ok(Expr::Variable(name.clone()))
             }
