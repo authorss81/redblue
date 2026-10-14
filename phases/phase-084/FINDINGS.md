@@ -26,21 +26,28 @@ would not offer the agent in the path being used. `mode: "all"` covers both
 readings at the cost of precision. This is a one-word change to
 `opencode.json` once the invocation is confirmed.
 
-## Only `edit` and `bash` are pinned
+## Only `edit` and `bash` are declared; the widening half is now enforced
 
 The phase names four values and this phase pins exactly those. `reviewer` is
-granted no `webfetch` and no `write`, so both fall back to the global
+granted no `webfetch` and no `write`, so both still fall back to the global
 `~/.config/opencode/opencode.json` defaults — which, per the phase evidence,
-are permissive for `edit` and `bash` and unmeasured for everything else. A
-read-only reviewer arguably should also `deny` `write`, `webfetch` and
-`external_directory`, but that is broader than this phase's finding and would
-be a change to what the reviewer can do, which belongs in its own phase.
+are permissive for `edit` and `bash` and unmeasured for everything else. Adding
+those keys to the reviewer to close the fallback would be a change to what the
+reviewer can do, and belongs in its own phase.
+
+What *is* enforced now, added this run: a permission key beside `edit` and
+`bash` on the reviewer must itself be `deny`
+(`check_no_grants_beyond`, `tests/agent_permissions_test.rs:103`). Before that,
+`check_agent` looked up exactly `TOOLS` and never visited a third key, so
+`{"edit":"deny","bash":"deny","webfetch":"allow"}` passed every assertion in the
+file — a reviewer that can fetch, described as one that cannot. `deny`-ing
+`webfetch` and `write` for the reviewer remains a phase of its own.
 
 ## Every resume commit costs one line in `ACKNOWLEDGED`
 
 `tests/unreviewed_work_ack_test.rs` fails on any commit in `HEAD`'s history
 whose subject contains `resume phase-` or `checkpoint` and that is not listed in
-its `ACKNOWLEDGED` data. **This has now cost three one-line repairs across three
+its `ACKNOWLEDGED` data. **This has now cost four one-line repairs across four
 deliveries of this phase**, one per run, and the cost is structural rather than
 accidental. Each delivery's resume commit has a different SHA, the test rejects
 both unlisted *and* stale entries, so exactly one line must be rewritten every
@@ -55,15 +62,16 @@ The sequence, recorded so the pattern is visible:
 | 2 | `d1f21633394cc27b5bcd35ec73bc4a14a16e5b3f` | repointed; `55f71878` went stale |
 | 3 | `ffa1f29ab36c05f452eca84b69f93b039c295abd` | repointed; `d1f21633` went stale |
 | 4 | `05c77d1a0e2860b1970b4cee93577fefd462aa02` | repointed again; `ffa1f29` went stale |
+| 5 | `48d5bf0183fac60b08e50633aab0aee1b8e846d9` | repointed again; `05c77d1` went stale |
 
 At every delivery `cargo test` was red *before any phase code ran*: once because
 the new SHA was unlisted, and (from delivery 2 on) simultaneously because the
 previous SHA was stale. The entry at `tests/unreviewed_work_ack_test.rs:88` now
-names the SHA this history actually contains (`05c77d1…`, measured this run with
-`git merge-base --is-ancestor ffa1f29 HEAD` → exit 1), its reason records the
-three SHAs it replaces, and the same SHA was added to `MEASURED`, which is the
-list that file requires to name every commit it was measured on. Delivery 4 is
-the fourth consecutive observation of the same defect: this is now a measured
+names the SHA this history actually contains (`48d5bf0…`, measured this run with
+`git merge-base --is-ancestor 05c77d1 HEAD` → exit 1), its reason records the
+four SHAs it replaces, and the same SHA was added to `MEASURED`, which is the
+list that file requires to name every commit it was measured on. Delivery 5 is
+the fifth consecutive observation of the same defect: this is a measured
 pattern, not a prediction.
 
 **The fix is not another one-line repair.** Either the resume commit's subject
@@ -136,7 +144,7 @@ finds neither directory, and `find . -name verify.sh -not -path './target/*'`
 returns nothing. The fourth gate was reported as NOT RUN in `REPORT.md` rather
 than claimed as passing. The gates that were run: `cargo fmt --all -- --check`
 clean, `cargo clippy --all-targets -- -D warnings` clean, `cargo test --all-targets`
-1571 passed / 0 failed / 0 ignored across 60 binaries, exit 0.
+1572 passed / 0 failed / 0 ignored across 60 binaries, exit 0.
 
 The shipped `opencode.json` was validated against the live published schema at
 <https://opencode.ai/config.json> using `jsonschema` 4.10.3 (Draft 2020-12, with
