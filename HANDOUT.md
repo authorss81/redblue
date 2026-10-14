@@ -43,7 +43,7 @@ Redblue is a programming language designed to be as readable as plain English.
 say "Hello, World!"
 
 set name to "World"
-if name is "World"
+if name is "World" then
     say "Hello, {name}!"
 end
 
@@ -132,36 +132,44 @@ set parts to text.split("a,b,c", by ",")  // ["a", "b", "c"]
 ### math - Math Functions
 ```redblue
 set sqrt2 to math.sqrt(2)
-set rand to math.random(1, 100)
 set rounded to math.round(3.7)
+set total to pow(2, 10)   // the random builtins are flat: random(1, 6)
 ```
 
 ### files - File I/O
 ```redblue
 set content to files.read("data.txt")
 files.write("output.txt", "Hello!")
-if files.exists("config.txt")
+if files.exists("config.txt") then
     say "Config found"
 end
 ```
 
-### formats - JSON/CSV
+### json and csv - JSON/CSV
 ```redblue
-set data to formats.parse_json('{"name": "Alice"}')
-set json to formats.to_json(data)
+set data to json.parse("{ \"name\": \"Alice\" }")
+set json to json.stringify(data)
+set rows to csv.parse("a,b")
 ```
+
+There is no `formats` module: JSON and CSV are `json.*` and `csv.*`. There are
+no single-quoted strings either, so a text is written between double quotes with
+`\"` for a quote inside it.
 
 ### list - List Operations
 ```redblue
 set doubled to list.map([1, 2, 3], to (x) give back x * 2)
-set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)
+say doubled              // [2, 4, 6]
 ```
+
+`list.map` is the whole of it. There is no `list.filter`: `Module 'list' has no
+function 'filter'` is the answer, and it is a known gap rather than a spelling.
 
 ### console - I/O
 ```redblue
 say "Hello!"           // Print with newline
 print "Hello!"         // Print without newline
-set input to ask "Your name?"  // Get user input
+set name to input("Your name? ")  // Get user input; there is no `ask`
 ```
 
 ---
