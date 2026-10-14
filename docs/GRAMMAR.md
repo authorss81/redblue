@@ -80,6 +80,12 @@ text_literal       = '"' { any_unicode_character_except_quote | escape } '"'
 escape             = '\' ( 'n' | 't' | 'r' | '"' | '\' | 'u' hex_digit hex_digit hex_digit hex_digit )
 hex_digit          = digit | 'a'..'f' | 'A'..'F'
 
+// The escape set is closed. A `\` followed by anything else is a LexerError at
+// the backslash, and so is a `\` followed by `u` and fewer than four hex digits
+// — a short run is not padded out to four, and a fifth digit is ordinary text
+// after the escape, so `\u1f600` is `\u1f60` then `0`. A `\` followed by a
+// surrogate half is a LexerError too: `\uD83D` names no character of its own.
+
 // Boolean
 boolean_literal    = 'yes' | 'no'
 

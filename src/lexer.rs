@@ -315,6 +315,7 @@ impl Lexer {
                 return Ok(text);
             }
             if c == '\\' {
+                let escape = Span::new(self.line, self.column);
                 self.advance();
                 match self.advance() {
                     Some('n') => text.push('\n'),
@@ -322,7 +323,13 @@ impl Lexer {
                     Some('r') => text.push('\r'),
                     Some('\\') => text.push('\\'),
                     Some('"') => text.push('"'),
-                    Some(c) => text.push(c),
+                    Some('u') => text.push(self.read_unicode_escape(escape)?),
+                    Some(other) => {
+                        return Err(Error::Lexer(
+                            format!("Unknown escape '\\{other}' in text"),
+                            escape,
+                        ))
+                    }
                     None => return Err(self.unterminated(span)),
                 }
             } else {
@@ -330,6 +337,43 @@ impl Lexer {
                 self.advance();
             }
         }
+    }
+
+    /// The character named by the four hex digits of a `\u` escape.
+    ///
+    /// The escape names one code point and nothing else. `docs/GRAMMAR.md:80`
+    /// says four `hex_digit`s, and that is exactly what it takes: a shorter run
+    /// is a typo, not a number to be padded out to four digits. Everything the
+    /// grammar does not spell out is refused rather than guessed at — the
+    /// catch-all that used to sit in `read_text` pushed only the first character
+    /// after the backslash, so `"\u00e9"` read as `u00e9` and a program written
+    /// in a language's own escape printed text nobody had written.
+    ///
+    /// `span` is the backslash, so the refusal points at the escape rather than
+    /// at the character four positions past it.
+    fn read_unicode_escape(&mut self, span: Span) -> Result<char> {
+        let mut value: u32 = 0;
+        for _ in 0..4 {
+            let Some(digit) = self.current().and_then(|c| c.to_digit(16)) else {
+                return Err(Error::Lexer(
+                    "Unicode escape needs four hex digits, such as \"\\u00e9\"".to_string(),
+                    span,
+                ));
+            };
+            value = value * 16 + digit;
+            self.advance();
+        }
+
+        // A half of a surrogate pair — `char::from_u32` refuses it because it
+        // names no character, and a lone surrogate has no UTF-8 encoding at all.
+        // Substituting the replacement character here would be the same silent
+        // rewrite this escape used to be, one level down.
+        char::from_u32(value).ok_or_else(|| {
+            Error::Lexer(
+                format!("Unicode escape \\u{value:04X} names no character of its own"),
+                span,
+            )
+        })
     }
 
     /// The failure for a string that ran to the end of input without closing.

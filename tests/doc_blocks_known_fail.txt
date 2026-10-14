@@ -28,13 +28,13 @@
 # --- SPEC.md ---------------------------------------------------------------
 
 SPEC.md:89	Error: ParserError: Expected field name
-SPEC.md:570	Error: ParserError: Expected 'then' but got 'give'
-SPEC.md:607	Error: RuntimeError: Module 'numbers' has no function 'map'
-SPEC.md:631	Error: ParserError: Expected 'end' but got Eof
-SPEC.md:977	Error: ParserError: Expected 'then' but got 'say'
-SPEC.md:1015	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
-SPEC.md:1066	Error: AnalyzerError: Unknown variable 'async'
-SPEC.md:1267	Error: ParserError: Expected variable name, found reserved word 'back'
+SPEC.md:610	Error: ParserError: Expected 'then' but got 'give'
+SPEC.md:647	Error: RuntimeError: Module 'numbers' has no function 'map'
+SPEC.md:671	Error: ParserError: Expected 'end' but got Eof
+SPEC.md:1017	Error: ParserError: Expected 'then' but got 'say'
+SPEC.md:1055	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
+SPEC.md:1106	Error: AnalyzerError: Unknown variable 'async'
+SPEC.md:1307	Error: ParserError: Expected variable name, found reserved word 'back'
 
 # --- PHILOSOPHY.md ----------------------------------------------------------
 

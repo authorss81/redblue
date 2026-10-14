@@ -115,6 +115,46 @@ set person to record {
 }
 ```
 
+#### Escapes in a text literal
+
+A text literal carries five one-character escapes and one that names a code
+point:
+
+| Written | Reads as |
+|---|---|
+| `\n` | line feed |
+| `\t` | tab |
+| `\r` | carriage return |
+| `\"` | `"` |
+| `\\` | `\` |
+| `\uXXXX` | the character the four hex digits name |
+
+```redblue
+say "caf\u00e9"      // café — U+00E9, one character
+say "A\u0042C"       // ABC
+```
+
+`\uXXXX` is *exactly* four hex digits, in either case. It is not padded, not
+read past the fourth digit, and not braced: `\u1f600` is `\u1f60` followed by a
+literal `0`, because four digits cannot name a code point above U+FFFF. A file
+that can hold the character itself should write the character — the escape is
+for the code points a file cannot otherwise carry.
+
+Everything the grammar does not spell out is a `LexerError` naming the line and
+column of the backslash, never a different string:
+
+```redblue
+say "\q"            // LexerError: Unknown escape '\q' in text
+say "\uZZZZ"        // LexerError: Unicode escape needs four hex digits
+say "\u00"          // LexerError: Unicode escape needs four hex digits
+say "\ud83d"        // LexerError: \uD83D is half a surrogate pair; no character
+say "abc\           // LexerError: Unterminated string
+```
+
+A half of a surrogate pair is refused because it names no character of its own:
+a lone surrogate has no UTF-8 encoding, so the only thing a decoder could put
+there is a character nobody wrote.
+
 ### Comments
 
 ```redblue
