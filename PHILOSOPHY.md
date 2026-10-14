@@ -133,8 +133,8 @@ Use `nothing` explicitly. Type system prevents unexpected nulls.
 set name to "Alice"
 set age to 30
 set score to 95.5
-set is active to yes
-set items to empty list
+set active to yes
+set items to []
 set data to nothing
 ```
 
@@ -228,7 +228,7 @@ end
 ```redblue
 async to fetch users()
     set response to wait network.get("https://api.example.com/users")
-    give back formats.parse_json(response)
+    give back json.parse(response)
 end
 
 async to process all()
