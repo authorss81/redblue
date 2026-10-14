@@ -22,29 +22,17 @@
 #   <doc>:<line><TAB><first line of stderr>
 #
 # COUNTS, as of the run that wrote this file
-#   SPEC.md 8 · PHILOSOPHY.md 1 · HANDOUT.md 6 · docs/GRAMMAR.md 0 · README.md 0
-#   15 of 101 blocks.
+#   SPEC.md 3 · PHILOSOPHY.md 0 · HANDOUT.md 0 · docs/GRAMMAR.md 0 · README.md 0
+#   3 of 101 blocks.
 
 # --- SPEC.md ---------------------------------------------------------------
 
-SPEC.md:89	Error: ParserError: Expected field name
-SPEC.md:570	Error: ParserError: Expected 'then' but got 'give'
-SPEC.md:607	Error: RuntimeError: Module 'numbers' has no function 'map'
-SPEC.md:631	Error: ParserError: Expected 'end' but got Eof
-SPEC.md:977	Error: ParserError: Expected 'then' but got 'say'
-SPEC.md:1015	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
-SPEC.md:1066	Error: AnalyzerError: Unknown variable 'async'
-SPEC.md:1267	Error: ParserError: Expected variable name, found reserved word 'back'
+SPEC.md:628	Error: ParserError: Expected 'end' but got Eof
+SPEC.md:1012	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
+SPEC.md:1063	Error: AnalyzerError: Unknown variable 'async'
 
 # --- PHILOSOPHY.md ----------------------------------------------------------
 
-PHILOSOPHY.md:132	Error: ParserError: Expected variable name, found reserved word 'is'
 
 # --- HANDOUT.md -------------------------------------------------------------
 
-HANDOUT.md:42	Error: ParserError: Expected 'then' but got 'say'
-HANDOUT.md:133	Error: RuntimeError: Module 'math' has no function 'random'
-HANDOUT.md:140	Error: ParserError: Expected 'then' but got 'say'
-HANDOUT.md:149	Error: LexerError: Unexpected character '\''
-HANDOUT.md:155	Error: RuntimeError: Module 'list' has no function 'filter'
-HANDOUT.md:161	Error: AnalyzerError: Unknown variable 'ask'; did you mean 'as'?
