@@ -17,6 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history is REQUIRED, not an optimisation.
+          # unreviewed_work_ack_test audits every commit in git log HEAD, and
+          # actions/checkout defaults to a depth-1 clone. A truncated log reads
+          # as a clean one, so that test refuses to read it rather than pass.
+          fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: actions/cache@v4
         with:
@@ -93,6 +99,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history is REQUIRED, not an optimisation.
+          # unreviewed_work_ack_test audits every commit in git log HEAD, and
+          # actions/checkout defaults to a depth-1 clone. A truncated log reads
+          # as a clean one, so that test refuses to read it rather than pass.
+          fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: actions/cache@v4
         with:
@@ -151,6 +163,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history is REQUIRED, not an optimisation.
+          # unreviewed_work_ack_test audits every commit in git log HEAD, and
+          # actions/checkout defaults to a depth-1 clone. A truncated log reads
+          # as a clean one, so that test refuses to read it rather than pass.
+          fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: actions/cache@v4
         with:
