@@ -405,13 +405,18 @@ fn edge_a_literal_rebinding_its_capture_leaves_the_enclosing_scope_alone() {
 
 /// Too few arguments. `map` refuses the call before anything runs, so the
 /// failure names the call rather than the body's arithmetic on `nothing`.
+///
+/// The wording is the one the method spelling uses for the same mistake —
+/// `map(xs)` and `xs.map()` are one operation called two ways, and the list was
+/// given in both — so the refusal says what is missing instead of restating the
+/// shape and naming a list the program did supply.
 #[test]
 fn edge_calling_map_without_a_function_fails() {
     assert_fails(
         "
         give back map([1, 2, 3])
         ",
-        "map requires a list and a function",
+        "map requires a function, but no argument was given",
     );
 }
 
@@ -650,6 +655,261 @@ fn a_literal_can_be_stored_in_a_record() {
         ",
         "100",
     );
+}
+
+// ---------------------------------------------------------------------------
+// The bytecode compiler lowers a literal too
+// ---------------------------------------------------------------------------
+
+/// Compiles `source` and runs it on the bytecode VM, returning the value of its
+/// last statement.
+#[track_caller]
+fn compiled(source: &str) -> Value {
+    let chunk = redblue::compile_source(source).expect("source should compile");
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    vm.set_echo(false);
+    vm.run(&chunk)
+        .unwrap_or_else(|error| panic!("the compiled program should run, failed with {error:?}"))
+}
+
+/// Compiles `source` and returns the error it produced, for a program the
+/// compiler accepts and the runtime refuses.
+#[track_caller]
+fn compiled_err(source: &str) -> Error {
+    let chunk = redblue::compile_source(source).expect("source should compile");
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    vm.set_echo(false);
+    vm.run(&chunk)
+        .map(|value| panic!("the compiled program was expected to fail, it gave {value:?}"))
+        .expect_err("the compiled program should have failed")
+}
+
+/// Runs `source` on both engines and returns what they said, having checked
+/// they said the same thing.
+#[track_caller]
+fn both(source: &str) -> Value {
+    let walked = eval(source);
+    let compiled = compiled(source);
+    assert_eq!(
+        compiled, walked,
+        "the two engines disagree:\n  tree-walker: {walked}\n  bytecode:    {compiled}\n\
+         program:\n{source}"
+    );
+    walked
+}
+
+/// Runs `source` on both engines and returns the message both refused it with.
+#[track_caller]
+fn both_fail(source: &str) -> String {
+    let walked = message(&eval_err(source));
+    let compiled = message(&compiled_err(source));
+    assert_eq!(
+        compiled, walked,
+        "the two engines refused it differently:\n  tree-walker: {walked}\n\
+         bytecode:    {compiled}\nprogram:\n{source}"
+    );
+    walked
+}
+
+/// Every place a literal can be written, compiled and run on the bytecode VM.
+///
+/// The compiler used to refuse a literal outright — `ParserError: `to (x) ...
+/// end` as an expression is not compiled yet` — which left every specification
+/// example that writes a function as an expression runnable but not
+/// compilable. Nothing in this file noticed, because nothing in it asked the
+/// compiler anything.
+///
+/// Each shape is asserted *against the tree-walker*, not only against a
+/// literal expected value: a lowering that produced a closure with the wrong
+/// captures, or one that compiled to something the VM read differently from
+/// `Expr::FunctionLiteral`, would answer a different value and be caught.
+#[test]
+fn edge_a_literal_is_lowered_on_both_engines() {
+    // Bound to a name, in the one-line spelling SPEC.md writes.
+    assert_eq!(
+        both("set double to to (x) give back x * 2\ndouble(21)\n").to_string(),
+        "42",
+        "a literal bound to a name did not answer the same on both engines"
+    );
+
+    // Bound to a name, in the block spelling — the other of the two forms
+    // SPEC.md says mean the same thing.
+    assert_eq!(
+        both("set double to to (x)\n    give back x * 2\nend\ndouble(21)\n").to_string(),
+        "42",
+        "the block form of a literal did not answer the same on both engines"
+    );
+
+    // Written where the value goes, with nothing between it and the call.
+    assert_eq!(
+        both("[1, 2, 3].map(to (x) give back x * 2)\n").to_string(),
+        "[2, 4, 6]",
+        "a literal written inline as an argument did not answer the same on both engines"
+    );
+
+    // The capture, both halves of the policy. A top-level name is a *global*
+    // and is read at call time, so rebinding it is seen; a parameter is a local
+    // and is captured by value where the literal was written, so rebinding it
+    // is not. The compiled engine has to resolve against the same two rules,
+    // which is the difference between capturing a scope and reading a frame.
+    assert_eq!(
+        both("set n to 10\nset add to to (x) give back x + n\nset n to 99\nadd(1)\n").to_string(),
+        "100",
+        "a literal reading a global after it was rebound differs between the engines"
+    );
+    assert_eq!(
+        both(
+            "to make(bias)\n\
+             \x20   set early to to (x) give back x + bias\n\
+             \x20   set bias to 100\n\
+             \x20   set late to to (x) give back x + bias\n\
+             \x20   give back early(1) + late(1)\n\
+             end\n\
+             make(10)\n"
+        )
+        .to_string(),
+        "112",
+        "a literal's capture of a local differs between the engines"
+    );
+
+    // A parameter shadows a captured binding of the same name.
+    assert_eq!(
+        both("set x to 1\nset f to to (x) give back x * 10\nset x to 2\nf(3)\n").to_string(),
+        "30",
+        "a parameter did not shadow an enclosing binding the same on both engines"
+    );
+
+    // A literal nested inside a literal, each level capturing its own. Written
+    // as nested *blocks* so the compiler has to lower a literal that appears in
+    // a literal's body — the one place `expr` recurses into itself with a fresh
+    // block to add to.
+    assert_eq!(
+        both(
+            "set a to 1\n\
+             set outer to to (y)\n\
+             \x20   give back to (z) give back y + z + a\n\
+             end\n\
+             set inner to outer(2)\n\
+             inner(3)\n"
+        )
+        .to_string(),
+        "6",
+        "a literal nested inside a literal did not answer the same on both engines"
+    );
+
+    // Held in a list and in a record, read back out, and called.
+    assert_eq!(
+        both(
+            "set fs to [to (x) give back x + 1, to (x) give back x * 10]\n\
+             set g to fs[1]\n\
+             g(4)\n"
+        )
+        .to_string(),
+        "40",
+        "a literal read back out of a list answered differently on one engine"
+    );
+    assert_eq!(
+        both(
+            "set r to {f: to (x) give back x - 1}\n\
+             set g to r.f\n\
+             g(4)\n"
+        )
+        .to_string(),
+        "3",
+        "a literal read back out of a record answered differently on one engine"
+    );
+
+    // A literal with no parameters, written both ways the grammar allows, and
+    // one whose body is empty.
+    assert_eq!(
+        both("set answer to to () give back 42\nset bare to to give back 7\nanswer() + bare()\n")
+            .to_string(),
+        "49",
+        "a parameterless literal answered differently on one engine"
+    );
+    assert_eq!(
+        both("set quiet to to () end\nquiet()\n").to_string(),
+        "nothing",
+        "a literal with an empty body answered differently on one engine"
+    );
+}
+
+/// A literal reaches `map` on the bytecode VM in every spelling.
+///
+/// The method-spelled receiver is `xs.map(f)`, which is the one the compiler
+/// could not reach before, because it could not compile the program that binds
+/// `f` to a literal. The other three spellings pass a literal directly and were
+/// unreachable for the same reason, so none of the four was covered.
+#[test]
+fn edge_a_literal_maps_in_every_spelling_on_both_engines() {
+    let double = "set double to to (x) give back x * 2\n";
+    for call in [
+        "map([1, 2, 3], double)",
+        "list.map([1, 2, 3], double)",
+        "[1, 2, 3].map(double)",
+        "xs.map(double)",
+    ] {
+        let source = format!("{double}set xs to [1, 2, 3]\n{call}\n");
+        assert_eq!(
+            both(&source).to_string(),
+            "[2, 4, 6]",
+            "`{call}` did not answer [2, 4, 6] on both engines"
+        );
+    }
+}
+
+/// A failure inside a literal is the same diagnostic on both engines.
+///
+/// A literal that reaches the map with a bad argument, or one whose body fails
+/// on an element, has to be refused for the same reason whichever engine
+/// lowered it. These run the *compiled* path through the shared `map_function`
+/// check as well as the tree-walker's.
+#[test]
+fn edge_a_literal_refused_by_map_is_the_same_diagnostic_on_both_engines() {
+    assert_eq!(
+        both_fail("[1, 2, 3].map(5)\n"),
+        "map requires a function, but was given 5",
+        "the compiled engine refused a bad map argument differently"
+    );
+    assert_eq!(
+        both_fail("map([1, 2, 3], to (x) give back x / 0)\n"),
+        "Division by zero",
+        "a literal that failed on an element was refused differently"
+    );
+}
+
+/// A literal that recurses is stopped at the call-depth limit by both engines,
+/// and both name it the way the program called it.
+///
+/// A literal has no name of its own — its declaration name is the anonymous
+/// name, `interpreter::ANONYMOUS_FUNCTION` — but the *call site* named it
+/// `loop`, and that is what a reader needs to be told. The tree-walking VM has
+/// always reported the call-site name; the bytecode VM reported the
+/// declaration's, so the same program said `anonymous function` on one engine
+/// and `loop` on the other.
+#[test]
+fn edge_a_recursive_literal_is_named_by_its_call_site_on_both_engines() {
+    let source = "set loop to to (n)\n    give back loop(n + 1)\nend\nloop(0)\n";
+    let message = both_fail(source);
+    assert!(
+        message.contains("while calling 'loop'"),
+        "a recursive literal should be reported under the name it was called by, \
+         it said: {message}"
+    );
+    assert!(
+        !message.contains("anonymous function"),
+        "a recursive literal was reported under its declaration name rather than \
+         the call site's: {message}"
+    );
+
+    // And it is the *limit* that stops it, on both: a compiler that inlined the
+    // body instead of emitting a closure would recurse on the host stack.
+    for error in [eval_err(source), compiled_err(source)] {
+        assert!(
+            matches!(error, Error::Limit(_, _)) && error.is_resource_limit(),
+            "a runaway recursive literal should stop at a host limit, got {error:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

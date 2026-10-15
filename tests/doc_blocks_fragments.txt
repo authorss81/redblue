@@ -32,7 +32,7 @@
 #
 # COUNTS, as of the run that wrote this file
 #   SPEC.md 29 · docs/GRAMMAR.md 2 · PHILOSOPHY.md 8 · README.md 0 · HANDOUT.md 0
-#   39 of 103 blocks. The other 64 are 49 RUNS and 15 KNOWN-FAIL.
+#   39 of 103 blocks. The other 64 are 50 RUNS and 14 KNOWN-FAIL.
 
 # --- SPEC.md ---------------------------------------------------------------
 

@@ -13,6 +13,7 @@
 use indexmap::IndexMap;
 
 use crate::error::{Error, Result, Span};
+use crate::interpreter::ANONYMOUS_FUNCTION;
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 
 use crate::bytecode::format::{Block, BlockKind, Chunk, Constant, Instruction, MAX_BLOCK_DEPTH};
@@ -247,15 +248,15 @@ impl Compiler {
 
         match &stmt.statement {
             Statement::Say(expr) => {
-                self.expr(expr, code, line)?;
+                self.expr(expr, code, blocks, depth, line)?;
                 emit(code, Opcode::Say, 0, 0, line);
             }
             Statement::Print(expr) => {
-                self.expr(expr, code, line)?;
+                self.expr(expr, code, blocks, depth, line)?;
                 emit(code, Opcode::Print, 0, 0, line);
             }
             Statement::Expr(expr) => {
-                self.expr(expr, code, line)?;
+                self.expr(expr, code, blocks, depth, line)?;
                 // A block whose value nobody reads is a statement, and a
                 // statement consumes what it produced; `POP` is how the file
                 // says so.
@@ -271,7 +272,7 @@ impl Compiler {
                 }
             }
             Statement::Set { name, value } => {
-                self.expr(value, code, line)?;
+                self.expr(value, code, blocks, depth, line)?;
                 let name = self.text(name);
                 emit(code, Opcode::Store, name, 0, line);
             }
@@ -281,7 +282,7 @@ impl Compiler {
             // tree-walking VM refuses at runtime and what `DECLARE_CONST`
             // declares in the file.
             Statement::Constant { name, value } => {
-                self.expr(value, code, line)?;
+                self.expr(value, code, blocks, depth, line)?;
                 let name = self.text(name);
                 emit(code, Opcode::DeclareConst, name, 0, line);
             }
@@ -292,7 +293,7 @@ impl Compiler {
             } => {
                 let object = self.text(object_name);
                 emit(code, Opcode::Load, object, 0, line);
-                self.expr(value, code, line)?;
+                self.expr(value, code, blocks, depth, line)?;
                 let target = self.text(&format!("{object_name}.{property}"));
                 emit(code, Opcode::SetProperty, target, 0, line);
             }
@@ -301,7 +302,7 @@ impl Compiler {
                 then_branch,
                 else_branch,
             } => {
-                self.expr(condition, code, line)?;
+                self.expr(condition, code, blocks, depth, line)?;
                 // The `end` of an `if` with no `else` is where a false
                 // condition lands, so there is one jump either way.
                 let to_else = jump(code, Opcode::JumpIfFalse, line);
@@ -331,7 +332,7 @@ impl Compiler {
                 }
             }
             Statement::Unless { condition, body } => {
-                self.expr(condition, code, line)?;
+                self.expr(condition, code, blocks, depth, line)?;
                 // There is no `JumpIfTrue`, so the condition is negated and the
                 // existing jump runs the body exactly when it was false. The
                 // `end` of a one-branch block is that jump's landing pad.
@@ -345,7 +346,7 @@ impl Compiler {
                 iterable,
                 body,
             } => {
-                self.expr(iterable, code, line)?;
+                self.expr(iterable, code, blocks, depth, line)?;
                 emit(code, Opcode::GetIter, 0, 0, line);
                 let top = code.len() as u32;
                 let variable = self.text(variable);
@@ -360,11 +361,11 @@ impl Compiler {
                 step,
                 body,
             } => {
-                self.expr(start, code, line)?;
-                self.expr(end, code, line)?;
+                self.expr(start, code, blocks, depth, line)?;
+                self.expr(end, code, blocks, depth, line)?;
                 let arity = match step {
                     Some(step) => {
-                        self.expr(step, code, line)?;
+                        self.expr(step, code, blocks, depth, line)?;
                         3
                     }
                     None => 2,
@@ -377,7 +378,7 @@ impl Compiler {
                 emit(code, Opcode::Jump, top, 0, line);
             }
             Statement::Repeat { count, body } => {
-                self.expr(count, code, line)?;
+                self.expr(count, code, blocks, depth, line)?;
                 emit(code, Opcode::GetRange, 0, 1, line);
                 let top = code.len() as u32;
                 let counter = self.text(REPEAT_COUNTER);
@@ -387,7 +388,7 @@ impl Compiler {
             }
             Statement::While { condition, body } => {
                 let top = code.len() as u32;
-                self.expr(condition, code, line)?;
+                self.expr(condition, code, blocks, depth, line)?;
                 let to_end = jump(code, Opcode::JumpIfFalse, line);
                 self.statements(body, code, blocks, depth, false, BodyKind::Statements)?;
                 emit(code, Opcode::Jump, top, 0, line);
@@ -411,14 +412,14 @@ impl Compiler {
                 // compiled with the condition's own line and a failure in the
                 // condition is reported where it was written.
                 let condition_line = condition_span.line as u32;
-                self.expr(condition, code, condition_line)?;
+                self.expr(condition, code, blocks, depth, condition_line)?;
                 emit(code, Opcode::JumpIfFalse, top, 0, condition_line);
             }
             Statement::Break => emit(code, Opcode::Break, 0, 0, line),
             Statement::Skip => emit(code, Opcode::Skip, 0, 0, line),
             Statement::Return(expr) | Statement::GiveBack(expr) => {
                 match expr {
-                    Some(expr) => self.expr(expr, code, line)?,
+                    Some(expr) => self.expr(expr, code, blocks, depth, line)?,
                     None => {
                         let nothing = self.constant(Constant::Nothing);
                         emit(code, Opcode::PushConst, nothing, 0, line);
@@ -465,7 +466,7 @@ impl Compiler {
                 // no `default` is initialised to `nothing`, which is what the
                 // tree-walking VM gives it.
                 match default {
-                    Some(expr) => self.expr(expr, code, line)?,
+                    Some(expr) => self.expr(expr, code, blocks, depth, line)?,
                     None => {
                         let nothing = self.constant(Constant::Nothing);
                         emit(code, Opcode::PushConst, nothing, 0, line);
@@ -649,7 +650,21 @@ impl Compiler {
         Ok(())
     }
 
-    fn expr(&mut self, expr: &Expr, code: &mut Vec<Instruction>, line: u32) -> Result<()> {
+    /// Compiles one expression into `code`.
+    ///
+    /// `blocks` is the enclosing block's own list of nested declarations and
+    /// `depth` is how many blocks deep it sits; both are threaded here because
+    /// an expression can be a *function literal*, which is a declaration that
+    /// happens to be written where a value goes. Everything else in the
+    /// expression grammar is a value already and needs neither.
+    fn expr(
+        &mut self,
+        expr: &Expr,
+        code: &mut Vec<Instruction>,
+        blocks: &mut Vec<Block>,
+        depth: usize,
+        line: u32,
+    ) -> Result<()> {
         match expr {
             Expr::Number(n) => {
                 let index = self.constant(Constant::Number(*n));
@@ -672,12 +687,12 @@ impl Compiler {
                 emit(code, Opcode::Load, name, 0, line);
             }
             Expr::Binary { op, left, right } => {
-                self.expr(left, code, line)?;
-                self.expr(right, code, line)?;
+                self.expr(left, code, blocks, depth, line)?;
+                self.expr(right, code, blocks, depth, line)?;
                 emit(code, binary_opcode(op), 0, 0, line);
             }
             Expr::Unary { op, expr: inner } => {
-                self.expr(inner, code, line)?;
+                self.expr(inner, code, blocks, depth, line)?;
                 emit(
                     code,
                     match op {
@@ -691,7 +706,7 @@ impl Compiler {
             }
             Expr::Call { name, args } => {
                 for arg in args {
-                    self.expr(arg, code, line)?;
+                    self.expr(arg, code, blocks, depth, line)?;
                 }
                 let name = self.text(name);
                 emit(code, Opcode::Call, name, args.len() as u32, line);
@@ -708,33 +723,33 @@ impl Compiler {
                 // never a variable. A receiver that is an expression is loaded,
                 // because the value is what says whether it is an object at all.
                 if !matches!(receiver.as_ref(), Expr::Variable(_)) {
-                    self.expr(receiver, code, line)?;
+                    self.expr(receiver, code, blocks, depth, line)?;
                 }
                 for arg in args {
-                    self.expr(arg, code, line)?;
+                    self.expr(arg, code, blocks, depth, line)?;
                 }
                 let name = self.method_name(receiver, method);
                 emit(code, Opcode::CallMethod, name, args.len() as u32, line);
             }
             Expr::Property { object, property } => {
-                self.expr(object, code, line)?;
+                self.expr(object, code, blocks, depth, line)?;
                 let property = self.text(property);
                 emit(code, Opcode::LoadProperty, property, 0, line);
             }
             Expr::Index { object, index } => {
-                self.expr(object, code, line)?;
-                self.expr(index, code, line)?;
+                self.expr(object, code, blocks, depth, line)?;
+                self.expr(index, code, blocks, depth, line)?;
                 emit(code, Opcode::Index, 0, 0, line);
             }
             Expr::InterpolatedText(parts) => {
                 for part in parts {
-                    self.expr(part, code, line)?;
+                    self.expr(part, code, blocks, depth, line)?;
                 }
                 emit(code, Opcode::BuildText, parts.len() as u32, 0, line);
             }
             Expr::List(items) => {
                 for item in items {
-                    self.expr(item, code, line)?;
+                    self.expr(item, code, blocks, depth, line)?;
                 }
                 emit(code, Opcode::BuildList, items.len() as u32, 0, line);
             }
@@ -742,13 +757,13 @@ impl Compiler {
                 for (key, value) in fields {
                     let key = self.text(key);
                     emit(code, Opcode::PushConst, key, 0, line);
-                    self.expr(value, code, line)?;
+                    self.expr(value, code, blocks, depth, line)?;
                 }
                 emit(code, Opcode::BuildRecord, fields.len() as u32, 0, line);
             }
             Expr::Expect { actual, expected } => {
-                self.expr(actual, code, line)?;
-                self.expr(expected, code, line)?;
+                self.expr(actual, code, blocks, depth, line)?;
+                self.expr(expected, code, blocks, depth, line)?;
                 emit(code, Opcode::Expect, 0, 0, line);
             }
             // `might fail <call>`: a guard, the call, the marker that takes the
@@ -760,7 +775,7 @@ impl Compiler {
             // because it is one instruction and needs none of a frame's scope.
             Expr::MightFail(inner) => {
                 let guard = jump(code, Opcode::MightFail, line);
-                self.expr(inner, code, line)?;
+                self.expr(inner, code, blocks, depth, line)?;
                 emit(code, Opcode::Nop, MIGHT_FAIL_END_MARKER, 0, line);
                 let over = jump(code, Opcode::Jump, line);
                 let recovery = code.len() as u32;
@@ -769,18 +784,32 @@ impl Compiler {
                 patch_here(code, over);
                 patch(code, guard, recovery);
             }
-            // A literal needs a block of its own, and a block is compiled by the
-            // statement path: `expr` has no block pool to add one to. Rather
-            // than compile a literal to something the bytecode VM would read
-            // differently from the tree-walker, `rb compile` refuses it and says
-            // which runner can. See FINDINGS.md.
-            Expr::FunctionLiteral { .. } => {
-                return Err(Error::Parser(
-                    "`to (x) ... end` as an expression is not compiled yet; run \
-                     programs that use one with `rb run`"
-                        .to_string(),
-                    Span::unknown(),
-                ));
+            // A literal is a declaration written where a value goes, so it
+            // compiles to a block of its own and leaves the closure it names on
+            // the stack — which is exactly what the enclosing expression wants
+            // to read. `DEF_FUNCTION` pushes and the `STORE` that follows it in
+            // the statement path is the only thing that pops: a literal has no
+            // name to bind, so nothing follows, and the closure *is* the value.
+            //
+            // The block is named [`ANONYMOUS_FUNCTION`] and has the kind of a
+            // function, so a call-depth failure reached through one reports the
+            // same name the tree-walking VM reports. Both spellings SPEC.md
+            // gives a literal — the one-line `to (x) give back x * 2` and the
+            // block closed by its own `end` — arrive here as this one node.
+            Expr::FunctionLiteral { params, body } => {
+                let block = self.nested(
+                    Decl {
+                        kind: BlockKind::Function,
+                        name: ANONYMOUS_FUNCTION,
+                        arity: params.len(),
+                        params,
+                        body,
+                        span: Span::unknown(),
+                    },
+                    depth,
+                    blocks,
+                )?;
+                emit(code, Opcode::DefFunction, block, params.len() as u32, line);
             }
         }
 

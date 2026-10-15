@@ -12,6 +12,12 @@
 # at all: without this file a block that stopped working would silently join the
 # fragments, and a documentation promise would rot without a word.
 #
+# "Runs" means BOTH runners now. `rb run` has to exit 0 AND `rb compile` has to
+# exit 0. `SPEC.md:647` sat in this file for a whole phase while `rb compile`
+# refused the function literal it is written with — "`to (x) ... end` as an
+# expression is not compiled yet" — and no gate in the suite could see it,
+# because `rb run` never asked the compiler anything.
+#
 # FORMAT
 #   <doc>:<line>
 # `line` is the line of the opening ```redblue fence, counted from 1. Editing a
@@ -19,8 +25,8 @@
 # than quietly losing its bucket.
 #
 # COUNTS, as of the run that wrote this file
-#   SPEC.md 33 · docs/GRAMMAR.md 7 · README.md 7 · HANDOUT.md 2 · PHILOSOPHY.md 0
-#   49 of 101 blocks. The other 52 are 38 fragments and 14 known failures.
+#   SPEC.md 34 · docs/GRAMMAR.md 7 · README.md 7 · HANDOUT.md 2 · PHILOSOPHY.md 0
+#   50 of 103 blocks. The other 53 are 39 fragments and 14 known failures.
 
 # --- SPEC.md ---------------------------------------------------------------
 SPEC.md:40

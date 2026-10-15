@@ -2017,13 +2017,24 @@ impl Vm {
     /// budget. The function runs once per element in order and its result
     /// becomes the mapped element; a failure inside it fails the whole call,
     /// with the depth released as `call_user_function` releases it.
+    ///
+    /// The list is the receiver and is matched here; the function is the
+    /// argument and is left to [`stdlib::map_function`], which is also what the
+    /// method spelling asks. One operation has one wording: `map(xs, 5)` and
+    /// `xs.map(5)` both name the `5`, and `map(xs, f, extra)` says how many
+    /// arguments it was given instead of only that the shape was wrong. Only a
+    /// first argument that is not a list is refused here, because that is the
+    /// receiver and no argument check could describe it.
     fn map_builtin(&mut self, args: &[Value]) -> Result<Value> {
-        let [Value::List(items), Value::Function(function)] = args else {
+        let [Value::List(items), rest @ ..] = args else {
             return Err(Error::Runtime(
                 "map requires a list and a function".to_string(),
                 self.span(),
             ));
         };
+
+        let function =
+            stdlib::map_function(rest).map_err(|message| Error::Runtime(message, self.span()))?;
 
         self.apply_map(items, function)
     }

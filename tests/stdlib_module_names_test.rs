@@ -2394,8 +2394,10 @@ fn call_from(body: &str, start: usize, arguments: usize) -> Option<String> {
 /// The receiver is bound to a list and each argument to a declared function —
 /// the two shapes a `name.member(…)` a document writes in prose has: a list to
 /// take a method of, and something to apply. `to f(x) … end` rather than
-/// `set f to to (x) … end` because the bytecode compiler refuses a function
-/// literal, and a probe that cannot be compiled answers for one engine only.
+/// `set f to to (x) … end` because a *named* declaration reads the same in a
+/// failure message as the name the probe called, and a literal — which the
+/// bytecode compiler lowers now, see `tests/function_literal_test.rs` — would
+/// be reported under the anonymous name instead.
 fn preamble_for(call: &str) -> String {
     let (head, arguments) = call.split_once('(').unwrap_or((call, ""));
     let receiver = head.split('.').next().unwrap_or(head).trim();

@@ -80,6 +80,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("1ee5aba2f2474d2e929710d3c4acd0c7855f8432", "resume phase-039: adopt preserved work. Carries unreviewed code (+887/-98, 5 files, +227 lines under src/). Deliberately not rewritten."),
     ("96c3c17955d3b5233806c311110646ebe088fbd7", "resume phase-044: adopt preserved work. Carries unreviewed code (+1500/-18, 7 files, +728 lines under src/). Deliberately not rewritten."),
     ("985e4456ce8d526d292e5157a449542bcdba5259", "resume phase-046: adopt preserved work. Carries unreviewed code (+1274/-26, 11 files, +370 lines under src/). Deliberately not rewritten."),
+    ("a72143420f1da24667137b3f809bece989f274d2", "resume phase-086: adopt preserved work. Carries unreviewed code (+664/-27, 7 files, +79 lines under src/). Deliberately not rewritten."),
     // The two below are invisible to a shallow `git log`, which is how phase-083
     // undercounted this shape as thirteen. Recorded so the count cannot drift.
     ("e26659d49097210a2d1ab8abecc97d61698afebe", "resume phase-048: adopt preserved work. Carries unreviewed code (+1223/-16, 8 files, +120 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),

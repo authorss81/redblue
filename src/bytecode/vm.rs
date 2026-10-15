@@ -2720,13 +2720,16 @@ impl BytecodeVm {
         // error. The tree-walking VM excludes the same two names before its own
         // call into `stdlib::builtin`; see [`crate::interpreter::Vm::call`].
         if matches!(name, "map" | "list_map") {
-            let [Value::List(items), Value::Function(function)] = args else {
+            let [Value::List(items), rest @ ..] = args else {
                 return Err(Error::Runtime(
                     "map requires a list and a function".to_string(),
                     self.span(),
                 ));
             };
-            self.start_map(frame, items.clone(), function.clone())?;
+            let function = crate::stdlib::map_function(rest)
+                .map_err(|message| Error::Runtime(message, self.span()))?
+                .clone();
+            self.start_map(frame, items.clone(), function)?;
             self.advance(frame);
             return Ok(());
         }
@@ -2739,7 +2742,7 @@ impl BytecodeVm {
         }
         match self.get_var(name) {
             Some(Value::Function(function)) => {
-                self.call_function(&function, args, None)?;
+                self.call_function(name, &function, args, None)?;
                 self.advance(frame);
                 Ok(())
             }
@@ -2874,7 +2877,7 @@ impl BytecodeVm {
         // `this` is bound below the callee's captured scopes and its parameters,
         // so a parameter named `this` shadows the receiver the way it shadows a
         // captured binding in the tree-walking VM.
-        self.call_function(&function, &args, receiver)?;
+        self.call_function(method, &function, &args, receiver)?;
         self.advance(frame);
         Ok(())
     }
@@ -2917,7 +2920,12 @@ impl BytecodeVm {
             mapped: Vec::new(),
             function: function.clone(),
         });
-        self.call_function(&function, std::slice::from_ref(&first), None)
+        self.call_function(
+            &function.name,
+            &function,
+            std::slice::from_ref(&first),
+            None,
+        )
     }
 
     /// Carries the finished callee's `value` on to the `map` `frame` started.
@@ -2935,12 +2943,23 @@ impl BytecodeVm {
         let next = map.items[map.next].clone();
         map.next += 1;
         let function = map.function.clone();
-        self.call_function(&function, std::slice::from_ref(&next), None)
+        self.call_function(&function.name, &function, std::slice::from_ref(&next), None)
     }
 
     /// Runs a closure's block, binding `args` to its parameters.
+    ///
+    /// `called_as` is the name the call site spelled, and it is what a call-depth
+    /// failure reports rather than `function.name`. The two are the same for
+    /// every named declaration, and differ for exactly one shape: a function
+    /// *literal*, whose declaration name is [`crate::interpreter::ANONYMOUS_FUNCTION`]
+    /// whichever name it is bound to. `set loop to to (n) … end` then recursing
+    /// on `loop` is the tree-walking VM's `Vm::call_user_function`, which is
+    /// given the call-site name; naming the declaration here would have the
+    /// compiled engine say `anonymous function` for a program the other engine
+    /// reports under `loop`.
     fn call_function(
         &mut self,
+        called_as: &str,
         function: &FunctionValue,
         args: &[Value],
         this: Option<Value>,
@@ -2958,7 +2977,7 @@ impl BytecodeVm {
             return Err(Error::Limit(
                 format!(
                     "Maximum call depth of {} reached while calling '{}'",
-                    self.max_call_depth, function.name
+                    self.max_call_depth, called_as
                 ),
                 self.span(),
             ));

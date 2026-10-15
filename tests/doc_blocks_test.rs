@@ -18,7 +18,18 @@
 //! - `doc_blocks_known_fail.txt` — executed, exited non-zero, and the exact
 //!   first line of stderr is recorded.
 //!
-//! All three are checked in, and a block in none of them fails the suite, so
+//! **A RUNS block has to compile as well as run.** `rb run` reads the
+//! tree-walking engine and nothing else, so before `compile_block` existed a
+//! block could be listed here as working documentation while `rb compile`
+//! refused it outright — and `SPEC.md:647`, the program the specification uses
+//! to introduce function values, sat in that file for a whole phase with
+//! `rb compile` stopping on it with "`to (x) ... end` as an expression is not
+//! compiled yet". Every gate was green and the headline example still could
+//! not be compiled. RUNS now means `rb run` exits 0 **and** `rb compile`
+//! exits 0; the compiler lowers a function literal now, and
+//! `tests/function_literal_test.rs` is where that is pinned.
+//!
+//! All three lists are checked in, and a block in none of them fails the suite, so
 //! none of the lists can rot: adding a block to a document without classifying
 //! it fails here, and so does deleting one — the extracted count is pinned, and
 //! the entry would point at a block that is no longer there.
@@ -235,6 +246,58 @@ fn scratch(tag: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
     dir
+}
+
+/// What `rb compile` produced for one block.
+#[derive(Clone, Debug)]
+struct Compiled {
+    compiled: bool,
+    first_error_line: String,
+}
+
+/// Compiles `block` with `rb compile`, the same way [`run_block`] runs it, and
+/// reports whether a `.rbc` was written at all.
+///
+/// `rb run` only ever reads the tree-walking engine, so a block in the RUNS
+/// bucket could be listed as working documentation while `rb compile` refused
+/// it outright — and that is not a hypothetical: `SPEC.md:647`, the program the
+/// specification uses to introduce function values, was in this file for a
+/// whole phase while `rb compile` stopped on it with `` `to (x) ... end` as an
+/// expression is not compiled yet ``, a limitation no other check in the suite
+/// could see. The classification said "runs", so every gate was green and the
+/// specification's headline example still could not be compiled.
+///
+/// So a RUNS block has to be *both* runnable and compilable, and this is the
+/// half that was missing. It checks that the compile succeeds and nothing more:
+/// whether the compiled program then *answers* the same thing is what
+/// `tests/differential_test.rs` is for, and a block can legitimately differ
+/// there for reasons recorded in `phases/` rather than in a bucket here.
+fn compile_block(tag: &str, key: &str, block: &Block) -> Compiled {
+    let file = root().join(format!("docblocks-{tag}.tmp"));
+    fs::write(&file, block.source()).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+    let dir = scratch(tag);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("compile")
+        .arg(&file)
+        .arg("-o")
+        .arg(dir.join(format!("{tag}.rbc")))
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("rb compile {key}: {error}"));
+
+    let _ = fs::remove_file(&file);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Compiled {
+        compiled: output.status.success(),
+        first_error_line: stderr
+            .lines()
+            .find(|line| line.trim_start().starts_with("Error"))
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    }
 }
 
 /// What running one block produced.
@@ -511,6 +574,19 @@ fn running_every_block_agrees_with_the_bucket_it_is_in() {
                      first error line: {}\n\
                      body:\n{}",
                     outcome.first_error_line, block.body
+                );
+                let compiled = compile_block("agrees-compile", key, block);
+                assert!(
+                    compiled.compiled,
+                    "{key} is classified RUNS and `rb compile` refused it.\n\
+                     first error line: {}\n\
+                     body:\n{}\n\
+                     A RUNS block is a program `rb` runs *and* compiles. Either \
+                     the compiler cannot lower this program yet — in which case \
+                     that is the gap to fix and not this list to edit — or it \
+                     belongs in the fragment file with the reason it is not a \
+                     program.",
+                    compiled.first_error_line, block.body
                 );
                 ran += 1;
             }

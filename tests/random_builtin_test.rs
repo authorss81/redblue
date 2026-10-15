@@ -789,10 +789,9 @@ fn edge_random_refuses_a_range_no_number_can_measure() {
 /// generator really do live in the shared layer rather than in one VM.
 #[test]
 fn both_engines_agree_on_a_seeded_sequence() {
-    // No function literals: the bytecode compiler refuses them ("`to (x) ...
-    // end` as an expression is not compiled yet"), which is a gap of its own and
-    // not what this test is about. `say` of a list prints it whole, which is
-    // enough to compare the two sequences.
+    // `say` of a list prints it whole, which is enough to compare the two
+    // sequences. Nothing here needs a function value: the point of this test is
+    // the seeded generator, not the call that asks for it.
     let source = format!(
         "random_seed({SEED})\n\
          for each i from 1 to 20\n    \

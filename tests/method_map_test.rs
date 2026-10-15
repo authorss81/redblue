@@ -138,22 +138,25 @@ const DOUBLE: &str = "to double(x)\n    give back x * 2\nend\n";
 /// values does not run, which is the whole finding. The example ends in `say`,
 /// so what it answers is the line it printed rather than a value.
 ///
-/// The compiled half uses the **block form** of the same declaration rather
-/// than the literal `set double to to (x) …`. That is a standing limit of the
-/// bytecode compiler and not of this fix: a function *literal* is refused by
-/// `compile_source` as "not compiled yet" (see `phases/phase-086/FINDINGS.md`),
-/// so `rb compile` cannot be handed the literal form at all. The block form is
-/// the other of the two spellings SPEC.md gives for the same value, so what is
-/// being checked on the compiled engine is the same call with the same receiver.
+/// The compiled half is SPEC.md's example **verbatim** — literal and all.
+///
+/// It used to run the block form of the same declaration on this half, because
+/// `compile_source` refused a function *literal*. It does not any more: a
+/// literal is a declaration written where a value goes, so `codegen` compiles
+/// it to a block of its own and leaves the closure on the stack, which is what
+/// `DEF_FUNCTION` already does for `to double(x) … end`. A test that ran the
+/// block form here was checking a different program from the one SPEC.md
+/// prints, and the gap it papered over was reachable from the specification's
+/// own headline example.
 #[test]
 fn edge_the_specification_example_of_a_first_class_function_runs() {
-    let literal = "set double to to (x) give back x * 2\n\
-                   \n\
-                   set numbers to [1, 2, 3]\n\
-                   set doubled to numbers.map(double)\n\
-                   say doubled\n";
+    let source = "set double to to (x) give back x * 2\n\
+                  \n\
+                  set numbers to [1, 2, 3]\n\
+                  set doubled to numbers.map(double)\n\
+                  say doubled\n";
 
-    let tokens = redblue::lexer::Lexer::tokenize(literal).expect("SPEC.md's example should lex");
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("SPEC.md's example should lex");
     let ast = redblue::parser::parse(tokens).expect("it should parse");
     let (mut vm, result) = redblue::run_isolated(&ast);
     assert_eq!(
@@ -171,16 +174,11 @@ fn edge_the_specification_example_of_a_first_class_function_runs() {
         "SPEC.md's example printed something other than the doubled list"
     );
 
-    // The bytecode path separately, because the tree-walker output above cannot
-    // see the compiler that `rb compile` would emit.
-    let block = "to double(x)\n\
-                 give back x * 2\n\
-                 end\n\
-                 \n\
-                 set numbers to [1, 2, 3]\n\
-                 set doubled to numbers.map(double)\n\
-                 say doubled\n";
-    let chunk = redblue::compile_source(block).expect("SPEC.md's example should compile");
+    // The same source, compiled. `rb compile` used to stop before emitting
+    // anything for this file, so the two halves of SPEC.md's headline example —
+    // the one that runs it and the one that can be compiled at all — were
+    // never the same program.
+    let chunk = redblue::compile_source(source).expect("SPEC.md's example should compile");
     let mut compiled = BytecodeVm::new();
     compiled.set_echo(false);
     compiled
@@ -516,10 +514,10 @@ fn edge_a_receiver_whose_value_is_nothing_is_refused() {
 
 /// A bad argument to `xs.map` is a clean runtime error, not a panic.
 ///
-/// Two refusals: a number where a function is required, and no argument at
-/// all. The error has to name what it got — the finding's rule is that
-/// `xs.map(5)` "names the argument it got" — so the message is asserted, not
-/// merely that `Err` came back.
+/// Three refusals: a number where a function is required, no argument at all,
+/// and a second function that cannot be used. The error has to name what it
+/// got — the finding's rule is that `xs.map(5)` "names the argument it got" —
+/// so the message is asserted, not merely that `Err` came back.
 #[test]
 fn edge_a_bad_argument_to_a_variable_receiver_map_is_a_named_runtime_error() {
     let number = both_errors(&format!("{DOUBLE}set xs to [1, 2, 3]\nxs.map(5)\n"));
@@ -536,6 +534,57 @@ fn edge_a_bad_argument_to_a_variable_receiver_map_is_a_named_runtime_error() {
     assert!(
         none.contains("map requires a function"),
         "a call with no argument was not refused as a missing function: {none:?}"
+    );
+}
+
+/// One operation, one refusal — for a second function it cannot use.
+///
+/// `map` takes a list and one function. Handed a third value it has to say how
+/// many arguments it was given, and it has to say the *same* thing whichever
+/// spelling reached it: `xs.map(f, g)`, `map(xs, f, g)` and `list.map(xs, f, g)`
+/// are one operation and each of them used to be answered differently, the two
+/// flat ones saying only that the shape was wrong and the method one counting
+/// the arguments. Both engines are asked for each.
+///
+/// The count is what makes this a test and not a restatement: the third value is
+/// itself a function, so a refusal that only looked at the *last* argument
+/// would have run it, and one that only looked at the second would have said
+/// the arity without saying how far past it the call went.
+#[test]
+fn edge_a_map_given_a_second_function_is_refused_the_same_way_by_every_spelling() {
+    let expected = "map requires a function, but was given 2 arguments";
+
+    for call in [
+        "xs.map(double, double)",
+        "map(xs, double, double)",
+        "list.map(xs, double, double)",
+    ] {
+        let source = format!("{DOUBLE}set xs to [1, 2, 3]\n{call}\n");
+        assert_eq!(
+            both_errors(&source),
+            expected,
+            "`{call}` refused the extra function differently from the other spellings"
+        );
+    }
+
+    // Three arguments count as three, so the count is read rather than a fixed
+    // string with `2` in it.
+    let three = both_errors(&format!(
+        "{DOUBLE}set xs to [1, 2, 3]\nxs.map(double, double, double)\n"
+    ));
+    assert_eq!(
+        three, "map requires a function, but was given 3 arguments",
+        "the refusal counted the extra arguments rather than reporting the count it got"
+    );
+
+    // And a receiver that is not a list is still the receiver's refusal: the
+    // count belongs to the function side, and a call whose *first* argument is
+    // wrong never reaches it.
+    let not_a_list = both_errors(&format!("{DOUBLE}set xs to 5\nxs.map(double, double)\n"));
+    assert!(
+        !not_a_list.contains("2 arguments"),
+        "a non-list receiver was refused with the argument count instead of with the \
+         receiver it got: {not_a_list:?}"
     );
 }
 
