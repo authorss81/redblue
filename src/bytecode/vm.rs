@@ -2779,12 +2779,8 @@ impl BytecodeVm {
                             self.span(),
                         ));
                     };
-                    let [Value::Function(function)] = args.as_slice() else {
-                        return Err(Error::Runtime(
-                            "map requires a function".to_string(),
-                            self.span(),
-                        ));
-                    };
+                    let function = crate::stdlib::map_function(&args)
+                        .map_err(|message| Error::Runtime(message, self.span()))?;
                     self.start_map(frame, items.clone(), function.clone())?;
                     self.advance(frame);
                     Ok(())
@@ -2840,6 +2836,28 @@ impl BytecodeVm {
                 self.get_var(&qualified).is_some(),
                 crate::stdlib::module_member_name(&qualified).is_some(),
             ) {
+                // Nothing the module path can reach answers this, and `map` is
+                // the one member that is also a method on a list, so a name
+                // holding a list is asked here rather than refused. `xs.map(f)`
+                // is the program SPEC.md's "First-Class Functions" section uses
+                // to introduce function values, and before this it died as
+                // `xs_map`, a name nothing registers.
+                //
+                // It is asked *after* the module path, never before it, so a
+                // module function of the same spelling still wins: `list` bound
+                // to a list and called as `list.map(f)` is `list_map` with one
+                // argument, and stays the refusal that says so. The tree-walking
+                // VM asks it in the same place; see
+                // [`crate::interpreter::Vm::call_method`].
+                if method == "map" {
+                    if let Some(Value::List(items)) = self.get_var(object_name) {
+                        let function = crate::stdlib::map_function(&args)
+                            .map_err(|message| Error::Runtime(message, self.span()))?;
+                        self.start_map(frame, items, function.clone())?;
+                        self.advance(frame);
+                        return Ok(());
+                    }
+                }
                 return Err(Error::Runtime(
                     format!("Module '{module}' has no function '{method}'"),
                     self.span(),

@@ -1,4 +1,4 @@
-use crate::value::Value;
+use crate::value::{FunctionValue, Value};
 use std::collections::HashMap;
 
 /// The module names whose functions are registered as `module_function`
@@ -188,6 +188,31 @@ pub fn dotted_call_reaches(
         return false;
     }
     module_has_member(module, member) && (bound_by_the_program || answers_as_a_builtin)
+}
+
+/// The function a method-spelled `map` call was given, or the refusal it earns.
+///
+/// `map` is the one builtin whose argument has to be a Redblue function, so it
+/// is the one call whose bad arguments are named rather than merely counted:
+/// `xs.map(5)` says what it got, and a call with no argument at all says that
+/// too. Both engines ask this — see [`crate::interpreter::Vm::call_method`] and
+/// [`crate::bytecode::vm::BytecodeVm::call_method`] — because the two engines
+/// refusing with different words is a divergence `tests/differential_test.rs`
+/// reports for a program that is behaving the same way.
+///
+/// The caller has already established that the receiver is a list: this is the
+/// argument side alone, and a receiver that is not a list is refused by the
+/// receiver path rather than here.
+pub fn map_function(args: &[Value]) -> Result<&FunctionValue, String> {
+    match args {
+        [Value::Function(function)] => Ok(function),
+        [] => Err("map requires a function, but no argument was given".to_string()),
+        [one] => Err(format!("map requires a function, but was given {one}")),
+        many => Err(format!(
+            "map requires a function, but was given {} arguments",
+            many.len()
+        )),
+    }
 }
 
 /// Whether the `module.member` spelling reaches a builtin.
