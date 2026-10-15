@@ -180,10 +180,7 @@ fn edge_banner_with_colour_off_is_plain_text_with_no_escapes() {
         !text.contains('\u{1b}'),
         "a disabled banner leaked escape bytes: {text:?}"
     );
-    // Exactly three lines, and the third is blue-half only.
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 3, "banner must be three lines: {text:?}");
-    assert_eq!(lines[2], "└─┘");
+    assert_eq!(text.lines().count(), 7, "seven-line wordmark: {text:?}");
 }
 
 #[test]
@@ -192,29 +189,75 @@ fn a_coloured_banner_paints_both_halves_and_plain_text_still_reads() {
     assert!(text.contains('\u{1b}'), "enabled banner must colour");
     // Stripping escapes must leave exactly the plain banner - colour is the only
     // difference between the two modes.
-    let stripped: String = strip_escapes(&text);
-    let plain = redblue::repl::banner::banner_text(&Style::forced(false));
-    assert_eq!(stripped, plain, "colour changed the visible glyph");
+    assert_eq!(
+        strip_escapes(&text),
+        redblue::repl::banner::banner_text(&Style::forced(false)),
+        "colour changed the visible glyph"
+    );
 }
 
 #[test]
-fn the_two_halves_of_the_wordmark_use_different_roles() {
+fn the_wordmark_uses_a_gradient_across_its_lines() {
     let on = Style::forced(true);
-    let red = on.paint(Paint::BrandRed, "x");
-    let blue = on.paint(Paint::BrandBlue, "x");
-    assert_ne!(red, blue, "the wordmark would be one colour, not redblue");
+    let text = redblue::repl::banner::banner_text(&on);
+    // All three gradient steps must actually appear, or the banner reads as two
+    // flat blocks instead of one image.
+    for role in [Paint::BrandRed, Paint::BrandMid, Paint::BrandBlue] {
+        // paint() yields "\u{1b}[<sgr>m…\u{1b}[0m"; take everything between the
+        // first '[' and the following 'm'.
+        let sgr = on.paint(role, "x");
+        let code: String = sgr
+            .chars()
+            .skip_while(|c| *c != '[')
+            .skip(1)
+            .take_while(|c| *c != 'm')
+            .collect();
+        assert!(!code.is_empty(), "could not parse an SGR from {sgr:?}");
+        assert!(
+            text.contains(&format!("\u{1b}[{code}m")),
+            "gradient step {code} never appeared in the banner"
+        );
+    }
+}
+
+#[test]
+fn the_banner_is_ascii_when_asked_and_unicode_otherwise() {
+    // REDBLUE_ASCII exists because font coverage cannot be detected from inside
+    // the process. Both renderings must be complete, not one being a stub.
+    std::env::set_var("REDBLUE_ASCII", "1");
+    let ascii = redblue::repl::banner::banner_text(&Style::forced(false));
+    assert!(redblue::repl::banner::ascii_in_use());
+    assert!(
+        ascii.is_ascii(),
+        "the ASCII fallback still contains non-ASCII: {ascii:?}"
+    );
+    std::env::remove_var("REDBLUE_ASCII");
+
+    let uni = redblue::repl::banner::banner_text(&Style::forced(false));
+    assert!(
+        !redblue::repl::banner::ascii_in_use(),
+        "TERM=dumb or a set REDBLUE_ASCII should force ASCII"
+    );
+    assert!(
+        !uni.is_ascii(),
+        "the default wordmark should use box-drawing glyphs"
+    );
+    assert_eq!(
+        ascii.lines().count(),
+        uni.lines().count(),
+        "the two renderings must be the same shape"
+    );
 }
 
 #[test]
 fn brand_roles_are_distinct_from_error_and_prompt() {
-    // A brand colour that matches the error or prompt colour would make the
-    // wordmark read as an alert or as the prompt.
     let on = Style::forced(true);
     assert_ne!(on.paint(Paint::BrandRed, "x"), on.paint(Paint::Error, "x"));
     assert_ne!(
         on.paint(Paint::BrandBlue, "x"),
         on.paint(Paint::Prompt, "x")
     );
+    assert_ne!(on.paint(Paint::BrandMid, "x"), on.paint(Paint::Result, "x"));
 }
 
 #[test]
@@ -226,6 +269,16 @@ fn edge_banner_is_stable_across_calls() {
         redblue::repl::banner::banner_text(&s),
         redblue::repl::banner::banner_text(&s)
     );
+}
+
+#[test]
+fn edge_a_narrow_terminal_centres_without_panicking() {
+    std::env::set_var("COLUMNS", "10");
+    let text = redblue::repl::banner::banner_text(&Style::forced(false));
+    std::env::remove_var("COLUMNS");
+    // Width smaller than the glyph: padding must saturate to zero, not wrap.
+    assert!(!text.contains('\u{1b}'));
+    assert_eq!(text.lines().count(), 7);
 }
 
 fn strip_escapes(s: &str) -> String {

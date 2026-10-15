@@ -304,7 +304,7 @@ impl Repl {
         println!(
             "{}",
             self.style
-                .paint(Paint::Dim, "Type 'help' for commands, 'quit' to exit\n")
+                .paint(Paint::Dim, "Type ':help' for commands, ':quit' to exit\n")
         );
 
         let names: SessionNames = Rc::new(RefCell::new(Vec::new()));

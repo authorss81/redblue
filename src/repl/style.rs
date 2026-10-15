@@ -41,6 +41,11 @@ pub enum Paint {
     BrandRed,
     /// The "blue" of the wordmark, and the second half of the banner glyph.
     BrandBlue,
+    /// The middle of the wordmark's red-to-blue gradient.
+    ///
+    /// Without this the banner steps from red straight to blue and reads as two
+    /// separate blocks rather than one gradient.
+    BrandMid,
 }
 
 impl Paint {
@@ -50,16 +55,17 @@ impl Paint {
     /// read first and the colour should only help a long transcript be scanned.
     fn sgr(self) -> &'static str {
         match self {
-            Paint::Prompt => "1;34",   // bold blue
-            Paint::Heading => "1;36",  // bold cyan
-            Paint::Result => "0;32",   // green
-            Paint::Error => "0;31",    // red
-            Paint::Dim => "2;37",      // faint grey
-            Paint::BrandRed => "1;31", // bold red
+            Paint::Prompt => "1;34",    // bold blue
+            Paint::Heading => "1;36",   // bold cyan
+            Paint::Result => "0;32",    // green
+            Paint::Error => "0;31",     // red
+            Paint::Dim => "2;37",       // faint grey
+            Paint::BrandRed => "1;31",  // bold red
             Paint::BrandBlue => "1;36", // bold cyan — deliberately NOT 1;34, which is
-                                        // Prompt. A brand colour that matches the
-                                        // prompt would make the wordmark look like
-                                        // something to type.
+            // Prompt. A brand colour that matches the
+            // prompt would make the wordmark look like
+            // something to type.
+            Paint::BrandMid => "1;35", // bold magenta — the red/blue midpoint
         }
     }
 }
