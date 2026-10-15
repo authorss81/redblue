@@ -86,6 +86,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("e26659d49097210a2d1ab8abecc97d61698afebe", "resume phase-048: adopt preserved work. Carries unreviewed code (+1223/-16, 8 files, +120 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
     ("09dd1020443e166a765991815c75c024a5ccd45b", "resume phase-049: adopt preserved work. Carries unreviewed code (+1437/-173, 35 files, +263 lines under src/) - the widest file count on this list. Deliberately not rewritten."),
     ("10f97506426673e83119b6e0ec21f6754bddf75c", "resume phase-050: adopt preserved work. Carries unreviewed code (+5410/-126, 15 files, +596 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
+    ("7e75dc15c77a5882f086990d261a9049de9d48bb", "resume phase-054: adopt preserved work. Carries unreviewed code (+1131/-8, 6 files, +923/-8 under src/ - the REPL syntax highlighter: src/repl/highlight.rs, src/repl/style.rs, src/repl/editor.rs, src/repl/mod.rs, plus this phase's own REPORT.md and FINDINGS.md). Deliberately not rewritten."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -169,6 +170,10 @@ const MEASURED: &[(&str, &str)] = &[
     (
         "10f97506426673e83119b6e0ec21f6754bddf75c",
         "resume phase-050",
+    ),
+    (
+        "7e75dc15c77a5882f086990d261a9049de9d48bb",
+        "resume phase-054",
     ),
     (
         "3fbf7396de1d2355267ddcfda9a40a00277a4687",

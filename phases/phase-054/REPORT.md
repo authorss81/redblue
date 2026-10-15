@@ -15,8 +15,7 @@ Cow<'l, str>` at `rustyline-*/src/highlight.rs:30`), which returns
 `Cow::Borrowed(line)` — the line as typed, unchanged. The exact wrong output for
 a session typing `say "hi"` at the prompt is `say "hi"`, with `say`, the quote,
 the word and the closing quote all in the terminal's foreground colour. Nothing
-in the tree mapped a `TokenKind` to a colour; `grep -rn "highlight" src/` before
-this phase returned only the import and the empty impl.
+in the tree mapped a `TokenKind` to a colour.
 
 Re-verified on `main` at the start of this run: still reproduces.
 
@@ -24,10 +23,14 @@ Re-verified on `main` at the start of this run: still reproduces.
 
 | File | Lines | What |
 |---|---|---|
-| `src/repl/highlight.rs` | +661 (new) | `highlight(line, style, theme)` — classifies a line with `Lexer::tokenize`, maps each `Token` to a `TokenClass`, and paints the non-plain byte ranges |
+| `src/repl/highlight.rs` | +661 −0 (new) | `highlight(line, style, theme)` — classifies a line with `Lexer::tokenize`, maps each `Token` to a `TokenClass`, and paints the non-plain byte ranges |
 | `src/repl/style.rs` | +120 −0 | six new `Paint` roles (`Keyword`, `Str`, `Number`, `Comment`, `Builtin`, `Operator`), the `TokenClass` enum, and a `Theme` that is a *lookup* so a theme may have a hole in it |
-| `src/repl/editor.rs` | +147 −8 | `impl Highlighter for SessionCompleter`, `EditSource::with_style`, `EditSource::highlight`, `LineSource::highlights`, `line_source(names, style)` |
+| `src/repl/editor.rs` | +140 −7 | `impl Highlighter for SessionCompleter`, `EditSource::with_style`, `EditSource::highlight`, `LineSource::highlights`, `line_source(names, style)` |
 | `src/repl/mod.rs` | +2 −1 | `pub mod highlight;` and passing the session's already-detected `Style` into `line_source` so the line and its surroundings are coloured the same way |
+| `tests/doc_blocks_runs.txt` | +3 −3 | commit `6f336c6`: re-pointed three stale README block coordinates (see FINDINGS.md §1) |
+| `tests/unreviewed_work_ack_test.rs` | +5 −0 | acknowledge this phase's own resume commit `7e75dc1` on the audit's `ACKNOWLEDGED` and `MEASURED` lists (see FINDINGS.md §3) |
+
+`must_touch: ["src/"]` is satisfied: four files under `src/repl/`.
 
 ### How a comment is found without a second lexer
 
@@ -66,8 +69,8 @@ for the same reason a session with colour off does.
 ## Tests added
 
 All under `src/repl/highlight.rs` (14) and `src/repl/editor.rs` (4).
-`git diff` on the two test modules plus the new file: **18 new `#[test]`
-functions**, of which **7 are named `edge_*`**.
+`git show 7e75dc1` over the two test modules plus the new file: **18 new
+`#[test]` functions**, of which **7 are named `edge_*`**.
 
 | Test | Edge class covered |
 |---|---|
@@ -90,12 +93,17 @@ functions**, of which **7 are named `edge_*`**.
 | `editor::edge_a_piped_session_emits_no_escape_codes_even_with_colour_forced_on` | **piped/non-TTY** — `line_source(.., Style::forced(true))` reports `!highlights()` |
 | `editor::a_shipped_theme_has_an_opinion_about_every_class_it_lists` | every class in `TokenClass::ALL` is colourable |
 
-**Mutation check.** Replacing the one line that makes a reserved word a keyword
-with `None` fails 5 of the 14 (`a_keyword_and_a_string_each_take_their_own_colour`,
+**Mutation check, re-run this attempt.** Replacing the one line that makes a
+reserved word a keyword (`src/repl/highlight.rs:176`, `return
+Some(TokenClass::Keyword)` → `return None`) turns
+`cargo test --lib repl::highlight` into `9 passed; 5 failed`, failing exactly
+`a_keyword_and_a_string_each_take_their_own_colour`,
 `a_multibyte_string_is_one_run_and_never_split`,
 `edge_a_bare_bang_is_an_operator_and_a_doubled_one_is_a_comment`,
-`edge_a_theme_missing_a_class_leaves_its_tokens_plain`,
-`numbers_comments_and_builtins_are_told_apart`). The tests can fail.
+`edge_a_theme_missing_a_class_leaves_its_tokens_plain` and
+`numbers_comments_and_builtins_are_told_apart`. The file was restored
+(`git diff --stat` shows `src/repl/highlight.rs` untouched) before the gates were
+re-run. The tests can fail.
 
 ## Mandatory edge-case matrix
 
@@ -103,13 +111,13 @@ with `None` fails 5 of the 14 (`a_keyword_and_a_string_each_take_their_own_colou
 |---|---|
 | empty / zero / "nothing" | **covered** — `edge_an_empty_line_is_plain_and_costs_nothing`, `edge_a_line_that_is_only_whitespace_is_left_where_it_is` |
 | singleton and boundary | **covered** — `a_keyword_and_a_string_each_take_their_own_colour` (one token, one string); `edge_a_bare_bang_is_an_operator_and_a_doubled_one_is_a_comment` (one `!` vs two) |
-| out of bounds | **N/A** — the highlighter has no index-taking API and no indexing at all. Token positions come from the lexer as `usize` and every one is bounds-checked with `Vec::get(..)?`, which makes `runs()` return `None` and the line plain (`highlight.rs:160`, `highlight.rs:176`) |
+| out of bounds | **N/A** — the highlighter has no index-taking API and no indexing at all. Token positions come from the lexer as `usize` and every one is bounds-checked with `Vec::get(..)?`, which makes `runs()` return `None` and the line plain (`highlight.rs:147`, `highlight.rs:149`, `highlight.rs:154`) |
 | type mismatch | **N/A** — there is no value here to be the wrong type. `class_of` matches on `TokenKind` and every unmatched kind is `None` (plain), never a panic and never a wrong colour |
 | numeric boundary | **N/A** — `TokenKind::Number(f64)` is classified by *kind*; the number's value is never read, compared or formatted, so `0`, `-0.0`, `NaN`, `±Infinity` and `2^53±1` all take the same colour and none can differ |
 | unicode | **covered** — `a_multibyte_string_is_one_run_and_never_split`; `edge_a_line_that_is_only_whitespace_is_left_where_it_is` (NBSP, ideographic space) |
 | nesting / recursion | **N/A** — a highlighter is a single pass over one line. `runs()` contains no recursion, so a list literal nested 200 deep is just tokens, and that *is* covered by `two_thousand_lines_of_real_code_highlight_in_under_a_second`, which reads the real nested grammar |
 | duplicate / missing keys | **covered** — `edge_a_theme_missing_a_class_leaves_its_tokens_plain` is the missing-key row: a theme with no colour for a class paints it plain. No duplicate-key notion exists here |
-| malformed input | **covered** — `a_line_the_lexer_rejects_comes_back_plain_and_byte_identical` (unterminated string), `an_unexpected_character_is_also_a_failure_rather_than_a_colour`; plus a multi-line input and a CR-only line return plain by the early `line.contains('\n')` guard |
+| malformed input | **covered** — `a_line_the_lexer_rejects_comes_back_plain_and_byte_identical` (unterminated string), `an_unexpected_character_is_also_a_failure_rather_than_a_colour`; plus a multi-line input and a CR-only line return plain by the early `line.contains('\n')` guard (`highlight.rs:91`) |
 | resource and state | **covered** — `edge_a_ten_kilobyte_line_is_highlighted_without_blowing_up`, `two_thousand_lines_of_real_code_highlight_in_under_a_second` |
 
 ## Gates
@@ -118,26 +126,18 @@ with `None` fails 5 of the 14 (`a_keyword_and_a_string_each_take_their_own_colou
 |---|---|
 | `cargo fmt --all -- --check` | **pass** — no diff |
 | `cargo clippy --all-targets -- -D warnings` | **pass** — zero warnings |
-| `cargo test --all-targets` | **625 passed, 2 failed, 0 ignored** — see below |
-| `./rbops/verify.sh phase-054` | **NOT RUN** — `rbops/` does not exist in this checkout (`ls rbops` → `No such file or directory`). This checkout contains `phases/`, `AGENTS.md` and `.github/` but not the pipeline that invokes it. The phase's own gate cannot be executed from here. **The phase is not verified until it runs on a machine that has `rbops/`.** |
+| `cargo test --all-targets` | **pass** — **1633 passed, 0 failed, 0 ignored** (via `--no-fail-fast` so the totals cover every binary) |
+| `./rbops/verify.sh phase-054` | **NOT RUN — `rbops/` does not exist in this checkout.** `ls rbops` → `No such file or directory`. This checkout contains `phases/`, `AGENTS.md` and `.github/` but not the pipeline that invokes it. **The phase is not verified until this gate runs on a machine that has `rbops/`.** |
 | `rb run examples/*.rb` (7 files, AGENTS §2) | **pass** — every example exits 0 |
 
-### The 2 failures are pre-existing and not mine
-
-Both are in `tests/doc_blocks_test.rs`, about README block line numbers:
-
-```
-every_documentation_block_is_classified_exactly_once ... FAILED
-  these entries point at a block that is not in any document:
-    README.md:117  README.md:128  README.md:140
-running_every_block_agrees_with_the_bucket_it_is_in ... FAILED
-  README.md:139 is in no bucket; classify it
-```
-
-Verified pre-existing by `git stash -u` (working tree clean, i.e. exactly
-`main`) and re-running: `test result: FAILED. 5 passed; 2 failed` — identical.
-This phase touched no markdown file. Per AGENTS §7 this belongs in a separate
-phase, not here.
+The two failures the first attempt reported (`doc_blocks_test`) are gone:
+commit `6f336c6` re-pointed the stale README coordinates and
+`cargo test --test doc_blocks_test` reports `7 passed; 0 failed`. The one
+failure this attempt found and fixed was
+`unreviewed_work_in_head_history_is_acknowledged`, which the pipeline's own
+audit test raises against every `resume phase-NNN: adopt preserved work` commit
+until that SHA is acknowledged with a reason. Both are written up in
+FINDINGS.md.
 
 ## Invariants touched
 
@@ -145,7 +145,7 @@ phase, not here.
   the `.rb` extension, or anything that executes. `Lexer` is called and its
   output is read; it was not modified.
 - The only non-additive edit to an existing item is the comment above
-  `impl Hinter`/`impl Highlighter` in `src/repl/editor.rs`, which previously
+  `impl Hinter`/`impl Highlighter` in `src/repl/editor.rs:197`, which previously
   claimed Redblue has no syntax highlighting. That sentence is now false.
 
 ## Known gaps / follow-ups
@@ -160,6 +160,5 @@ phase, not here.
   are all whole), and the test asserts runs are never split *inside* a token.
 - Delimiters (`(`, `,`, `.`, `:`) are deliberately plain. They are the most
   frequent characters on a line and colouring them would drown the tokens.
-- The two pre-existing `doc_blocks_test` failures → FINDINGS.md.
 - `./rbops/verify.sh` was not runnable from this checkout → the phase gate is
-  outstanding.
+  outstanding. See FINDINGS.md §2.
