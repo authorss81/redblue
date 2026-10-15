@@ -180,7 +180,11 @@ fn edge_banner_with_colour_off_is_plain_text_with_no_escapes() {
         !text.contains('\u{1b}'),
         "a disabled banner leaked escape bytes: {text:?}"
     );
-    assert_eq!(text.lines().count(), 7, "seven-line wordmark: {text:?}");
+    assert_eq!(
+        text.lines().count(),
+        6,
+        "five-row wordmark plus a blank: {text:?}"
+    );
 }
 
 #[test]
@@ -278,7 +282,7 @@ fn edge_a_narrow_terminal_centres_without_panicking() {
     std::env::remove_var("COLUMNS");
     // Width smaller than the glyph: padding must saturate to zero, not wrap.
     assert!(!text.contains('\u{1b}'));
-    assert_eq!(text.lines().count(), 7);
+    assert_eq!(text.lines().count(), 6);
 }
 
 fn strip_escapes(s: &str) -> String {

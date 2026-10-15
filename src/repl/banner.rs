@@ -17,10 +17,14 @@
 //! - **Centring on the real terminal width**, so it does not sit hard against
 //!   column zero on a wide window.
 //!
-//! Half the mark is red and half is blue, which is the whole name.
+//! It spells REDBLUE, and the gradient follows the name: **RED** is painted red,
+//! **BLUE** is painted blue, and B sits on the midpoint between them.
+//!
+//! The first version of this file drew the letter R three times and called it a
+//! wordmark. It looked like "RRR". A glyph that is not the thing it claims to
+//! be is not a cosmetic defect — it is a lie in the place the user looks first.
 
 use crate::repl::style::{Paint, Style};
-use std::io::{IsTerminal, Write};
 
 /// One line of the banner: the glyph, and which step of the gradient it takes.
 struct Line {
@@ -28,30 +32,26 @@ struct Line {
     paint: Paint,
 }
 
-/// The Unicode wordmark: `redblue`, in block capitals.
-const LOGO_UNICODE: [Line; 7] = [
+/// The Unicode wordmark. Five rows, seven letters, `redblue`.
+const LOGO_UNICODE: [Line; 6] = [
     Line {
-        glyph: "██████╗ ██████╗ ██████╗ ",
+        glyph: "███ ████ ███ ███ █   █ █ ████",
         paint: Paint::BrandRed,
     },
     Line {
-        glyph: "██╔══██╗██╔══██╗██╔══██╗ ",
+        glyph: "█ █ █    █ █ █ █ █   █ █ █   ",
         paint: Paint::BrandRed,
     },
     Line {
-        glyph: "██████╔╝██████╔╝██████╔╝ ",
+        glyph: "███ ███  █ █ ███ █   █ █ ███ ",
         paint: Paint::BrandMid,
     },
     Line {
-        glyph: "██╔══██╗██╔══██╗██╔══██╗ ",
+        glyph: "█ █ █    █ █ █ █ █   █ █ █   ",
         paint: Paint::BrandBlue,
     },
     Line {
-        glyph: "██║  ██║██║  ██║██║  ██║ ",
-        paint: Paint::BrandBlue,
-    },
-    Line {
-        glyph: "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ",
+        glyph: "█ █ ████ ███ ████ ███ ███ ████",
         paint: Paint::BrandBlue,
     },
     Line {
@@ -62,31 +62,28 @@ const LOGO_UNICODE: [Line; 7] = [
 
 /// The same wordmark in pure ASCII, for a terminal that cannot draw the above.
 ///
-/// Proportioned to match: `#` carries the weight, `+`/`|` the joins, so the two
-/// render at a similar visual size rather than the ASCII looking cramped.
-const LOGO_ASCII: [Line; 7] = [
+/// Proportioned to match: `#` carries the weight and the gaps are single spaces,
+/// so the two render at a similar visual size rather than the ASCII looking
+/// cramped.
+const LOGO_ASCII: [Line; 6] = [
     Line {
-        glyph: "######  ######  ######  ",
+        glyph: "### #### ### ### #   # # ####",
         paint: Paint::BrandRed,
     },
     Line {
-        glyph: "##   ## ##   ## ##   ## ",
+        glyph: "# # #    # # # # #   # # #   ",
         paint: Paint::BrandRed,
     },
     Line {
-        glyph: "###### ###### ######  ",
+        glyph: "### ###  # # ### #   # # ### ",
         paint: Paint::BrandMid,
     },
     Line {
-        glyph: "##   ## ##   ## ##   ## ",
+        glyph: "# # #    # # # # #   # # #   ",
         paint: Paint::BrandBlue,
     },
     Line {
-        glyph: "##   ## ##   ## ##   ## ",
-        paint: Paint::BrandBlue,
-    },
-    Line {
-        glyph: "##   ## ##   ## ##   ## ",
+        glyph: "# # #### ### #### ### ### ####",
         paint: Paint::BrandBlue,
     },
     Line {
@@ -112,8 +109,8 @@ fn use_ascii() -> bool {
 
 /// Terminal width, defaulting to 80 when it cannot be read.
 fn terminal_width() -> usize {
-    // COLUMNS is what the shell exports and is cheap; the terminal query is the
-    // fallback. A failure here must never stop the REPL starting.
+    // COLUMNS is what the shell exports and is cheap; a failure here must never
+    // stop the REPL starting, hence the default rather than an error.
     if let Ok(c) = std::env::var("COLUMNS") {
         if let Ok(n) = c.trim().parse::<usize>() {
             if n > 0 {
@@ -125,7 +122,7 @@ fn terminal_width() -> usize {
 }
 
 /// Print the banner: centred, gradient-coloured, static.
-pub fn print_banner<W: Write>(out: &mut W, style: &Style) -> std::io::Result<()> {
+pub fn print_banner<W: std::io::Write>(out: &mut W, style: &Style) -> std::io::Result<()> {
     let ascii = use_ascii();
     let logo = if ascii {
         &LOGO_ASCII[..]
@@ -169,11 +166,4 @@ pub fn banner_text(style: &Style) -> String {
 /// rather than only whichever the test host happens to pick.
 pub fn ascii_in_use() -> bool {
     use_ascii()
-}
-
-/// Whether a terminal exists at all — used only to keep clippy honest about
-/// `IsTerminal` being imported for a future interactive-only path.
-#[allow(dead_code)]
-fn stdout_is_tty() -> bool {
-    std::io::stdout().is_terminal()
 }
