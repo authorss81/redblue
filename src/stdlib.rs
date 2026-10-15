@@ -919,6 +919,349 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "input",
 ];
 
+/// The shape of every builtin: the parameters it reads and what it answers.
+///
+/// This is what `:sighelp` reads. A builtin's arity and argument types are written
+/// in the arms of [`builtin_function`] and [`crate::runtime::builtin`], which a
+/// reader has to hold in their head to answer "how do I call `split`?" — and a
+/// REPL that cannot answer it sends the user to the source instead.
+///
+/// Kept here, beside [`BUILTIN_NAMES`], so it is written down where the registry
+/// is: [`signatures_cover_the_registry`] fails the moment a builtin is registered
+/// without a shape, which is the drift a table in a REPL module would have had.
+///
+/// The shapes are written in the language's own terms — `text`, `number`,
+/// `yes/no`, `list` — rather than Rust's, because they are shown to someone
+/// writing Redblue. `text.length` answers bytes, and says so.
+pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
+    ("abs", "abs(number) -> number"),
+    ("floor", "floor(number) -> number"),
+    ("ceil", "ceil(number) -> number"),
+    ("round", "round(number) -> number"),
+    ("sqrt", "sqrt(number) -> number, or nothing for a negative"),
+    (
+        "pow",
+        "pow(number, number) -> number, or nothing when it overflows",
+    ),
+    ("sin", "sin(number) -> number"),
+    ("cos", "cos(number) -> number"),
+    ("tan", "tan(number) -> number, or nothing at a pole"),
+    ("log", "log(number) -> number, or nothing for zero or less"),
+    ("exp", "exp(number) -> number, or nothing when it overflows"),
+    (
+        "uppercase",
+        "uppercase(text) -> text, with each character's uppercase form",
+    ),
+    (
+        "lowercase",
+        "lowercase(text) -> text, with each character's lowercase form",
+    ),
+    (
+        "trim",
+        "trim(text) -> text, without its leading and trailing space",
+    ),
+    (
+        "split",
+        "split(text, separator) -> list of text; an empty separator has no answer",
+    ),
+    ("join", "join(list, separator) -> text"),
+    (
+        "contains",
+        "contains(text, text) -> yes/no, searching for the text\n\
+         contains(list, any) -> yes/no, testing membership",
+    ),
+    ("starts_with", "starts_with(text, prefix) -> yes/no"),
+    ("ends_with", "ends_with(text, suffix) -> yes/no"),
+    (
+        "replace",
+        "replace(text, from, to) -> text; an empty `from` has no answer",
+    ),
+    (
+        "length",
+        "length(text) -> number of bytes\nlength(list) -> number of items",
+    ),
+    (
+        "push",
+        "push(list, value) -> the list with the value at its end",
+    ),
+    (
+        "append",
+        "append(value, list) -> the list with the value at its start",
+    ),
+    (
+        "pop",
+        "pop(list) -> the last item, or nothing for an empty list",
+    ),
+    (
+        "shift",
+        "shift(list) -> the first item, or nothing for an empty list",
+    ),
+    (
+        "map",
+        "map(list, function) -> a list of what the function answers for each item",
+    ),
+    (
+        "filter",
+        "filter(list, predicate) -> the items the predicate accepts",
+    ),
+    ("reduce", "reduce(list, function, start) -> one value"),
+    (
+        "list_map",
+        "list_map(list, function) -> a list; the `list.map` spelling",
+    ),
+    ("is_number", "is_number(any) -> yes/no"),
+    ("is_text", "is_text(any) -> yes/no"),
+    ("is_list", "is_list(any) -> yes/no"),
+    ("is_record", "is_record(any) -> yes/no"),
+    ("to_text", "to_text(any) -> text"),
+    (
+        "to_number",
+        "to_number(text) -> number, or nothing when it is not one",
+    ),
+    (
+        "to_list",
+        "to_list(list) -> the list; to_list(text) -> its whitespace-separated words",
+    ),
+    ("type_of", "type_of(any) -> the name of its kind"),
+    ("files_read", "files_read(text) -> the whole file as text"),
+    (
+        "files_write",
+        "files_write(text, text) -> nothing; writes a file",
+    ),
+    (
+        "files_append",
+        "files_append(text, text) -> nothing; adds to a file",
+    ),
+    ("files_exists", "files_exists(text) -> yes/no"),
+    (
+        "files_lines",
+        "files_lines(text) -> a list of the file's lines",
+    ),
+    (
+        "files_delete",
+        "files_delete(text) -> nothing; removes a file",
+    ),
+    (
+        "files_copy",
+        "files_copy(text, text) -> nothing; copies a file",
+    ),
+    (
+        "files_rename",
+        "files_rename(text, text) -> nothing; moves a file",
+    ),
+    ("time_now", "time_now() -> a record of the current time"),
+    (
+        "time_sleep",
+        "time_sleep(number) -> nothing; waits that many seconds",
+    ),
+    (
+        "time_format",
+        "time_format(number, text) -> text; the time in a format",
+    ),
+    (
+        "time_unix",
+        "time_unix(text) -> number; a \"YYYY-MM-DD HH:MM:SS\" as seconds",
+    ),
+    (
+        "json_parse",
+        "json_parse(text) -> the record, list or value it holds",
+    ),
+    ("json_stringify", "json_stringify(any) -> text"),
+    (
+        "csv_parse",
+        "csv_parse(text) -> a list of rows, each a list of text",
+    ),
+    (
+        "network_get",
+        "network_get(text) -> the body of the response",
+    ),
+    (
+        "network_post",
+        "network_post(text, text) -> the body of the response",
+    ),
+    (
+        "expect",
+        "expect(actual, expected) -> nothing, or an error when they differ",
+    ),
+    (
+        "assert",
+        "assert(actual, expected) -> nothing, or an error when they differ",
+    ),
+    ("console_log", "console_log(any) -> nothing; writes a line"),
+    (
+        "console_error",
+        "console_error(any) -> nothing; writes a line to stderr",
+    ),
+    (
+        "console_clear",
+        "console_clear() -> nothing; clears the screen",
+    ),
+    (
+        "random",
+        "random() -> a whole number from 0 to 99\nrandom(min, max) -> one between them",
+    ),
+    (
+        "random_seed",
+        "random_seed(number) -> nothing; seeds the generator",
+    ),
+    (
+        "random_number",
+        "random_number() -> a number from 0 to 1, exclusive",
+    ),
+    ("random_choice", "random_choice(list) -> one of its items"),
+    (
+        "random_shuffle",
+        "random_shuffle(list) -> the items in a new order",
+    ),
+    (
+        "bytes_from_text",
+        "bytes_from_text(text) -> the text's bytes",
+    ),
+    (
+        "bytes_write",
+        "bytes_write(bytes, text) -> the bytes with the text appended",
+    ),
+    ("bytes_text", "bytes_text(bytes) -> the bytes as text"),
+    (
+        "sys_argv",
+        "sys_argv() -> the arguments the program was run with",
+    ),
+    ("input", "input() -> the next line typed, as text"),
+];
+
+/// The shape of `name`, or `None` when it is not a builtin this table covers.
+///
+/// A `<module>_<member>` name is asked about as the member is spelled:
+/// `:sighelp files.read` finds `files_read` because that is the name the
+/// registry holds it under.
+pub fn builtin_signature(name: &str) -> Option<&'static str> {
+    let name = resolve(name);
+    BUILTIN_SIGNATURES
+        .iter()
+        .find(|(listed, _)| *listed == name)
+        .map(|(_, shape)| *shape)
+}
+
+/// The registered builtins [`BUILTIN_SIGNATURES`] says nothing about.
+///
+/// Should always be empty, and is checked rather than trusted: a shape written
+/// for a builtin that no longer exists, and a builtin added without one, are the
+/// same defect seen from the two ends — a `:sighelp` that answers about a name
+/// the language does not have, or stays silent about one it does.
+pub fn signatures_covering_nothing() -> Vec<&'static str> {
+    BUILTIN_SIGNATURES
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !BUILTIN_NAMES.contains(name))
+        .collect()
+}
+
+/// The registered builtins with no shape written down.
+///
+/// Should always be empty, for the reason [`signatures_covering_nothing`] gives
+/// from the other side.
+pub fn builtins_without_signatures() -> Vec<&'static str> {
+    BUILTIN_NAMES
+        .iter()
+        .copied()
+        .filter(|name| builtin_signature(name).is_none())
+        .collect()
+}
+
+/// The builtins whose effects leave the value they answer.
+///
+/// Everything else in the registry answers from its arguments and changes
+/// nothing: `uppercase("a")` is `A` whether it is called twice or never, and
+/// `length(xs)` is a number either way. These are not that.
+///
+/// **Three kinds, and a question cannot undo any of them.**
+///
+/// - They *write*: a file (`files_write`, `files_append`, `files_delete`,
+///   `files_copy`, `files_rename`), the terminal (`console_log`,
+///   `console_error`, `console_clear`), or a request out
+///   (`network_get`, `network_post`). What they wrote is gone.
+/// - They *block*: `time_sleep` waits, and `input` reads the session's own
+///   standard input — which on a piped session is the rest of the script, and
+///   on a terminal is the user pressing enter for a question they did not ask.
+///   `files_read` and `files_lines` block the same way on a FIFO or a device,
+///   with no timeout to save them.
+/// - They *advance something shared*: `random`, `random_number`,
+///   `random_choice` and `random_shuffle` all draw from the one
+///   `RANDOM_STATE` ([`crate::runtime`]), so asking `:type random()` twice
+///   answers two different numbers and the *next* `random()` a program draws
+///   is not the one it would have got. `random_seed` writes that state outright.
+///   `time_now` is the same defect without a stream to advance: it is the wall
+///   clock, so the answer is different every time it is asked and there is no
+///   answer to reproduce.
+///
+/// The first kind is what this table was written for, and it was too narrow in
+/// the other two directions twice over: a read was treated as harmless because
+/// it changes nothing on disk (it can block, and it reads what the user has not
+/// agreed to show), and a draw was treated as harmless because it returns a
+/// value (it moves a generator the next answer depends on).
+///
+/// The table exists because [`crate::repl::introspect::expression_of`] has to
+/// refuse a call before it runs rather than after. A *program's* own body cannot
+/// be read for effects before it is run in general — which is why the REPL also
+/// refuses at the point of the call — but the registry can be, and it is here.
+///
+/// Written under the registry's own spelling (`files_write`, not `files.write`)
+/// because that is what [`resolve`] is handed and what the registry holds;
+/// [`is_effectful`] resolves first, so both spellings of a module member are the
+/// same answer.
+///
+/// What it is not: a claim that these are the *only* ways out of the value
+/// system. A `to` function a session wrote is not here, because nothing can be
+/// known about its body before it runs.
+pub const EFFECTFUL_BUILTINS: &[&str] = &[
+    "files_read",
+    "files_write",
+    "files_append",
+    "files_exists",
+    "files_lines",
+    "files_delete",
+    "files_copy",
+    "files_rename",
+    "network_get",
+    "network_post",
+    "time_now",
+    "time_sleep",
+    "input",
+    "console_log",
+    "console_error",
+    "console_clear",
+    "random",
+    "random_seed",
+    "random_number",
+    "random_choice",
+    "random_shuffle",
+];
+
+/// Whether calling `name` does something outside the value it answers.
+///
+/// Normalised before it is looked for, so `files.delete`, `files_delete` and a
+/// call through an alias for `files` are one answer rather than three: the dotted
+/// spelling is the registry's with a `.` where the registry writes `_`, and
+/// [`resolve`] only knows about the latter.
+pub fn is_effectful(name: &str) -> bool {
+    let qualified = name.replace('.', "_");
+    EFFECTFUL_BUILTINS.contains(&resolve(&qualified))
+}
+
+/// The names in [`EFFECTFUL_BUILTINS`] the registry does not hold.
+///
+/// Should always be empty, and is checked rather than trusted for the same
+/// reason [`signatures_covering_nothing`] is: a refusal naming a builtin the
+/// language does not have refuses something that was never going to run, and
+/// reads as a bug in the command rather than as the rule.
+pub fn effectful_names_that_are_not_builtins() -> Vec<&'static str> {
+    EFFECTFUL_BUILTINS
+        .iter()
+        .copied()
+        .filter(|name| !BUILTIN_NAMES.contains(name))
+        .collect()
+}
+
 impl Value {
     fn abs(&self) -> Value {
         match self {
