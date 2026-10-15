@@ -87,7 +87,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("09dd1020443e166a765991815c75c024a5ccd45b", "resume phase-049: adopt preserved work. Carries unreviewed code (+1437/-173, 35 files, +263 lines under src/) - the widest file count on this list. Deliberately not rewritten."),
     ("10f97506426673e83119b6e0ec21f6754bddf75c", "resume phase-050: adopt preserved work. Carries unreviewed code (+5410/-126, 15 files, +596 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
     ("7e75dc15c77a5882f086990d261a9049de9d48bb", "resume phase-054: adopt preserved work. Carries unreviewed code (+1131/-8, 6 files, +923/-8 under src/ - the REPL syntax highlighter: src/repl/highlight.rs, src/repl/style.rs, src/repl/editor.rs, src/repl/mod.rs, plus this phase's own REPORT.md and FINDINGS.md). Deliberately not rewritten."),
-    ("617e466704fc55823329fd58449db7fb7aec99f0", "resume phase-056: adopt preserved work. Carries unreviewed code (+1616/-2, 5 files, +1616 lines under src/ - the REPL code-introspection commands: src/repl/introspect.rs is new, plus src/repl/commands.rs, src/repl/mod.rs, src/stdlib.rs and src/interpreter.rs). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
+    ("1a7df335b8b3f656f599d5ff22856918b63858b7", "resume phase-056: adopt preserved work. Carries unreviewed code (+3776/-16, 8 files, +3520 lines under src/ - the REPL code-introspection commands `.type`/`.doc`/`.which`/`.sighelp`: src/repl/introspect.rs is new, plus src/repl/commands.rs, src/repl/mod.rs, src/stdlib.rs and src/interpreter.rs, along with this phase's tests and REPORT.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The abandoned attempt it replaces (617e4667) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -177,7 +177,7 @@ const MEASURED: &[(&str, &str)] = &[
         "resume phase-054",
     ),
     (
-        "617e466704fc55823329fd58449db7fb7aec99f0",
+        "1a7df335b8b3f656f599d5ff22856918b63858b7",
         "resume phase-056",
     ),
     (
