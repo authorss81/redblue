@@ -910,6 +910,20 @@ impl Vm {
         self.globals.insert(name, value);
     }
 
+    /// Whether `name` is a module member this VM published from a module a
+    /// program declared or imported.
+    ///
+    /// Not the same as "the name is bound": every builtin is bound in `globals`,
+    /// so `files_read` answers here and is not a member any program published.
+    /// What a program's module publishes goes through [`Vm::publish_member`], and
+    /// that is what is being asked about — a REPL's `.which` has to tell
+    /// `files.read` (a stdlib member) from `MathUtils.circle_area` (a member of a
+    /// module this session imported), and only the record of publication tells
+    /// them apart.
+    pub fn published_member(&self, name: &str) -> bool {
+        self.qualified_members.contains(name)
+    }
+
     /// The value bound to `name`, wherever this VM keeps it.
     ///
     /// What a REPL's `:inspect` and `:vars` read, and neither of them could

@@ -38,6 +38,18 @@ pub enum ReplCommand {
     /// Prints the frame the program last stopped in.
     Frame,
     Inspect(String),
+    /// Answers "what is this?" — the value, its kind, and where it was written.
+    ///
+    /// The argument is an *expression*, not a name: `.type [1, 2]` is a question
+    /// about a value that no session has ever bound.
+    Type(String),
+    /// Lists what a module exposes, from the registry rather than from prose.
+    Doc(String),
+    /// Says where a name comes from: a builtin, this session, a module member, or
+    /// nothing at all.
+    Which(String),
+    /// The shape of a call — its parameters and what it answers.
+    Sighelp(String),
     Ast(String),
     Tokens(String),
     Example,
@@ -273,6 +285,38 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Inspect(argument.unwrap_or_default()),
     },
     CommandSpec {
+        names: &["type"],
+        description: "Value, kind and source span of an expression",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Type(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["doc"],
+        description: "List what a module exposes",
+        usage: Some("<module>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Doc(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["which"],
+        description: "Say where a name is bound",
+        usage: Some("<name>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Which(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["sighelp"],
+        description: "Show the shape of a call",
+        usage: Some("<name>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Sighelp(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["ast"],
         description: "Print AST for expression",
         usage: Some("<expression>"),
@@ -476,6 +520,32 @@ impl ReplCommand {
     pub fn keeps_argument_whitespace(input: &str) -> bool {
         spec_for(input).is_some_and(|spec| spec.verbatim_argument)
     }
+
+    /// The argument this command carries, or `None` for one that takes none.
+    ///
+    /// Read by the tests rather than by the session, which dispatches on the
+    /// variant: an alias table that asserted only the variant could not tell
+    /// `:ast 1 + 1` carrying `Ast("1")` from carrying `Ast("1 + 1")`, which is
+    /// the bug that table exists to keep fixed.
+    pub fn argument_text(&self) -> Option<&str> {
+        match self {
+            ReplCommand::Load(value)
+            | ReplCommand::Save(value)
+            | ReplCommand::Restore(value)
+            | ReplCommand::Run(value)
+            | ReplCommand::Inspect(value)
+            | ReplCommand::Type(value)
+            | ReplCommand::Doc(value)
+            | ReplCommand::Which(value)
+            | ReplCommand::Sighelp(value)
+            | ReplCommand::Ast(value)
+            | ReplCommand::Tokens(value)
+            | ReplCommand::Break(value)
+            | ReplCommand::Delete(value) => Some(value.as_str()),
+            ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -583,6 +653,45 @@ mod tests {
                 carried, argument,
                 "parsing {:?} should carry the argument {:?}",
                 input, argument
+            );
+        }
+    }
+
+    /// The four questions the REPL could not answer about code, as commands.
+    ///
+    /// Before this there was no word in the table that inspected anything: the
+    /// seventeen commands were all about the *session*, so "what is `uppercase`"
+    /// or "what kind of thing is `[1, 2]`" meant leaving the REPL. Asserted
+    /// through [`ReplCommand::parse`] rather than against [`COMMAND_TABLE`]
+    /// directly, because what a user types reaching a command is the thing that
+    /// was missing.
+    #[test]
+    fn parse_answers_questions_about_code() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            (":type [1, 2]", "Type", "[1, 2]"),
+            (".type nosuchname", "Type", "nosuchname"),
+            (":doc json", "Doc", "json"),
+            (":doc nosuchmodule", "Doc", "nosuchmodule"),
+            (":which uppercase", "Which", "uppercase"),
+            (".which nosuchname", "Which", "nosuchname"),
+            (":sighelp split", "Sighelp", "split"),
+            (":sighelp say", "Sighelp", "say"),
+        ];
+
+        for (input, expected, argument) in cases {
+            let parsed = ReplCommand::parse(input);
+            let variant = format!("{:?}", parsed);
+            let variant = variant.split(['(', ' ']).next().unwrap_or_default();
+            assert_eq!(
+                variant, expected,
+                "{:?} is a command a question about code needs",
+                input
+            );
+            assert_eq!(
+                parsed.argument_text(),
+                Some(argument),
+                "{:?} carries what was asked about",
+                input
             );
         }
     }
