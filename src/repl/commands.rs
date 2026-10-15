@@ -50,6 +50,13 @@ pub enum ReplCommand {
     Which(String),
     /// The shape of a call — its parameters and what it answers.
     Sighelp(String),
+    /// Runs an expression N times against the session and reports wall time.
+    ///
+    /// The argument is the measurement, not a name: `.time 1 + 1` is a question
+    /// about code the session never bound.
+    Time(String),
+    /// The same, reported as a distribution over a hundred runs.
+    Bench(String),
     Ast(String),
     Tokens(String),
     Example,
@@ -317,6 +324,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Sighelp(argument.unwrap_or_default()),
     },
     CommandSpec {
+        names: &["time"],
+        description: "Time an expression over N runs, in wall time",
+        usage: Some("<expression> [n times]"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Time(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["bench"],
+        description: "Report min/median/max/mean over N runs, in wall time",
+        usage: Some("<expression> [n times]"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Bench(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["ast"],
         description: "Print AST for expression",
         usage: Some("<expression>"),
@@ -538,6 +561,8 @@ impl ReplCommand {
             | ReplCommand::Doc(value)
             | ReplCommand::Which(value)
             | ReplCommand::Sighelp(value)
+            | ReplCommand::Time(value)
+            | ReplCommand::Bench(value)
             | ReplCommand::Ast(value)
             | ReplCommand::Tokens(value)
             | ReplCommand::Break(value)

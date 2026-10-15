@@ -5,12 +5,14 @@ pub mod editor;
 pub mod highlight;
 pub mod history;
 pub mod introspect;
+pub mod measure;
 pub mod style;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 pub use commands::ReplCommand;
 pub use completer::ReplCompleter;
@@ -809,6 +811,14 @@ impl Repl {
             }
             ReplCommand::Sighelp(name) => {
                 self.print_sighelp(&name);
+                true
+            }
+            ReplCommand::Time(expression) => {
+                self.print_time(&expression);
+                true
+            }
+            ReplCommand::Bench(expression) => {
+                self.print_bench(&expression);
                 true
             }
             ReplCommand::Ast(expr) => {
@@ -1840,6 +1850,95 @@ impl Repl {
         self.variables
             .get(name)
             .or_else(|| self.vm.user_value(name))
+    }
+
+    /// `:time <expression> [n times]` — wall time, and the mean of the runs.
+    fn print_time(&mut self, code: &str) {
+        let answer = self.time_answer(code);
+        self.print_measurement(answer);
+    }
+
+    /// `:bench <expression> [n times]` — min, median, max and mean of the runs.
+    fn print_bench(&mut self, code: &str) {
+        let answer = self.bench_answer(code);
+        self.print_measurement(answer);
+    }
+
+    fn print_measurement(&self, answer: Result<Vec<String>, String>) {
+        match answer {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => {
+                println!("{}", self.style.paint(Paint::Error, &message));
+            }
+        }
+    }
+
+    /// What `.time` has to say about `code`, or why it will not say it.
+    fn time_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
+        let measurement = measure::split_runs(code, "time", measure::TIME_RUNS)?;
+        let samples = self.time_runs(&measurement)?;
+        Ok(measure::time_lines(
+            "time",
+            measurement.expression,
+            &samples,
+        ))
+    }
+
+    /// What `.bench` has to say about `code`, or why it will not say it.
+    fn bench_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
+        let measurement = measure::split_runs(code, "bench", measure::BENCH_RUNS)?;
+        let samples = self.time_runs(&measurement)?;
+        Ok(measure::bench_lines(
+            "bench",
+            measurement.expression,
+            &samples,
+        ))
+    }
+
+    /// Runs the measured program once per requested run, in this session's own
+    /// VM, and answers with how long each of them took.
+    ///
+    /// **The session's VM, not a fork.** A measurement taken at the prompt is a
+    /// question about the session as it stands: `.time x + 1` has to read the
+    /// `x` the session bound, and what the timed program binds is still there
+    /// afterwards. [`Repl::evaluate_for_question`] forks for the opposite reason
+    /// — a question must change nothing — which is the wrong trade here, since
+    /// measuring `set hits to hits + 1` a hundred times and learning nothing
+    /// about the session is not a measurement.
+    ///
+    /// **Analysis once, before any run.** A program that cannot run is refused
+    /// before the clock starts, so the error is the language's own rather than a
+    /// per-run failure inside a loop.
+    ///
+    /// **A failure stops the loop.** The error is reported once, by name, and
+    /// the measurement ends: timing the same failure N times is N copies of one
+    /// line, and the side effects before it happened once rather than N times.
+    fn time_runs(
+        &mut self,
+        measurement: &measure::Measurement<'_>,
+    ) -> Result<Vec<Duration>, String> {
+        let program =
+            parse_only(measurement.expression).map_err(|error| format!("Error: {}", error))?;
+        analyzer::analyze_with_bound_names(&program, &self.session_names())
+            .map_err(|error| format!("Error: {}", error))?;
+
+        let mut samples = Vec::with_capacity(measurement.runs);
+        for _ in 0..measurement.runs {
+            let started = Instant::now();
+            let outcome = self.vm.run_quietly(&program);
+            let elapsed = started.elapsed();
+            // What a run said is dropped, and the buffer drained every run: a
+            // measurement that printed its result once per run is a flood, and
+            // `.bench say 1` is a thing a user will type.
+            self.vm.take_output();
+            samples.push(elapsed);
+            outcome.map_err(|error| format!("Error: {}", error))?;
+        }
+        Ok(samples)
     }
 
     fn print_ast(&self, code: &str) {
@@ -4434,6 +4533,322 @@ mod tests {
                 repl.repeat_target(),
                 Some("set x to 1"),
                 "the history outlives a reset, so `!!` still has something to repeat"
+            );
+        }
+    }
+
+    /// `.time` and `.bench` — the session measuring itself.
+    ///
+    /// Before this there was no way to ask inside the REPL. The numbers are wall
+    /// time and are nondeterministic by nature, so every assertion here is about
+    /// the *shape* of the report: which figures it carries, that they are finite
+    /// and positive, that the mean is the total over the runs, and that the
+    /// samples are ordered. No test asserts how long anything took.
+    mod measure {
+        use super::{feed, Repl};
+        use crate::repl::commands::ReplCommand;
+        use crate::value::Value;
+
+        /// The number and unit a labelled line carries, read back out of the text.
+        ///
+        /// Parsed rather than matched, because a report a test can only check for
+        /// the presence of a word in is a report whose numbers could be anything.
+        fn reading(lines: &[String], label: &str) -> (f64, String) {
+            let line = lines
+                .iter()
+                .find(|line| line.trim_start().starts_with(label))
+                .unwrap_or_else(|| panic!("{} should be reported: {:?}", label, lines));
+            let rest = line.trim_start()[label.len()..].trim();
+            let (number, unit) = rest
+                .split_once(char::is_whitespace)
+                .unwrap_or_else(|| panic!("{:?} should carry a number and a unit", rest));
+            (
+                number
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{:?} should be a number", number)),
+                unit.trim().to_string(),
+            )
+        }
+
+        fn assert_finite_positive(value: f64, what: &str) {
+            assert!(value.is_finite(), "{} must be finite: {}", what, value);
+            assert!(value > 0.0, "{} must be positive: {}", what, value);
+        }
+
+        /// `.time 1 + 1` answers with a wall-time total and a per-run mean, in one
+        /// unit, over the ten runs it makes when it is not told otherwise.
+        #[test]
+        fn time_reports_a_wall_time_total_and_a_mean_over_ten_runs() {
+            let mut repl = Repl::new();
+
+            let lines = repl
+                .time_answer("1 + 1")
+                .expect("1 + 1 is something :time can run");
+            let joined = lines.join("\n");
+
+            assert!(
+                joined.contains("wall time"),
+                "the numbers are wall time and say so: {:?}",
+                lines
+            );
+            assert!(
+                joined.contains("10 run"),
+                "and how many runs the figure covers: {:?}",
+                lines
+            );
+
+            let (total, total_unit) = reading(&lines, "total:");
+            let (mean, mean_unit) = reading(&lines, "mean:");
+            assert_eq!(
+                total_unit, mean_unit,
+                "one unit for the whole report, so the two figures can be compared: {:?}",
+                lines
+            );
+            assert!(
+                matches!(total_unit.as_str(), "ns" | "µs" | "ms" | "s"),
+                "a labelled unit: {:?}",
+                lines
+            );
+            assert_finite_positive(total, "the total");
+            assert_finite_positive(mean, "the mean");
+            assert!(
+                total >= mean,
+                "ten runs take no less than one of them: {} against {}",
+                total,
+                mean
+            );
+            // The mean is the total over the runs, to within the three decimals
+            // both are printed to.
+            assert!(
+                (total - mean * 10.0).abs() <= 0.02,
+                "the mean is the total over the runs: total {} against mean {} x 10",
+                total,
+                mean
+            );
+        }
+
+        /// `.bench` answers with the distribution over its hundred runs, and the
+        /// distribution is ordered.
+        #[test]
+        fn bench_reports_min_median_max_and_mean_over_a_hundred_runs() {
+            let mut repl = Repl::new();
+
+            let lines = repl
+                .bench_answer("say 1")
+                .expect("`say 1` is something :bench can run");
+            let joined = lines.join("\n");
+            assert!(
+                joined.contains("wall time"),
+                "the numbers are wall time and say so: {:?}",
+                lines
+            );
+            assert!(
+                joined.contains("100 run"),
+                "a hundred runs is what :bench measures: {:?}",
+                lines
+            );
+
+            let (min, min_unit) = reading(&lines, "min:");
+            let (median, median_unit) = reading(&lines, "median:");
+            let (max, max_unit) = reading(&lines, "max:");
+            let (mean, mean_unit) = reading(&lines, "mean:");
+
+            assert_eq!(min_unit, median_unit, "one unit for the whole report");
+            assert_eq!(min_unit, max_unit, "one unit for the whole report");
+            assert_eq!(min_unit, mean_unit, "one unit for the whole report");
+
+            for (value, what) in [
+                (min, "min"),
+                (median, "median"),
+                (max, "max"),
+                (mean, "mean"),
+            ] {
+                assert_finite_positive(value, what);
+            }
+            assert!(
+                min <= median && median <= max,
+                "the samples are ordered: min {} median {} max {}",
+                min,
+                median,
+                max
+            );
+            assert!(
+                mean >= min && mean <= max,
+                "a mean is one of the samples' middle: mean {} against {}..{}",
+                mean,
+                min,
+                max
+            );
+        }
+
+        /// The timed code runs *in the session*: it reads the bindings the session
+        /// already holds, and what it binds is still there afterwards. A throwaway
+        /// interpreter could answer `.time x + 1` for a session that never held
+        /// `x`, and would throw the counts away.
+        #[test]
+        fn timed_code_runs_in_the_session_it_was_typed_in() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 3"]);
+
+            let lines = repl
+                .time_answer("x + 1 4 times")
+                .expect("x is bound, so the timed expression resolves");
+            assert!(
+                lines.join("\n").contains("4 run"),
+                "the run count the user gave is the run count made: {:?}",
+                lines
+            );
+
+            feed(&mut repl, &["set hits to 0"]);
+            repl.time_answer("set hits to hits + 1 5 times")
+                .expect("a statement is something :time can run");
+
+            assert_eq!(
+                repl.lookup("hits").cloned(),
+                Some(Value::Number(5.0)),
+                "five runs of an incrementing statement leave five, so the runs \
+                 happened in this session's own VM"
+            );
+        }
+
+        /// A failing expression is reported once, and the loop stops: the run
+        /// counter proves the failure was not repeated.
+        #[test]
+        fn edge_a_failing_expression_reports_its_error_once_and_runs_once() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "set hits to 0",
+                    "to bump()\n    set hits to hits + 1\n    give back 1 / 0\nend",
+                ],
+            );
+
+            let error = repl
+                .time_answer("bump() 10 times")
+                .expect_err("dividing by zero is not something :time can time");
+
+            assert!(
+                error.contains("Error"),
+                "the underlying error, not a silent success: {}",
+                error
+            );
+            assert_eq!(
+                repl.lookup("hits").cloned(),
+                Some(Value::Number(1.0)),
+                "the failing run happened once and the loop stopped, rather than \
+                 timing the same failure ten times"
+            );
+
+            // And the command reaches the session rather than being handed to the
+            // parser as source: `.time bump()` is not Redblue, so a `.time` the
+            // table never heard of would have run nothing at all and left the
+            // counter where it was.
+            let mut dispatched = Repl::new();
+            feed(
+                &mut dispatched,
+                &[
+                    "set hits to 0",
+                    "to bump()\n    set hits to hits + 1\n    give back 1 / 0\nend",
+                ],
+            );
+            assert!(
+                dispatched.handle_command(".time bump() 10 times"),
+                "`.time` is dispatched as a command"
+            );
+            assert_eq!(
+                dispatched.lookup("hits").cloned(),
+                Some(Value::Number(1.0)),
+                "the dispatched command ran the failing expression once, as well"
+            );
+        }
+
+        /// Both commands insist on an expression, and the report says which one
+        /// was missing rather than timing nothing. Both sigils reach them.
+        #[test]
+        fn edge_time_with_no_argument_is_refused_before_anything_runs() {
+            for (input, command, usage) in [
+                (":time", "time", "<expression> [n times]"),
+                (".time", "time", "<expression> [n times]"),
+                (":bench", "bench", "<expression> [n times]"),
+                (".bench  ", "bench", "<expression> [n times]"),
+            ] {
+                assert_eq!(
+                    ReplCommand::parse(input),
+                    ReplCommand::MissingArgument { command, usage },
+                    "{:?} is a command that was given no expression",
+                    input
+                );
+            }
+
+            // And given one, each carries it whole — the run count included.
+            assert_eq!(
+                ReplCommand::argument_text(&ReplCommand::parse(".time x + 1 4 times")),
+                Some("x + 1 4 times"),
+                "the whole argument is the measurement, run count and all"
+            );
+            assert_eq!(
+                ReplCommand::argument_text(&ReplCommand::parse(".bench say 1")),
+                Some("say 1"),
+                "a statement is a thing to measure, not just an expression"
+            );
+        }
+
+        /// A run count that is not a number is refused by name, and a count of
+        /// zero or fewer is refused rather than divided by.
+        #[test]
+        fn edge_a_run_count_that_is_not_a_positive_number_is_refused_by_name() {
+            let mut repl = Repl::new();
+
+            let not_a_number = repl
+                .bench_answer("1 + 1 many times")
+                .expect_err("'many' is not a count");
+            assert!(
+                not_a_number.contains("bench") && not_a_number.contains("many"),
+                "the refusal names the command and the count it could not read: {}",
+                not_a_number
+            );
+
+            for count in ["0", "-4"] {
+                let refused = repl
+                    .time_answer(&format!("1 + 1 {} times", count))
+                    .expect_err("no runs is no measurement");
+                assert!(
+                    refused.contains(count.trim_start_matches('-')) && refused.contains("time"),
+                    "{} runs is refused by name rather than divided by: {}",
+                    count,
+                    refused
+                );
+            }
+
+            let beyond = repl
+                .bench_answer("1 + 1 100000000 times")
+                .expect_err("a count past the cap is a hang, not a measurement");
+            assert!(
+                beyond.contains("bench"),
+                "the cap is reported against the command that was asked for: {}",
+                beyond
+            );
+        }
+
+        /// An expression that cannot be run at all is the pipeline's own error,
+        /// reported rather than panicked on — and a unicode expression is measured
+        /// like any other.
+        #[test]
+        fn edge_a_broken_expression_is_the_language_error_and_unicode_measures_fine() {
+            let mut repl = Repl::new();
+
+            let broken = repl
+                .time_answer("1 +")
+                .expect_err("an unfinished expression does not run");
+            assert!(
+                broken.contains("Error"),
+                "the parser's own error: {}",
+                broken
+            );
+            assert!(
+                repl.time_answer("\"héllo \" + \"🙂\"").is_ok(),
+                "a unicode expression is timed like any other"
             );
         }
     }

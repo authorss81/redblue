@@ -5,7 +5,29 @@
 //! proving that, because a colour feature that leaked escape bytes into a
 //! plain transcript would corrupt golden files and any transcript a user saved.
 
+use std::sync::Mutex;
+
 use redblue::repl::style::{Paint, Style};
+
+/// Serialises the two tests that pin `COLUMNS`.
+///
+/// The banner reads the terminal width out of the process environment, and
+/// cargo runs the tests in one binary on parallel threads sharing it. Whichever
+/// of the two ran `remove_var` in between the other's calls decided what the
+/// other saw: `edge_banner_is_stable_across_calls` compared a banner centred at
+/// 80 columns with one centred at none, and failed under the full suite while
+/// passing every time it was run alone. Taking this lock is the fix — the
+/// environment is still what the production code reads, and no assertion is
+/// weakened by not letting two tests write to it at once.
+static COLUMNS_LOCK: Mutex<()> = Mutex::new(());
+
+/// The lock, taken even if a test that held it panicked, so one failure does not
+/// cascade into every later COLUMNS test.
+fn pin_columns() -> std::sync::MutexGuard<'static, ()> {
+    COLUMNS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // --- the byte-identical guarantee -------------------------------------------
 
@@ -271,6 +293,7 @@ fn edge_banner_is_stable_across_calls() {
     // COLUMNS races this one: the first run saw the banner centred and the second
     // did not, because the width changed in between. A test that depends on
     // ambient environment is a flake, not a test.
+    let _pinned = pin_columns();
     std::env::set_var("COLUMNS", "80");
     let s = Style::forced(true);
     let first = redblue::repl::banner::banner_text(&s);
@@ -288,6 +311,7 @@ fn edge_banner_is_stable_across_calls() {
 
 #[test]
 fn edge_a_narrow_terminal_centres_without_panicking() {
+    let _pinned = pin_columns();
     std::env::set_var("COLUMNS", "10");
     let text = redblue::repl::banner::banner_text(&Style::forced(false));
     std::env::remove_var("COLUMNS");
