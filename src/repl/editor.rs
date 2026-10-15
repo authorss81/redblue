@@ -12,6 +12,7 @@
 //! [`crate::repl::Repl`], which reads a [`Line`] and does the same thing with it
 //! whichever source produced it.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -28,6 +29,8 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Editor, Helper};
 
 use super::completer::ReplCompleter;
+use super::highlight::highlight;
+use super::style::{Style, Theme};
 
 /// The file a session keeps its history in, under the user's home directory.
 /// Nothing there is created until a session has something to write.
@@ -80,6 +83,15 @@ pub trait LineSource {
     /// session and never owned a file.
     fn flush_history(&mut self) -> io::Result<()> {
         Ok(())
+    }
+
+    /// Whether this source draws the line being typed in colour.
+    ///
+    /// False for every source but [`EditSource`], and it is what a piped
+    /// session's "no escape codes" guarantee is made of: the highlight hook
+    /// lives on the editor, so a session with no terminal never has one to call.
+    fn highlights(&self) -> bool {
+        false
     }
 }
 
@@ -139,6 +151,9 @@ pub type SessionNames = Rc<RefCell<Vec<String>>>;
 struct SessionCompleter {
     completer: ReplCompleter,
     names: SessionNames,
+    /// How to draw the line being typed, and what each class of it wears.
+    style: Style,
+    theme: Theme,
 }
 
 impl SessionCompleter {
@@ -180,13 +195,27 @@ impl Completer for SessionCompleter {
 }
 
 // The line editor is generic over a "helper", which is completion plus the three
-// hooks around it. Redblue has no syntax highlighting, no inline hints and no
-// per-line validation to offer, so those three are the defaults rather than a
-// second place to keep state.
+// hooks around it. Redblue has no inline hints and no per-line validation to
+// offer, so those two are the defaults rather than a second place to keep
+// state. Highlighting is the third: it is wired to Redblue's own lexer rather
+// than left out, because a REPL that shows you what you are typing in plain
+// black while it colours everything else around it reads as unfinished.
 impl Hinter for SessionCompleter {
     type Hint = String;
 }
-impl Highlighter for SessionCompleter {}
+
+impl Highlighter for SessionCompleter {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        // Borrowed when colour is off, which is not a micro-optimisation: it
+        // is the same string the user typed, so a plain session and an editing
+        // session cannot differ by a byte.
+        if !self.style.enabled() {
+            return Cow::Borrowed(line);
+        }
+        Cow::Owned(highlight(line, &self.style, &self.theme))
+    }
+}
+
 impl Validator for SessionCompleter {}
 impl Helper for SessionCompleter {}
 
@@ -209,9 +238,25 @@ impl EditSource {
     /// history: a session whose history quietly stopped loading is worse than
     /// one that says so.
     pub fn new(names: SessionNames, history_path: Option<PathBuf>) -> io::Result<Self> {
+        Self::with_style(names, history_path, Style::detect())
+    }
+
+    /// Opens an editor that draws what it reads in `style`'s colours.
+    ///
+    /// The seam `new` is written in terms of: a session that has already
+    /// decided whether colour is on — because `NO_COLOR` or `REDBLUE_COLOR`
+    /// said so, rather than because the terminal was detected here — passes it
+    /// in, so the line and everything around it are coloured the same way.
+    pub fn with_style(
+        names: SessionNames,
+        history_path: Option<PathBuf>,
+        style: Style,
+    ) -> io::Result<Self> {
         let completer = SessionCompleter {
             completer: ReplCompleter::new(),
             names,
+            style,
+            theme: Theme::standard(),
         };
         let config = Config::builder().auto_add_history(true).build();
         let mut editor = Editor::with_config(config).map_err(io_error)?;
@@ -254,6 +299,13 @@ impl EditSource {
     /// The offset within `line` at which its completions begin.
     pub fn complete_start(&self, line: &str, pos: usize) -> usize {
         self.completion(line, pos).0
+    }
+
+    /// The line as this editor would draw it while it is being typed.
+    ///
+    /// What the terminal asks for on every keystroke, reachable without one.
+    pub fn highlight<'l>(&self, line: &'l str) -> Cow<'l, str> {
+        Highlighter::highlight(&self.completer, line, line.len())
     }
 
     /// Records `line` as read, so Up and Down can walk back to it.
@@ -315,6 +367,10 @@ impl LineSource for EditSource {
         };
         self.save(&path)
     }
+
+    fn highlights(&self) -> bool {
+        true
+    }
 }
 
 /// The source this session reads from: the line editor when it has a terminal
@@ -322,10 +378,12 @@ impl LineSource for EditSource {
 ///
 /// The terminal is the whole difference. Piped input and CI take the second
 /// branch, so what they see is byte for byte what they saw when every session
-/// took it.
-pub fn line_source(names: SessionNames) -> Box<dyn LineSource> {
+/// took it — including when `style` says colour is on, which is the case worth
+/// being careful about: the highlight hook lives on the editor, and a session
+/// that never has an editor has no way to emit an escape code at all.
+pub fn line_source(names: SessionNames, style: Style) -> Box<dyn LineSource> {
     if io::stdin().is_terminal() {
-        match EditSource::new(names, default_history_path()) {
+        match EditSource::with_style(names, default_history_path(), style) {
             Ok(editor) => return Box::new(editor),
             Err(error) => eprintln!(
                 "Warning: no line editor ({}); reading lines without one",
@@ -349,6 +407,7 @@ mod tests {
     use super::{
         default_history_path, line_from, EditSource, Line, LineSource, PlainSource, SessionNames,
     };
+    use crate::repl::style::{Paint, Style, Theme};
 
     /// A scratch name no other test in this binary has taken.
     fn scratch_name(prefix: &str) -> String {
@@ -628,6 +687,80 @@ mod tests {
         assert!(
             line_from(Err(ReadlineError::Io(std::io::Error::other("no terminal")))).is_err(),
             "an I/O failure is a failure, not an empty line and not an interrupt"
+        );
+    }
+
+    /// An editor that draws in `style`'s colours, built without a terminal.
+    fn coloured_editor(style: Style) -> EditSource {
+        EditSource::with_style(live_names(&[]), None, style)
+            .expect("an editor that never reads a line should be creatable")
+    }
+
+    #[test]
+    fn the_editor_hook_colours_a_line_typed_at_the_prompt() {
+        let source = coloured_editor(Style::forced(true));
+
+        let coloured = source.highlight("say \"hi\"").into_owned();
+        assert!(
+            coloured.contains(&Style::forced(true).paint(Paint::Keyword, "say")),
+            "`say` is a keyword and takes the keyword colour through the editor's own hook, got {}",
+            coloured.escape_debug()
+        );
+        assert!(
+            coloured.contains(&Style::forced(true).paint(Paint::Str, "\"hi\"")),
+            "and `\"hi\"` takes the string colour, got {}",
+            coloured.escape_debug()
+        );
+        assert_eq!(
+            coloured.matches('\u{1b}').count(),
+            4,
+            "the drawn line is `say` and `\"hi\"` each wrapped once and nothing else, got {}",
+            coloured.escape_debug()
+        );
+    }
+
+    #[test]
+    fn an_editor_with_colour_off_hands_the_line_straight_back() {
+        let source = coloured_editor(Style::forced(false));
+
+        assert_eq!(
+            source.highlight("say \"hi\"").into_owned(),
+            "say \"hi\"",
+            "with colour off the editor borrows the line rather than building a copy of it"
+        );
+    }
+
+    #[test]
+    fn edge_a_piped_session_emits_no_escape_codes_even_with_colour_forced_on() {
+        // Standard input is not a terminal under `cargo test`, which is the
+        // situation a pipe is in: the highlight hook is on the editor, and a
+        // session with no editor has no way to reach it.
+        let source = super::line_source(live_names(&["counter"]), Style::forced(true));
+
+        assert!(
+            !source.highlights(),
+            "a session with no terminal must not get a highlighter, however colour is configured"
+        );
+        assert!(
+            !PlainSource.highlights(),
+            "and the plain reader never claims to colour anything"
+        );
+    }
+
+    #[test]
+    fn a_shipped_theme_has_an_opinion_about_every_class_it_lists() {
+        let theme = Theme::standard();
+        for class in crate::repl::style::TokenClass::ALL {
+            assert_eq!(
+                theme.role(*class),
+                Some(class.role()),
+                "{class:?} is listed as a class, so the shipped theme must colour it"
+            );
+        }
+        assert_eq!(
+            crate::repl::style::TokenClass::ALL.len(),
+            6,
+            "a class added without a theme colour would be a class nobody can draw"
         );
     }
 }
