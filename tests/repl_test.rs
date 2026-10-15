@@ -982,3 +982,204 @@ fn edge_a_piped_session_prompts_plainly_until_colour_is_asked_for() {
         .assert_stdout_contains("= 5")
         .assert_stdout_contains("Goodbye!");
 }
+
+/// `:type` is a question, and running a program to answer one changed the
+/// session. Both halves are observable here in a way they are not from inside
+/// the process: `say` printed a line nobody typed, and `set` bound a name the
+/// session's history holds no line for — so the *next* question, `.which`,
+/// disagreed with the session about what it held.
+#[test]
+fn edge_type_of_a_statement_prints_nothing_and_binds_nothing() {
+    let s = session(
+        ":type say \"typed, never said\"\n:which typed_never\nset typed_never to 1\n\
+         :type set sneaky to 1\n:which sneaky\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_lacks("typed, never said")
+        .assert_stdout_contains("is a statement")
+        .assert_stdout_contains("sneaky: unknown");
+    assert!(
+        !s.stdout.contains("= 1"),
+        "a refused statement binds nothing at all\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// A question cannot undo what it does. `files.delete` is the sharp end of it:
+/// before this, `:type files.delete(path)` deleted the file the question was
+/// asked about, and the file is the only witness.
+#[test]
+fn edge_type_cannot_delete_a_file() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/repl_type_delete");
+    std::fs::create_dir_all(&dir).expect("the test needs a directory");
+    let path = dir.join("notes.rb");
+    std::fs::write(&path, "original").expect("the test needs a file to protect");
+    let quoted = path.display().to_string();
+
+    let s = session(&format!(
+        ":type files.delete(\"{quoted}\")\n:type files.write(\"{quoted}\", \"clobbered\")\n\
+         :type time.sleep(30)\n:quit\n"
+    ));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("files_delete")
+        .assert_stdout_lacks("files.write");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file is still there"),
+        "original",
+        "a question about a value did not write to it\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// The half that only shows up through the session: a `to` function's own `set`
+/// writes a global, and describing what the call answers must not run it against
+/// the session. `:inspect counter` reads the live value, so it is the thing that
+/// can be wrong.
+#[test]
+fn edge_type_of_a_call_does_not_change_the_session_it_runs_against() {
+    let s = session(
+        "set counter to 3\n:inspect counter\n\
+         to bump()\n    set counter to counter + 1\n    return counter\nend\n\
+         :type bump()\n:inspect counter\n:quit\n",
+    );
+
+    s.assert_exited_ok().assert_stdout_contains("value: 4");
+    assert_eq!(
+        s.count_stdout("counter: 3"),
+        2,
+        "the session's own counter is 3 before the question and 3 after it\nstdout:\n{}",
+        s.stdout
+    );
+    assert!(
+        !s.stdout.contains("counter: 4"),
+        "and was never 4 in the session itself\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// The gate that refused `files.delete` when it was written out is a gate that
+/// reads the *expression*. `to evil()` calls the same function, and `:type evil()`
+/// writes no call at all — so the question ran, on a fork that shares the
+/// filesystem, and deleted the file. The file is the only witness that matters,
+/// so it is written, protected, and read back at the end.
+///
+/// Driven through the real binary because the shape of the exploit is two
+/// *lines of a session*, and only a session has lines.
+#[test]
+fn edge_type_cannot_delete_a_file_through_a_function_the_session_declared() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/repl_type_indirect");
+    std::fs::create_dir_all(&dir).expect("the test needs a directory");
+    let path = dir.join("victim.rb");
+    std::fs::write(&path, "original").expect("the test needs a file to protect");
+    let quoted = path.display().to_string();
+
+    let s = session(&format!(
+        "to evil()\n    files.delete(\"{quoted}\")\nend\n\
+         to middle()\n    evil()\nend\n\
+         :type evil()\n:type middle()\n:type map([1, 2], evil)\n:quit\n"
+    ));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("files_delete")
+        .assert_stdout_lacks("value:");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file is still there"),
+        "original",
+        "a question about a call reached the filesystem through a declaration, not \
+         through the expression\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// A question must not move the random stream, and it must not read the clock.
+///
+/// Both are refusals rather than sandboxed answers, and both are only visible
+/// from outside the process: a `random()` drawn by `.type` is gone by the time
+/// the next line runs, and `time.now()` is a different answer every time it is
+/// asked with nothing to reproduce either way. So the witness is the program's
+/// *own* next draw, which has to be the one it would have got anyway.
+#[test]
+fn edge_type_cannot_move_the_random_stream_or_read_the_clock() {
+    let s = session(
+        "random_seed(7)\nset first to random(1, 1000000)\n:type random()\n:type random.number()\n\
+         :type random.choice([1, 2])\n:type time.now()\n\
+         random_seed(7)\nset again to random(1, 1000000)\n\
+         :inspect first\n:inspect again\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("random")
+        .assert_stdout_contains("time_now");
+    let first = s.stdout.find("first: ").expect("the first draw is printed");
+    let again = s
+        .stdout
+        .rfind("again: ")
+        .expect("the second draw is printed");
+    assert_eq!(
+        s.stdout[first..]
+            .split("first: ")
+            .nth(1)
+            .and_then(|rest| rest.lines().next()),
+        s.stdout[again..]
+            .split("again: ")
+            .nth(1)
+            .and_then(|rest| rest.lines().next()),
+        "the four refused questions drew nothing: the same seed answers the same \
+         number either side of them\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// A question must not *speak* either. `say` was covered — it is a statement,
+/// so `:type say "x"` is refused before anything runs — and `print` was not: it
+/// is a statement too, but it writes straight to stdout rather than into the
+/// output buffer, so a question that called a *declaration* reached it without
+/// the word ever appearing in the expression. `:type loud(1)` printed a line the
+/// user did not ask for.
+///
+/// Only a test that captures stdout can see this, and both halves have to hold:
+/// the question is silent, and the program on the next line still speaks.
+#[test]
+fn edge_type_cannot_print_through_a_function_the_session_called() {
+    let s = session(
+        "to loud(n)\n    print \"spoken by loud\"\n    return n\nend\n\
+         :type loud(7)\n\
+         set spoke to loud(1)\n:quit\n",
+    );
+
+    s.assert_exited_ok().assert_stdout_contains("value: 7");
+    assert_eq!(
+        s.count_stdout("spoken by loud"),
+        1,
+        "the declaration printed once — when the program called it, and not when \
+         the question did\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// The three commands that answer about code, through the real binary and
+/// through a pipe. The fixes this phase carried are all about what these answer
+/// about a *multi-name* line and about a session that has been reset, and both
+/// are only fully visible from outside the process.
+#[test]
+fn edge_which_names_every_module_one_import_binds_and_a_reset_forgets_their_lines() {
+    let s = session(
+        "import files, network as net\n:which network\n:which net\n\
+         :reset\n:which files\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("network: session binding")
+        .assert_stdout_contains("net: session binding")
+        .assert_stdout_contains("files: unknown");
+    assert_eq!(
+        s.count_stdout("<session>:1"),
+        2,
+        "both of the names that import binds point at the line that wrote them\n\
+         stdout:\n{}",
+        s.stdout
+    );
+}

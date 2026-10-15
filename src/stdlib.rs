@@ -1168,6 +1168,100 @@ pub fn builtins_without_signatures() -> Vec<&'static str> {
         .collect()
 }
 
+/// The builtins whose effects leave the value they answer.
+///
+/// Everything else in the registry answers from its arguments and changes
+/// nothing: `uppercase("a")` is `A` whether it is called twice or never, and
+/// `length(xs)` is a number either way. These are not that.
+///
+/// **Three kinds, and a question cannot undo any of them.**
+///
+/// - They *write*: a file (`files_write`, `files_append`, `files_delete`,
+///   `files_copy`, `files_rename`), the terminal (`console_log`,
+///   `console_error`, `console_clear`), or a request out
+///   (`network_get`, `network_post`). What they wrote is gone.
+/// - They *block*: `time_sleep` waits, and `input` reads the session's own
+///   standard input — which on a piped session is the rest of the script, and
+///   on a terminal is the user pressing enter for a question they did not ask.
+///   `files_read` and `files_lines` block the same way on a FIFO or a device,
+///   with no timeout to save them.
+/// - They *advance something shared*: `random`, `random_number`,
+///   `random_choice` and `random_shuffle` all draw from the one
+///   `RANDOM_STATE` ([`crate::runtime`]), so asking `:type random()` twice
+///   answers two different numbers and the *next* `random()` a program draws
+///   is not the one it would have got. `random_seed` writes that state outright.
+///   `time_now` is the same defect without a stream to advance: it is the wall
+///   clock, so the answer is different every time it is asked and there is no
+///   answer to reproduce.
+///
+/// The first kind is what this table was written for, and it was too narrow in
+/// the other two directions twice over: a read was treated as harmless because
+/// it changes nothing on disk (it can block, and it reads what the user has not
+/// agreed to show), and a draw was treated as harmless because it returns a
+/// value (it moves a generator the next answer depends on).
+///
+/// The table exists because [`crate::repl::introspect::expression_of`] has to
+/// refuse a call before it runs rather than after. A *program's* own body cannot
+/// be read for effects before it is run in general — which is why the REPL also
+/// refuses at the point of the call — but the registry can be, and it is here.
+///
+/// Written under the registry's own spelling (`files_write`, not `files.write`)
+/// because that is what [`resolve`] is handed and what the registry holds;
+/// [`is_effectful`] resolves first, so both spellings of a module member are the
+/// same answer.
+///
+/// What it is not: a claim that these are the *only* ways out of the value
+/// system. A `to` function a session wrote is not here, because nothing can be
+/// known about its body before it runs.
+pub const EFFECTFUL_BUILTINS: &[&str] = &[
+    "files_read",
+    "files_write",
+    "files_append",
+    "files_exists",
+    "files_lines",
+    "files_delete",
+    "files_copy",
+    "files_rename",
+    "network_get",
+    "network_post",
+    "time_now",
+    "time_sleep",
+    "input",
+    "console_log",
+    "console_error",
+    "console_clear",
+    "random",
+    "random_seed",
+    "random_number",
+    "random_choice",
+    "random_shuffle",
+];
+
+/// Whether calling `name` does something outside the value it answers.
+///
+/// Normalised before it is looked for, so `files.delete`, `files_delete` and a
+/// call through an alias for `files` are one answer rather than three: the dotted
+/// spelling is the registry's with a `.` where the registry writes `_`, and
+/// [`resolve`] only knows about the latter.
+pub fn is_effectful(name: &str) -> bool {
+    let qualified = name.replace('.', "_");
+    EFFECTFUL_BUILTINS.contains(&resolve(&qualified))
+}
+
+/// The names in [`EFFECTFUL_BUILTINS`] the registry does not hold.
+///
+/// Should always be empty, and is checked rather than trusted for the same
+/// reason [`signatures_covering_nothing`] is: a refusal naming a builtin the
+/// language does not have refuses something that was never going to run, and
+/// reads as a bug in the command rather than as the rule.
+pub fn effectful_names_that_are_not_builtins() -> Vec<&'static str> {
+    EFFECTFUL_BUILTINS
+        .iter()
+        .copied()
+        .filter(|name| !BUILTIN_NAMES.contains(name))
+        .collect()
+}
+
 impl Value {
     fn abs(&self) -> Value {
         match self {

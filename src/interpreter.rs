@@ -365,6 +365,37 @@ pub struct Vm {
     /// write" at *every statement it is shown* and a frame listing two hundred
     /// builtins answers nothing.
     builtin_names: HashSet<String>,
+    /// Whether this VM is answering a *question* about a value rather than
+    /// running a program, which changes two things about how it evaluates.
+    ///
+    /// Off on every VM a program runs on, and on for exactly one: the fork the
+    /// REPL evaluates `.type` on ([`Vm::ask_questions`]).
+    ///
+    /// It changes two things, and both are about the difference between *what a
+    /// value is* and *what reaching it costs the process*:
+    ///
+    /// - A call to one of [`stdlib::EFFECTFUL_BUILTINS`] is refused, in
+    ///   [`Vm::call`], before the effect it would have. This half exists because
+    ///   the other half of that gate — reading the calls out of the expression
+    ///   and refusing the effectful ones by name — can only see what is written
+    ///   in the expression. A `to` function's body is not written there, an
+    ///   object's method is not written there, and a function *value* handed to
+    ///   `map` is not written there at all, so all three reach a builtin through
+    ///   a name no reading of the expression could have found. This is the
+    ///   backstop under all three: every builtin this interpreter calls goes
+    ///   through [`Vm::call`] — [`Vm::call_method`] resolves `files.delete(…)`
+    ///   to `files_delete` and then calls that — so the refusal happens while
+    ///   the effect still has not happened.
+    /// - A `print` writes nothing ([`Vm::run_quietly`] already keeps `say` off
+    ///   the terminal by not flushing the output buffer). `print` writes at the
+    ///   point it is reached, so the only way to keep it out of a question is
+    ///   to refuse to write.
+    ///
+    /// The call half is a flag rather than a list of forbidden names so the rule
+    /// is [`stdlib::is_effectful`] itself and the table stays in one place — and
+    /// so a refusal cannot drift from the early one, because both ask the same
+    /// question of the same name.
+    asking_a_question: bool,
     /// Every `object` declaration, by type name. The table is the inheritance
     /// model: an entry already holds its own fields and methods merged with
     /// everything it inherits, nearest declaration first, so a lookup is a
@@ -598,6 +629,7 @@ impl Vm {
             module_depth: 0,
             qualified_members: HashSet::new(),
             builtin_names: stdlib::builtins().keys().cloned().collect(),
+            asking_a_question: false,
             objects: HashMap::new(),
             expectation_failure: None,
             assertions_failed: 0,
@@ -612,6 +644,109 @@ impl Vm {
             loop_depth: 0,
             loop_control: None,
         }
+    }
+
+    /// A VM holding a copy of this one's bindings and none of its history.
+    ///
+    /// What it copies is everything a program can *read*: the globals, the
+    /// `constant` names, the live local scopes, the modules already run, the
+    /// aliases they were imported under, the modules the program declared, the
+    /// members those published, and the objects it declared. So an expression
+    /// written against this session resolves exactly as it would against the
+    /// session itself — `nums[0]` and `MathUtils.circle_area(5)` both answer.
+    ///
+    /// What it does not copy is everything that *happened*: the output buffer,
+    /// the step and call budgets already spent, the recorded test failures, the
+    /// current span, and the debugger's hook. It is a VM on which to try
+    /// something out, not the VM the session is made of — which is what a REPL
+    /// command that asks a question needs. `.type` runs on a fork precisely so
+    /// that asking what `f()` answers cannot bind `x`, cannot print, and cannot
+    /// half-run a program against the session's own bindings.
+    ///
+    /// The copy is shallow where the values are shared: a [`Value::Function`]
+    /// body is an `Arc`, so the fork calls the same declaration the session does
+    /// rather than a copy of it. What the fork keeps is the *bindings* those
+    /// declarations read and write, which is the part `.type` must not change.
+    ///
+    /// The question flag is **not** copied, and starts off: a fork is a VM
+    /// somebody may run a question on, and whether this one is for that is the
+    /// caller's decision ([`Vm::ask_questions`]), not something inherited from
+    /// the VM it was made from.
+    pub fn fork(&self) -> Vm {
+        let mut forked = Vm::new_in(&self.root);
+        forked.globals = self.globals.clone();
+        forked.constants = self.constants.clone();
+        forked.locals = self.locals.clone();
+        forked.modules = self.modules.clone();
+        forked.module_aliases = self.module_aliases.clone();
+        forked.declared_modules = self.declared_modules.clone();
+        forked.qualified_members = self.qualified_members.clone();
+        forked.objects = self.objects.clone();
+        forked
+    }
+
+    /// Declares that this VM is answering a question about a value rather than
+    /// running a program, and is either.
+    ///
+    /// Off everywhere by default. A caller answering a question — the REPL's
+    /// `.type`, on a [`Vm::fork`] — says so for the VM it evaluates that question
+    /// on and nothing else does, because for a program these builtins and this
+    /// output are the point. See [`Vm::asking_a_question`] for what changes.
+    pub fn ask_questions(&mut self, asking: bool) {
+        self.asking_a_question = asking;
+    }
+
+    /// The body of the function `name` names, when `name` holds one.
+    ///
+    /// Every way a call can reach a Redblue function this VM declared, in the
+    /// order [`Vm::call`] and [`Vm::call_method`] reach it, so a caller asking
+    /// "what does calling this do?" reads the same declaration the run would:
+    ///
+    /// - a bare name — `evil()` is `call("evil", …)`, which ends at
+    ///   [`Vm::get_var`] — read out of the globals and the live scopes, because a
+    ///   function declared inside a function closes over them;
+    /// - a module member — `MathUtils.circle_area(5)` is `call("MathUtils_circle_area", …)`
+    ///   after [`Vm::call_method`] resolved the module and its alias;
+    /// - an object's method — `counter.bump()` is not a name at all, it is
+    ///   `objects[counter].methods[bump]`, and the receiver is a name the caller
+    ///   has in hand.
+    ///
+    /// `None` for anything else, and for a name that holds something that is not
+    /// a function: a builtin has no body to read, and a caller that reached a
+    /// builtin reads [`stdlib::EFFECTFUL_BUILTINS`] instead.
+    pub fn function_body(&self, name: &str) -> Option<&FunctionBody> {
+        match self.get_var_ref(name) {
+            Some(Value::Function(function)) => Some(&function.body),
+            _ => None,
+        }
+    }
+
+    /// The method `method` of the `object` declaration named `object`.
+    ///
+    /// The third of [`Vm::function_body`]'s three shapes, and separate because
+    /// the receiver of an object's method is *not* a name a value is bound to —
+    /// it is the type's own name — so a caller reading a dotted call off an AST
+    /// has both halves and needs them put back together.
+    pub fn object_method(&self, object: &str, method: &str) -> Option<&Value> {
+        self.objects
+            .get(object)
+            .and_then(|declaration| declaration.methods.get(method))
+    }
+
+    /// The module an `import … as <name>` bound `<name>` to, or `name` itself.
+    ///
+    /// `import files as F` binds `F`, and `F.delete(…)` reaches
+    /// `files.delete(…)`. A caller that has to recognise what a dotted call
+    /// touches — what `.type` refuses, what `.which` names — has to resolve the
+    /// alias first or it is looking at a name the language never registered.
+    /// Every module declares itself in this table under its own name
+    /// ([`Vm::declare_module`]), so the unaliased case is a hit rather than a
+    /// miss.
+    pub fn module_behind<'a>(&'a self, name: &'a str) -> &'a str {
+        self.module_aliases
+            .get(name)
+            .map(String::as_str)
+            .unwrap_or(name)
     }
 
     /// Builds a VM with an explicit call-depth limit, ignoring the environment.
@@ -1045,7 +1180,12 @@ impl Vm {
     /// published — `module text … end` publishing `greet` is not
     /// `Module 'text' has no function 'greet'`. Where the two meet is
     /// [`stdlib::dotted_call_reaches`].
-    fn is_declared_module(&self, name: &str) -> bool {
+    ///
+    /// Public because a REPL asks it about a name rather than about a call: a
+    /// `module Foo … export all end` binds `Foo_greet` and no `Foo`, so the only
+    /// evidence that the declaration ran is this. See
+    /// [`crate::repl::Repl::record_definitions`].
+    pub fn declares_module(&self, name: &str) -> bool {
         self.modules.contains_key(name) || self.declared_modules.contains_key(name)
     }
 
@@ -1186,17 +1326,45 @@ impl Vm {
     }
 
     pub fn run(&mut self, program: &Program) -> Result<Value> {
-        let mut result = Value::Nothing;
-
-        for statement in &program.statements {
-            result = self.execute_statement(statement)?;
-        }
+        let result = self.run_statements(program)?;
 
         // Print collected output. Through the one boundary a program writes
         // through, so the WebAssembly playground can collect what the native
         // binary would have printed.
         for line in &self.output {
             crate::wasm::emit(&format!("{}\n", line));
+        }
+
+        Ok(result)
+    }
+
+    /// Runs `program` and answers with what it returned, printing nothing.
+    ///
+    /// [`Vm::run`] prints what the program *said*, which is right for a program
+    /// and wrong for a question about a value: `.type f()` is not asking to hear
+    /// what `f` prints, and a REPL that printed it would answer a question with
+    /// output the user did not type. The lines are still buffered — nothing is
+    /// lost, and a caller that wants them reads them with [`Vm::take_output`] —
+    /// so this is about what reaches the terminal and not about the VM keeping
+    /// a record.
+    ///
+    /// `print` and `console.log` do not go through this buffer: they write at
+    /// the point they are reached, so a question has to keep them out of the
+    /// program it evaluates rather than rely on there being nothing to print.
+    pub fn run_quietly(&mut self, program: &Program) -> Result<Value> {
+        self.run_statements(program)
+    }
+
+    /// The statements, without the printing [`Vm::run`] does afterwards.
+    ///
+    /// Split out so the two entry points cannot disagree about what a program
+    /// *does* — a failure returns here in both, before any output is emitted,
+    /// exactly as it did when [`Vm::run`] returned straight from the loop.
+    fn run_statements(&mut self, program: &Program) -> Result<Value> {
+        let mut result = Value::Nothing;
+
+        for statement in &program.statements {
+            result = self.execute_statement(statement)?;
         }
 
         Ok(result)
@@ -1424,7 +1592,17 @@ impl Vm {
             }
             Statement::Print(expr) => {
                 let value = self.evaluate(expr)?;
-                crate::wasm::emit(&value.to_string());
+                // A question is not a request to hear anything, and `print` is
+                // the one way out of the value system that does not go through a
+                // builtin: it is a statement, so `[Vm::is_effectful`] cannot
+                // name it, and it writes where the line is rather than into the
+                // output buffer [`Vm::run_quietly`] declines to flush. It is
+                // evaluated and dropped — so a `print` inside a `to` function a
+                // question called is as silent as one at the top level, and a
+                // program's own `print` is untouched.
+                if !self.asking_a_question {
+                    crate::wasm::emit(&value.to_string());
+                }
                 Ok(Value::Nothing)
             }
             Statement::Set { name, value } => {
@@ -1980,6 +2158,21 @@ impl Vm {
     }
 
     fn call(&mut self, name: &str, args: &[Value]) -> Result<Value> {
+        // The one place a builtin is reached, so it is the one place a refusal
+        // has to be. See `Vm::refuse_effectful_builtins`: a question must not
+        // change the world, and this fires before the effect rather than after
+        // it. A name that is not effectful costs one table lookup and is the
+        // overwhelmingly common case.
+        if self.asking_a_question && stdlib::is_effectful(name) {
+            return Err(Error::Runtime(
+                format!(
+                    "{} does something outside the value it answers, and this is a question \
+                     about a value rather than a line to run",
+                    name
+                ),
+                self.span(),
+            ));
+        }
         // `append` writes through a binding, so it needs the frame the free
         // `runtime::builtin` does not have; every other builtin is asked first.
         if name == "append" {
@@ -2154,7 +2347,7 @@ impl Vm {
                 if !stdlib::dotted_call_reaches(
                     &module,
                     method,
-                    self.is_declared_module(&module),
+                    self.declares_module(&module),
                     self.get_var(&qualified).is_some(),
                     stdlib::module_member_name(&qualified).is_some(),
                 ) {

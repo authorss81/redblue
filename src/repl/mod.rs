@@ -8,7 +8,7 @@ pub mod introspect;
 pub mod style;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::rc::Rc;
 
@@ -22,9 +22,10 @@ use crate::analyzer;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
 use crate::interpreter::Vm;
 use crate::lexer::{Lexer, TokenKind};
-use crate::parser::{open_block_depth, Parser, Program};
+use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
 use crate::repl::style::{Paint, Style};
-use crate::value::Value;
+use crate::stdlib;
+use crate::value::{FunctionBody, Value};
 
 /// How many lines a session keeps before the oldest is dropped. A terminal
 /// scrollback holds far more, so a session that outgrows this has already lost
@@ -246,16 +247,86 @@ fn line_number(argument: &str) -> Result<usize, String> {
 
 /// The keywords a name is *declared* by, rather than read through.
 ///
-/// `set x to 1` binds `x`, `to x(..)` binds `x`, and `import M` binds `M`. This
-/// is what [`Repl::record_definitions`] looks for, so the line it points at is
+/// `set x to 1` binds `x`, `constant x`, `to x(..)`, `import M` and `module M`
+/// each bind one name, and every one of them is followed by an identifier where a
+/// *new* name is written — which is what makes a flat scan of the tokens able to
+/// say where a name was declared without knowing what it was bound to. This is
+/// what [`Repl::record_definitions`] looks for, so the line it points at is
 /// the line the name was written on and not the line it was last used on — the
 /// difference between `.which x` naming where `x` came from and naming some
 /// earlier line that happened to mention it.
 fn declares_a_name(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Set | TokenKind::Constant | TokenKind::To | TokenKind::Import
+        TokenKind::Set
+            | TokenKind::Constant
+            | TokenKind::To
+            | TokenKind::Module
+            | TokenKind::Import
     )
+}
+
+/// The program `code` is, without running or analyzing it.
+///
+/// Shared by the two callers that want the *shape* of what was typed rather than
+/// what it did: a typed line runs it, and `.type` reads it to decide whether it
+/// is a question at all.
+fn parse_only(code: &str) -> Result<Program, crate::error::Error> {
+    let tokens = Lexer::tokenize(code)?;
+    Parser::new(tokens).parse()
+}
+
+/// The name the keyword at `tokens[index]` declares, if it is written as one.
+///
+/// `None` for anything else, and for `set x.y to …` — there the identifier after
+/// the `set` is the *object* being written to, not a name that line declares,
+/// and recording it would move `.which x` to a line that only assigned into it.
+fn declared_after(tokens: &[crate::lexer::Token], index: usize) -> Option<String> {
+    let name = match &tokens.get(index + 1)?.kind {
+        TokenKind::Identifier(name) => name.clone(),
+        _ => return None,
+    };
+    if matches!(
+        tokens.get(index + 2).map(|token| &token.kind),
+        Some(TokenKind::Dot)
+    ) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Whether the `to` at `tokens[index]` introduces a value rather than declaring a
+/// name.
+///
+/// `set x to 1` holds two words that look like a declaration: `set x`, and a
+/// `to` that introduces the value. Only the first declares. The `to` that does
+/// declare is the one opening a statement — `to double(n)` — and that one is
+/// never two tokens behind a `set` or a `constant`.
+fn introduces_a_value(tokens: &[crate::lexer::Token], index: usize) -> bool {
+    index >= 2 && matches!(tokens[index - 2].kind, TokenKind::Set | TokenKind::Constant)
+}
+
+/// Every name an `import` statement binds, from the tokens after the keyword.
+///
+/// The whole rest of the line, because one `import` can bind several names and
+/// the grammar says so: `import files, network as net` binds `files`, `network`
+/// and `net`, and `import json as J` binds `J` as well as leaving `json` naming
+/// it. Both kinds of name are bound in the VM, so both are recorded — a scan
+/// that read only the identifier after the `import` recorded the first item and
+/// called every other one unknown.
+fn imported_names(rest: &[crate::lexer::Token]) -> Vec<(String, usize)> {
+    let mut names = Vec::new();
+    for token in rest {
+        match &token.kind {
+            // The statement ends at the line's end: whatever is written below it
+            // belongs to another statement, and an `import` says nothing about
+            // it.
+            TokenKind::Newline | TokenKind::Eof => break,
+            TokenKind::Identifier(name) => names.push((name.clone(), token.line)),
+            _ => {}
+        }
+    }
+    names
 }
 
 /// The snippets `:help` prints under "Quick Reference", each one a complete
@@ -814,11 +885,20 @@ impl Repl {
     /// ran. A session that has been reset is a session at a prompt, so the buffer
     /// goes with the bindings.
     ///
+    /// The recorded definitions go with them, and that half was just as visible.
+    /// They are a map from a name to the line that bound it, and a name a reset
+    /// session no longer holds was still reported by `.which` as a session
+    /// binding at `<session>:3` — a span pointing at a line of a session that had
+    /// been thrown away, quoted at that. A reset forgets what it was; a `.which`
+    /// that disagrees with it is worse than the stale binding it used to report,
+    /// because it is a wrong answer rather than an absence.
+    ///
     /// The history is left alone: it is the record of what was typed, and a reset
     /// is not a new session in the sense that the earlier lines were never typed.
     fn reset_session(&mut self) {
         self.vm = Vm::new();
         self.variables.clear();
+        self.definitions.clear();
         self.multiline_buffer.clear();
         self.in_multiline = false;
         println!("REPL state reset.");
@@ -937,9 +1017,26 @@ impl Repl {
     /// already bound changes nothing a before-and-after comparison can see, so
     /// `:which x` reported the line the *first* `set` was on and pointed at a
     /// value that had not been there since. The declaring keyword is what is
-    /// looked for — `set x to`, `to x(..)`, `constant x`, `import M`,
+    /// looked for — `set x to`, `constant x`, `to x(..)`, `import M`,
     /// `module M` — so the line recorded is the line the name was written on and
     /// not the line it was last read.
+    ///
+    /// Three things about that list are worth writing down, because each of them
+    /// was a name the command said nothing about:
+    ///
+    /// - **An `import` declares more than one name.** `import files, network as
+    ///   net` binds `files`, `network` *and* `net` — the grammar says so, and
+    ///   [`crate::parser`] parses a list of items with an optional alias each.
+    ///   Reading only the identifier after the `import` recorded the first item
+    ///   and left the rest unknown.
+    /// - **A `to` in `set x to …` is not a declaration.** It introduces the value.
+    ///   `set x to y` overwrote `y`'s line with a line on which `y` was only
+    ///   read, which is the exact failure reading the source was meant to avoid.
+    /// - **A declared module binds no value of its own.** `module Foo … export
+    ///   all end` publishes `Foo_greet`; the name `Foo` is a namespace rather
+    ///   than a binding. So "did the run bind it?" is the wrong question for it
+    ///   and [`Vm::declares_module`] is the right one — otherwise `.which Foo`
+    ///   answered "unknown" for a declaration the session had just run.
     ///
     /// A name the code declares but the run did not bind is not recorded: a
     /// `set` inside a branch that did not run declared nothing, and pointing at
@@ -951,20 +1048,48 @@ impl Repl {
         };
         let lines: Vec<&str> = code.lines().collect();
 
-        for pair in tokens.windows(2) {
-            if !declares_a_name(pair[0].kind.clone()) {
+        // (name, the line it was written on, whether it is a module declaration)
+        let mut declared: Vec<(String, usize, bool)> = Vec::new();
+        for (index, token) in tokens.iter().enumerate() {
+            if !declares_a_name(token.kind.clone()) {
                 continue;
             }
-            let name = match &pair[1].kind {
-                TokenKind::Identifier(name) => name.clone(),
-                _ => continue,
-            };
-            if self.lookup(&name).is_none() {
+            match token.kind {
+                TokenKind::Import => declared.extend(
+                    imported_names(&tokens[index + 1..])
+                        .into_iter()
+                        .map(|(name, line)| (name, line, false)),
+                ),
+                TokenKind::To => {
+                    if introduces_a_value(&tokens, index) {
+                        continue;
+                    }
+                    if let Some(name) = declared_after(&tokens, index) {
+                        declared.push((name, token.line, false));
+                    }
+                }
+                TokenKind::Module => {
+                    if let Some(name) = declared_after(&tokens, index) {
+                        declared.push((name, token.line, true));
+                    }
+                }
+                _ => {
+                    if let Some(name) = declared_after(&tokens, index) {
+                        declared.push((name, token.line, false));
+                    }
+                }
+            }
+        }
+
+        for (name, line, module) in declared {
+            // A module declares itself; everything else has to have been bound
+            // for the line to be a line that bound something.
+            let bound = self.lookup(&name).is_some() || (module && self.vm.declares_module(&name));
+            if !bound {
                 continue;
             }
-            let number = line_offset + pair[0].line;
             let source = lines
-                .get(pair[0].line.saturating_sub(1))
+                .get(line.saturating_sub(1))
                 .copied()
                 .unwrap_or_default()
                 .trim()
@@ -973,7 +1098,7 @@ impl Repl {
                 name,
                 Definition {
                     file: file.to_string(),
-                    line: number,
+                    line: line_offset + line,
                     source,
                 },
             );
@@ -991,9 +1116,7 @@ impl Repl {
     /// value was right there in the VM and the analyzer had never heard of the
     /// name.
     fn run_code(&mut self, code: &str) -> Result<Value, crate::error::Error> {
-        let tokens = Lexer::tokenize(code)?;
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse()?;
+        let program = parse_only(code)?;
         let bound = self.session_names();
         analyzer::analyze_with_bound_names(&program, &bound)?;
         self.run_program(&program, code)
@@ -1443,18 +1566,156 @@ impl Repl {
         }
     }
 
-    /// What `.type` has to say about `code`, or the error the session's own
-    /// pipeline produced for it.
+    /// What `.type` has to say about `code`, or why it will not say it.
     ///
     /// `Err` rather than a line that reads like an answer: a name nothing binds
     /// is an unknown-variable error, and printing it inside a listing whose other
-    /// lines are about values would make it look like a kind of value.
+    /// lines are about values would make it look like a kind of value. The same
+    /// channel carries the two refusals — a statement, and a call whose effects
+    /// leave the value it answers — so a question that cannot be answered is
+    /// reported as the question it could not answer.
+    ///
+    /// Three gates, in this order, and each of them is the reason the next one
+    /// was needed:
+    ///
+    /// 1. **The program must be one expression.** [`introspect::expression_of`].
+    /// 2. **No call may leave the value system.** [`Repl::effectful_call_in`].
+    /// 3. **It runs on a fork.** [`Repl::evaluate_for_question`].
+    ///
+    /// The first two stop the world being changed; the third stops the *session*
+    /// being changed, which is the half nothing else reaches: a `to` function's
+    /// own `set` writes a global, and `uppercase` is a builtin rather than a
+    /// statement.
     fn type_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
-        let value = self
-            .run_code(code)
-            .map_err(|error| format!("Error: {}", error))?;
+        let program = parse_only(code).map_err(|error| format!("Error: {}", error))?;
+        let expression = introspect::expression_of(&program)?;
+        if let Some(call) = self.effectful_call_in(expression) {
+            return Err(format!(
+                "Error: :type is a question about a value, and {} does something outside \
+                 the value it answers — a question cannot undo it. `:sighelp {}` describes it.",
+                call, call
+            ));
+        }
+        let value = self.evaluate_for_question(&program)?;
         let definition = self.definition_of_expression(code);
         Ok(introspect::type_lines(&value, definition.as_ref()))
+    }
+
+    /// The first call reachable from `expression` whose effects leave the value
+    /// it answers, named the way the registry holds it.
+    ///
+    /// Read off the expression rather than out of a run, because the point is to
+    /// refuse *before* the run: `files.delete("notes.rb")` has to be a message,
+    /// not an answer about what `files.delete` returns. Every spelling is
+    /// resolved to the registry's own name first — [`Vm::module_behind`] for an
+    /// `import files as F`, [`stdlib::resolve`] for a module member written flat
+    /// — so `files.delete(…)`, `files_delete(…)` and `F.delete(…)` are one
+    /// refusal and not three holes.
+    ///
+    /// **And it follows the calls.** Reading only the expression finds the calls
+    /// written in it, which is not the same set as the calls *made*: `to evil()
+    /// files.delete("notes.rb") end` writes a call that appears nowhere in
+    /// `:type evil()`, and a gate that only reads what it can see is a gate with
+    /// one line written around it. So every call reached is resolved to the
+    /// function it names — a bare name, a module member, an object's method
+    /// ([`Vm::function_body`], [`Vm::object_method`]) — and that function's body
+    /// is queued in its turn, transitively. A declaration that calls itself, or
+    /// two that call each other, terminates because a body is only ever read
+    /// once.
+    ///
+    /// What this cannot see is a call made *through a value* rather than through
+    /// a name: `xs.map(evil)` never writes `evil` at all. That is not a gap in
+    /// this walk, it is the reason [`Repl::evaluate_for_question`] also refuses
+    /// at the point of the call — and the two are asked the same question of the
+    /// same name by [`stdlib::is_effectful`], so neither can drift from the
+    /// other.
+    fn effectful_call_in(&self, expression: &Expr) -> Option<String> {
+        let mut queue: VecDeque<introspect::Call> = introspect::calls_in(expression).into();
+        let mut read: HashSet<String> = HashSet::new();
+
+        while let Some(call) = queue.pop_front() {
+            let module = call
+                .receiver
+                .as_deref()
+                .map(|name| self.vm.module_behind(name));
+            let name = call.builtin_name(module);
+            if stdlib::is_effectful(&name) {
+                return Some(name);
+            }
+            if !read.insert(name.clone()) {
+                continue;
+            }
+            if let Some(body) = self.callee_body(&call, module) {
+                queue.extend(introspect::calls_in_body(body));
+            }
+        }
+        None
+    }
+
+    /// The statements behind `call`, when it names a function this session
+    /// declared.
+    ///
+    /// The three shapes [`Vm::call`] and [`Vm::call_method`] can reach a
+    /// declaration through, asked in the order they reach it. An object's method
+    /// is not a bound name at all — `counter.bump()` is `objects[counter].methods[bump]`
+    /// — so it is looked up from the receiver the call was written on and the
+    /// name the two would build is the fallback rather than the first question.
+    fn callee_body(&self, call: &introspect::Call, module: Option<&str>) -> Option<&[Stmt]> {
+        let declared = match (module, &call.receiver) {
+            (Some(_), Some(receiver)) => match self.vm.object_method(receiver, &call.member) {
+                Some(Value::Function(function)) => Some(&function.body),
+                _ => None,
+            },
+            _ => None,
+        }
+        .or_else(|| self.vm.function_body(&call.builtin_name(module)))?;
+
+        match declared {
+            FunctionBody::Statements(body) => Some(body),
+            // A body compiled to bytecode has no statements to read. The tree-
+            // walking VM builds `Statements` and the bytecode VM never reaches
+            // `.type`, so this is unreachable in practice — and the walk is a
+            // *refinement*, not the gate: [`Repl::evaluate_for_question`] refuses
+            // the effect at the call itself whether or not this could see it.
+            FunctionBody::Block { .. } => None,
+        }
+    }
+
+    /// Evaluates `program` against the session's bindings and changes none of
+    /// them.
+    ///
+    /// A [`Vm::fork`], not the session's own VM: the analyzer is seeded from the
+    /// session exactly as a typed line would be — so `nosuchname` is that
+    /// pipeline's own error and `nums[0]` resolves — and the run happens on a
+    /// copy. A call that assigns, a builtin that prints, and the `_` binding
+    /// `.type` never makes are all consequences of using the session's VM here,
+    /// and none of them survives the fork.
+    ///
+    /// [`Vm::run_quietly`] rather than [`Vm::run`]: `say` inside a called
+    /// function buffers its line, and a question is not a request to hear it.
+    /// `print` is the one way out that is not buffered at all, so
+    /// [`Vm::ask_questions`] is what keeps it off the terminal.
+    ///
+    /// And the fork is told it is answering a question ([`Vm::ask_questions`]),
+    /// which refuses an effectful builtin *at the call* — the half of the gate
+    /// that does not depend on reading the source. The fork shares the process
+    /// with the session: the same root, the same filesystem, the same
+    /// `RANDOM_STATE`, the same terminal. So a call no static reading of the
+    /// expression could have found still has to be stopped where it happens.
+    /// Three reach one that way — a `to` function's body, an object's method,
+    /// and a function value handed to `map` — and none of them writes the name
+    /// it calls into the expression. They are refused after the early gate has
+    /// had its say, so the message the user reads is the early one wherever the
+    /// early one can see it, and an error naming the offending call where it
+    /// cannot.
+    fn evaluate_for_question(&self, program: &Program) -> Result<Value, String> {
+        analyzer::analyze_with_bound_names(program, &self.session_names())
+            .map_err(|error| format!("Error: {}", error))?;
+        let mut scratch = self.vm.fork();
+        scratch.ask_questions(true);
+        scratch
+            .run_quietly(program)
+            .map_err(|error| format!("Error: {}", error))
     }
 
     /// Where `:type`'s expression was written, when it is a bare name this
@@ -2794,6 +3055,17 @@ mod tests {
             repl
         }
 
+        /// A directory for a test's files, named after the test so two running in
+        /// parallel cannot collide. Under `target/tmp/`, never `/tmp`.
+        fn temp_dir(name: &str) -> std::path::PathBuf {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/tmp")
+                .join(name);
+            std::fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| panic!("cannot create {}: {e}", dir.display()));
+            dir
+        }
+
         /// `.type` answers with the value, its kind, and where it was written —
         /// the third of which nothing in the REPL said before.
         #[test]
@@ -2824,6 +3096,532 @@ mod tests {
                 joined.contains("set nums to [1, 2]"),
                 "quoted back, so the span can be checked against the history: {:?}",
                 lines
+            );
+        }
+
+        /// A question is a question. `.type` used to run whatever it was given
+        /// through the session's own pipeline, so `:type set sneaky to 1` bound a
+        /// name the session's history holds no line for — `.which` would then
+        /// call it unknown while the next typed line reached it — and `:type say
+        /// "hi"` printed a line nobody asked for. Both are refused by name, and
+        /// the session is left exactly as the question found it.
+        #[test]
+        fn edge_type_refuses_a_program_and_the_session_never_knows_it_happened() {
+            let mut repl = session_with_bindings();
+            let last_result = repl.lookup("_").cloned();
+
+            for (program, keyword) in [
+                ("set sneaky to 1", "set"),
+                ("say \"typed, not said\"", "say"),
+                ("print \"typed, not printed\"", "print"),
+                ("import files", "import"),
+                ("to helper()\n    return 1\nend", "to"),
+                ("set a to 1\nset b to 2", "statement"),
+            ] {
+                let refusal = repl
+                    .type_answer(program)
+                    .expect_err("a program is not a question about one value");
+                assert!(
+                    refusal.contains(keyword),
+                    "{:?} is refused naming {:?}, got: {}",
+                    program,
+                    keyword,
+                    refusal
+                );
+                assert!(
+                    refusal.starts_with("Error:"),
+                    "and the refusal is an error, not a value of some kind: {}",
+                    refusal
+                );
+            }
+
+            assert!(
+                repl.lookup("sneaky").is_none() && repl.lookup("helper").is_none(),
+                "no name was bound by a command that refused to run"
+            );
+            assert_eq!(
+                repl.which_answer("sneaky").join("\n"),
+                "sneaky: unknown",
+                "and nothing is left behind for :which to be wrong about"
+            );
+            assert_eq!(
+                repl.lookup("_").cloned(),
+                last_result,
+                "and the last result is still the last line's, not a question's"
+            );
+            assert!(
+                repl.type_answer("counter").is_ok(),
+                "the session is still a session: it answers the next question"
+            );
+        }
+
+        /// The one thing a clone of the bindings cannot undo is an effect that
+        /// leaves the process, so a call that reaches the filesystem, the
+        /// network, the clock, the terminal, standard input or the random stream
+        /// is refused before it runs. Asserted on the file, because "it said no"
+        /// and "the file is still there" are different claims and only one of
+        /// them is the point.
+        ///
+        /// A *read* is in that list now, and it was not. `files.read` changes
+        /// nothing on disk, so it was treated as answerable — which is how a
+        /// question could block forever on a FIFO and how `files.read("/home/…")`
+        /// printed the user's home directory into a transcript they had agreed to
+        /// nothing about. It blocks, and it reaches out of the process to do it.
+        #[test]
+        fn edge_type_refuses_a_call_that_changes_the_world_and_the_file_survives() {
+            let dir = temp_dir("repl_type_effects");
+            let path = dir.join("notes.rb");
+            let copy = dir.join("copy.rb");
+            std::fs::write(&path, "original").expect("the test needs a file to protect");
+            let _ = std::fs::remove_file(&copy);
+            let quoted = path.display().to_string();
+
+            let mut repl = Repl::new();
+            for call in [
+                format!("files.write(\"{quoted}\", \"clobbered\")"),
+                format!("files.delete(\"{quoted}\")"),
+                format!("files.copy(\"{quoted}\", \"{}\")", copy.display()),
+                format!("files_append(\"{quoted}\", \"more\")"),
+                format!("files.read(\"{quoted}\")"),
+                format!("files.lines(\"{quoted}\")"),
+                format!("files.exists(\"{quoted}\")"),
+                "time.sleep(0)".to_string(),
+                "time_sleep(0)".to_string(),
+                "time.now()".to_string(),
+                "time_now()".to_string(),
+                "input()".to_string(),
+                "console.log(\"typed\")".to_string(),
+                "random.seed(1)".to_string(),
+                "random()".to_string(),
+                "random.number()".to_string(),
+                "random.choice([1, 2])".to_string(),
+                "random.shuffle([1, 2])".to_string(),
+            ] {
+                let refusal = repl
+                    .type_answer(&call)
+                    .expect_err("a call that leaves the process is not a question");
+                assert!(
+                    refusal.starts_with("Error:") && refusal.contains("sighelp"),
+                    "{} is refused with somewhere to go instead: {}",
+                    call,
+                    refusal
+                );
+            }
+
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file is still there"),
+                "original",
+                "not one of those calls wrote to it"
+            );
+            assert!(
+                !copy.exists(),
+                "and the copy was never made either: a refusal is not a plan"
+            );
+
+            // And the value system itself is still answerable — the refusal list
+            // is a list of the calls that leave it, not a refusal to answer.
+            let lines = repl
+                .type_answer("uppercase(\"redblue\")")
+                .expect("a call that only answers a value is still a question");
+            assert!(
+                lines[0].contains("value: REDBLUE"),
+                "what does not leave the process still answers: {:?}",
+                lines
+            );
+        }
+
+        /// An alias is another name for a module, so a call through one reaches
+        /// the same function and has to be refused the same way — and a call
+        /// through an alias to a function that *is* answerable still answers, so
+        /// the rule is about what the function does and not about how it is
+        /// written.
+        #[test]
+        fn edge_type_refuses_a_call_written_through_an_import_alias() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["import files as F", "import json to J"]);
+
+            for (call, named) in [
+                ("F.delete(\"notes.rb\")", Some("files_delete")),
+                // The reads are refused through an alias exactly as they are
+                // under the module's own name: `F` *is* `files`.
+                ("F.read(\"notes.rb\")", Some("files_read")),
+                ("F.exists(\"notes.rb\")", Some("files_exists")),
+                ("J.parse(\"{}\")", None),
+                ("J.stringify([1])", None),
+            ] {
+                match named {
+                    // The refusal names the registry's function, not the spelling
+                    // the user typed: an alias is a name for a module, not a
+                    // second module.
+                    Some(expected) => {
+                        let refusal = repl
+                            .type_answer(call)
+                            .expect_err("a call behind an alias is the same call");
+                        assert!(
+                            refusal.contains(expected),
+                            "{} is refused as {}, got: {}",
+                            call,
+                            expected,
+                            refusal
+                        );
+                    }
+                    None => {
+                        assert!(
+                            repl.type_answer(call).is_ok(),
+                            "{} changes nothing outside the value it answers",
+                            call
+                        );
+                    }
+                }
+            }
+        }
+
+        /// A call to a `to` function is a real question with a real answer, and
+        /// the function's own `set` writes a global. So the run happens on a fork
+        /// of the session's bindings: `counter` is still 3 afterwards, because
+        /// describing what `bump()` answers is not the same as running it.
+        #[test]
+        fn type_calls_a_session_function_without_running_it_against_the_session() {
+            let mut repl = session_with_bindings();
+            feed(
+                &mut repl,
+                &["to bump()\n    set counter to counter + 1\n    say \"bumped\"\n    return counter\nend"],
+            );
+            let before = repl.lookup("counter").cloned().expect("counter is bound");
+            let recorded_before = repl.which_answer("counter").join("\n");
+
+            let lines = repl
+                .type_answer("bump()")
+                .expect("a function the session declared is a call it can describe");
+            assert!(
+                lines[0].contains("value: 4"),
+                "what it answers is the value after the increment: {:?}",
+                lines
+            );
+
+            assert_eq!(
+                repl.lookup("counter"),
+                Some(&before),
+                "and the session's own counter is untouched: the call ran on a fork"
+            );
+            assert_eq!(
+                repl.which_answer("counter").join("\n"),
+                recorded_before,
+                "and nothing else moved either — asking a question changes no answer \
+                 the next question would give"
+            );
+        }
+
+        /// A question about a value cannot answer one about a *call the session made
+        /// before it*, and reading only the expression the user typed is how that
+        /// is got wrong.
+        ///
+        /// `to evil()` calls `files.delete`, and `:type evil()` writes no call at
+        /// all: the only thing in it is the name `evil`. So the early gate read
+        /// the expression, found nothing effectful, and ran the question — on a
+        /// fork, which copies the bindings and shares the process — and the file
+        /// was deleted. The fork was never going to help with this and never was
+        /// asked to; the hole was in *what was refused*, not in what was isolated.
+        ///
+        /// Every shape a declaration can hide behind is checked, because each one
+        /// is a separate way to spell the same mistake: through another function
+        /// (so the walk has to be transitive, not one level), through a module's
+        /// own member, through an object's method, and through a function *value*
+        /// handed to `map` — which writes no name at all, and is therefore only
+        /// stoppable at the call.
+        ///
+        /// The file is the witness for every one of them. A refusal that said
+        /// "no" while the file went anyway would pass an assertion on the
+        /// message alone, so nothing here checks the message until afterwards.
+        #[test]
+        fn edge_type_refuses_a_question_whose_call_hides_behind_a_declared_function() {
+            let dir = temp_dir("repl_type_callee");
+            let path = dir.join("victim.rb");
+            std::fs::write(&path, "original").expect("the test needs a file to protect");
+            let quoted = path.display().to_string();
+
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    // Directly.
+                    &format!("to evil()\n    files.delete(\"{quoted}\")\nend"),
+                    // One call removed: the walk has to follow the body.
+                    "to middle()\n    evil()\nend",
+                    // Two removed, and mutual: the walk has to terminate.
+                    "to left()\n    right()\nend",
+                    &format!("to right()\n    left()\n    files.delete(\"{quoted}\")\nend"),
+                    // Through a module the session declared itself.
+                    &format!(
+                        "module Vault\n    export empty\n    to empty()\n        \
+                         files.delete(\"{quoted}\")\n    end\nend"
+                    ),
+                    // Through an object's method, where the callee is not a name
+                    // any binding holds.
+                    &format!(
+                        "object Safe\n    to empty()\n        files.delete(\"{quoted}\")\n    end\nend"
+                    ),
+                ],
+            );
+
+            for question in [
+                "evil()",
+                "middle()",
+                "left()",
+                "Vault.empty()",
+                "Safe.empty()",
+            ] {
+                let refusal = repl
+                    .type_answer(question)
+                    .expect_err("a question whose call reaches the filesystem is not a question");
+                // The *early* refusal, not merely a refusal: these are all calls
+                // the walk can reach by name, and each is answered before the run
+                // with somewhere to go instead. A refusal raised at the call
+                // would say the same thing about the file and say nothing about
+                // when it was decided.
+                assert!(
+                    refusal.contains("`:sighelp files_delete` describes it"),
+                    "{question} is refused by name, before anything runs: {refusal}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&path).expect("the file is still there"),
+                    "original",
+                    "{question} deleted the file it was a question about"
+                );
+            }
+
+            // And the one that only a refusal *at the call* can stop, because the
+            // expression names nothing that is called: `map` is handed a function
+            // value, and the call to it is made by the builtin rather than
+            // written in the source.
+            feed(&mut repl, &["to keep(n)\n    return n\nend"]);
+            let refusal = repl
+                .type_answer("map([1, 2], evil)")
+                .expect_err("a function value handed to map is called just the same");
+            assert!(
+                refusal.contains("files_delete") && !refusal.contains(":sighelp"),
+                "this one is caught where it happens rather than where it is written: {refusal}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file is still there"),
+                "original",
+                "the file is still there after the last of them"
+            );
+
+            // The walk is a refinement, not the whole rule: a function that only
+            // answers a value is still describable, through the same door.
+            let lines = repl
+                .type_answer("map([1, 2], keep)")
+                .expect("mapping a function that only answers is a question with an answer");
+            assert!(
+                lines[0].contains("value: [1, 2]"),
+                "and it answers: {:?}",
+                lines
+            );
+        }
+
+        /// The refusal belongs to the *question*, and to nothing else.
+        ///
+        /// It is a flag on one VM rather than a change to the language, so the
+        /// sharpest way to pin it is to show that the very call `.type` refuses
+        /// still works on the line after: `files.write` is what the file module is
+        /// for, and a gate that had leaked into ordinary evaluation would have
+        /// broken the language to protect it. A file written by the session and a
+        /// question about it refused is the only pair of claims that can both be
+        /// true.
+        #[test]
+        fn edge_the_refusal_is_the_questions_and_not_the_language() {
+            let dir = temp_dir("repl_type_only_questions");
+            let path = dir.join("notes.rb");
+            std::fs::write(&path, "before").expect("the test needs a file");
+            let quoted = path.display().to_string();
+
+            let mut repl = Repl::new();
+
+            // A session line runs on the session's own VM and is not guarded.
+            let write = format!("files.write(\"{quoted}\", \"after\")");
+            feed(&mut repl, &[&write]);
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file is still there"),
+                "after",
+                "a program still writes files: the guard is a question's, not the language's"
+            );
+
+            // And the same call, asked as a question, is refused.
+            let refusal = repl
+                .type_answer(&format!("files.write(\"{quoted}\", \"clobbered\")"))
+                .expect_err("asking the question is not running the line");
+            assert!(
+                refusal.contains("files_write"),
+                "and it is refused as what it would have done: {refusal}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file is still there"),
+                "after",
+                "the refused question wrote nothing over it"
+            );
+        }
+
+        /// A deep tree is a diagnostic, not a crash.
+        ///
+        /// `.type` walks the expression it is given before it evaluates it, and
+        /// that walk used to recurse — on the REPL's own thread, which is the
+        /// thread the user is typing on and is not the sized one
+        /// [`crate::interpreter::run_isolated`] spawns for a program. The parser
+        /// bounds nesting, so a tree deep enough to overflow is refused before
+        /// the walk sees it; that is the *second* line of defence and this is what
+        /// pins it, because the first one is the walk itself and it no longer
+        /// exists.
+        #[test]
+        fn edge_a_deeply_nested_question_is_refused_rather_than_overflowing() {
+            let mut repl = Repl::new();
+
+            for question in [
+                format!("{}1{}", "a+(".repeat(4000), ")".repeat(4000)),
+                format!("{}b", "a.".repeat(4000)),
+                format!("{}1{}", "[".repeat(4000), "]".repeat(4000)),
+            ] {
+                let refusal = repl
+                    .type_answer(&question)
+                    .expect_err("a tree deeper than the parser allows has no answer");
+                assert!(
+                    refusal.starts_with("Error:"),
+                    "and it is reported: {}",
+                    &refusal[..refusal.len().min(120)]
+                );
+            }
+
+            // Premise: the session is still answering, so nothing above overflowed
+            // anything and took the process with it.
+            assert!(
+                repl.type_answer("uppercase(\"ok\")")
+                    .expect("the session survived the deep questions")
+                    .join("")
+                    .contains("OK"),
+                "and a question afterwards is answered normally"
+            );
+        }
+
+        /// `:reset` forgets the bindings. It used to keep the lines they were
+        /// bound on, so `.which x` reported `<session>:3` — quoting a line of a
+        /// session that had been thrown away — for a name nothing held any more.
+        #[test]
+        fn edge_a_reset_forgets_the_lines_of_the_bindings_it_forgets() {
+            let mut repl = session_with_bindings();
+            assert!(
+                repl.which_answer("counter")
+                    .contains(&"counter: session binding".to_string()),
+                "premise: the binding is reported before the reset"
+            );
+
+            repl.reset_session();
+
+            let answer = repl.which_answer("counter").join("\n");
+            assert_eq!(answer, "counter: unknown", "a reset session holds nothing");
+            assert!(
+                !answer.contains("<session>"),
+                "and there is no line left to point at: {}",
+                answer
+            );
+            assert!(
+                repl.type_answer("counter").is_err(),
+                "and the value is gone with the binding"
+            );
+        }
+
+        /// One `import` binds three names here — two modules and an alias — and
+        /// all three are recorded. Reading only the identifier after the keyword
+        /// recorded `files` and called `network` and `net` unknown, for names the
+        /// session held and a program would have called.
+        #[test]
+        fn edge_which_names_every_name_one_import_binds() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["import files, network as net"]);
+
+            for name in ["files", "network", "net"] {
+                let answer = repl.which_answer(name).join("\n");
+                assert!(
+                    answer.contains("session binding"),
+                    "{} is bound by the import that reached it: {}",
+                    name,
+                    answer
+                );
+                assert!(
+                    answer.contains("<session>:1"),
+                    "on the line it was written on: {}",
+                    answer
+                );
+                assert!(
+                    answer.contains("import files, network as net"),
+                    "which is quoted so the span can be checked: {}",
+                    answer
+                );
+            }
+
+            // The older alias spelling binds the same two kinds of name.
+            feed(&mut repl, &["import csv as C"]);
+            for name in ["csv", "C"] {
+                assert!(
+                    repl.which_answer(name)
+                        .contains(&format!("{name}: session binding")),
+                    "{} is bound by `import csv as C` too",
+                    name
+                );
+            }
+        }
+
+        /// A `module Foo … end` declares a namespace rather than binding a
+        /// value, which is why "was the name bound?" is the wrong question for it.
+        /// `.which Foo` said *unknown* for a declaration the session had just
+        /// run, and the documented contract said it should be recorded.
+        #[test]
+        fn edge_which_names_a_module_the_session_declared_itself() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &["module Greeter\n    to greet(n)\n        return \"hi, \" + n\n    end\n    export all\nend"],
+            );
+
+            let answer = repl.which_answer("Greeter").join("\n");
+            assert!(
+                answer.contains("session binding"),
+                "the declaration is a binding of a namespace: {}",
+                answer
+            );
+            assert!(
+                answer.contains("<session>:1") && answer.contains("module Greeter"),
+                "reported where it was written, and quoted: {}",
+                answer
+            );
+
+            let member = repl.which_answer("Greeter.greet").join("\n");
+            assert!(
+                member.contains("session module member") && member.contains("of module Greeter"),
+                "and what it published is the session's own: {}",
+                member
+            );
+        }
+
+        /// `set x to y` reads `y` and writes `x`. The `to` in it looks exactly
+        /// like the `to` that opens a declaration, and treating it as one moved
+        /// `y` to a line on which it was never written — the precise failure
+        /// reading the source rather than a before/after diff was meant to avoid.
+        #[test]
+        fn edge_a_value_read_by_a_set_stays_on_the_line_that_bound_it() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set y to 1", "set x to y"]);
+
+            let read = repl.which_answer("y").join("\n");
+            assert!(
+                read.contains("<session>:1") && read.contains("set y to 1"),
+                "y was bound on the first line and only read on the second: {}",
+                read
+            );
+            let written = repl.which_answer("x").join("\n");
+            assert!(
+                written.contains("<session>:2"),
+                "and x is on the line that wrote it: {}",
+                written
             );
         }
 
@@ -2860,6 +3658,10 @@ mod tests {
                 ("1 + \"a\"", "Cannot add non-numbers"),
                 ("\"abc", "Unterminated string"),
                 ("1 / 0", "Division by zero"),
+                // One past the end, on a value nobody has indexed before: `.type`
+                // evaluates the expression, so an out-of-bounds index reaches the
+                // session's own bounds check and has to come back as its message.
+                ("[1][9]", "Index 9 is out of bounds"),
             ] {
                 let error = repl.type_answer(expression).unwrap_err();
                 assert!(
@@ -2870,6 +3672,28 @@ mod tests {
                     error
                 );
             }
+
+            // The other end of the same rule, and it is the one that is easy to
+            // assume: a negative index is *not* out of bounds. SPEC.md §"List
+            // Operations" makes it count from the end, so `-1` is the last item.
+            // `.type` reports that value rather than refusing it, and pinning it
+            // here is what stops a later "fix" turning it into an error.
+            let last = repl
+                .type_answer("[1, 2, 3][-1]")
+                .expect("-1 names an element");
+            assert!(
+                last[0].contains("value: 3"),
+                "index -1 counts from the end: {:?}",
+                last
+            );
+            let first = repl
+                .type_answer("[1, 2, 3][0]")
+                .expect("index 0 is the first");
+            assert!(
+                first[0].contains("value: 1"),
+                "and index 0 is the first: {:?}",
+                first
+            );
 
             assert!(
                 repl.type_answer("counter").is_ok(),
