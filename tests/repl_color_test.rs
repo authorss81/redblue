@@ -266,12 +266,23 @@ fn brand_roles_are_distinct_from_error_and_prompt() {
 
 #[test]
 fn edge_banner_is_stable_across_calls() {
-    // Not animated: two calls must be identical. An animated banner would fail
-    // this, which is the point - it is why the glyph is static.
+    // COLUMNS is pinned here rather than inherited. cargo runs tests on parallel
+    // threads sharing one process environment, so a sibling test that sets
+    // COLUMNS races this one: the first run saw the banner centred and the second
+    // did not, because the width changed in between. A test that depends on
+    // ambient environment is a flake, not a test.
+    std::env::set_var("COLUMNS", "80");
     let s = Style::forced(true);
-    assert_eq!(
-        redblue::repl::banner::banner_text(&s),
-        redblue::repl::banner::banner_text(&s)
+    let first = redblue::repl::banner::banner_text(&s);
+    let second = redblue::repl::banner::banner_text(&s);
+    std::env::set_var("COLUMNS", "100");
+    let third = redblue::repl::banner::banner_text(&s);
+    std::env::remove_var("COLUMNS");
+
+    assert_eq!(first, second, "the banner must not change between calls");
+    assert_ne!(
+        first, third,
+        "COLUMNS must actually affect centring, or it is not centring"
     );
 }
 

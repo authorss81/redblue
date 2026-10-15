@@ -12,84 +12,67 @@
 //! - **An ASCII fallback.** Box-drawing glyphs render as blanks or `?` on a
 //!   terminal whose font lacks them, which makes the mark *invisible* rather
 //!   than ugly. A mark you cannot see is worse than no mark.
-//! - **A gradient across the lines**, not one flat colour, so the eye reads it
-//!   as one image rather than a stack of coloured rows.
-//! - **Centring on the real terminal width**, so it does not sit hard against
-//!   column zero on a wide window.
+//! - **Colour per letter, not per row.** The first version painted each *row* a
+//!   single colour, which striped the whole wordmark red/red/magenta/blue/blue
+//!   and looked like a smear. Each letter carries its own colour, which is also
+//!   the only reading that means anything: RED is red, BLUE is blue.
+//! - **Centring on the real terminal width**, so it does not sit against column
+//!   zero on a wide window.
 //!
-//! It spells REDBLUE, and the gradient follows the name: **RED** is painted red,
-//! **BLUE** is painted blue, and B sits on the midpoint between them.
+//! ## Why the letters are built from cells and not as whole rows
 //!
-//! The first version of this file drew the letter R three times and called it a
-//! wordmark. It looked like "RRR". A glyph that is not the thing it claims to
-//! be is not a cosmetic defect — it is a lie in the place the user looks first.
+//! The first working version wrote five literal strings. Its last row was 30
+//! characters where the others were 29, because three of the seven letters have
+//! a 4-wide bottom cell and the other four do not, and hand-spacing them drifted.
+//! The result was a wordmark whose bottom row was visibly wrong — the user saw
+//! it immediately.
+//!
+//! So every letter is a fixed 4x5 cell and the rows are assembled from them.
+//! Alignment is then a property of the code rather than of my typing, and a
+//! cell that is one space short is a compile error rather than a picture that
+//! looks slightly off.
 
 use crate::repl::style::{Paint, Style};
 
-/// One line of the banner: the glyph, and which step of the gradient it takes.
-struct Line {
-    glyph: &'static str,
+/// The height of the wordmark, in rows.
+const ROWS: usize = 5;
+
+/// One letter: `ROWS` cells, each exactly four characters wide, and its colour.
+struct Glyph {
+    cells: [&'static str; ROWS],
     paint: Paint,
 }
 
-/// The Unicode wordmark. Five rows, seven letters, `redblue`.
-const LOGO_UNICODE: [Line; 6] = [
-    Line {
-        glyph: "███ ████ ███ ███ █   █ █ ████",
-        paint: Paint::BrandRed,
-    },
-    Line {
-        glyph: "█ █ █    █ █ █ █ █   █ █ █   ",
-        paint: Paint::BrandRed,
-    },
-    Line {
-        glyph: "███ ███  █ █ ███ █   █ █ ███ ",
-        paint: Paint::BrandMid,
-    },
-    Line {
-        glyph: "█ █ █    █ █ █ █ █   █ █ █   ",
-        paint: Paint::BrandBlue,
-    },
-    Line {
-        glyph: "█ █ ████ ███ ████ ███ ███ ████",
-        paint: Paint::BrandBlue,
-    },
-    Line {
-        glyph: "",
-        paint: Paint::BrandBlue,
-    },
+const fn glyph(cells: [&'static str; ROWS], paint: Paint) -> Glyph {
+    Glyph { cells, paint }
+}
+
+/// The wordmark, in order. It spells REDBLUE and the colours follow the name.
+const WORD: [Glyph; 7] = [
+    // R E D — the red half.
+    glyph(["███ ", "█ █ ", "███ ", "█ █ ", "█ █ "], Paint::BrandRed),
+    glyph(["████", "█   ", "███ ", "█   ", "████"], Paint::BrandRed),
+    glyph(["███ ", "█ █ ", "█ █ ", "█ █ ", "███ "], Paint::BrandRed),
+    // B — the midpoint, so the eye reads one image rather than two blocks.
+    glyph(["███ ", "█ █ ", "███ ", "█ █ ", "███ "], Paint::BrandMid),
+    // L U E — the blue half.
+    glyph(["█   ", "█   ", "█   ", "█   ", "████"], Paint::BrandBlue),
+    glyph(["█ █ ", "█ █ ", "█ █ ", "█ █ ", "███ "], Paint::BrandBlue),
+    glyph(["████", "█   ", "███ ", "█   ", "████"], Paint::BrandBlue),
 ];
 
 /// The same wordmark in pure ASCII, for a terminal that cannot draw the above.
 ///
-/// Proportioned to match: `#` carries the weight and the gaps are single spaces,
-/// so the two render at a similar visual size rather than the ASCII looking
-/// cramped.
-const LOGO_ASCII: [Line; 6] = [
-    Line {
-        glyph: "### #### ### ### #   # # ####",
-        paint: Paint::BrandRed,
-    },
-    Line {
-        glyph: "# # #    # # # # #   # # #   ",
-        paint: Paint::BrandRed,
-    },
-    Line {
-        glyph: "### ###  # # ### #   # # ### ",
-        paint: Paint::BrandMid,
-    },
-    Line {
-        glyph: "# # #    # # # # #   # # #   ",
-        paint: Paint::BrandBlue,
-    },
-    Line {
-        glyph: "# # #### ### #### ### ### ####",
-        paint: Paint::BrandBlue,
-    },
-    Line {
-        glyph: "",
-        paint: Paint::BrandBlue,
-    },
+/// `#` carries the weight and the gaps stay single spaces, so the two render at
+/// a similar visual size rather than the ASCII looking cramped.
+const WORD_ASCII: [Glyph; 7] = [
+    glyph(["### ", "# # ", "### ", "# # ", "# # "], Paint::BrandRed),
+    glyph(["####", "#   ", "### ", "#   ", "####"], Paint::BrandRed),
+    glyph(["### ", "# # ", "# # ", "# # ", "### "], Paint::BrandRed),
+    glyph(["### ", "# # ", "### ", "# # ", "### "], Paint::BrandMid),
+    glyph(["#   ", "#   ", "#   ", "#   ", "####"], Paint::BrandBlue),
+    glyph(["# # ", "# # ", "# # ", "# # ", "### "], Paint::BrandBlue),
+    glyph(["####", "#   ", "### ", "#   ", "####"], Paint::BrandBlue),
 ];
 
 /// Whether box-drawing glyphs can be trusted.
@@ -121,37 +104,43 @@ fn terminal_width() -> usize {
     80
 }
 
-/// Print the banner: centred, gradient-coloured, static.
-pub fn print_banner<W: std::io::Write>(out: &mut W, style: &Style) -> std::io::Result<()> {
-    let ascii = use_ascii();
-    let logo = if ascii {
-        &LOGO_ASCII[..]
+/// The rendered rows, each one a run of `(text, paint)` segments.
+///
+/// Splitting a row into per-letter segments is what lets each letter take its own
+/// colour. A whole row cannot: it would be one colour for seven letters, which is
+/// the striping this design exists to avoid.
+fn rows() -> Vec<Vec<(&'static str, Paint)>> {
+    let word = if use_ascii() {
+        &WORD_ASCII[..]
     } else {
-        &LOGO_UNICODE[..]
+        &WORD[..]
     };
+    (0..ROWS)
+        .map(|row| {
+            word.iter()
+                .map(|g| (g.cells[row], g.paint))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
 
-    // Measure the widest glyph so centring survives colour being off — an
-    // escape-wrapped string is longer than the text it wraps.
-    let width = logo
-        .iter()
-        .map(|l| l.glyph.chars().count())
-        .max()
-        .unwrap_or(0);
+/// Print the banner: centred, colour per letter, static.
+pub fn print_banner<W: std::io::Write>(out: &mut W, style: &Style) -> std::io::Result<()> {
+    let built = rows();
+    let width = WORD[0].cells[0].chars().count() * WORD.len() + (WORD.len() - 1);
     let pad = terminal_width().saturating_sub(width) / 2;
 
-    for line in logo {
-        if line.glyph.is_empty() {
-            writeln!(out)?;
-        } else {
-            writeln!(
-                out,
-                "{}{}",
-                " ".repeat(pad),
-                style.paint(line.paint, line.glyph)
-            )?;
+    for segments in &built {
+        let mut line = String::new();
+        for (i, (text, paint)) in segments.iter().enumerate() {
+            if i > 0 {
+                line.push(' ');
+            }
+            line.push_str(&style.paint(*paint, text));
         }
+        writeln!(out, "{}{}", " ".repeat(pad), line)?;
     }
-    Ok(())
+    writeln!(out)
 }
 
 /// The banner as a `String`, for callers that want the text rather than the IO.
