@@ -4,6 +4,7 @@ pub mod completer;
 pub mod editor;
 pub mod highlight;
 pub mod history;
+pub mod introspect;
 pub mod style;
 
 use std::cell::RefCell;
@@ -15,11 +16,12 @@ pub use commands::ReplCommand;
 pub use completer::ReplCompleter;
 pub use editor::{Line, LineSource, SessionNames};
 pub use history::ReplHistory;
+pub use introspect::Definition;
 
 use crate::analyzer;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
 use crate::interpreter::Vm;
-use crate::lexer::Lexer;
+use crate::lexer::{Lexer, TokenKind};
 use crate::parser::{open_block_depth, Parser, Program};
 use crate::repl::style::{Paint, Style};
 use crate::value::Value;
@@ -242,6 +244,20 @@ fn line_number(argument: &str) -> Result<usize, String> {
     Ok(line)
 }
 
+/// The keywords a name is *declared* by, rather than read through.
+///
+/// `set x to 1` binds `x`, `to x(..)` binds `x`, and `import M` binds `M`. This
+/// is what [`Repl::record_definitions`] looks for, so the line it points at is
+/// the line the name was written on and not the line it was last used on — the
+/// difference between `.which x` naming where `x` came from and naming some
+/// earlier line that happened to mention it.
+fn declares_a_name(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Set | TokenKind::Constant | TokenKind::To | TokenKind::Import
+    )
+}
+
 /// The snippets `:help` prints under "Quick Reference", each one a complete
 /// program the session has run.
 ///
@@ -330,6 +346,12 @@ pub struct Repl {
     /// sequences into a line editor is the editor's problem to measure, not
     /// something to hand it raw.
     prompt_format: String,
+    /// Where each name this session bound was written, for `.type` and `.which`.
+    ///
+    /// The VM knows *that* a name is bound and the session knows *where* it was
+    /// typed, and neither knew the other's half: `:inspect x` printed the value
+    /// and its kind and nothing about the line three prompts ago that made it.
+    definitions: HashMap<String, Definition>,
 }
 
 impl Repl {
@@ -345,6 +367,7 @@ impl Repl {
             debug: DebugSession::shared(),
             style: Style::detect(),
             prompt_format: DEFAULT_PROMPT.to_string(),
+            definitions: HashMap::new(),
         }
     }
 
@@ -701,6 +724,22 @@ impl Repl {
                 self.inspect_value(&name);
                 true
             }
+            ReplCommand::Type(expression) => {
+                self.print_type(&expression);
+                true
+            }
+            ReplCommand::Doc(module) => {
+                self.print_module_doc(&module);
+                true
+            }
+            ReplCommand::Which(name) => {
+                self.print_which(&name);
+                true
+            }
+            ReplCommand::Sighelp(name) => {
+                self.print_sighelp(&name);
+                true
+            }
             ReplCommand::Ast(expr) => {
                 self.print_ast(&expr);
                 true
@@ -852,10 +891,32 @@ impl Repl {
     }
 
     fn execute_code(&mut self, code: &str) {
+        let offset = self.current_line_number().saturating_sub(1);
+        self.execute_code_from(introspect::SESSION_FILE, offset, code);
+    }
+
+    /// The number `:history` prints beside the line being run, which is the line
+    /// a name it binds was written on.
+    ///
+    /// The history rather than a count of lines executed: `:history` is what the
+    /// user is looking at when they ask where something came from, so a span
+    /// that did not match it would be a span they could not check.
+    fn current_line_number(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Runs `code` as the program at `file`, whose first line is `line_offset`
+    /// plus one.
+    ///
+    /// The offset is what makes one definition format serve two callers: a line
+    /// the user typed has no line of its own but has a place in the history, and
+    /// a file's line *is* its line.
+    fn execute_code_from(&mut self, file: &str, line_offset: usize, code: &str) {
         let result = self.run_code(code);
 
         match result {
             Ok(value) => {
+                self.record_definitions(file, line_offset, code);
                 if !matches!(value, Value::Nothing) {
                     let line = format!("= {}", value);
                     println!("{}", self.style.paint(Paint::Result, &line));
@@ -866,6 +927,56 @@ impl Repl {
                 let line = format!("Error: {}", e);
                 println!("{}", self.style.paint(Paint::Error, &line));
             }
+        }
+    }
+
+    /// Notes where `code` bound each name, for `.type` and `.which`.
+    ///
+    /// Read out of the source rather than out of the VM's bindings afterwards,
+    /// because the difference is the whole point: a `set` of a name that was
+    /// already bound changes nothing a before-and-after comparison can see, so
+    /// `:which x` reported the line the *first* `set` was on and pointed at a
+    /// value that had not been there since. The declaring keyword is what is
+    /// looked for — `set x to`, `to x(..)`, `constant x`, `import M`,
+    /// `module M` — so the line recorded is the line the name was written on and
+    /// not the line it was last read.
+    ///
+    /// A name the code declares but the run did not bind is not recorded: a
+    /// `set` inside a branch that did not run declared nothing, and pointing at
+    /// it would be pointing at a line that made no binding.
+    fn record_definitions(&mut self, file: &str, line_offset: usize, code: &str) {
+        let tokens = match Lexer::tokenize(code) {
+            Ok(tokens) => tokens,
+            Err(_) => return,
+        };
+        let lines: Vec<&str> = code.lines().collect();
+
+        for pair in tokens.windows(2) {
+            if !declares_a_name(pair[0].kind.clone()) {
+                continue;
+            }
+            let name = match &pair[1].kind {
+                TokenKind::Identifier(name) => name.clone(),
+                _ => continue,
+            };
+            if self.lookup(&name).is_none() {
+                continue;
+            }
+            let number = line_offset + pair[0].line;
+            let source = lines
+                .get(pair[0].line.saturating_sub(1))
+                .copied()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            self.definitions.insert(
+                name,
+                Definition {
+                    file: file.to_string(),
+                    line: number,
+                    source,
+                },
+            );
         }
     }
 
@@ -1081,7 +1192,9 @@ impl Repl {
         };
 
         println!("Loaded {} bytes from '{}'.", source.len(), path);
-        self.execute_code(&source);
+        // The path, not `<session>`: a name this file binds is reported by
+        // `.which` as `path:line`, which is a place the user can open.
+        self.execute_code_from(path, 0, &source);
     }
 
     /// Writes the session's history to `path`, one entry per line, in the
@@ -1307,6 +1420,158 @@ impl Repl {
                 println!("Variable '{}' not found.", name);
             }
         }
+    }
+
+    /// `:type <expression>` — the value, its kind, and where it was written.
+    ///
+    /// An *expression*, not a name: `.type [1, 2]` is a question about a value
+    /// no session has ever bound, and `:inspect` could not ask it because it
+    /// only ever looked a name up. The expression is evaluated through the
+    /// session's own pipeline, so it is the same analyzer and the same bindings
+    /// the next typed line would get — and a name nothing binds is that
+    /// pipeline's ordinary error, printed rather than panicked.
+    fn print_type(&mut self, code: &str) {
+        match self.type_answer(code) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => {
+                println!("{}", self.style.paint(Paint::Error, &message));
+            }
+        }
+    }
+
+    /// What `.type` has to say about `code`, or the error the session's own
+    /// pipeline produced for it.
+    ///
+    /// `Err` rather than a line that reads like an answer: a name nothing binds
+    /// is an unknown-variable error, and printing it inside a listing whose other
+    /// lines are about values would make it look like a kind of value.
+    fn type_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
+        let value = self
+            .run_code(code)
+            .map_err(|error| format!("Error: {}", error))?;
+        let definition = self.definition_of_expression(code);
+        Ok(introspect::type_lines(&value, definition.as_ref()))
+    }
+
+    /// Where `:type`'s expression was written, when it is a bare name this
+    /// session bound.
+    ///
+    /// A name is the only expression with a span to report: `[1, 2]` was
+    /// written in the command itself, which the user is looking at, and pointing
+    /// at the session's history index would be pointing at the question.
+    fn definition_of_expression(&self, code: &str) -> Option<Definition> {
+        let name = code.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        self.definitions.get(name).cloned()
+    }
+
+    /// `:doc <module>` — what a module exposes, read out of the registry.
+    ///
+    /// A name that is not a module is refused by name. An empty listing would
+    /// read like a module with nothing in it, which sends the user looking for a
+    /// bug in the REPL rather than a typo in the command.
+    fn print_module_doc(&self, module: &str) {
+        match self.module_doc_answer(module.trim()) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => {
+                println!("{}", self.style.paint(Paint::Error, &message));
+            }
+        }
+    }
+
+    /// What `.doc` has to say about `module`, or the refusal that names the
+    /// modules that do exist.
+    fn module_doc_answer(&self, module: &str) -> Result<Vec<String>, String> {
+        introspect::doc_lines(module).ok_or_else(|| {
+            format!(
+                "Error: '{}' is not a module. The modules are: {}",
+                module,
+                crate::stdlib::MODULES.join(", ")
+            )
+        })
+    }
+
+    /// `:which <name>` — builtin, this session, a module member, or nothing.
+    fn print_which(&self, name: &str) {
+        for line in self.which_answer(name) {
+            println!("{}", line);
+        }
+    }
+
+    fn which_answer(&self, name: &str) -> Vec<String> {
+        let name = name.trim();
+        introspect::which_lines(name, &self.origin_of(name))
+    }
+
+    /// The [`introspect::Origin`] of `name`, asking the VM the two facts only it
+    /// knows: whether a bare name is bound, and whether a `Module.member`
+    /// spelling is one this session published.
+    ///
+    /// Only a *recorded* line makes a session binding a span: a name the session
+    /// holds but has no line for is reported by `:inspect`, which reads the value
+    /// and does not care where it came from, and `.which` says the name is not
+    /// one it can place rather than inventing a line 0.
+    fn origin_of(&self, name: &str) -> introspect::Origin {
+        let definition = self.definitions.get(name);
+        let session_member = match name.split_once('.') {
+            Some((module, member)) if !module.is_empty() && !member.is_empty() => {
+                self.vm.published_member(&format!("{module}_{member}"))
+            }
+            _ => false,
+        };
+        introspect::classify(name, definition, session_member)
+    }
+
+    /// `:sighelp <name>` — the shape of a call.
+    ///
+    /// Nothing is invented for a name that has no shape: the refusal says the
+    /// name is not something this language can call, which is the answer, and a
+    /// guessed signature would be worse than none.
+    fn print_sighelp(&self, name: &str) {
+        match self.sighelp_answer(name.trim()) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => {
+                println!("{}", self.style.paint(Paint::Error, &message));
+            }
+        }
+    }
+
+    /// What `.sighelp` has to say about `name`, or the refusal for a name with no
+    /// shape.
+    ///
+    /// The two refusals are different sentences because they are different
+    /// mistakes: a keyword is a word the language already uses, and being told
+    /// "no shape for `say`" reads as "`say` does not exist" when it answers every
+    /// time.
+    fn sighelp_answer(&self, name: &str) -> Result<Vec<String>, String> {
+        introspect::sighelp_lines(name, self.lookup(name)).ok_or_else(|| {
+            if Lexer::keywords().contains(&name) {
+                format!(
+                    "Error: '{}' is a keyword, not something to call: it is written {}.",
+                    name, name
+                )
+            } else {
+                format!(
+                    "Error: no shape for '{}': it is not a builtin, and this session has not \
+                     defined a function of that name.",
+                    name
+                )
+            }
+        })
     }
 
     /// The value bound to `name` anywhere in this session, VM included.
@@ -2499,6 +2764,415 @@ mod tests {
                 "the {:?} example does not promise an interpolation `say` does not do",
                 caption
             );
+        }
+    }
+
+    /// The four questions about code, answered by a live session rather than by
+    /// the pure helpers they are written on.
+    ///
+    /// They are driven through [`Repl::feed`] — history, dispatch and all — so a
+    /// command that parses but is never dispatched fails here. Before this phase
+    /// the table had seventeen commands and not one that inspected anything:
+    /// answering "what kind of thing is `[1, 2]`" or "where does `uppercase`
+    /// come from" meant leaving the REPL.
+    mod introspection {
+        use super::{feed, Repl};
+        use crate::repl::commands::ReplCommand;
+        use crate::stdlib;
+
+        /// A session with three bindings, fed through the read loop's order.
+        fn session_with_bindings() -> Repl {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "set counter to 3",
+                    "set nums to [1, 2]",
+                    "to double(n)\n    return n * 2\nend",
+                ],
+            );
+            repl
+        }
+
+        /// `.type` answers with the value, its kind, and where it was written —
+        /// the third of which nothing in the REPL said before.
+        #[test]
+        fn type_reports_the_value_its_kind_and_the_line_it_was_written_on() {
+            let mut repl = session_with_bindings();
+
+            let lines = repl
+                .type_answer("nums")
+                .expect("a bound name is a question :type can answer");
+            let joined = lines.join("\n");
+
+            assert!(
+                joined.contains("value: [1, 2]"),
+                "the value as the language prints it: {:?}",
+                lines
+            );
+            assert!(
+                joined.contains("kind:  list (2 item(s))"),
+                "the kind and how much of it: {:?}",
+                lines
+            );
+            assert!(
+                joined.contains("from:  <session>:2"),
+                "and the line it was written on, which is the line :history shows: {:?}",
+                lines
+            );
+            assert!(
+                joined.contains("set nums to [1, 2]"),
+                "quoted back, so the span can be checked against the history: {:?}",
+                lines
+            );
+        }
+
+        /// An expression nobody bound is still a question `.type` answers, and
+        /// the span it reports is the command itself rather than a history line
+        /// that has nothing to do with the value.
+        #[test]
+        fn type_answers_about_an_expression_the_session_never_bound() {
+            let mut repl = session_with_bindings();
+
+            let lines = repl
+                .type_answer("[1, 2]")
+                .expect("a literal is an expression, not a name to look up");
+            let joined = lines.join("\n");
+
+            assert!(joined.contains("value: [1, 2]"), "{:?}", lines);
+            assert!(
+                joined.contains("evaluated at the prompt"),
+                "a literal was written in the command, so no other span is true: {:?}",
+                lines
+            );
+        }
+
+        /// A `.type` over something the session cannot evaluate is *that* error,
+        /// not a panic and not a value of some kind: a number added to text, an
+        /// unterminated string, and a division by zero each come back through the
+        /// same channel a typed line would print them through — and the session is
+        /// still a session afterwards.
+        #[test]
+        fn edge_type_reports_the_sessions_own_errors_and_survives_them() {
+            let mut repl = session_with_bindings();
+
+            for (expression, needle) in [
+                ("1 + \"a\"", "Cannot add non-numbers"),
+                ("\"abc", "Unterminated string"),
+                ("1 / 0", "Division by zero"),
+            ] {
+                let error = repl.type_answer(expression).unwrap_err();
+                assert!(
+                    error.contains(needle),
+                    "{:?} fails with {:?}, got {:?}",
+                    expression,
+                    needle,
+                    error
+                );
+            }
+
+            assert!(
+                repl.type_answer("counter").is_ok(),
+                "a question the session can answer still is answered afterwards"
+            );
+            assert!(
+                repl.which_answer("counter")
+                    .contains(&"counter: session binding".to_string()),
+                "and the session is not a fresh one: the binding is still here"
+            );
+        }
+
+        /// A name nothing binds is an error from the session's own analyzer, not
+        /// a panic and not a value of some kind called "unknown".
+        #[test]
+        fn edge_type_of_an_unknown_name_is_a_clean_error() {
+            let mut repl = session_with_bindings();
+
+            let error = repl
+                .type_answer("nosuchname")
+                .expect_err("a name nothing binds cannot be typed");
+
+            assert!(
+                error.contains("nosuchname"),
+                "the error names what could not be found: {}",
+                error
+            );
+            assert!(
+                error.starts_with("Error:"),
+                "and is reported as the error it is: {}",
+                error
+            );
+        }
+
+        /// `.type` with nothing after it is the parser's missing-argument report,
+        /// not a command that evaluated the empty string and printed a value.
+        #[test]
+        fn edge_type_with_no_argument_is_refused_before_anything_runs() {
+            let mut repl = Repl::new();
+
+            assert_eq!(
+                ReplCommand::parse(":type"),
+                ReplCommand::MissingArgument {
+                    command: "type",
+                    usage: "<expression>"
+                },
+                "an expression is what :type is asked about"
+            );
+            assert!(
+                repl.handle_command(":type"),
+                "and it is a command, not a program to evaluate"
+            );
+            assert!(
+                repl.variables.is_empty(),
+                "nothing was bound by a command that had nothing to evaluate"
+            );
+        }
+
+        /// `.which` names a builtin, names this session's own binding over it, and
+        /// says "unknown" for a name nothing binds — three answers from one
+        /// command, which is what makes the lookup order visible.
+        #[test]
+        fn which_distinguishes_a_builtin_a_session_binding_and_an_unknown_name() {
+            let mut repl = Repl::new();
+
+            let builtin = repl.which_answer("uppercase").join("\n");
+            assert!(
+                builtin.contains("builtin"),
+                "a registered builtin is named as one: {}",
+                builtin
+            );
+
+            feed(&mut repl, &["set uppercase to 5"]);
+            let shadowed = repl.which_answer("uppercase").join("\n");
+            assert!(
+                shadowed.contains("session binding"),
+                "and the session binding that shadows it is reported as what the next \
+                 line reaches: {}",
+                shadowed
+            );
+            assert!(
+                shadowed.contains("<session>:1"),
+                "with the line it was written on: {}",
+                shadowed
+            );
+
+            let unknown = repl.which_answer("nosuchname").join("\n");
+            assert!(
+                unknown.contains("unknown"),
+                "a name nothing binds is unknown, not a builtin: {}",
+                unknown
+            );
+        }
+
+        /// A dotted name is one of two things, and the difference matters: a
+        /// stdlib member is in the registry whether or not this session has ever
+        /// heard of it, while a module member exists only because the session
+        /// imported something. Asking "is it bound?" cannot tell them apart —
+        /// every builtin is bound in the VM's globals — so `files.read` came back
+        /// as a member of a module the session never imported.
+        #[test]
+        fn which_tells_a_stdlib_member_from_a_modules_own_member() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["import MathUtils"]);
+
+            let stdlib_member = repl.which_answer("files.read").join("\n");
+            assert!(
+                stdlib_member.contains("module member")
+                    && !stdlib_member.contains("session module member"),
+                "a stdlib member is in the registry, not in this session: {}",
+                stdlib_member
+            );
+            assert!(
+                stdlib_member.contains("callable as files.read"),
+                "and it is named the way a program writes it: {}",
+                stdlib_member
+            );
+
+            let own = repl.which_answer("MathUtils.circle_area").join("\n");
+            assert!(
+                own.contains("session module member"),
+                "a member of a module this session imported is the session's own: {}",
+                own
+            );
+            assert!(
+                own.contains("of module MathUtils"),
+                "and names the module it belongs to: {}",
+                own
+            );
+
+            // The module name itself is a binding, and the line that made it is
+            // the `import`.
+            let module = repl.which_answer("MathUtils").join("\n");
+            assert!(
+                module.contains("session binding") && module.contains("import MathUtils"),
+                "the module is bound by the import that reached it: {}",
+                module
+            );
+        }
+
+        /// A re-`set` of a name already bound reports the line the *new* value was
+        /// written on. A before-and-after comparison of bindings could not see
+        /// this, which is why `.which` reads the declaration rather than the
+        /// change.
+        #[test]
+        fn edge_which_reports_the_latest_set_of_a_name() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1", "set y to 2", "set x to 99"]);
+
+            let answer = repl.which_answer("x").join("\n");
+
+            assert!(
+                answer.contains("<session>:3"),
+                "the third line is where x was last written: {}",
+                answer
+            );
+            assert!(
+                answer.contains("set x to 99"),
+                "and the line is quoted so it can be checked: {}",
+                answer
+            );
+        }
+
+        /// `.doc` answers from the registry, so the expectation is derived from it
+        /// rather than written out: a member added to the language is listed
+        /// without this test being edited.
+        #[test]
+        fn doc_lists_the_members_the_registry_registers() {
+            let repl = Repl::new();
+
+            for module in stdlib::MODULES {
+                let answer = repl
+                    .module_doc_answer(module)
+                    .unwrap_or_else(|error| panic!("{} is a module: {}", module, error));
+                for (listed, members) in stdlib::MODULE_MEMBERS.iter().filter(|(m, _)| m == module)
+                {
+                    for member in *members {
+                        let spelling = format!("{}.{}", listed, member);
+                        assert!(
+                            answer.iter().any(|line| line.contains(&spelling)),
+                            "{:?} lists {}",
+                            module,
+                            spelling
+                        );
+                    }
+                }
+            }
+        }
+
+        /// A name that is not a module is refused by name, and the refusal names
+        /// the modules that do exist — an empty listing reads like a module with
+        /// nothing in it.
+        #[test]
+        fn edge_doc_of_an_unknown_module_is_refused_by_name() {
+            let repl = Repl::new();
+
+            let error = repl
+                .module_doc_answer("nosuchmodule")
+                .expect_err("a name that is not a module gets no listing");
+
+            assert!(
+                error.contains("nosuchmodule"),
+                "the refusal names the module asked for: {}",
+                error
+            );
+            assert!(
+                error.contains("json"),
+                "and the ones that do exist, so the user can see the shape of the answer: {}",
+                error
+            );
+
+            // The empty name is the boundary of the same refusal: it is not the
+            // module that happens to have no members.
+            assert!(repl.module_doc_answer("").is_err());
+            assert!(
+                repl.module_doc_answer("JSON").is_err(),
+                "a module name is spelled exactly as it is registered"
+            );
+        }
+
+        /// `.sighelp` reads the shape table, and every builtin on it answers.
+        #[test]
+        fn sighelp_answers_for_every_registered_builtin() {
+            let repl = Repl::new();
+
+            for name in stdlib::BUILTIN_NAMES {
+                let answer = repl
+                    .sighelp_answer(name)
+                    .unwrap_or_else(|error| panic!("{} has a shape: {}", name, error));
+                assert!(
+                    answer[0].contains(name),
+                    "{} answers under its own name: {:?}",
+                    name,
+                    answer
+                );
+            }
+        }
+
+        /// The boundary of a shape is the empty name, and a session function's
+        /// shape is read from the declaration rather than guessed.
+        #[test]
+        fn edge_sighelp_of_an_empty_name_and_of_a_session_function() {
+            let repl = session_with_bindings();
+
+            assert!(
+                repl.sighelp_answer("").is_err(),
+                "an empty name is not a builtin with no parameters"
+            );
+
+            let answer = repl
+                .sighelp_answer("double")
+                .expect("a function the session declared is a call it can make")
+                .join("\n");
+            assert!(
+                answer.contains("parameters: n"),
+                "the declared parameters are the shape: {}",
+                answer
+            );
+            assert!(
+                answer.contains("arity:       1"),
+                "and how many of them there are: {}",
+                answer
+            );
+        }
+
+        /// Every new command is in `:help`. The help text is built from the table,
+        /// so this cannot drift unless the table does — but it is asserted by name
+        /// because a command that works and is not documented is the defect the
+        /// finding describes for the whole table.
+        #[test]
+        fn edge_help_names_every_command_that_inspects_code() {
+            let help = ReplCommand::help_lines().join("\n");
+
+            for command in ["type", "doc", "which", "sighelp"] {
+                assert!(
+                    help.contains(&format!(":{}", command)),
+                    ":help names :{}: {}",
+                    command,
+                    help
+                );
+            }
+        }
+
+        /// And the completer offers them, which is the other half of "the command
+        /// exists": a command nobody can complete is a command nobody types.
+        #[test]
+        fn edge_the_completer_offers_the_introspection_commands() {
+            let repl = Repl::new();
+
+            // Through a sigil, because that is how a command word is reached:
+            // a bare `ty` offers the language's names, not `:type`. The sigil is
+            // put back on what it offers, so that is what the answer is checked
+            // against.
+            for command in ["type", "doc", "which", "sighelp"] {
+                let completions = repl.complete(&format!(":{}", command));
+                let expected = format!(":{}", command);
+                assert!(
+                    completions.contains(&expected),
+                    "{} is completed: {:?}",
+                    expected,
+                    completions
+                );
+            }
         }
     }
 
