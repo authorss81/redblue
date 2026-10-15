@@ -2008,8 +2008,9 @@ impl Vm {
 
     /// `map(list, function)` — the higher-order builtin, in the three spellings
     /// `SPEC.md` uses: `map(xs, f)`, `list.map(xs, f)` and `[1, 2, 3].map(f)`.
-    /// The third takes its receiver literally, so `xs.map(f)` is not one of them
-    /// and is refused as `Module 'xs' has no function 'map'`.
+    /// The fourth, `xs.map(f)`, takes the list from the name rather than as an
+    /// argument and is answered by [`Vm::call_method`], which is where the
+    /// receiver is in hand.
     ///
     /// It lives here rather than in `runtime::builtin` because applying a
     /// Redblue function needs this walker's captured scopes and its call-depth
@@ -2060,7 +2061,10 @@ impl Vm {
     /// provides, and `this` is bound to the receiver for the length of the
     /// call. A receiver that names no object is a module function, spelled
     /// `module_function` — which is what `files.read` and `time.now` are.
-    /// Anything else is an error rather than a guess.
+    /// A receiver that reaches no module function but holds a **list** is the
+    /// method spelling of the higher-order builtin, which is what `xs.map(f)`
+    /// is and what SPEC.md's "First-Class Functions" section introduces
+    /// function values with. Anything else is an error rather than a guess.
     fn call_method(&mut self, receiver: &Expr, method: &str, args: &[Expr]) -> Result<Value> {
         let arg_values: Result<Vec<Value>> = args.iter().map(|a| self.evaluate(a)).collect();
         let args = arg_values?;
@@ -2074,16 +2078,9 @@ impl Vm {
                 // has a method. Every other receiver is still the error below.
                 if method == "map" {
                     if let Value::List(items) = this {
-                        let function = match args.as_slice() {
-                            [Value::Function(function)] => function.clone(),
-                            _ => {
-                                return Err(Error::Runtime(
-                                    "map requires a function".to_string(),
-                                    self.span(),
-                                ))
-                            }
-                        };
-                        return self.apply_map(&items, &function);
+                        let function = stdlib::map_function(&args)
+                            .map_err(|message| Error::Runtime(message, self.span()))?;
+                        return self.apply_map(&items, function);
                     }
                 }
                 return Err(Error::Runtime(
@@ -2136,6 +2133,25 @@ impl Vm {
                     self.get_var(&qualified).is_some(),
                     stdlib::module_member_name(&qualified).is_some(),
                 ) {
+                    // Nothing the module path can reach answers this, and `map`
+                    // is the one member that is also a method on a list, so a
+                    // name holding a list is asked here rather than refused.
+                    // `xs.map(f)` is the program SPEC.md's "First-Class
+                    // Functions" section uses to introduce function values, and
+                    // before this it died as `xs_map`, a name nothing
+                    // registers.
+                    //
+                    // It is asked *after* the module path, never before it, so a
+                    // module function of the same spelling still wins: `list`
+                    // bound to a list and called as `list.map(f)` is `list_map`
+                    // with one argument, and stays the refusal that says so.
+                    if method == "map" {
+                        if let Some(Value::List(items)) = self.get_var(&name) {
+                            let function = stdlib::map_function(&args)
+                                .map_err(|message| Error::Runtime(message, self.span()))?;
+                            return self.apply_map(&items, function);
+                        }
+                    }
                     return Err(Error::Runtime(
                         format!("Module '{module}' has no function '{method}'"),
                         self.span(),

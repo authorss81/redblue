@@ -927,6 +927,9 @@ fn show_outcome(outcome: &Outcome) -> String {
 /// Every case is asked on both engines and the two **outcomes** are compared, so
 /// a fix that makes the bytecode VM agree by refusing what the tree-walker
 /// answers fails here rather than passing a gate that only ran one of them.
+/// Four of them are refusals and are checked to still be refusals on both
+/// engines, because a fix that made the bytecode VM agree by *accepting* what
+/// the tree-walker refuses is the same failure the comparison exists to catch.
 /// The last case is the one a fix has to be careful about: applying a function
 /// per element must not cost a *host* stack frame per element, or a `map` that
 /// nests inside the function it calls overflows the thread instead of reaching
@@ -948,10 +951,27 @@ fn edge_a_higher_order_call_answers_the_same_way_on_both_engines() {
             "the literal-receiver spelling",
             "set out to [1, 2, 3].map(double)\nsay out\n",
         ),
-        // A list written out in full is the receiver that answers; a name is not.
+        // A receiver that is a name answers too, as long as no module function
+        // of that spelling claims it: `xs` holds a list and `xs_map` is not a
+        // name anything registers. This was a refusal until phase-086 — the
+        // receiver was matched as a *name* before the value behind it was ever
+        // looked at — and it is the one program SPEC.md uses to introduce
+        // function values.
         (
-            "a variable receiver is still refused",
+            "the name-receiver spelling",
             "set xs to [1, 2, 3]\nsay xs.map(double)\n",
+        ),
+        // The fallback is asked *after* the module path, so a name that collides
+        // with a module that has a `map` member is still the module function.
+        (
+            "a name receiver that collides with a module keeps the module answer",
+            "set list to [1, 2, 3]\nsay list.map(double)\n",
+        ),
+        // A list held by the receiver name is the only thing that answers; a
+        // number held by it is still refused, and by the same words.
+        (
+            "a name receiver holding a number is still refused",
+            "set xs to 5\nsay xs.map(double)\n",
         ),
         // The function reads the scope the declaration closed over, and the
         // engine's own: a capture has to survive being applied later.

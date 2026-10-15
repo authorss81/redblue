@@ -22,14 +22,13 @@
 #   <doc>:<line><TAB><first line of stderr>
 #
 # COUNTS, as of the run that wrote this file
-#   SPEC.md 8 · PHILOSOPHY.md 1 · HANDOUT.md 6 · docs/GRAMMAR.md 0 · README.md 0
-#   15 of 101 blocks.
+#   SPEC.md 7 · PHILOSOPHY.md 1 · HANDOUT.md 6 · docs/GRAMMAR.md 0 · README.md 0
+#   14 of 101 blocks.
 
 # --- SPEC.md ---------------------------------------------------------------
 
 SPEC.md:89	Error: ParserError: Expected field name
 SPEC.md:610	Error: ParserError: Expected 'then' but got 'give'
-SPEC.md:647	Error: RuntimeError: Module 'numbers' has no function 'map'
 SPEC.md:671	Error: ParserError: Expected 'end' but got Eof
 SPEC.md:1017	Error: ParserError: Expected 'then' but got 'say'
 SPEC.md:1055	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
