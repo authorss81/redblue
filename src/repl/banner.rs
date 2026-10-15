@@ -143,6 +143,56 @@ pub fn print_banner<W: std::io::Write>(out: &mut W, style: &Style) -> std::io::R
     writeln!(out)
 }
 
+/// The version the greeting names, read from the crate rather than written out.
+///
+/// `CARGO_PKG_VERSION` is the one string that cannot go stale: bumping the
+/// version in `Cargo.toml` moves the greeting with it. The greeting said `v0.1.0`
+/// while the crate was `0.2.0`, and nothing in the tree could have noticed — the
+/// number was a literal in a `println!`.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The engine a REPL session runs programs on.
+///
+/// Named rather than left out, because "which of the two VMs is this?" is the
+/// first question anyone asks of a session that is behaving differently from
+/// the one they had yesterday, and the answer is otherwise only readable in the
+/// source. The REPL runs the tree-walking interpreter; the bytecode VM is what
+/// `rb compile` and `rb vm` drive.
+pub const ENGINE: &str = "tree-walking interpreter";
+
+/// Print the greeting that follows the wordmark: what this is, what to type, and
+/// what the session can do that the prompt does not say.
+///
+/// Three lines, in that order, because each answers the question the one before
+/// it raises — what is this, how do I leave, and what can I do here that I could
+/// not do from a shell.
+pub fn print_greeting<W: std::io::Write>(out: &mut W, style: &Style) -> std::io::Result<()> {
+    let heading = format!("Welcome to Redblue v{} - {}", VERSION, ENGINE);
+    writeln!(out, "{}", style.paint(Paint::Heading, &heading))?;
+    writeln!(
+        out,
+        "{}",
+        style.paint(Paint::Dim, "Type ':help' for commands, ':quit' to exit")
+    )?;
+    writeln!(
+        out,
+        "{}",
+        style.paint(
+            Paint::Dim,
+            "TAB completes, Up arrow walks back through history, !! repeats the last line"
+        )
+    )?;
+    writeln!(out)
+}
+
+/// The greeting as a `String`, for callers that want the text rather than the IO.
+pub fn greeting_text(style: &Style) -> String {
+    let mut out = Vec::new();
+    // A Vec never fails to write, so the error is unreachable by construction.
+    let _ = print_greeting(&mut out, style);
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// The banner as a `String`, for callers that want the text rather than the IO.
 pub fn banner_text(style: &Style) -> String {
     let mut out = Vec::new();

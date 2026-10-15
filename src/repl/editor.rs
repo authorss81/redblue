@@ -30,7 +30,7 @@ use rustyline::{Context, Editor, Helper};
 
 use super::completer::ReplCompleter;
 use super::highlight::highlight;
-use super::style::{Style, Theme};
+use super::style::{Paint, Style, Theme};
 
 /// The file a session keeps its history in, under the user's home directory.
 /// Nothing there is created until a session has something to write.
@@ -88,8 +88,16 @@ pub trait LineSource {
     /// Whether this source draws the line being typed in colour.
     ///
     /// False for every source but [`EditSource`], and it is what a piped
-    /// session's "no escape codes" guarantee is made of: the highlight hook
-    /// lives on the editor, so a session with no terminal never has one to call.
+    /// session's guarantee is made of: the highlight hook lives on the editor, so
+    /// a session with no terminal never has one to call and never colours a line
+    /// of input token by token.
+    ///
+    /// It says nothing about the prompt. A prompt is display text every reader
+    /// paints with the session's [`Style`], so a piped session whose colour is
+    /// forced on — `REDBLUE_COLOR=always` — *does* emit escapes, around the
+    /// prompt and nowhere else. What a pipe never sees is an escape it did not
+    /// ask for: with colour off, which is what a pipe gets by default, the
+    /// painted prompt is the prompt, byte for byte.
     fn highlights(&self) -> bool {
         false
     }
@@ -98,20 +106,57 @@ pub trait LineSource {
 /// The reader a session with no terminal gets: one line at a time off standard
 /// input, with the prompt written to standard output.
 ///
-/// This is the behaviour every session used to have, kept exactly so that piped
-/// input, CI and `printf … | rb` see what they saw before.
-pub struct PlainSource;
+/// Every line it reads is executed exactly as typed, with nothing echoed and
+/// nothing drawn around it: the highlight hook is on the editor, and there is no
+/// editor here. The prompt is the exception, and it is painted the same way both
+/// readers paint it. So piped input, CI and `printf … | rb` see what they saw
+/// before, byte for byte, whenever colour is off — which is what they get unless
+/// `REDBLUE_COLOR=always` says otherwise.
+pub struct PlainSource {
+    /// How the prompt is coloured, decided by the session rather than here — so a
+    /// piped session's prompt is the prompt, at the colour the rest of its output
+    /// is at, rather than a second opinion formed here.
+    style: Style,
+}
+
+impl PlainSource {
+    /// A plain reader that paints its prompt in `style`'s colours.
+    pub fn new(style: Style) -> Self {
+        Self { style }
+    }
+
+    /// The prompt as this reader writes it: painted when colour is on, and the
+    /// prompt itself when it is off.
+    ///
+    /// Split out of [`LineSource::read_line`] so the bytes a piped session puts
+    /// on stdout are something a test can hold. Asserting on it matters because
+    /// the guarantee is about those bytes: a piped session has no editor and so
+    /// no highlighter, but it does have a `Style`, and `REDBLUE_COLOR=always`
+    /// says the prompt is to be painted — so "a pipe emits no escapes" is false
+    /// and "a pipe emits nothing but a painted prompt" is the thing that holds.
+    fn painted_prompt(&self, prompt: &str) -> String {
+        self.style.paint(Paint::Prompt, prompt)
+    }
+}
 
 impl LineSource for PlainSource {
     fn read_line(&mut self, prompt: &str) -> io::Result<Line> {
-        print!("{}", prompt);
+        // Painted here and nowhere else on this path: `Style::paint` returns the
+        // text itself when colour is off, so a session with colour off prints
+        // exactly the prompt it was given.
+        print!("{}", self.painted_prompt(prompt));
         if io::stdout().flush().is_err() {
             return Err(io::Error::other("standard output is closed"));
         }
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
             Ok(0) => Ok(Line::Eof),
-            Ok(_) => Ok(Line::Text(input)),
+            // `read_line` hands back the newline it stopped at, and a
+            // [`Line::Text`] is the line *without* one: the terminator is how the
+            // reader knows the line ended, not something anyone typed. `\r\n`
+            // input carries both bytes, so both go. Trailing spaces stay — for
+            // `:prompt rb> ` the space is part of the prompt.
+            Ok(_) => Ok(Line::Text(input.trim_end_matches(['\r', '\n']).to_string())),
             Err(error) => Err(error),
         }
     }
@@ -213,6 +258,26 @@ impl Highlighter for SessionCompleter {
             return Cow::Borrowed(line);
         }
         Cow::Owned(highlight(line, &self.style, &self.theme))
+    }
+
+    /// The prompt, painted — here and not by the session, because this is where
+    /// the editor measures it.
+    ///
+    /// rustyline's own documentation says a prompt handed to `readline` should
+    /// not carry escapes: it counts prompt columns to place the cursor and the
+    /// line after it, and a prompt of the wrong measured width puts the cursor
+    /// in the wrong place. `highlight_prompt` is the supported way to colour one,
+    /// so the session hands over plain text and the colour arrives through this
+    /// hook.
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> Cow<'b, str> {
+        if !self.style.enabled() {
+            return Cow::Borrowed(prompt);
+        }
+        Cow::Owned(self.style.paint(Paint::Prompt, prompt))
     }
 }
 
@@ -378,9 +443,11 @@ impl LineSource for EditSource {
 ///
 /// The terminal is the whole difference. Piped input and CI take the second
 /// branch, so what they see is byte for byte what they saw when every session
-/// took it — including when `style` says colour is on, which is the case worth
-/// being careful about: the highlight hook lives on the editor, and a session
-/// that never has an editor has no way to emit an escape code at all.
+/// took it — with colour off, which is what a pipe gets unless the user asked
+/// otherwise. The case worth being careful about is a pipe under
+/// `REDBLUE_COLOR=always`: it has no editor, so it never colours the line being
+/// typed token by token, and it does paint its prompt, because a prompt is
+/// display text that both readers draw through the session's [`Style`].
 pub fn line_source(names: SessionNames, style: Style) -> Box<dyn LineSource> {
     if io::stdin().is_terminal() {
         match EditSource::with_style(names, default_history_path(), style) {
@@ -391,7 +458,7 @@ pub fn line_source(names: SessionNames, style: Style) -> Box<dyn LineSource> {
             ),
         }
     }
-    Box::new(PlainSource)
+    Box::new(PlainSource::new(style))
 }
 
 #[cfg(test)]
@@ -635,7 +702,7 @@ mod tests {
 
     #[test]
     fn a_plain_source_has_no_history_file_and_never_fails_to_flush() {
-        let mut plain = PlainSource;
+        let mut plain = PlainSource::new(Style::forced(false));
         assert!(
             plain.flush_history().is_ok(),
             "a piped session has no history file, so flushing one is nothing to do"
@@ -730,20 +797,59 @@ mod tests {
         );
     }
 
+    /// What a piped session puts on stdout: no editor, so no highlighter and no
+    /// token-by-token colouring of the line being typed — and the prompt painted
+    /// through the session's [`Style`], which is the one thing a pipe does colour.
+    ///
+    /// The test asserts the bytes rather than the intent. It used to assert only
+    /// `!source.highlights()`, which stayed true whatever was written: a piped
+    /// session under `REDBLUE_COLOR=always` emits escape codes today, and the
+    /// promise that it emits none is one the reader broke when `PlainSource`
+    /// learned to paint. What still holds, and what a user of a pipe depends on,
+    /// is narrower: no highlighter on this path, a prompt that is the prompt
+    /// byte for byte when colour is off, and a painted prompt when it is on.
     #[test]
-    fn edge_a_piped_session_emits_no_escape_codes_even_with_colour_forced_on() {
+    fn edge_a_piped_session_paints_its_prompt_and_never_its_input() {
         // Standard input is not a terminal under `cargo test`, which is the
-        // situation a pipe is in: the highlight hook is on the editor, and a
-        // session with no editor has no way to reach it.
+        // situation a pipe is in.
         let source = super::line_source(live_names(&["counter"]), Style::forced(true));
-
         assert!(
             !source.highlights(),
             "a session with no terminal must not get a highlighter, however colour is configured"
         );
         assert!(
-            !PlainSource.highlights(),
+            !PlainSource::new(Style::forced(false)).highlights(),
             "and the plain reader never claims to colour anything"
+        );
+
+        let plain = PlainSource::new(Style::forced(false));
+        assert_eq!(
+            plain.painted_prompt(">>> "),
+            ">>> ",
+            "with colour off — what a pipe gets unless `REDBLUE_COLOR` says \
+             otherwise — the painted prompt is the prompt, byte for byte"
+        );
+
+        let on = Style::forced(true);
+        let painted = PlainSource::new(on).painted_prompt(">>> ");
+        assert_eq!(
+            painted,
+            on.paint(Paint::Prompt, ">>> "),
+            "with colour forced on the prompt is painted as a prompt and nothing \
+             else is, got {:?}",
+            painted.escape_debug()
+        );
+        assert_eq!(
+            painted.matches('\u{1b}').count(),
+            2,
+            "one open and one close for the prompt and no third escape, so the \
+             escapes a forced-on pipe emits are exactly this one paint, got {:?}",
+            painted.escape_debug()
+        );
+        assert!(
+            painted.contains(">>> "),
+            "and the prompt itself survives the painting, got {:?}",
+            painted.escape_debug()
         );
     }
 

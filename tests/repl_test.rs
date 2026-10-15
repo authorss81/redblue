@@ -74,12 +74,29 @@ impl Session {
 /// a child that fills the pipe buffer cannot deadlock the test while the parent
 /// waits for it to exit.
 fn session(input: &str) -> Session {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rb"))
+    session_with_env(input, &[])
+}
+
+/// The same session, with `env` set on the child and the two variables that
+/// decide whether colour is on cleared first.
+///
+/// The environment is process-global, so this sets them on the child rather than
+/// on the test process: a test that exported `REDBLUE_COLOR` for itself would
+/// race every sibling in the binary. Clearing `NO_COLOR` is the other half — it
+/// is inherited, it is set by whatever launched `cargo`, and a session under
+/// test must not depend on that.
+fn session_with_env(input: &str, env: &[(&str, &str)]) -> Session {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rb"));
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .expect("the rb binary should start");
+        .env_remove("NO_COLOR")
+        .env_remove("REDBLUE_COLOR");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("the rb binary should start");
 
     let mut stdin = child.stdin.take().expect("stdin should be piped");
     let payload = input.to_string();
@@ -652,7 +669,10 @@ fn edge_the_report_of_an_unclosed_block_counts_the_lines_it_did_not_echo() {
         .assert_stdout_contains("never closed with 'end'")
         .assert_stdout_contains("and 21 more line(s)")
         .assert_stdout_lacks("BODY 39")
-        .assert_stdout_lacks("42");
+        // The value form of what the block would have produced, not the bare
+        // digits: a continuation prompt is numbered, so a block this long prints
+        // `..  42` of its own accord and a bare "42" no longer says the block ran.
+        .assert_stdout_lacks("= 42");
 }
 
 /// `say` output belongs to the line that printed it. `Vm::run` prints the VM's
@@ -734,4 +754,231 @@ fn edge_command_missing_its_argument_is_reported_for_restore_too() {
     s.assert_exited_ok()
         .assert_stdout_contains("Usage: :restore")
         .assert_stdout_lacks("Unknown command");
+}
+
+/// The banner has to name the version the binary actually is.
+///
+/// `env!("CARGO_PKG_VERSION")` is the crate's own version, so this row cannot go
+/// stale when the version is bumped: the test moves with it. The greeting said
+/// `v0.1.0` while `Cargo.toml` said `0.2.0` for months, and nothing in the tree
+/// could have noticed.
+#[test]
+fn edge_the_banner_names_the_crate_version_and_not_a_stale_one() {
+    let s = session(":quit\n");
+    let wanted = format!("Redblue v{}", env!("CARGO_PKG_VERSION"));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains(&wanted)
+        .assert_stdout_lacks("v0.1.0")
+        .assert_stdout_contains("tree-walking interpreter")
+        .assert_stdout_contains("TAB")
+        .assert_stdout_contains("Up");
+}
+
+/// A block is read one line at a time, and the prompt says which line.
+///
+/// A pasted traceback or a multi-line program means nothing without them: `..  `
+/// is the same four characters for line 2 and line 30, so the reader has to count
+/// the lines they typed rather than copy the block somewhere.
+#[test]
+fn a_block_is_read_at_a_prompt_that_numbers_its_continuations() {
+    let s = session("repeat 1 times\n    say \"body\"\nend\n:quit\n");
+
+    s.assert_exited_ok().assert_stdout_contains("body");
+    assert_eq!(
+        s.count_stdout("..  2 "),
+        1,
+        "the second line of the block is read at `..  2 `, with the gap the \
+         primary prompt has\nstdout:\n{}",
+        s.stdout
+    );
+    assert_eq!(
+        s.count_stdout("..  3 "),
+        1,
+        "and the third at `..  3 `, so a pasted block maps back to what was typed\n\
+         stdout:\n{}",
+        s.stdout
+    );
+    assert_eq!(
+        s.count_stdout("..  4"),
+        0,
+        "and nothing asks for a fourth line of a three-line block\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// A piped `:prompt` ends where the line ended.
+///
+/// The space at the end of `:prompt rb> ` is part of the prompt; the newline the
+/// pipe delivered after it is not. A session that kept the newline stored a format
+/// ending in one and printed a blank line before every line that followed — a
+/// pipe's `:prompt` was unusable, and the unit tests could not see it because the
+/// scripted source fed lines without one.
+#[test]
+fn edge_a_piped_prompt_command_leaves_the_newline_out_of_the_prompt() {
+    let s = session(":prompt rb> \nsay \"piped\"\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("rb> piped")
+        .assert_stdout_lacks("rb> \n")
+        .assert_stdout_contains("Goodbye!");
+}
+
+/// A `}` with no `{` in front of it is refused like every other brace mistake.
+///
+/// The placeholders are a closed set, so `:prompt foo}` closing nothing is a
+/// mistake that would otherwise be printed at the user before every line, for the
+/// rest of the session.
+#[test]
+fn edge_a_prompt_format_that_closes_a_brace_it_never_opens_is_refused() {
+    let s = session(":prompt rb}\nsay \"alive\"\n:prompt\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("closes a '}' it never opens")
+        .assert_stdout_contains("alive")
+        .assert_stdout_contains(">>> ");
+    assert_eq!(
+        s.count_stdout("rb}"),
+        1,
+        "the refused format is quoted once, by the refusal, and never became a \
+         prompt of its own\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// `!!` runs the line before it again, output and all, and the line it repeats is
+/// the last one *typed* rather than the last one that happened to work.
+#[test]
+fn edge_bang_bang_repeats_the_last_line_with_its_output() {
+    let s = session("say \"once\"\n!!\n:quit\n");
+
+    s.assert_exited_ok();
+    assert_eq!(
+        s.count_stdout("once"),
+        2,
+        "`say \"once\"` typed and then repeated prints twice\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// `!!` with nothing before it is a clean error naming `!!`, not a parse error
+/// about a stray `!` and not an index into an empty history.
+#[test]
+fn edge_bang_bang_at_the_start_of_a_session_says_there_is_nothing_to_repeat() {
+    let s = session("!!\nsay \"alive\"\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("nothing to repeat")
+        .assert_stdout_contains("!!")
+        .assert_stdout_contains("alive");
+}
+
+/// `:prompt` hands the prompt to the user, and a placeholder it does not know is
+/// refused by name rather than printed as `{nope}` at every line that follows.
+#[test]
+fn a_prompt_command_replaces_the_prompt_and_refuses_an_unknown_placeholder() {
+    let s = session(":prompt rb> \nset x to 41\nx + 1\n:prompt rb{nope} \n:prompt\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("rb> ")
+        .assert_stdout_contains("does not know the placeholder {nope}")
+        // The line typed at the custom prompt ran, the refused format never
+        // became the prompt, and `:prompt` with no argument put the default back.
+        .assert_stdout_contains("= 42")
+        .assert_stdout_contains(">>> ");
+}
+
+/// A line that failed is very often the line being worked on, so `!!` repeats the
+/// failure rather than skipping past it to the last line that worked.
+#[test]
+fn edge_bang_bang_after_a_failed_line_repeats_the_failure() {
+    let s = session("1 / 0\n!!\n:quit\n");
+
+    s.assert_exited_ok();
+    assert_eq!(
+        s.count_stdout("Division by zero"),
+        2,
+        "the failed line ran, and `!!` ran it again rather than skipping it\n\
+         stdout:\n{}",
+        s.stdout
+    );
+}
+
+/// `:reset` forgets the bindings and keeps the history — a session that has been
+/// reset is a session at a prompt, and the record of what was typed is not part
+/// of what a reset forgets. So `!!` still has something to repeat afterwards,
+/// and what it repeats is the last line typed, which by then is the `:reset`.
+#[test]
+fn edge_bang_bang_still_repeats_after_a_reset() {
+    let s = session("say \"before the reset\"\n:reset\n!!\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_lacks("nothing to repeat")
+        .assert_stdout_contains("before the reset");
+    assert_eq!(
+        s.count_stdout("REPL state reset."),
+        2,
+        "the history outlives a reset, so `!!` reached the `:reset` and ran it \
+         again\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// `!!` twice reaches the line before both of them, so it can be used more than
+/// once in a row rather than repeating itself.
+#[test]
+fn edge_bang_bang_twice_repeats_the_same_line_twice() {
+    let s = session("say \"three times\"\n!!\n!!\n:quit\n");
+
+    s.assert_exited_ok();
+    assert_eq!(
+        s.count_stdout("three times"),
+        3,
+        "typed once and repeated twice\nstdout:\n{}",
+        s.stdout
+    );
+}
+
+/// `!!` repeats the last line typed, which in this REPL is one line of history —
+/// the same line Up-arrow would have given back.
+///
+/// After a block that is the block's closing `end`, which is not a program on its
+/// own. It has to be a clean error and a live session, not a panic and not a
+/// silently swallowed line.
+#[test]
+fn edge_repeating_the_last_line_of_a_block_is_a_clean_error_not_a_dead_session() {
+    let s = session("repeat 1 times\n    say \"body\"\nend\n!!\nsay \"still alive\"\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("body")
+        .assert_stdout_contains("Error")
+        .assert_stdout_contains("still alive")
+        .assert_stdout_contains("Goodbye!");
+}
+
+/// What a pipe is promised, in bytes, under both answers to the colour question.
+///
+/// A piped session has no line editor, so nothing it reads is echoed or coloured
+/// token by token. Its prompt is painted like the editor's is, so
+/// `REDBLUE_COLOR=always` *does* put escapes on the wire — and the promise that
+/// holds either way is the one these assert: with colour off the prompt is the
+/// prompt and nothing in the output is an escape, and with colour forced on the
+/// prompt arrives painted and the session still reads and runs.
+#[test]
+fn edge_a_piped_session_prompts_plainly_until_colour_is_asked_for() {
+    let plain = session("2 + 3\n:quit\n");
+    plain
+        .assert_exited_ok()
+        .assert_stdout_contains(">>> ")
+        .assert_stdout_contains("= 5")
+        .assert_stdout_lacks("\u{1b}");
+
+    let coloured = session_with_env("2 + 3\n:quit\n", &[("REDBLUE_COLOR", "always")]);
+    let painted = redblue::repl::style::Style::forced(true)
+        .paint(redblue::repl::style::Paint::Prompt, ">>> ");
+    coloured
+        .assert_exited_ok()
+        .assert_stdout_contains(&painted)
+        .assert_stdout_contains("= 5")
+        .assert_stdout_contains("Goodbye!");
 }

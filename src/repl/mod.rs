@@ -51,9 +51,42 @@ const BLOCK_REPORT_LINES: usize = 20;
 
 /// The prompt a program stopped by the debugger waits at.
 ///
-/// Distinct from `>>> ` and `..  ` because it is asked by a running program
+/// Distinct from `>>> ` and `..  2 ` because it is asked by a running program
 /// rather than typed at, and a session has to be able to tell the three apart.
 const DEBUG_PROMPT: &str = "(rb-debug) ";
+
+/// The prompt a session reads a fresh line at, until `:prompt` says otherwise.
+///
+/// A format string rather than a fixed string, because the prompt is the one
+/// piece of a session that belongs to the user: they are the one typing at it.
+/// What it may contain is [`PROMPT_PLACEHOLDERS`].
+const DEFAULT_PROMPT: &str = ">>> ";
+
+/// Every placeholder a `:prompt` format string may name.
+///
+/// Named and closed, so `:prompt {engine} ` renders rather than printing a
+/// literal `{}` at the user, and a typo is refused by name instead of being
+/// silently passed through.
+const PROMPT_PLACEHOLDERS: [&str; 3] = ["{engine}", "{version}", "{history}"];
+
+/// The most bytes a `:prompt` format may hold.
+///
+/// A format is kept for as long as the session lasts and rendered once for every
+/// line the session reads, so an unbounded one is an unbounded allocation per
+/// line — one piped line of a million `x`es would put a megabyte in front of
+/// every prompt for the rest of the session. The blocks a session buffers are
+/// capped for the same reason and by the same argument
+/// ([`MAX_BLOCK_LINES`], [`MAX_BLOCK_BYTES`]); this is the prompt's share of it.
+///
+/// A kilobyte is far more prompt than anyone types. `>>> ` is four bytes.
+const MAX_PROMPT_BYTES: usize = 1024;
+
+/// The line that runs the line before it again.
+///
+/// Both Ipp and inscript have it, and it is the one input a user reaches for
+/// after a long paste: re-running the last line is a keystroke, and re-typing it
+/// is a scroll back through the editor's history looking for it.
+const REPEAT: &str = "!!";
 
 /// The answers a debugger prompt takes, and what each one asks the VM to do.
 ///
@@ -73,6 +106,64 @@ fn debug_answer(input: &str) -> Option<DebugAction> {
         "s" | "step" | "into" => Some(DebugAction::Step(StepMode::Into)),
         "n" | "next" | "over" => Some(DebugAction::Step(StepMode::Over)),
         _ => None,
+    }
+}
+
+/// Whether a `:prompt` format string is one a session will accept.
+///
+/// Refused rather than rendered, because a prompt is printed before every single
+/// line: a format string with `{nope}` in it would put that text in front of the
+/// user once per line, forever, and the mistake would be invisible in a
+/// transcript of anything long. The size is refused for the same reason and by
+/// the same argument — see [`MAX_PROMPT_BYTES`] — and the refusal quotes the size
+/// rather than the format, so saying "this is too long" cannot itself be the
+/// flood.
+fn check_prompt_format(format: &str) -> Result<(), String> {
+    if format.len() > MAX_PROMPT_BYTES {
+        return Err(format!(
+            "Error: a prompt format may be at most {MAX_PROMPT_BYTES} bytes, and \
+             this one is {}.",
+            format.len()
+        ));
+    }
+    let mut rest = format;
+    loop {
+        let open = rest.find('{');
+        let close = rest.find('}');
+        // Nothing left to open: whatever is left is display text, and a `}` with
+        // no `{` in front of it closes nothing. Refused for the reason the
+        // unknown placeholder is: the placeholders are a closed set, so a brace
+        // is either one of them or a mistake, and a mistake printed before every
+        // line is a mistake forever.
+        let Some(open) = open else {
+            return if close.is_some() {
+                Err(format!(
+                    "Error: ':prompt {format}' closes a '}}' it never opens."
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        if close.is_some_and(|close| close < open) {
+            return Err(format!(
+                "Error: ':prompt {format}' closes a '}}' it never opens."
+            ));
+        }
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            return Err(format!(
+                "Error: ':prompt {format}' opens a '{{' it never closes."
+            ));
+        };
+        let name = &after[..close];
+        if !PROMPT_PLACEHOLDERS.contains(&format!("{{{name}}}").as_str()) {
+            return Err(format!(
+                "Error: ':prompt' does not know the placeholder {{{name}}}. \
+                 It knows: {}.",
+                PROMPT_PLACEHOLDERS.join(", ")
+            ));
+        }
+        rest = &after[close + 1..];
     }
 }
 
@@ -233,6 +324,12 @@ pub struct Repl {
     /// How output is coloured. Detected once at startup, and `forced` in
     /// tests so a colour assertion can run without a TTY.
     style: Style,
+    /// The format the primary prompt is rendered from, and what `:prompt` sets.
+    ///
+    /// Uncoloured text: the reader paints it, because a prompt carrying escape
+    /// sequences into a line editor is the editor's problem to measure, not
+    /// something to hand it raw.
+    prompt_format: String,
 }
 
 impl Repl {
@@ -247,6 +344,7 @@ impl Repl {
             in_multiline: false,
             debug: DebugSession::shared(),
             style: Style::detect(),
+            prompt_format: DEFAULT_PROMPT.to_string(),
         }
     }
 
@@ -292,21 +390,13 @@ impl Repl {
 
     pub fn run(&mut self) {
         // The wordmark, then the greeting. Painted once, never redrawn.
-        if let Err(e) = banner::print_banner(&mut std::io::stdout(), &self.style) {
+        let mut out = std::io::stdout();
+        if let Err(e) = banner::print_banner(&mut out, &self.style) {
             eprintln!("Warning: could not print banner: {}", e);
         }
-        println!(
-            "{}",
-            self.style.paint(
-                Paint::Heading,
-                "Welcome to Redblue v0.1.0 - Interactive REPL"
-            )
-        );
-        println!(
-            "{}",
-            self.style
-                .paint(Paint::Dim, "Type ':help' for commands, ':quit' to exit\n")
-        );
+        if let Err(e) = banner::print_greeting(&mut out, &self.style) {
+            eprintln!("Warning: could not print greeting: {}", e);
+        }
 
         let names: SessionNames = Rc::new(RefCell::new(Vec::new()));
         let mut source = editor::line_source(Rc::clone(&names), self.style);
@@ -354,14 +444,14 @@ impl Repl {
                 return SessionEnd::Quit;
             }
 
-            let prompt = if self.in_multiline { "..  " } else { ">>> " };
+            let prompt = self.prompt_for_next_line();
 
             // The editor completes against the names the session has bound, and
             // it cannot be lent them while they are being borrowed to read a
             // line, so it is given a snapshot refreshed here.
             *names.borrow_mut() = self.session_names();
 
-            let line = match source.read_line(prompt) {
+            let line = match source.read_line(&prompt) {
                 Ok(Line::Text(text)) => text,
                 // Ctrl-C throws away the line being written, not the session.
                 Ok(Line::Interrupted) => continue,
@@ -372,19 +462,150 @@ impl Repl {
                 Err(_) => return SessionEnd::InputError,
             };
 
+            // The newline a reader stopped at is not part of the line, and
+            // everything below treats the line as if it were not there: what is
+            // recorded, what is dispatched as a command, and what is run as
+            // Redblue. Left on, it is invisible for source — `trim` eats it — and
+            // fatal for a `:prompt` whose argument *is* display text, because the
+            // format then ends in a newline and every prompt after it prints a
+            // blank line of its own. Stripped here rather than trusted away, so
+            // this holds for any source; only the trailing `\r\n` goes, because a
+            // trailing space is part of a prompt and must survive.
+            let line = line.trim_end_matches(['\r', '\n']);
+
             let input = line.trim();
             if input.is_empty() {
                 continue;
             }
 
-            self.history.push(input.to_string());
+            // Commands are dispatched from the line as it was typed rather than
+            // from its trimmed form, because `:prompt rb> ` ends in a space and
+            // that space is the command's argument. Every other command trims
+            // what it is given, so nothing else can tell the difference.
+            let typed = line.trim_start();
 
-            if self.handle_command(input) {
+            // Recorded the way it is dispatched, because that is what `!!` hands
+            // back: the history entry for `:prompt rb> ` is run again as a
+            // command, and recorded trimmed it would come back as `:prompt rb>`
+            // and silently drop the space out of the prompt. Only the commands
+            // whose argument *is* display text are recorded with their trailing
+            // whitespace; everything else is recorded trimmed, so a stray space
+            // at the end of a line does not reach the history file either.
+            let recorded = if ReplCommand::keeps_argument_whitespace(typed) {
+                typed
+            } else {
+                input
+            };
+            self.history.push(recorded.to_string());
+
+            // `!!` is a line like any other as far as the history is concerned —
+            // it was typed, and `:history` should show it — but what runs is the
+            // line before it, dispatched the same way, so `!!` over a command
+            // repeats the command rather than trying to evaluate `:vars` as
+            // Redblue.
+            let expanded = if input == REPEAT {
+                match self.repeat() {
+                    Ok(previous) => previous,
+                    Err(message) => {
+                        println!("{}", self.style.paint(Paint::Error, &message));
+                        continue;
+                    }
+                }
+            } else {
+                input.to_string()
+            };
+
+            let dispatched = if input == REPEAT { &expanded } else { typed };
+            if self.handle_command(dispatched) {
                 continue;
             }
 
-            self.execute_line(input);
+            self.execute_line(&expanded);
         }
+    }
+
+    /// The prompt the next line is read at, as plain text the reader paints.
+    ///
+    /// Two shapes, and the second is numbered: inside a block, `..  2` says this
+    /// is line 2 of the block and `..  3` says line 3, where a flat `..  ` said
+    /// neither. A block the user pasted from a file, or a traceback quoting line
+    /// 17 of one, is only readable if the session's own lines are numbered to
+    /// match. The number is the line about to be typed, so it never skips one and
+    /// never repeats one.
+    ///
+    /// Both shapes end in a space, because what is typed lands right after the
+    /// prompt: the primary one does, and a continuation that ran into the digits
+    /// without a gap put the first character a user types against them.
+    fn prompt_for_next_line(&self) -> String {
+        if self.in_multiline {
+            return format!("..  {} ", self.multiline_buffer.len() + 1);
+        }
+        self.render_prompt_format()
+    }
+
+    /// The user's prompt format with its placeholders filled in.
+    ///
+    /// Filled by substitution rather than by a formatting library so the whole
+    /// surface is the closed set [`PROMPT_PLACEHOLDERS`] — a prompt cannot depend
+    /// on anything a format string can reach that this cannot.
+    ///
+    /// Three passes over a format [`check_prompt_format`] has already bounded to
+    /// [`MAX_PROMPT_BYTES`], once per line read. The bound is why that is cheap:
+    /// without it, a single `:prompt` line would make every prompt after it
+    /// allocate whatever the user had typed, forever.
+    fn render_prompt_format(&self) -> String {
+        self.prompt_format
+            .replace("{engine}", banner::ENGINE)
+            .replace("{version}", banner::VERSION)
+            .replace("{history}", &self.history.len().to_string())
+    }
+
+    /// Sets the prompt from a `:prompt` format string, or restores
+    /// [`DEFAULT_PROMPT`] when given no argument.
+    ///
+    /// The format is checked before it is stored, so a format string that would
+    /// print `{nope}` at the user — or one big enough to be printed at them a
+    /// thousand times — never becomes the prompt. The session keeps the one it
+    /// had, and says which placeholder it did not know or how long the format was.
+    fn set_prompt_format(&mut self, argument: Option<&str>) -> Result<(), String> {
+        match argument {
+            None => {
+                self.prompt_format = DEFAULT_PROMPT.to_string();
+                Ok(())
+            }
+            Some(format) => {
+                check_prompt_format(format)?;
+                self.prompt_format = format.to_string();
+                Ok(())
+            }
+        }
+    }
+
+    /// The line `!!` repeats: the last line typed that was not itself `!!`.
+    ///
+    /// Skipping the repeats is what keeps `!!` usable more than once: a second
+    /// `!!` has to reach the same line the first one did, not the `!!` that
+    /// reached it.
+    fn repeat_target(&self) -> Option<&str> {
+        (0..self.history.len())
+            .rev()
+            .filter_map(|index| self.history.get(index).map(String::as_str))
+            .find(|line| !line.trim().is_empty() && line.trim() != REPEAT)
+    }
+
+    /// The line `!!` should run, or the message saying there is none.
+    ///
+    /// An `Err` rather than a default: a session whose first line is `!!` has
+    /// nothing to repeat, and reporting that is the only honest answer. An index
+    /// into an empty history would panic, and repeating nothing would look like a
+    /// command that ran and printed nothing.
+    fn repeat(&self) -> Result<String, String> {
+        self.repeat_target().map(str::to_string).ok_or_else(|| {
+            format!(
+                "Error: '{REPEAT}' has nothing to repeat: it is the first line of \
+                 this session's history."
+            )
+        })
     }
 
     /// Runs one command line, returning whether `input` was a command rather
@@ -490,6 +711,17 @@ impl Repl {
             }
             ReplCommand::Example => {
                 self.show_examples();
+                true
+            }
+            ReplCommand::Prompt(argument) => {
+                // The whole argument, whitespace inside it included: a prompt is
+                // read, not parsed, so `:prompt rb> ` must keep the space the
+                // prompt ends with. Hence the command carries an `Option` and the
+                // table is not the one that decides it is missing.
+                let argument = argument.as_deref();
+                if let Err(message) = self.set_prompt_format(argument) {
+                    println!("{}", self.style.paint(Paint::Error, &message));
+                }
                 true
             }
             ReplCommand::NotACommand => false,
@@ -1201,18 +1433,31 @@ mod tests {
     /// of input, a failed read — without one.
     struct ScriptedSource {
         lines: std::collections::VecDeque<io::Result<Line>>,
+        /// Every prompt the session asked at, in the order it asked.
+        ///
+        /// Recorded rather than discarded because the prompt is the whole subject
+        /// of the continuation-numbering and `:prompt` tests: what a session
+        /// prints at the user is only observable from the reader's side.
+        prompts: Vec<String>,
     }
 
     impl ScriptedSource {
         fn new(lines: Vec<io::Result<Line>>) -> Self {
             Self {
                 lines: lines.into_iter().collect(),
+                prompts: Vec::new(),
             }
+        }
+
+        /// The prompts the session asked at, in order.
+        fn prompts(&self) -> &[String] {
+            &self.prompts
         }
     }
 
     impl LineSource for ScriptedSource {
-        fn read_line(&mut self, _prompt: &str) -> io::Result<Line> {
+        fn read_line(&mut self, prompt: &str) -> io::Result<Line> {
+            self.prompts.push(prompt.to_string());
             self.lines.pop_front().unwrap_or(Ok(Line::Eof))
         }
     }
@@ -2253,6 +2498,444 @@ mod tests {
                 !source.contains("{{") && !source.contains("}}"),
                 "the {:?} example does not promise an interpolation `say` does not do",
                 caption
+            );
+        }
+    }
+
+    /// The session surface: the greeting, the prompt, and `!!`.
+    ///
+    /// These drive [`Repl::session_loop`] over a [`ScriptedSource`] that records the
+    /// prompt it is asked at, which is the only place a prompt is observable — the
+    /// reader is what a user sees.
+    mod surface {
+        use super::super::{MAX_PROMPT_BYTES, REPEAT};
+        use super::{Repl, ScriptedSource, SessionEnd};
+        use crate::repl::banner;
+        use crate::repl::editor::Line;
+        use crate::repl::style::Style;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        /// Runs `lines` through the session and returns every prompt it asked at,
+        /// including the one it asked at before the session ended.
+        ///
+        /// The lines go in as a pipe delivers them — with the newline the reader
+        /// stopped at still attached — because that is the shape every
+        /// integration test drives the real binary with, and it is the only shape
+        /// that can tell a session which strips a line terminator from one that
+        /// has never been asked to. A scripted source that fed bare lines passed
+        /// while a piped `:prompt` grew a newline into every prompt after it.
+        fn prompts_for(repl: &mut Repl, lines: &[&str]) -> Vec<String> {
+            let mut source = ScriptedSource::new(
+                lines
+                    .iter()
+                    .map(|line| Ok(Line::Text(format!("{line}\n"))))
+                    .collect(),
+            );
+            let names = Rc::new(RefCell::new(repl.session_names()));
+            repl.session_loop(&mut source, &names);
+            source.prompts().to_vec()
+        }
+
+        /// The greeting a session prints under the wordmark, with colour forced off.
+        fn plain_greeting() -> String {
+            banner::print_greeting(&mut Vec::new(), &Style::forced(false))
+                .ok()
+                .map(|_| ())
+                .unwrap_or_default();
+            banner::greeting_text(&Style::forced(false))
+        }
+
+        #[test]
+        fn the_greeting_names_the_crate_version_the_engine_and_what_the_keys_do() {
+            let greeting = plain_greeting();
+
+            assert!(
+                greeting.contains(&format!("Redblue v{}", env!("CARGO_PKG_VERSION"))),
+                "the greeting names the version the crate is, got:\n{greeting}"
+            );
+            assert!(
+                !greeting.contains("v0.1.0"),
+                "and the stale version it used to say is gone, got:\n{greeting}"
+            );
+            assert!(
+                greeting.contains(banner::ENGINE),
+                "the greeting names the engine in use, got:\n{greeting}"
+            );
+            assert!(
+                greeting.contains("TAB") && greeting.contains("Up arrow"),
+                "a first-time user is told what the keys do without reading the docs, \
+             got:\n{greeting}"
+            );
+        }
+
+        /// The greeting with colour off has to be the text and nothing else: an
+        /// escape sequence in a banner is visible to every user as garbage, and a
+        /// blank line where a sentence should be is the same kind of failure.
+        #[test]
+        fn edge_the_greeting_with_colour_off_is_plain_aligned_and_complete() {
+            let plain = plain_greeting();
+            let coloured = banner::greeting_text(&Style::forced(true));
+
+            assert!(
+                !plain.contains('\u{1b}'),
+                "no escape sequence survives with colour off, got:\n{plain:?}"
+            );
+            // Three lines and a blank one: the greeting is a block, and the blank
+            // line is what separates it from the first prompt rather than a fourth
+            // sentence of it.
+            let lines: Vec<&str> = plain.lines().collect();
+            assert_eq!(
+                lines.len(),
+                4,
+                "the greeting is three lines and the blank that follows them, got {lines:?}"
+            );
+            assert_eq!(
+                lines[3], "",
+                "and the fourth line is the blank separator, got {lines:?}"
+            );
+            for line in &lines[..3] {
+                assert!(!line.trim().is_empty(), "no blank line in {lines:?}");
+                assert!(
+                    !line.starts_with(' '),
+                    "no line is indented, so the block reads as a block: {lines:?}"
+                );
+            }
+            // Every escape the coloured form adds is a whole paint: it opens and it
+            // resets. A half-open one leaves the rest of the terminal coloured.
+            assert_eq!(
+                coloured.matches("\u{1b}[0m").count(),
+                coloured.matches('\u{1b}').count() / 2,
+                "every escape in the coloured greeting is closed, got:\n{coloured:?}"
+            );
+            assert!(
+                plain.len() < coloured.len(),
+                "colour is the difference between the two renderings, and only that"
+            );
+        }
+
+        /// A block is read one line at a time, and each continuation says which line
+        /// of the block it is.
+        ///
+        /// The number is the line about to be typed, so a three-line block asks for
+        /// lines 2 and 3 and never for a 4th — and the prompt after the closing `end`
+        /// is the primary one again, which is what says the block closed.
+        #[test]
+        fn a_block_is_read_at_a_prompt_numbered_by_the_line_of_the_block() {
+            let mut repl = Repl::new();
+            let prompts = prompts_for(
+                &mut repl,
+                &["repeat 1 times", "    say \"body\"", "end", ":quit"],
+            );
+
+            assert_eq!(
+                prompts,
+                vec![">>> ", "..  2 ", "..  3 ", ">>> "],
+                "each line of the block is asked for by its own number"
+            );
+        }
+
+        /// The prompt is the user's, not merely coloured: `:prompt` replaces the
+        /// text the next line is read at, and every placeholder it documents is
+        /// filled in.
+        #[test]
+        fn a_prompt_format_becomes_the_prompt_the_next_line_is_read_at() {
+            let mut repl = Repl::new();
+            repl.history.push("set x to 1".to_string());
+
+            assert!(
+                repl.handle_command(":prompt rb{version}/{history}/{engine} "),
+                ":prompt is a command"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                format!("rb{}/{}/{} ", env!("CARGO_PKG_VERSION"), 1, banner::ENGINE),
+                "the format is what the next prompt is, with its placeholders filled"
+            );
+
+            assert!(
+                repl.handle_command(":prompt"),
+                ":prompt with no argument is the command too, not a missing argument"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                ">>> ",
+                "and with no argument it puts the default back"
+            );
+        }
+
+        /// A format string naming a placeholder that does not exist is refused by
+        /// name, and the prompt the session had is kept: a prompt is printed before
+        /// every line, so one full of `{nope}` would be read a thousand times a day.
+        #[test]
+        fn edge_an_unknown_placeholder_is_refused_by_name_and_the_prompt_is_kept() {
+            let mut repl = Repl::new();
+
+            let refused = repl.set_prompt_format(Some("rb{nope} "));
+            assert!(
+                refused.is_err(),
+                "a placeholder the prompt does not know is refused, got {refused:?}"
+            );
+            let message = refused.unwrap_err();
+            assert!(
+                message.contains("{nope}"),
+                "the refusal names the placeholder that was refused, got: {message}"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                ">>> ",
+                "and the prompt the session had is still the prompt"
+            );
+
+            let unclosed = repl.set_prompt_format(Some("rb{version"));
+            assert!(
+                unclosed.is_err(),
+                "a brace that is never closed is refused too, got {unclosed:?}"
+            );
+            assert!(
+                unclosed.unwrap_err().contains('{'),
+                "and the report shows the brace it could not read past"
+            );
+
+            // The other end of the same rule: a `}` that closes nothing. The
+            // placeholders are a closed set, so a brace is either one of them or
+            // a mistake — and `:prompt foo}` used to be accepted and rendered
+            // literally, contradicting the claim the refusal above is made for.
+            let stray = repl.set_prompt_format(Some("rb>} "));
+            assert!(
+                stray.is_err(),
+                "a brace that closes nothing is refused the same way, got {stray:?}"
+            );
+            assert!(
+                stray.unwrap_err().contains('}'),
+                "and the report shows the brace it could not match"
+            );
+            assert!(
+                repl.set_prompt_format(Some("rb{version} ok}")).is_err(),
+                "including one behind a placeholder that did open, rather than only \
+                 at the start of a format"
+            );
+            assert!(
+                repl.set_prompt_format(Some("rb} {version} ")).is_err(),
+                "and one *before* a placeholder, which is the same mistake in the \
+                 other order"
+            );
+
+            assert!(
+                repl.set_prompt_format(None).is_ok(),
+                "and `:prompt` with no argument still restores the default"
+            );
+        }
+
+        /// A format string is held for the rest of the session and rendered before
+        /// every line the session reads, so there has to be a size at which it is
+        /// refused — the same reason the block buffer has one.
+        ///
+        /// Both sides of the boundary are asserted, because a limit that refuses
+        /// too little is not a limit and one that refuses too much is a bug: the
+        /// default prompt is four bytes and `>>> ` is the smallest thing a session
+        /// ever prints, so nothing anyone would type is near a kilobyte.
+        #[test]
+        fn edge_an_oversize_prompt_format_is_refused_and_the_prompt_is_kept() {
+            let mut repl = Repl::new();
+            let at_limit = "x".repeat(MAX_PROMPT_BYTES);
+            let set = repl.set_prompt_format(Some(&at_limit));
+            assert!(
+                set.is_ok(),
+                "a format of exactly {} bytes is allowed, got {:?}",
+                MAX_PROMPT_BYTES,
+                set.err()
+            );
+
+            let over = "x".repeat(MAX_PROMPT_BYTES + 1);
+            let refused = repl.set_prompt_format(Some(&over));
+            assert!(
+                refused.is_err(),
+                "one byte more is not, and a prompt is rendered once per line for \
+                 the rest of the session"
+            );
+            let message = refused.unwrap_err();
+            assert!(
+                message.contains(&MAX_PROMPT_BYTES.to_string()),
+                "the refusal names the limit, got: {message}"
+            );
+            assert!(
+                message.len() < 200,
+                "and quotes the size rather than the format, so refusing an \
+                 oversize prompt is not itself a flood, got: {message}"
+            );
+
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                at_limit,
+                "the prompt the session had is still the prompt"
+            );
+        }
+
+        /// `!!` hands the history entry back to the parser as a command, so the
+        /// entry has to be the line that was typed — including the whitespace at
+        /// the end of it, for the one command whose argument is display text.
+        ///
+        /// A prompt ends in a space; that space is the gap between the prompt and
+        /// what gets typed. Recorded trimmed, `:prompt rb> ` came back from `!!` as
+        /// `:prompt rb>` and the prompt silently lost its gap, which is exactly
+        /// the kind of change a repeat must not make. Every other line is still
+        /// recorded trimmed, so a stray space at the end of a program does not
+        /// reach the history file.
+        #[test]
+        fn edge_a_repeated_prompt_keeps_the_space_that_is_part_of_it() {
+            let mut repl = Repl::new();
+            let prompts = prompts_for(&mut repl, &[":prompt rb> ", "!!", ":quit"]);
+
+            assert_eq!(
+                prompts,
+                vec![">>> ", "rb> ", "rb> "],
+                "the repeat put the prompt back as it was typed, space and all"
+            );
+            assert_eq!(
+                repl.history.get(0).map(String::as_str),
+                Some(":prompt rb> "),
+                "and the entry it repeated is the line as typed, not the same \
+                 line trimmed — which is what a second `!!` would hand back"
+            );
+
+            let mut repl = Repl::new();
+            prompts_for(&mut repl, &["set x to 1   ", ":quit"]);
+            assert_eq!(
+                repl.history.get(0).map(String::as_str),
+                Some("set x to 1"),
+                "a line that is not a display-text command is still recorded \
+                 trimmed, so the history file does not collect stray spaces"
+            );
+        }
+
+        /// A line ends where the reader stopped; the newline it stopped at is not
+        /// part of it.
+        ///
+        /// A pipe delivers `:prompt rb> \n`, and the space at the end of that is
+        /// part of the prompt while the newline after it is not. Kept on, the
+        /// stored format ends in a newline and every prompt printed from it
+        /// breaks the line before the user has typed anything — and the history
+        /// entry, which is the same string, is two lines in a file that is one
+        /// entry per line. Piped here through `prompts_for`, which feeds the
+        /// shape a pipe actually delivers.
+        #[test]
+        fn edge_a_piped_prompt_command_leaves_no_newline_in_the_prompt_or_the_history() {
+            let mut repl = Repl::new();
+            let prompts = prompts_for(&mut repl, &[":prompt rb> ", "say \"piped\"", ":quit"]);
+
+            assert_eq!(
+                prompts,
+                vec![">>> ", "rb> ", "rb> "],
+                "the prompt is `rb> ` and nothing else, so what is typed lands \
+                 after the space the user gave it"
+            );
+            for prompt in &prompts {
+                assert!(
+                    !prompt.contains(['\n', '\r']),
+                    "no prompt carries the newline the line arrived with, got {prompt:?}"
+                );
+            }
+            assert_eq!(
+                repl.history.get(0).map(String::as_str),
+                Some(":prompt rb> "),
+                "and the entry is one line, so writing the history out is one line \
+                 per entry rather than a blank line for every prompt that was set"
+            );
+            assert!(
+                repl.history
+                    .get(0)
+                    .is_some_and(|entry| !entry.ends_with(['\n', '\r'])),
+                "…and it is a line without a terminator of its own"
+            );
+        }
+
+        /// `!!` is the last line typed, run again — including a line that failed,
+        /// because a line that failed is very often the one being worked on.
+        #[test]
+        fn edge_repeat_reruns_a_line_that_failed_rather_than_skipping_it() {
+            let mut repl = Repl::new();
+
+            let refusal = repl.repeat();
+            assert!(
+                refusal.is_err(),
+                "a session with nothing typed has nothing to repeat, got {refusal:?}"
+            );
+            assert!(
+                refusal.unwrap_err().contains(REPEAT),
+                "and the refusal names the line that asked for it"
+            );
+
+            // A session that stops right after the repeat: its history is the failed
+            // line and the `!!`, so what `!!` reached is readable afterwards.
+            let mut stopped = Repl::new();
+            let mut source = ScriptedSource::new(vec![
+                Ok(Line::Text("1 / 0".to_string())),
+                Ok(Line::Text("!!".to_string())),
+            ]);
+            let names = Rc::new(RefCell::new(stopped.session_names()));
+            stopped.session_loop(&mut source, &names);
+            assert_eq!(
+                stopped.repeat_target(),
+                Some("1 / 0"),
+                "the failed line is what `!!` reaches, not the `!!` itself and not \
+             nothing"
+            );
+            assert_eq!(
+                stopped.history.search("1 / 0"),
+                Some("1 / 0".to_string()),
+                "and the repeat did not push a second copy of the line it repeated"
+            );
+
+            // And the session carries on afterwards: a repeat that swallowed the
+            // rest of the session would leave the lines after it unrun.
+            let mut source = ScriptedSource::new(vec![
+                Ok(Line::Text("1 / 0".to_string())),
+                Ok(Line::Text("!!".to_string())),
+                Ok(Line::Text("set after_repeat to 40 + 1".to_string())),
+                Ok(Line::Text(":quit".to_string())),
+            ]);
+            let names = Rc::new(RefCell::new(repl.session_names()));
+            let end = repl.session_loop(&mut source, &names);
+
+            assert_eq!(end, SessionEnd::Quit, "the session survived the repeat");
+            assert!(
+                repl.complete("after_repeat")
+                    .contains(&"after_repeat".to_string()),
+                "the line typed after the repeat is the one that ran next, so the \
+             repeat did not swallow the session"
+            );
+        }
+
+        /// `!!` twice reaches the same line both times: the repeats in between are
+        /// not what it finds, or the second one would repeat the first.
+        #[test]
+        fn edge_a_second_repeat_reaches_the_same_line_as_the_first() {
+            let mut repl = Repl::new();
+            repl.history.push("set x to 1".to_string());
+            repl.history.push("!!".to_string());
+            repl.history.push("!!".to_string());
+
+            assert_eq!(
+                repl.repeat_target(),
+                Some("set x to 1"),
+                "two `!!` in the history are not a line to repeat"
+            );
+        }
+
+        /// `:reset` clears the bindings and leaves the history — a session that has
+        /// been reset is a session at a prompt, and the record of what was typed is
+        /// not part of what a reset forgets.
+        #[test]
+        fn edge_repeat_still_works_after_a_reset() {
+            let mut repl = Repl::new();
+            repl.history.push("set x to 1".to_string());
+            repl.reset_session();
+
+            assert_eq!(
+                repl.repeat_target(),
+                Some("set x to 1"),
+                "the history outlives a reset, so `!!` still has something to repeat"
             );
         }
     }

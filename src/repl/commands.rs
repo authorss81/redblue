@@ -41,6 +41,13 @@ pub enum ReplCommand {
     Ast(String),
     Tokens(String),
     Example,
+    /// Sets the prompt from a format string, or restores the default when given
+    /// no argument.
+    ///
+    /// `Option` rather than a plain `String` because `:prompt` on its own is not
+    /// a command missing its argument: it is the one that puts the prompt back.
+    /// The table still declares a usage so `:help` names what the argument is.
+    Prompt(Option<String>),
     /// A command that was recognised but not given what it needs.
     ///
     /// Not [`ReplCommand::Unknown`]: the command *is* known, its argument is
@@ -70,6 +77,21 @@ struct CommandSpec {
     /// the missing-argument report both show. `None` for a command that takes
     /// none, which is also what tells the parser it must not be given one.
     usage: Option<&'static str>,
+    /// Whether the argument may be left out without that being an error.
+    ///
+    /// True for one command: `:prompt` with nothing after it restores the default
+    /// prompt, which is a thing a user asks for rather than a command typed
+    /// incompletely. It still declares a `usage`, so `:help` names the format it
+    /// takes.
+    optional_argument: bool,
+    /// Whether the argument is display text, whose trailing whitespace is part of
+    /// it rather than a separator to be dropped.
+    ///
+    /// True for `:prompt` alone. A prompt ends in a space so what the user types
+    /// does not touch it, and every other command's argument is a path or a
+    /// program where a trailing space is a typo. So `:prompt rb> ` keeps its
+    /// space — which the trimming every other command gets would have taken.
+    verbatim_argument: bool,
     build: fn(Option<String>) -> ReplCommand,
 }
 
@@ -94,141 +116,222 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         names: &["quit", "exit", "q"],
         description: "Exit the REPL",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Quit,
     },
     CommandSpec {
         names: &["help", "h", "?"],
         description: "Show this help",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Help,
     },
     CommandSpec {
         names: &["clear", "cls"],
         description: "Clear the screen",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Clear,
     },
     CommandSpec {
         names: &["history", "hist"],
         description: "Show command history",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::History,
     },
     CommandSpec {
         names: &["vars", "variables", "v"],
         description: "Show all variables",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Vars,
     },
     CommandSpec {
         names: &["functions", "funcs", "f"],
         description: "Show defined functions",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Functions,
     },
     CommandSpec {
         names: &["load", "l"],
         description: "Load and run a file",
         usage: Some("<filename>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Load(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["save", "s"],
         description: "Save current session",
         usage: Some("<filename>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Save(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["restore", "r"],
         description: "Restore a saved session",
         usage: Some("<filename>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Restore(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["reset"],
         description: "Reset REPL state",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Reset,
     },
     CommandSpec {
         names: &["run"],
         description: "Run a Redblue file",
         usage: Some("<filename>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Run(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["debug"],
         description: "Debug mode",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Debug,
     },
     CommandSpec {
         names: &["break", "b"],
         description: "Stop at a line, or clear the breakpoint there",
         usage: Some("<line>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Break(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["breaks", "bps"],
         description: "List the lines breakpoints are set on",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Breaks,
     },
     CommandSpec {
         names: &["delete", "d"],
         description: "Remove the breakpoint on a line",
         usage: Some("<line>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Delete(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["step", "st"],
         description: "Step into the next call",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Step,
     },
     CommandSpec {
         names: &["next", "n"],
         description: "Step over the next call",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Next,
     },
     CommandSpec {
         names: &["continue", "c"],
         description: "Run on to the next breakpoint",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Continue,
     },
     CommandSpec {
         names: &["frame", "fr"],
         description: "Show the frame the program last stopped in",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Frame,
     },
     CommandSpec {
         names: &["inspect", "i"],
         description: "Inspect a variable",
         usage: Some("<variable>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Inspect(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["ast"],
         description: "Print AST for expression",
         usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Ast(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["tokens"],
         description: "Print tokens for expression",
         usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
         build: |argument| ReplCommand::Tokens(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["example", "examples"],
         description: "Show example code",
         usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
         build: |_| ReplCommand::Example,
     },
+    CommandSpec {
+        names: &["prompt"],
+        description: "Set the prompt from {engine}, {version}, {history}; none restores it",
+        usage: Some("<format>"),
+        optional_argument: true,
+        verbatim_argument: true,
+        build: |argument| ReplCommand::Prompt(argument),
+    },
 ];
+
+/// The command word `input` names, with its sigil off.
+///
+/// Empty when the word is a bare sigil, which is why it is asked for separately
+/// rather than inside [`spec_for`]: `:` names no command, and the parser still has
+/// to report which word it thought it had.
+fn command_word(input: &str) -> &str {
+    let input = input.trim_start();
+    let word = match input.split_once(char::is_whitespace) {
+        Some((word, _)) => word,
+        None => input,
+    };
+    word.strip_prefix(SIGILS).unwrap_or(word)
+}
+
+/// The table entry a line names, or `None` when it names none.
+///
+/// The lookup [`ReplCommand::parse`] and [`ReplCommand::keeps_argument_whitespace`]
+/// both need, so it lives here rather than being written twice: a second copy of
+/// the "which sigil, which word, which entry" question is a command that parses
+/// and is invisible to whoever asks about it.
+fn spec_for(input: &str) -> Option<&'static CommandSpec> {
+    let command = command_word(input);
+    COMMAND_TABLE
+        .iter()
+        .find(|spec| spec.names.contains(&command))
+}
 
 impl ReplCommand {
     /// Every command word the table accepts, without a sigil, sorted.
@@ -322,7 +425,10 @@ impl ReplCommand {
     fn argument(input: &str) -> Option<String> {
         let (_, rest) = input.split_once(char::is_whitespace)?;
         let argument = rest.trim_start();
-        if argument.is_empty() {
+        // Whitespace and nothing else is no argument at all, for the one command
+        // whose argument keeps its trailing spaces: `:prompt   ` is `:prompt`,
+        // not a prompt made of three spaces.
+        if argument.trim().is_empty() {
             None
         } else {
             Some(argument.to_string())
@@ -330,36 +436,45 @@ impl ReplCommand {
     }
 
     pub fn parse(input: &str) -> Self {
-        let input = input.trim();
+        let input = input.trim_start();
 
         if !input.starts_with(SIGILS) {
             return ReplCommand::NotACommand;
         }
 
-        let word = match input.split_once(char::is_whitespace) {
-            Some((word, _)) => word,
-            None => input,
-        };
-        // Exactly one sigil, so `::quit` and `...quit` name nothing rather than
-        // reaching the command one sigil in.
-        let command = word.strip_prefix(SIGILS).unwrap_or(word);
-
-        match COMMAND_TABLE
-            .iter()
-            .find(|spec| spec.names.contains(&command))
-        {
+        match spec_for(input) {
             Some(spec) => match spec.usage {
                 None => (spec.build)(None),
-                Some(usage) => match Self::argument(input) {
+                Some(usage) => match Self::argument(if spec.verbatim_argument {
+                    input
+                } else {
+                    input.trim_end()
+                }) {
                     Some(value) => (spec.build)(Some(value)),
+                    // An argument the command does not insist on is the command's
+                    // own business, not a missing-argument report: `:prompt` reads
+                    // "no format given" as "put the default back".
+                    None if spec.optional_argument => (spec.build)(None),
                     None => ReplCommand::MissingArgument {
                         command: spec.names[0],
                         usage,
                     },
                 },
             },
-            None => ReplCommand::Unknown(command.to_string()),
+            None => ReplCommand::Unknown(command_word(input).to_string()),
         }
+    }
+
+    /// Whether `input` names a command whose argument keeps the whitespace at its
+    /// end.
+    ///
+    /// Asked by the session before it records a line. `:prompt rb> ` is display
+    /// text: the space at the end of it is the space between the prompt and what
+    /// the user types, so a history entry that dropped it would come back as a
+    /// different prompt. Every other command's argument is a path or a program,
+    /// where a trailing space is a typo, and those are recorded trimmed.
+    pub fn keeps_argument_whitespace(input: &str) -> bool {
+        spec_for(input).is_some_and(|spec| spec.verbatim_argument)
     }
 }
 
@@ -426,6 +541,15 @@ mod tests {
             (":tokens 1 + 1", "Tokens", "1 + 1"),
             (":example", "Example", ""),
             (":examples", "Example", ""),
+            // `:prompt` is the one command whose argument may be left out and the
+            // one whose argument keeps its trailing whitespace, so it is listed in
+            // all three of its shapes: bare, whitespace only, and with the space
+            // a prompt ends with. Nothing here says which shape is which — the
+            // rows are read back as the exact variant, so a `Prompt(Some("rb>"))`
+            // where `Prompt(Some("rb> "))` was asked for fails.
+            (":prompt", "Prompt", ""),
+            (":prompt   ", "Prompt", ""),
+            (":prompt rb> ", "Prompt", "rb> "),
         ];
 
         for (input, expected, argument) in cases {
@@ -448,12 +572,111 @@ mod tests {
                 | ReplCommand::Tokens(value)
                 | ReplCommand::Break(value)
                 | ReplCommand::Delete(value) => value.as_str(),
+                // The two `Prompt` shapes are told apart by the variant itself:
+                // `Prompt(None)` is a command that restores the default and falls
+                // to the empty argument below, `Prompt(Some(..))` is one that was
+                // given a format and carries it verbatim.
+                ReplCommand::Prompt(Some(value)) => value.as_str(),
                 _ => "",
             };
             assert_eq!(
                 carried, argument,
                 "parsing {:?} should carry the argument {:?}",
                 input, argument
+            );
+        }
+    }
+
+    /// `:prompt` is the only command whose argument may be left out and the only
+    /// one whose argument keeps the whitespace at its end, so both of those flags
+    /// in the table are read here on all three shapes.
+    ///
+    /// A prompt ends in a space — that space is between the prompt and what the
+    /// user types — so `:prompt rb> ` and `:prompt rb>` are different prompts. And
+    /// `:prompt` on its own is not a command typed incompletely: it is the one
+    /// that puts the default back. Both facts are only worth anything if the
+    /// parser keeps them, which is what this asserts directly rather than through
+    /// the alias table, where a `Prompt` row could pass while the argument it
+    /// carries was wrong.
+    #[test]
+    fn parse_reads_a_prompt_as_display_text_or_as_no_argument() {
+        assert_eq!(
+            ReplCommand::parse(":prompt"),
+            ReplCommand::Prompt(None),
+            "no argument at all is the command that restores the default"
+        );
+        assert_eq!(
+            ReplCommand::parse(":prompt   "),
+            ReplCommand::Prompt(None),
+            "and whitespace is not a prompt made of three spaces"
+        );
+        assert_eq!(
+            ReplCommand::parse(":prompt rb> "),
+            ReplCommand::Prompt(Some("rb> ".to_string())),
+            "the space a prompt ends with is part of the prompt"
+        );
+        assert_eq!(
+            ReplCommand::parse("  :prompt rb>  "),
+            ReplCommand::Prompt(Some("rb>  ".to_string())),
+            "leading whitespace is the separator; every trailing space is the prompt's"
+        );
+        assert_eq!(
+            ReplCommand::parse(".prompt rb> "),
+            ReplCommand::Prompt(Some("rb> ".to_string())),
+            "and the other sigil reaches it with the same argument"
+        );
+        assert_eq!(
+            ReplCommand::parse(":prompt {version} "),
+            ReplCommand::Prompt(Some("{version} ".to_string())),
+            "a placeholder is not substituted here — the session renders it"
+        );
+        // The other end of the rule: a command whose argument is not display text
+        // still has its trailing whitespace dropped, so the two flags are not one
+        // flag.
+        assert_eq!(
+            ReplCommand::parse(":inspect counter  "),
+            ReplCommand::Inspect("counter".to_string()),
+            "a variable name does not keep the spaces typed after it"
+        );
+        assert_eq!(
+            ReplCommand::parse(":load"),
+            ReplCommand::MissingArgument {
+                command: "load",
+                usage: "<filename>"
+            },
+            "and an optional argument is not a licence for every command to have one"
+        );
+    }
+
+    /// Whether a line has to be recorded the way it was typed, which is a
+    /// question about the table and not about the line's contents.
+    ///
+    /// The session asks this before it puts a line in the history, and gets it
+    /// wrong in the direction that loses text: recording `:prompt rb> ` trimmed
+    /// would make `!!` repeat a prompt with no space in it, and recording `2 + 3
+    /// ` verbatim would put a trailing space in the history file for no reason.
+    #[test]
+    fn a_line_is_recorded_verbatim_only_for_a_display_text_argument() {
+        assert!(
+            ReplCommand::keeps_argument_whitespace(":prompt rb> "),
+            "a prompt's trailing space is the prompt"
+        );
+        assert!(
+            ReplCommand::keeps_argument_whitespace(":prompt"),
+            "and so is the decision about which prompt, whether or not there is one"
+        );
+        for line in [
+            "2 + 3  ",
+            ":load /tmp/a.rb  ",
+            ":inspect counter  ",
+            "",
+            "   ",
+            ":bogus argument  ",
+            "::prompt rb> ",
+        ] {
+            assert!(
+                !ReplCommand::keeps_argument_whitespace(line),
+                "{line:?} is not a display-text command, so it is recorded trimmed"
             );
         }
     }
