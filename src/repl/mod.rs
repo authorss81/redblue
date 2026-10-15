@@ -2,6 +2,7 @@ pub mod banner;
 pub mod commands;
 pub mod completer;
 pub mod editor;
+pub mod highlight;
 pub mod history;
 pub mod style;
 
@@ -308,7 +309,7 @@ impl Repl {
         );
 
         let names: SessionNames = Rc::new(RefCell::new(Vec::new()));
-        let mut source = editor::line_source(Rc::clone(&names));
+        let mut source = editor::line_source(Rc::clone(&names), self.style);
         self.restore_history(&*source);
         let end = self.session_loop(&mut *source, &names);
         if let Err(error) = source.flush_history() {

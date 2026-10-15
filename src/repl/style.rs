@@ -46,6 +46,22 @@ pub enum Paint {
     /// Without this the banner steps from red straight to blue and reads as two
     /// separate blocks rather than one gradient.
     BrandMid,
+    /// A word the language reserves.
+    Keyword,
+    /// A string literal.
+    Str,
+    /// A numeric literal.
+    Number,
+    /// A `//` comment.
+    Comment,
+    /// A name in [`crate::stdlib::BUILTIN_NAMES`].
+    Builtin,
+    /// `+`, `-`, `*`, `/`, `%`, `=`, `!=`, `<`, `<=`, `>`, `>=`.
+    ///
+    /// An operator is a role of its own rather than more dim punctuation because
+    /// operators are where a reader's eye goes next after a keyword, and the
+    /// difference between `x = 1` and `x == 1` is the whole point of the line.
+    Operator,
 }
 
 impl Paint {
@@ -66,7 +82,111 @@ impl Paint {
             // prompt would make the wordmark look like
             // something to type.
             Paint::BrandMid => "1;35", // bold magenta — the red/blue midpoint
+            Paint::Keyword => "0;35",  // magenta — the words the language reserves
+            // Green on purpose, and the same green as Paint::Result: a string
+            // literal is a value, so it wears the colour values already do.
+            Paint::Str => "0;32",
+            Paint::Number => "0;36", // cyan — plain, where Heading is bold cyan
+            // Bright black rather than Paint::Dim's faint white: a comment is
+            // present but unreadable at a glance, not merely de-emphasised.
+            Paint::Comment => "0;90",
+            Paint::Builtin => "0;33", // yellow — and not Paint::Prompt's blue,
+            // which would make a builtin look like something to type
+            Paint::Operator => "0;37", // white
         }
+    }
+}
+
+/// What a run of source is, as far as a colour scheme is concerned.
+///
+/// The lexer knows far more than this — `give` and `back` are one token, `5`
+/// and `5.0` are one token — and a theme is not interested in any of it. These
+/// are the classes a theme has an opinion about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenClass {
+    /// A word in [`crate::lexer::KEYWORDS`].
+    Keyword,
+    /// A string literal.
+    Str,
+    /// A numeric literal.
+    Number,
+    /// A `//` comment, to the end of the line.
+    Comment,
+    /// A name the standard library provides.
+    Builtin,
+    /// An operator.
+    Operator,
+}
+
+impl TokenClass {
+    /// Every class, so a theme can be written from the list rather than
+    /// remembered. Also the guard against a new class being added here and
+    /// nowhere else: [`Theme::standard`] is built from it.
+    pub const ALL: &'static [TokenClass] = &[
+        TokenClass::Keyword,
+        TokenClass::Str,
+        TokenClass::Number,
+        TokenClass::Comment,
+        TokenClass::Builtin,
+        TokenClass::Operator,
+    ];
+
+    /// The role this class takes in the theme this build ships.
+    pub fn role(self) -> Paint {
+        match self {
+            TokenClass::Keyword => Paint::Keyword,
+            TokenClass::Str => Paint::Str,
+            TokenClass::Number => Paint::Number,
+            TokenClass::Comment => Paint::Comment,
+            TokenClass::Builtin => Paint::Builtin,
+            TokenClass::Operator => Paint::Operator,
+        }
+    }
+}
+
+/// Which role each token class takes.
+///
+/// A lookup rather than a `match`, deliberately. A theme is the one part of
+/// colouring a user is expected to replace, and a theme written before
+/// [`TokenClass`] grew a class should paint that class plain rather than fail
+/// to compile — or, worse, take the colour of whatever a `match` fell through
+/// to. The same argument makes a missing entry worth having at all: a theme
+/// with a hole in it is ordinary, and the hole has to be safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Theme {
+    roles: Vec<(TokenClass, Paint)>,
+}
+
+impl Theme {
+    /// The theme this build ships: every class, in its own colour.
+    pub fn standard() -> Self {
+        Theme {
+            roles: TokenClass::ALL
+                .iter()
+                .map(|class| (*class, class.role()))
+                .collect(),
+        }
+    }
+
+    /// The same theme with `class` left out, whose tokens then draw plain.
+    pub fn without(mut self, class: TokenClass) -> Self {
+        self.roles.retain(|(candidate, _)| *candidate != class);
+        self
+    }
+
+    /// The role `class` takes here, or `None` when this theme says nothing
+    /// about it — in which case the caller leaves the text plain.
+    pub fn role(&self, class: TokenClass) -> Option<Paint> {
+        self.roles
+            .iter()
+            .find(|(candidate, _)| *candidate == class)
+            .map(|(_, role)| *role)
+    }
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::standard()
     }
 }
 
