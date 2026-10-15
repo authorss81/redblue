@@ -1,7 +1,9 @@
+pub mod banner;
 pub mod commands;
 pub mod completer;
 pub mod editor;
 pub mod history;
+pub mod style;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,6 +20,7 @@ use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepM
 use crate::interpreter::Vm;
 use crate::lexer::Lexer;
 use crate::parser::{open_block_depth, Parser, Program};
+use crate::repl::style::{Paint, Style};
 use crate::value::Value;
 
 /// How many lines a session keeps before the oldest is dropped. A terminal
@@ -226,6 +229,9 @@ pub struct Repl {
     /// the last program stopped in. Shared with the hook the VM calls, so a
     /// `:frame` typed after the program has run reads the frame that stop left.
     debug: SharedDebugSession,
+    /// How output is coloured. Detected once at startup, and `forced` in
+    /// tests so a colour assertion can run without a TTY.
+    style: Style,
 }
 
 impl Repl {
@@ -239,6 +245,7 @@ impl Repl {
             multiline_buffer: Vec::new(),
             in_multiline: false,
             debug: DebugSession::shared(),
+            style: Style::detect(),
         }
     }
 
@@ -283,18 +290,38 @@ impl Repl {
     }
 
     pub fn run(&mut self) {
-        println!("Welcome to Redblue v0.1.0 - Interactive REPL");
-        println!("Type 'help' for commands, 'quit' to exit\n");
+        // The wordmark, then the greeting. Painted once, never redrawn.
+        if let Err(e) = banner::print_banner(&mut std::io::stdout(), &self.style) {
+            eprintln!("Warning: could not print banner: {}", e);
+        }
+        println!(
+            "{}",
+            self.style.paint(
+                Paint::Heading,
+                "Welcome to Redblue v0.1.0 - Interactive REPL"
+            )
+        );
+        println!(
+            "{}",
+            self.style
+                .paint(Paint::Dim, "Type 'help' for commands, 'quit' to exit\n")
+        );
 
         let names: SessionNames = Rc::new(RefCell::new(Vec::new()));
         let mut source = editor::line_source(Rc::clone(&names));
         self.restore_history(&*source);
         let end = self.session_loop(&mut *source, &names);
         if let Err(error) = source.flush_history() {
-            eprintln!("Warning: could not save history: {}", error);
+            eprintln!(
+                "{}",
+                self.style.paint(
+                    Paint::Error,
+                    &format!("Warning: could not save history: {}", error)
+                )
+            );
         }
 
-        println!("{}", farewell(end));
+        println!("{}", self.style.paint(Paint::Heading, farewell(end)));
     }
 
     /// Reads back what a previous session left behind, so `:history` answers
@@ -597,12 +624,14 @@ impl Repl {
         match result {
             Ok(value) => {
                 if !matches!(value, Value::Nothing) {
-                    println!("= {}", value);
+                    let line = format!("= {}", value);
+                    println!("{}", self.style.paint(Paint::Result, &line));
                     self.variables.insert("_".to_string(), value);
                 }
             }
             Err(e) => {
-                println!("Error: {}", e);
+                let line = format!("Error: {}", e);
+                println!("{}", self.style.paint(Paint::Error, &line));
             }
         }
     }
@@ -684,7 +713,10 @@ impl Repl {
     }
 
     fn print_help(&self) {
-        println!("Redblue REPL Commands:");
+        println!(
+            "{}",
+            self.style.paint(Paint::Heading, "Redblue REPL Commands:")
+        );
         println!();
         // Every line of this list comes from the one table the parser accepts
         // commands in, aliases included. It was written out separately, so `:q`,

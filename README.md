@@ -90,6 +90,28 @@ cargo build --release
 # the binary is at ./target/release/rb
 ```
 
+**The binary is not on your PATH after building.** `cargo build` puts it in
+`target/release/`, and `rb` alone will not be found. Either invoke it by path:
+
+```bash
+./target/release/rb          # Linux / macOS
+.\target\release\rb.exe      # Windows
+```
+
+or add the directory to your PATH once:
+
+```bash
+# Linux / macOS — quote the path, it contains spaces in a default checkout
+export PATH="$HOME/3D Objects/a/rb/redblue/target/release:$PATH"
+```
+
+```bash
+# Windows PowerShell
+$env:PATH += ";$env:USERPROFILE\3D Objects\a\rb\redblue\target\release"
+```
+
+Then `rb`, `rb help` and so on work from any directory.
+
 ```bash
 # Run a file
 rb run hello.rb
