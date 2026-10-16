@@ -354,7 +354,7 @@ fn same_expr(a: &Expr, b: &Expr) -> bool {
         (Expr::Text(x), Expr::Text(y)) => x == y,
         (Expr::YesNo(x), Expr::YesNo(y)) => x == y,
         (Expr::Nothing, Expr::Nothing) => true,
-        (Expr::Variable(x), Expr::Variable(y)) => x == y,
+        (Expr::Variable(x, _), Expr::Variable(y, _)) => x == y,
         (
             Expr::Binary {
                 op: o1,

@@ -352,8 +352,9 @@ fn diagnostics_surface_a_spanned_analyzer_error() {
 
     assert_eq!(
         (diagnostic.line, diagnostic.column),
-        (2, 1),
-        "the analyzer diagnostic must point at the statement holding the bad name"
+        (2, 5),
+        "the analyzer diagnostic must point at the name holding the failure — \
+         the editor underlines the identifier, not the statement around it"
     );
     assert!(
         diagnostic.message.contains("missing"),

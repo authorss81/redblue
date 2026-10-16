@@ -142,8 +142,10 @@ fn edge_a_suggested_name_is_still_rejected_when_written() {
     );
     assert_eq!(
         error.span().map(|s| (s.line, s.column)),
-        Some((2, 1)),
-        "suggesting a fix must not move the reported position, got: {:?}",
+        Some((2, 5)),
+        "suggesting a fix must not move the reported position: the name is \
+         written at column 5 and the suggestion is advice about it, not a \
+         different place\ngot: {:?}",
         error.span()
     );
 }
@@ -379,9 +381,11 @@ RuntimeError: boom
 }
 
 #[test]
-fn edge_a_multibyte_line_is_underlined_by_character_and_not_by_byte() {
-    // The emoji is one character and four bytes, so a range opening at the
-    // character after it underlines by character too.
+fn edge_a_multibyte_line_is_underlined_by_display_cell_and_not_by_byte() {
+    // The emoji are one character and four bytes each, and a terminal draws two
+    // cells each — so the span is measured in characters and the underline is
+    // measured in the cells a reader actually sees, which is the only way the
+    // two can both be right.
     let source = "say \"\u{1F600}\u{1F600}oops\nmore\n";
     let error = failure_of(source);
     let span = error.span().expect("the failure carries a span");
@@ -399,8 +403,9 @@ LexerError: Unterminated string
   --> emoji.rb:1:5
 1 | say \"\u{1F600}\u{1F600}oops
 2 | more
-  |     ^~~~~~~~",
-        "the underline sits under the fifth character, not the thirty-fourth byte"
+  |     ^~~~~~~~~~",
+        "the underline covers the string in cells — two per emoji — so it ends \
+         under the `s` it runs to, not under the sixth character"
     );
 }
 

@@ -682,7 +682,7 @@ impl Compiler {
                 let index = self.constant(Constant::Nothing);
                 emit(code, Opcode::PushConst, index, 0, line);
             }
-            Expr::Variable(name) => {
+            Expr::Variable(name, _) => {
                 let name = self.text(name);
                 emit(code, Opcode::Load, name, 0, line);
             }
@@ -722,7 +722,7 @@ impl Compiler {
                 // need not exist — `json.parse` names a module, and `json` is
                 // never a variable. A receiver that is an expression is loaded,
                 // because the value is what says whether it is an object at all.
-                if !matches!(receiver.as_ref(), Expr::Variable(_)) {
+                if !matches!(receiver.as_ref(), Expr::Variable(..)) {
                     self.expr(receiver, code, blocks, depth, line)?;
                 }
                 for arg in args {
@@ -879,7 +879,7 @@ impl Compiler {
     /// [`crate::bytecode::vm::BytecodeVm::call_method`].
     fn method_name(&mut self, receiver: &Expr, method: &str) -> u32 {
         match receiver {
-            Expr::Variable(name) => self.text(&format!("{name}.{method}")),
+            Expr::Variable(name, _) => self.text(&format!("{name}.{method}")),
             _ => self.text(method),
         }
     }

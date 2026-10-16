@@ -692,7 +692,7 @@ impl Formatter {
             Expr::Text(s) => self.format_string_literal(s),
             Expr::YesNo(b) => self.write(if *b { "yes" } else { "no" }),
             Expr::Nothing => self.write("nothing"),
-            Expr::Variable(name) => self.write(name),
+            Expr::Variable(name, _) => self.write(name),
             Expr::Binary { op, left, right } => {
                 // Every level above binds left to right, so the left side needs
                 // parentheses only when it is looser than this operator, and the

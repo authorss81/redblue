@@ -1,4 +1,4 @@
 #label AnalyzerError
-#position 7:1
+#position 7:13
 #value nothing
 #message Unknown variable 'Inner'

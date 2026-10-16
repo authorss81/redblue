@@ -233,6 +233,21 @@ impl Analyzer {
         self.errors.push((msg.to_string(), span));
     }
 
+    /// Where an unknown name is reported: the position the parser recorded for
+    /// the name, falling back to the statement that read it.
+    ///
+    /// The parser records a span for every name it reads, so the fallback is
+    /// for the shapes where there is no name span to fall back from rather than
+    /// for the common case — and it is what keeps a diagnostic from arriving
+    /// with no position at all, which renders as a bare message.
+    fn name_position(name: &Span, statement: &Span) -> Span {
+        if name.is_known() {
+            *name
+        } else {
+            *statement
+        }
+    }
+
     /// Reports a name the walk could not find, offering the one it most likely
     /// meant.
     ///
@@ -553,9 +568,13 @@ impl Analyzer {
     fn analyze_expr(&mut self, expr: &Expr, span: &Span) {
         match expr {
             Expr::Number(_) | Expr::Text(_) | Expr::YesNo(_) | Expr::Nothing => {}
-            Expr::Variable(name) => {
+            // The name's own span, so `Unknown variable 'nosuchvar'` is reported
+            // under `nosuchvar` and not under the `say` that read it. The
+            // statement's span is the fallback for a name the parser could not
+            // place, so a failure is never left without a position.
+            Expr::Variable(name, name_span) => {
                 if !self.name_is_bound(name) {
-                    self.add_unknown_variable(name, *span);
+                    self.add_unknown_variable(name, Self::name_position(name_span, span));
                 }
             }
             Expr::Binary { op, left, right } => {
@@ -587,12 +606,12 @@ impl Analyzer {
                     // A bare receiver may be a module rather than a variable —
                     // `json.parse` is a module function — so it is an unknown
                     // variable only when it is neither in scope nor a module.
-                    Expr::Variable(name)
+                    Expr::Variable(name, name_span)
                         if !self.name_is_bound(name) && !stdlib::is_module(name) =>
                     {
-                        self.add_unknown_variable(name, *span);
+                        self.add_unknown_variable(name, Self::name_position(name_span, span));
                     }
-                    Expr::Variable(_) => {}
+                    Expr::Variable(..) => {}
                     other => self.analyze_expr(other, span),
                 }
                 for arg in args {
