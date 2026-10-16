@@ -1,4 +1,5 @@
 pub mod banner;
+pub mod bytecode_view;
 pub mod commands;
 pub mod completer;
 pub mod editor;
@@ -827,6 +828,14 @@ impl Repl {
             }
             ReplCommand::Tokens(expr) => {
                 self.print_tokens(&expr);
+                true
+            }
+            ReplCommand::Bytecode(expr) => {
+                self.print_bytecode(&expr);
+                true
+            }
+            ReplCommand::Asm(expr) => {
+                self.print_asm(&expr);
                 true
             }
             ReplCommand::Example => {
@@ -1969,6 +1978,42 @@ impl Repl {
             }
             Err(e) => {
                 println!("Lexer error: {}", e);
+            }
+        }
+    }
+
+    /// `:bytecode <expression>` — what the expression compiles to, one line per
+    /// instruction.
+    ///
+    /// Compiled through the same frontend `rb compile` uses and rendered by the
+    /// same disassembler, and handed to neither the session's VM nor the disk:
+    /// the chunk exists only as the text just printed, because a listing is
+    /// something to read.
+    fn print_bytecode(&self, code: &str) {
+        self.print_code_answer("bytecode", code, bytecode_view::bytecode_lines(code));
+    }
+
+    /// `:asm <expression>` — the same chunk, annotated: the constants table
+    /// above it and a comment naming the source line on every instruction.
+    fn print_asm(&self, code: &str) {
+        self.print_code_answer("asm", code, bytecode_view::asm_lines(code));
+    }
+
+    /// Prints the header naming what was asked about, then the listing or the
+    /// refusal.
+    ///
+    /// The header is the only thing here that is not the disassembler's own text,
+    /// which is what lets the two be compared against `rb dis` byte for byte.
+    fn print_code_answer(&self, command: &str, code: &str, answer: Result<Vec<String>, String>) {
+        match answer {
+            Ok(lines) => {
+                println!("{command}: `{}`", code.trim());
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => {
+                println!("{}", self.style.paint(Paint::Error, &message));
             }
         }
     }

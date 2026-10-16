@@ -59,6 +59,13 @@ pub enum ReplCommand {
     Bench(String),
     Ast(String),
     Tokens(String),
+    /// The instruction listing an expression compiles to.
+    ///
+    /// The argument is an expression, as for [`ReplCommand::Ast`]: the question
+    /// is about code, and the code need not be one the session has run.
+    Bytecode(String),
+    /// The same chunk, annotated: constants table and a comment per instruction.
+    Asm(String),
     Example,
     /// Sets the prompt from a format string, or restores the default when given
     /// no argument.
@@ -356,6 +363,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Tokens(argument.unwrap_or_default()),
     },
     CommandSpec {
+        names: &["bytecode"],
+        description: "List the instructions an expression compiles to",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Bytecode(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["asm"],
+        description: "Show the annotated disassembly of an expression",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Asm(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["example", "examples"],
         description: "Show example code",
         usage: None,
@@ -565,6 +588,8 @@ impl ReplCommand {
             | ReplCommand::Bench(value)
             | ReplCommand::Ast(value)
             | ReplCommand::Tokens(value)
+            | ReplCommand::Bytecode(value)
+            | ReplCommand::Asm(value)
             | ReplCommand::Break(value)
             | ReplCommand::Delete(value) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
@@ -837,6 +862,15 @@ mod tests {
         assert_eq!(
             ReplCommand::parse(":tokens set x to 1 + 2"),
             ReplCommand::Tokens("set x to 1 + 2".to_string())
+        );
+        assert_eq!(
+            ReplCommand::parse(".bytecode say 1 + 1"),
+            ReplCommand::Bytecode("say 1 + 1".to_string()),
+            "the compiler questions take the whole expression, on either sigil"
+        );
+        assert_eq!(
+            ReplCommand::parse(".asm set x to 1"),
+            ReplCommand::Asm("set x to 1".to_string())
         );
         assert_eq!(
             ReplCommand::parse("  :inspect counter  "),

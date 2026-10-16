@@ -23,6 +23,81 @@ use crate::bytecode::opcode::{Opcode, END_TRY_MARKER, MIGHT_FAIL_END_MARKER, STA
 /// chunk happens to use, so a column does not shift with the program.
 const MNEMONIC_WIDTH: usize = 17;
 
+/// Renders `chunk` as a compact listing: the version, then one line per
+/// instruction, and nothing else.
+///
+/// The same walk and the same operand spellings as [`render`] — the listing is
+/// not a second opinion about what a chunk holds — with the constants table and
+/// every trailing comment left out. Those two are what make the annotated form
+/// longer than the listing, which is the whole difference between the two: this
+/// is what the program is made of, and [`render`] is what each of those pieces
+/// came from.
+pub fn render_compact(chunk: &Chunk) -> String {
+    let mut out = String::new();
+
+    let _ = writeln!(
+        out,
+        "; redblue bytecode v{}",
+        crate::bytecode::FORMAT_VERSION
+    );
+
+    render_compact_blocks(&mut out, &chunk.main);
+    out
+}
+
+/// Renders `main` and every block nested in it as a compact listing.
+fn render_compact_blocks(out: &mut String, main: &Block) {
+    let mut pending = vec![Pending {
+        block: main,
+        path: "main".to_string(),
+        depth: 0,
+        blank_before: true,
+    }];
+
+    while let Some(item) = pending.pop() {
+        let Pending {
+            block,
+            path,
+            depth,
+            blank_before: _,
+        } = item;
+
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+        write_block_header(out, &path, block);
+
+        for (offset, instruction) in block.code.iter().enumerate() {
+            out.push_str(&compact_instruction(instruction, offset));
+        }
+
+        for (index, child) in block.blocks.iter().enumerate().rev() {
+            pending.push(Pending {
+                block: child,
+                path: format!("{path}.blocks[{index}]"),
+                depth: depth + 1,
+                blank_before: true,
+            });
+        }
+    }
+}
+
+/// One listing line: the offset, the mnemonic, and the operands, with no
+/// comment.
+///
+/// The mnemonic column keeps its padding, and the padding an instruction with no
+/// operands would end with is trimmed off: the listing is read on a terminal,
+/// where a line's trailing spaces are invisible and are only ever a difference
+/// between this text and what a file holding it would compare equal to.
+fn compact_instruction(instruction: &Instruction, offset: usize) -> String {
+    let opcode = instruction.opcode;
+    let mut line = format!("{offset:04}  {:<MNEMONIC_WIDTH$}", opcode.name());
+
+    write_operands(&mut line, instruction);
+    line.push('\n');
+    line.trim_end().to_string() + "\n"
+}
+
 /// Renders `chunk` as disassembly.
 pub fn render(chunk: &Chunk) -> String {
     let mut out = String::new();
@@ -80,17 +155,7 @@ fn render_blocks(out: &mut String, chunk: &Chunk, main: &Block) {
         for _ in 0..depth {
             out.push_str("  ");
         }
-        let params = if block.params.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", block.params.join(", "))
-        };
-        let _ = writeln!(
-            out,
-            "{path} ({}, arity {}){params}",
-            block.kind.name(),
-            block.arity
-        );
+        write_block_header(out, &path, block);
 
         for (offset, instruction) in block.code.iter().enumerate() {
             out.push_str(&render_instruction(chunk, block, offset, instruction));
@@ -107,6 +172,24 @@ fn render_blocks(out: &mut String, chunk: &Chunk, main: &Block) {
     }
 }
 
+/// The block's own header line: where it is in the tree, what kind it is, how
+/// many arguments it takes, and what they are called.
+///
+/// Shared with the compact listing, so a block is named the same way in both.
+fn write_block_header(out: &mut String, path: &str, block: &Block) {
+    let params = if block.params.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", block.params.join(", "))
+    };
+    let _ = writeln!(
+        out,
+        "{path} ({}, arity {}){params}",
+        block.kind.name(),
+        block.arity
+    );
+}
+
 /// One instruction line: the offset, the mnemonic, the operands, and the
 /// comment.
 fn render_instruction(
@@ -118,30 +201,40 @@ fn render_instruction(
     let opcode = instruction.opcode;
     let mut line = format!("{offset:04}  {:<MNEMONIC_WIDTH$}", opcode.name());
 
-    if opcode.has_operand() {
-        let _ = write!(line, "{}", instruction.arg);
-        if opcode.has_aux() {
-            // `DEF_OBJECT`'s second operand is a name or the reserved index
-            // that means "extends nothing". Printing the reserved index as a
-            // number would bury the one fact a reader wants from the line.
-            if opcode == Opcode::DefObject && instruction.aux == NO_CONST {
-                let _ = write!(line, ", none");
-            } else {
-                let _ = write!(line, ", {}", instruction.aux);
-            }
-        } else if opcode == Opcode::Export && instruction.aux == NO_CONST {
-            // `EXPORT` carries its one operand in `arg` and a refusal marker in
-            // `aux`, so the marker is printed here rather than as a second index
-            // that would read as one — the same treatment `DEF_OBJECT`'s reserved
-            // value gets above.
-            let _ = write!(line, ", not defined");
-        }
-    }
+    write_operands(&mut line, instruction);
 
     let _ = write!(line, "  ; {}", describe(chunk, block, instruction));
 
     line.push('\n');
     line
+}
+
+/// The operands of `instruction`, in the spelling both renderings use.
+///
+/// The reserved operands are printed by name rather than as the index they are
+/// stored as, because the number would bury the one fact a reader wants: what
+/// the instruction does when there is no parent, no alias, or nothing defined.
+fn write_operands(line: &mut String, instruction: &Instruction) {
+    let opcode = instruction.opcode;
+    if !opcode.has_operand() {
+        return;
+    }
+    let _ = write!(line, "{}", instruction.arg);
+    if opcode.has_aux() {
+        // `DEF_OBJECT`'s second operand is a name or the reserved index
+        // that means "extends nothing".
+        if opcode == Opcode::DefObject && instruction.aux == NO_CONST {
+            let _ = write!(line, ", none");
+        } else {
+            let _ = write!(line, ", {}", instruction.aux);
+        }
+    } else if opcode == Opcode::Export && instruction.aux == NO_CONST {
+        // `EXPORT` carries its one operand in `arg` and a refusal marker in
+        // `aux`, so the marker is printed here rather than as a second index
+        // that would read as one — the same treatment `DEF_OBJECT`'s reserved
+        // value gets above.
+        let _ = write!(line, ", not defined");
+    }
 }
 
 /// The trailing comment: the source line the instruction came from, then what
