@@ -773,6 +773,26 @@ fn a_wrongly_typed_split_argument_is_caught_by_try_catch_in_a_redblue_program() 
         Ok(()) => {}
         Err(error) => panic!("a wrongly typed split must be caught, not fatal: {error:?}"),
     }
+    // `run_source` answers `Result<(), Error>` and throws the program's value away,
+    // so `Ok(())` above says the program **ran** — and a failed `expect` is
+    // recorded rather than raised, so it does not even make the run fail. The
+    // `expect caught to be yes` in the program is the whole assertion and has to
+    // be read; without this line a `catch` that never caught anything passed.
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("the fixture lexes");
+    let program = redblue::parser::parse(tokens).expect("the fixture parses");
+    redblue::analyzer::analyze(&program).expect("the fixture analyzes");
+    let (mut vm, outcome) = redblue::run_isolated(&program);
+    outcome.expect("the fixture runs");
+    assert!(
+        vm.take_expectation_failure().is_none(),
+        "`expect caught to be yes` failed, so the wrongly typed split was not \
+         caught by the program's own try"
+    );
+    assert_eq!(
+        vm.take_output(),
+        Vec::<String>::new(),
+        "the fixture says nothing itself, so any line here is the program leaking"
+    );
 }
 
 // ---------------------------------------------------------------------------
