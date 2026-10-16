@@ -237,6 +237,37 @@ impl Style {
     }
 }
 
+/// The text `text` says, with every escape sequence taken off it.
+///
+/// What a document is made of. An export, a test and a `--color=never` pipe all
+/// want the same thing — the text a reader reads — and each of them reaching into
+/// the middle of an escape sequence is three places to get it wrong.
+///
+/// A sequence is `ESC [` followed by parameters and closed by a final byte in
+/// `@`…`~`, which covers everything [`Style::paint`] writes and everything else
+/// a terminal understands. An escape byte that opens nothing is dropped as well:
+/// it is a control character, not text, and a document that carried one would
+/// carry something no reader of the document can see.
+pub fn strip_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.as_str().starts_with('[') {
+            chars.next();
+            for parameter in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&parameter) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The detection order, isolated so it can be tested directly.
 fn resolve_enabled() -> bool {
     if let Ok(mode) = std::env::var("REDBLUE_COLOR") {
@@ -264,5 +295,80 @@ fn detect_terminal() -> bool {
 impl Default for Style {
     fn default() -> Self {
         Self::detect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{strip_escapes, Paint, Style};
+
+    /// The paint a style writes, and the text it says underneath it.
+    fn painted(role: Paint, text: &str) -> String {
+        Style::forced(true).paint(role, text)
+    }
+
+    /// Every role this crate can paint is round-tripped: stripping what
+    /// [`Style::paint`] added gives back the text that was painted, byte for byte.
+    #[test]
+    fn stripping_a_painted_string_gives_the_text_back() {
+        for role in [
+            Paint::Prompt,
+            Paint::Heading,
+            Paint::Result,
+            Paint::Error,
+            Paint::Dim,
+            Paint::BrandRed,
+            Paint::BrandBlue,
+            Paint::BrandMid,
+            Paint::Keyword,
+            Paint::Str,
+            Paint::Number,
+            Paint::Comment,
+            Paint::Builtin,
+            Paint::Operator,
+        ] {
+            assert_eq!(
+                strip_escapes(&painted(role, "hello")),
+                "hello",
+                "{role:?} is paint around the text, and the stripper takes it off"
+            );
+        }
+    }
+
+    /// Text with no escape in it comes back as itself, and a disabled style paints
+    /// nothing — so a plain session and a coloured one cannot export differently
+    /// because of what this function did.
+    #[test]
+    fn edge_stripping_a_plain_string_changes_nothing() {
+        let plain = "say \"hi\" = 1\n  indented\tand tabbed";
+        assert_eq!(strip_escapes(plain), plain);
+        assert_eq!(strip_escapes(""), "");
+        assert_eq!(Style::forced(false).paint(Paint::Result, "x"), "x");
+    }
+
+    /// An escape byte is a control character, not text. A document is read in a
+    /// text editor, a diff and a code review, and a stray `ESC` in one is
+    /// invisible in all three — so it is dropped, and only the text around it is
+    /// kept. The parameter form ends at its final byte, so `[2J` is one sequence
+    /// rather than a `[` and an orphan `J`.
+    #[test]
+    fn edge_an_escape_that_is_not_a_paint_sequence_leaves_only_text() {
+        assert_eq!(
+            strip_escapes("before\u{1b}after"),
+            "beforeafter",
+            "an escape that opens nothing is a control character, and dropping it \
+             keeps the text on both sides of it"
+        );
+        assert_eq!(
+            strip_escapes("\u{1b}[2J\u{1b}[H"),
+            "",
+            "a clear-screen and a cursor-home are terminal control, not text a \
+             document should carry"
+        );
+        assert_eq!(
+            strip_escapes("```redblue"),
+            "```redblue",
+            "and the backticks of a fence are text, so they stay"
+        );
     }
 }
