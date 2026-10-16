@@ -91,7 +91,9 @@ test "integration: unicode text survives every stage"
     set original to "héllo 世界 🎉"
     set copied to original
     expect copied is original to be yes
-    expect length(original) to be 18
+    // Ten characters — h, é, l, l, o, space, 世, 界, space, 🎉 — in eighteen
+    // UTF-8 bytes. `length` is the character count, so it says 10.
+    expect length(original) to be 10
 end
 
 test "integration: text escapes survive every stage"

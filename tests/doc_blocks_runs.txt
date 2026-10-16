@@ -58,11 +58,11 @@ SPEC.md:1070
 SPEC.md:1085
 SPEC.md:1120
 SPEC.md:1156
-SPEC.md:1187
-SPEC.md:1258
-SPEC.md:1292
-SPEC.md:1321
-SPEC.md:1333
+SPEC.md:1189
+SPEC.md:1260
+SPEC.md:1294
+SPEC.md:1323
+SPEC.md:1335
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:547

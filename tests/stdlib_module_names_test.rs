@@ -1629,7 +1629,7 @@ fn the_text_and_math_examples_answer_what_the_spec_claims() {
         (r#"say text.contains("abc", "b")"#, "yes"),
         (r#"say text.starts_with("abc", "ab")"#, "yes"),
         (r#"say text.ends_with("abc", "bc")"#, "yes"),
-        (r#"say text.length("héllo")"#, "6"),
+        (r#"say text.length("héllo")"#, "5"),
         (r#"say list.length([1, 2, 3])"#, "3"),
         (r#"say math.abs(-3)"#, "3"),
         (r#"say math.ceil(1.2)"#, "2"),
@@ -1677,7 +1677,7 @@ fn the_text_and_math_examples_answer_what_the_spec_claims() {
     }
 }
 
-/// `length` counts bytes, and both implementations that can answer it say so.
+/// `length` counts characters, and there is one implementation of it.
 ///
 /// There were two, and they disagreed. `runtime::builtin` — the one both VMs
 /// reach for, and so the one that answered — counted **bytes**;
@@ -1687,36 +1687,50 @@ fn the_text_and_math_examples_answer_what_the_spec_claims() {
 /// being handled early: every program that measures a string would have changed
 /// answer by a factor of two to four, with no change to any of them.
 ///
-/// Bytes is the language's contract, not the reachable arm's accident:
-/// `tests/test_text.rb` names it in six tests
-/// (`edge_text_length_counts_bytes_not_characters` and its neighbours, one of
-/// which spells out *why* — `é` is one glyph and three bytes) and
-/// `corpus/unicode-0001..0008` record it. So the fix went into the arm that
-/// disagreed rather than into the six tests.
+/// Bytes is what the reachable arm happened to answer, and it is wrong: README
+/// promises "Text is fully Unicode" and AGENTS.md makes unicode and combining
+/// marks a mandatory edge class, so `length("日本")` saying 6 for two characters
+/// made the one measurement a program can make about its own text silently
+/// wrong. Characters is the contract now, and the byte count is still reachable
+/// where a program goes looking for it — `bytes.from_text` — so nothing was
+/// taken away, only re-homed.
+///
+/// The dead arm is deleted rather than repaired: `tests/text_length_characters_test.rs`
+/// fails if a second implementation of `length` grows back in `stdlib`.
 #[test]
-fn edge_length_counts_bytes_in_both_arms() {
+fn edge_length_counts_characters_in_one_arm() {
     let cases = [
         // The two spellings agree with each other, which is the claim.
-        (r#"say length("héllo")"#, "6", "six bytes, five characters"),
+        (r#"say length("héllo")"#, "5", "five characters, six bytes"),
         (
             r#"say text.length("héllo")"#,
-            "6",
+            "5",
             "the module spelling agrees",
         ),
         (
             r#"say length(bytes.from_text("héllo"))"#,
             "6",
-            "the byte list agrees",
+            "the byte list still counts bytes",
         ),
-        // One glyph, three bytes: the case `tests/test_text.rb` writes the
+        // One glyph, two characters: the case `tests/test_text.rb` writes the
         // comment for. Written as an escape here because the two forms look
-        // identical in an editor — `"é"` is two bytes when it is precomposed
-        // U+00E9 and three when it is `e` followed by U+0301 COMBINING ACUTE
-        // ACCENT, which is the one this means.
-        ("say length(\"e\u{301}\")", "3", "one glyph, three bytes"),
-        (r#"say length("世界")"#, "6", "six bytes, two characters"),
-        (r#"say length("")"#, "0", "no bytes at all"),
-        (r#"say length("a\nb")"#, "3", "an escape is one byte"),
+        // identical in an editor — `"é"` is one character when it is
+        // precomposed U+00E9 and two when it is `e` followed by U+0301 COMBINING
+        // ACUTE ACCENT, which is the one this means.
+        (r#"say length("e\u0301")"#, "2", "one glyph, two characters"),
+        (
+            r#"say length(bytes.from_text("e\u0301"))"#,
+            "3",
+            "the same text is three bytes",
+        ),
+        (r#"say length("世界")"#, "2", "two characters, six bytes"),
+        (r#"say length("")"#, "0", "no characters at all"),
+        (
+            r#"say length("a
+b")"#,
+            "3",
+            "an escape is one character",
+        ),
         (
             r#"say length([1, 2, 3])"#,
             "3",

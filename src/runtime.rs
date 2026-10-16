@@ -789,21 +789,27 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             if let Some(Value::List(items)) = args.first().cloned() {
                 Ok(Some(Value::Number(items.len() as f64)))
             } else if let Some(Value::Text(s)) = args.first().cloned() {
-                // Bytes, and that is the stated contract rather than a slip:
-                // `tests/test_text.rb` names it in six tests
-                // (`edge_text_length_counts_bytes_not_characters` and its
-                // neighbours) and `corpus/unicode-0001..0008` record it. A
-                // program's answer to `length` is a number it can compare and
-                // index by, and the bytes are what the string is made of —
-                // `bytes.from_text("héllo")` is the same 6, spelled as a list.
+                // Characters, not bytes. `s.len()` is the length of the
+                // `String` as UTF-8, so every text outside ASCII answered two,
+                // three or four times its real length: `length("日本")` said 6
+                // for two characters and `length("é")` said 2 for one. README
+                // promises "Text is fully Unicode", so the one measurement a
+                // program can make about its own text was wrong for every
+                // non-ASCII string and carried a plausible-looking number.
                 //
-                // `stdlib::builtin_function` counted characters, so the two
-                // implementations disagreed by a factor of two to four for any
-                // text outside ASCII. Only this one was reachable, which is why
-                // nothing noticed — and it would have surfaced the day `length`
-                // stopped being handled early, as a silent change to every
-                // program that measures a string.
-                Ok(Some(Value::Number(s.len() as f64)))
+                // A character here is one Unicode scalar value — what Rust's
+                // `char` is — not one user-perceived glyph. `e` + U+0301 is two
+                // characters and one glyph, and answering 1 would mean
+                // segmenting grapheme clusters, which is a different
+                // measurement under a different name. A program that wants the
+                // bytes writes `length(bytes.from_text(s))`, which answers 6
+                // for `"héllo"` because a byte is a byte.
+                //
+                // This is the only implementation of `length` over text:
+                // `stdlib::builtin_function` had a second arm that no caller
+                // reached, and it is deleted. `tests/text_length_characters_test.rs`
+                // pins that there is one.
+                Ok(Some(Value::Number(s.chars().count() as f64)))
             } else {
                 Err(Error::Runtime(
                     "length requires a list or text".to_string(),

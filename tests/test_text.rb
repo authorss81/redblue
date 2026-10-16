@@ -1,7 +1,9 @@
 // Redblue text tests.
 //
-// `length` on text counts bytes, not characters, so the unicode tests pin that
-// behaviour instead of assuming character semantics.
+// `length` on text counts characters — Unicode scalar values — not UTF-8
+// bytes, so the unicode tests pin character counts and say how many bytes the
+// same text is when the two differ. A program that wants the bytes writes
+// `length(bytes.from_text(s))`.
 
 test "text: empty text has length zero"
     set empty to ""
@@ -16,8 +18,11 @@ test "text: a singleton text is its own length"
 end
 
 test "text: length counts characters for ascii"
+    // Every ASCII character is one byte, so this is the one row where the
+    // character count and the byte count cannot tell each other apart.
     set greeting to "hello"
     expect length(greeting) to be 5
+    expect length(bytes.from_text(greeting)) to be 5
 end
 
 test "text: concatenation joins two texts"
@@ -68,42 +73,61 @@ test "text: empty text equals empty text"
     expect a is b to be yes
 end
 
-test "edge_text_length_counts_bytes_not_characters"
+test "edge_text_length_counts_characters_not_bytes"
+    // Five characters, six UTF-8 bytes: "é" is two bytes. Both numbers are
+    // asserted here so the difference is stated rather than implied — the byte
+    // count is still reachable, through `bytes.from_text`.
     set accented to "héllo"
-    expect length(accented) to be 6
+    expect length(accented) to be 5
+    expect length(bytes.from_text(accented)) to be 6
 end
 
-test "edge_text_length_counts_bytes_for_cjk"
+test "edge_text_length_counts_cjk_characters"
+    // Two characters, six bytes: each ideograph is three.
     set cjk to "世界"
-    expect length(cjk) to be 6
+    expect length(cjk) to be 2
+    expect length(bytes.from_text(cjk)) to be 6
 end
 
-test "edge_text_length_counts_bytes_for_emoji_outside_the_bmp"
+test "edge_text_length_counts_emoji_outside_the_bmp_as_one"
+    // One character, four bytes — the surrogate-pair case a byte count answered
+    // 4 for.
     set party to "🎉"
-    expect length(party) to be 4
+    expect length(party) to be 1
+    expect length(bytes.from_text(party)) to be 4
 end
 
-test "edge_text_combining_mark_counts_as_its_own_byte"
-    // "e" followed by U+0301 COMBINING ACUTE ACCENT is three bytes and renders
-    // as one glyph, so byte length and glyph count deliberately disagree.
-    set combining to "é"
-    expect length(combining) to be 3
-    expect combining to be "é"
+test "edge_text_combining_mark_is_a_character_of_its_own"
+    // "e" followed by U+0301 COMBINING ACUTE ACCENT is two characters and
+    // renders as one glyph, so character length and glyph count deliberately
+    // disagree. `length` counts characters: it is 2, and it is not 3 (the byte
+    // count) and not 1 (the grapheme count, which is a different measurement
+    // under a different name).
+    set combining to "e\u0301"
+    expect length(combining) to be 2
+    expect length(bytes.from_text(combining)) to be 3
+    expect combining to be "e\u0301"
 end
 
 test "edge_text_right_to_left_text_round_trips"
+    // Four characters, eight bytes: the count does not depend on where a bidi
+    // mark sits, because it is over characters in either direction.
     set hebrew to "שלום"
     expect hebrew to be "שלום"
-    expect length(hebrew) to be 8
+    expect length(hebrew) to be 4
+    expect length(bytes.from_text(hebrew)) to be 8
 end
 
 test "edge_text_emoji_and_cjk_share_one_literal"
+    // h, i, space, party popper, space, 世, 界 is seven characters and
+    // fourteen bytes.
     set mixed to "hi 🎉 世界"
     expect mixed to be "hi 🎉 世界"
-    expect length(mixed) to be 14
+    expect length(mixed) to be 7
+    expect length(bytes.from_text(mixed)) to be 14
 end
 
-test "text: newline escape is one byte and one character"
+test "text: newline escape is one character"
     set two_lines to "a\nb"
     expect length(two_lines) to be 3
 end

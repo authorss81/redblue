@@ -262,7 +262,7 @@ text.split("text", by), text.join(list, by)
 text.contains("text", sub)
 text.starts_with("text", prefix), text.ends_with("text", suffix)
 text.replace("text", from, to)
-text.length("text")      // bytes, not characters: text.length("héllo") is 6
+text.length("text")      // characters, not bytes: text.length("héllo") is 5
 // every one of them is also spelled flat: uppercase("text"), split("text", by), ...
 ```
 

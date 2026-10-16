@@ -692,20 +692,16 @@ pub fn builtin_function(name: &str, args: Vec<Value>) -> Option<Value> {
         "is_list" => Some(Value::YesNo(matches!(args.first()?, Value::List(_)))),
         "is_record" => Some(Value::YesNo(matches!(args.first()?, Value::Record(_)))),
 
-        "length" => match args.first()? {
-            // Bytes, which is what `runtime::builtin` answers and what the
-            // language has always answered: `tests/test_text.rb` names the
-            // contract in six tests and `corpus/unicode-0001..0008` record it.
-            // This arm used to count characters, which is how two
-            // implementations of one function disagreed by a factor of two to
-            // four for every text outside ASCII — and only the other one was
-            // reachable, so no test could see it. `runtime::builtin` handles
-            // `length` first and answers before this is consulted; the two must
-            // say the same thing on the day that stops being true.
-            Value::Text(s) => Some(Value::Number(s.len() as f64)),
-            Value::List(items) => Some(Value::Number(items.len() as f64)),
-            _ => None,
-        },
+        // `length` has no arm here, and that is the point. It had one, and it
+        // was dead: [`crate::runtime::builtin`] matches `"length" | "len"`
+        // before this function is consulted, and answers for both a list and a
+        // text and returns a runtime error for anything else — so nothing ever
+        // reached the copy below. Two implementations of one function that
+        // could not see each other is how `length("日本")` was 6 in one and 2 in
+        // the other for as long as both existed, with only the reachable one
+        // ever running. There is now one arm, in `runtime::builtin`, and
+        // `tests/text_length_characters_test.rs` fails if a second grows here.
+
         // `pop` and `shift` return the element they removed and leave the list they
         // were given as it was. Redblue's lists are copy-on-write, so a program
         // that wants the shorter list writes `set xs to pop(xs)` — and a

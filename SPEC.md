@@ -400,8 +400,8 @@ together, so `length(items)`, `say length`, and a program that binds its own
 of a line is a syntax error where it is written.
 
 `length of X` is `length(X)`, which is a builtin and nothing else: a text
-answers its length in bytes and a list answers its element count, and anything
-else is the runtime error `length requires a list or text`.
+answers its length in characters and a list answers its element count, and
+anything else is the runtime error `length requires a list or text`.
 
 `is in` tests **list membership**: the right side must be a `list`, and the
 answer is `yes` when the left side equals one of its elements by value. There
@@ -1163,16 +1163,18 @@ set holds to text.contains("abc", "b")  // yes
 set starts to text.starts_with("abc", "ab")  // yes
 set ends to text.ends_with("abc", "bc")  // yes
 set swapped to text.replace("a-b", "-", "+")  // "a+b"
-set size to text.length("héllo")  // 6
+set size to text.length("héllo")  // 5
 ```
 
-`length` counts **bytes**, which is what a text is made of: `length("héllo")` is
-6 and `length("世界")` is 6, not 2. The same number is spelled as a list by
-`length(bytes.from_text("héllo"))`, so a program that wants the byte values
-rather than the count asks § bytes below for them. `tests/test_text.rb` pins this
-in six tests and `corpus/unicode-0001..0008` record it, including the case the
-rule exists for: `é` — an `e` and a combining acute accent — is one glyph, three
-bytes and a length of 3.
+`length` counts **characters**, where a character is one Unicode scalar value:
+`length("héllo")` is 5 and `length("世界")` is 2. It is not a glyph count —
+`é`, an `e` and a combining acute accent, is one glyph, two characters and a
+length of 2. The **byte** count is still available and is spelled as a list by
+`length(bytes.from_text("héllo"))`, which is 6, so a program that wants the
+byte values rather than the count asks § bytes below for them.
+`tests/test_text.rb` pins both numbers in six tests and
+`corpus/unicode-0001..0008` record the character counts, including the case the
+rule exists for.
 
 `length` answers a text and a list, and it is the same function under each of the
 three spellings: `length(xs)`, `text.length(xs)` and `list.length(xs)`. A record is

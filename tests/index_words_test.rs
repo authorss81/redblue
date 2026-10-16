@@ -854,18 +854,18 @@ fn edge_neither_worded_form_takes_an_operand_from_the_next_line() {
 /// The Unicode row: an element count is a count of elements, not of bytes, and
 /// the worded spelling must not be the one that gets it wrong.
 #[test]
-fn edge_length_of_measures_elements_and_bytes_under_the_right_spelling() {
+fn edge_length_of_measures_elements_and_characters_under_the_right_spelling() {
     // Three elements, one of them multi-byte: `length of` must say 3.
     assert_eq!(
         printed("set xs to [\"héllo\", \"日本語\", \"x\"]\nsay length of xs\n"),
         vec!["3"]
     );
-    // A text is measured in bytes, which is the contract `stdlib.rs` and
-    // `tests/test_text.rb` already fix; the worded form is the same function.
+    // A text is measured in characters, which is the contract `runtime.rs` and
+    // `tests/test_text.rb` now fix; the worded form is the same function.
     assert_eq!(
         printed("say length of \"héllo\"\n"),
-        vec!["6"],
-        "a text answers its length in bytes, as `length(\"héllo\")` does"
+        vec!["5"],
+        "a text answers its length in characters, as `length(\"héllo\")` does"
     );
     assert_eq!(
         printed("say length of \"\"\n"),
