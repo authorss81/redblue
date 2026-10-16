@@ -46,7 +46,8 @@ painted `Paint::Error`; `1 | say nosuchvar` is left exactly as it was typed.
 ## What changed
 
 `must_touch: ["src/"]` is satisfied: nine files under `src/`, **+897 −61**, out of
-+1317 −85 over the whole phase (22 files).
++1321 −85 over the whole phase (22 files) — `git show --numstat b48189a`, re-derived
+rather than trusted.
 
 | File | Lines | What |
 |---|---|---|
@@ -62,7 +63,7 @@ painted `Paint::Error`; `1 | say nosuchvar` is left exactly as it was typed.
 | `tests/diagnostics_test.rs` | +12 −7 | `edge_a_multibyte_line_is_underlined_by_display_cell_and_not_by_byte` (renamed): the underline of an emoji is two cells per emoji, so `^~~~~~~~` became `^~~~~~~~~~`. |
 | `tests/formatter_test.rs`, `tests/interpolation_test.rs` | +6 −6 | The new arity, plus the interpolation column assertion moving from the statement's 5 to the name's 16. |
 | `tests/tooling_grammar_test.rs` | +3 −2 | The LSP diagnostic's pinned column for `say missing`: 2:1 → 2:5. This test was **failing** on the tree before this round — see below. |
-| `tests/unreviewed_work_ack_test.rs` | +1 | Acknowledgement entry for the resume commit `8389c5a`, so `unreviewed_work_in_head_history_is_acknowledged` has nothing unacknowledged to report. Data, not prose: the entry names the SHA, what it carries and why it was deliberately not rewritten. |
+| `tests/unreviewed_work_ack_test.rs` | +1 −1 | Acknowledgement entry for the resume commit this tree actually carries, `b48189a`, so `unreviewed_work_in_head_history_is_acknowledged` has nothing unacknowledged *and* nothing stale to report. Data, not prose: the entry names the SHA, what it carries and why it was deliberately not rewritten. The entry for `8389c5a` — the abandoned earlier resume of this same phase, which is not an ancestor of HEAD — was replaced rather than kept, because `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure. See "What this round changed". |
 
 The REPL part is small: two lines at the print site, three functions to render and
 paint a diagnostic, and one more so a `.type`/`.time`/`.bench` failure gets the same
@@ -130,7 +131,9 @@ reading of the drawing that production does not have.
 
 ## Gates
 
-Run in this checkout, in this order, on the tree as it now stands:
+Run in this checkout, in this order, on the tree as it now stands (re-run in full on
+this round, after the one-line acknowledgement fix below; the numbers are the same
+because nothing else moved):
 
 | Gate | Result |
 |---|---|
@@ -145,6 +148,42 @@ Run in this checkout, in this order, on the tree as it now stands:
 recorded. I did not create, inspect or work around them. The four cargo gates above
 were run here; `./rbops/verify.sh` will have to run where it exists.
 `examples/*.rb` (7 files) were each run through `rb run` by hand and all exit 0.
+
+## What this round changed
+
+One failure, in one line of data, and nothing else:
+
+```
+$ cargo test --all-targets
+---- unreviewed_work_in_head_history_is_acknowledged stdout ----
+unreviewed-work commits selected: 27 | acknowledged: 27 | unacknowledged: 1 | stale entries: 1
+  | UNACKNOWLEDGED: b48189aa679e0f4df60f5cd5d10a4894d77bc3f7  resume phase-059: adopt preserved work
+  | STALE: 8389c5a199498f9b10ba702305071767e122b392
+```
+
+`tests/unreviewed_work_ack_test.rs:92` acknowledged `8389c5a` — the resume commit that
+adopted the *previous* attempt's work. This tree is adopted by a different commit,
+`b48189a` (`git log --oneline -2`: `b48189a` → `d514651`), and `8389c5a` is not an
+ancestor of HEAD. So the audit named the wrong SHA twice over: the commit that is on
+HEAD unacknowledged, and an acknowledgement pointing at nothing. The entry was
+**replaced**, not added to — `scan` treats an acknowledgement whose SHA the history does
+not contain as stale, and the test asserts `scan.stale.is_empty()`, so keeping both
+would have traded one failure for another. This is the same handling phase-056's entry
+records for its own abandoned attempt (`:90`).
+
+No production code, no test, no assertion and no threshold was touched to get there.
+After the one line: 13 passed, 0 failed in `unreviewed_work_ack_test`, and 1748 passed,
+0 failed across the suite.
+
+What was re-verified rather than taken on trust, on this tree:
+
+- the finding itself is fixed — `printf 'say nosuchvar\n' | rb` prints
+  `--> <session>:1:5`, the line `1 | say nosuchvar` and the caret under `nosuchvar`,
+  while `rb run` on the same line prints the same picture under a path
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test --all-targets` and `cargo test --doc` all run here, in that order
+- `examples/*.rb` — 7 files, each through `rb run`, all exit 0
+- the 12 `repl::tests::error_rendering` tests pass, unmodified
 
 ## What the round-two review changed
 
