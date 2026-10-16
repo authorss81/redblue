@@ -387,6 +387,24 @@ fn edge_a_command_argument_with_a_space_in_it_is_not_truncated() {
         .assert_stdout_lacks("No such file");
 }
 
+/// The same file, quoted — which is the form TAB offers for a name holding a
+/// space, so offering it and not being able to load it would be a completer that
+/// lies.
+#[test]
+fn edge_a_quoted_path_with_a_space_in_it_is_the_file_it_names() {
+    let dir = scratch_dir().join("quoted with a space");
+    std::fs::create_dir_all(&dir).expect("the directory should be creatable");
+    let program = dir.join("my file.rb");
+    std::fs::write(&program, "say \"QUOTED PATH\"\n").expect("the file should be writable");
+
+    let s = session(&format!(":load \"{}\"\n:quit\n", program.display()));
+    let _ = std::fs::remove_file(&program);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("QUOTED PATH")
+        .assert_stdout_lacks("No such file");
+}
+
 /// `:vars` prints a listing, and a listing whose order changes from one session
 /// to the next cannot be read. `variables` is a `HashMap`, so it is sorted.
 #[test]
@@ -1302,5 +1320,238 @@ fn asm_at_the_prompt_agrees_with_rb_dis_on_the_same_source() {
         body.len() > 3,
         "and the annotated form is more than a header and a block: {} lines",
         body.len()
+    );
+}
+
+/// The first line every exported document starts with, and the fence the input
+/// of each exchange is written inside.
+///
+/// Named here rather than written inline because two assertions are about them:
+/// that the document begins where the export began, and that a two-line session
+/// has exactly two fences of this kind.
+const EXPORT_HEADER: &str = "# Redblue session";
+const EXPORT_FENCE: &str = "```redblue";
+
+/// The prompt a session under test uses, so the lines the export itself printed
+/// can be told apart from the prompts around them.
+///
+/// `:prompt` is the REPL's own command and the export runs after it, so every
+/// prompt in the session is this one and a line of the document is a line that is
+/// not followed by a prompt.
+const EXPORT_PROMPT: &str = "~rb~ ";
+
+/// Strips every escape sequence, so an assertion is about text and cannot fail
+/// because the palette changed.
+fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for skip in chars.by_ref() {
+                if skip == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The document a session printed, from its header to the next prompt.
+///
+/// The prompt the export was typed at shares the header's line — it is printed
+/// before the line is read — so it is dropped with everything before the header.
+/// What is left is the export: the header is the first line of the document, and
+/// the next prompt is the next command.
+fn exported_document(stdout: &str) -> String {
+    let stdout = plain(stdout);
+    let start = stdout.find(EXPORT_HEADER).unwrap_or_else(|| {
+        panic!(
+            "the session exported nothing:\n{stdout}\n\
+             (an export is Markdown: a {EXPORT_HEADER:?} heading and the session \
+             inside it)"
+        )
+    });
+    let rest = &stdout[start..];
+    let end = rest
+        .find(&format!("\n{EXPORT_PROMPT}"))
+        .unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+/// The lines of a fenced block, as `(fence language, body)` pairs, in the order
+/// they appear.
+fn fenced_blocks(document: &str) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    let mut fence: Option<String> = None;
+    let mut body: Vec<&str> = Vec::new();
+    for line in document.lines() {
+        let is_fence = line.starts_with("```");
+        match (&fence, is_fence) {
+            (None, true) => fence = Some(line.trim_start_matches('`').to_string()),
+            (Some(_), true) => {
+                blocks.push((fence.take().unwrap_or_default(), body.join("\n")));
+                body.clear();
+            }
+            (Some(_), false) => body.push(line),
+            (None, false) => {}
+        }
+    }
+    blocks
+}
+
+/// `.export` with no path writes the session as Markdown on stdout.
+///
+/// A session could leave the terminal only as scrollback before this — prompts,
+/// colour and all, which is not a thing you can paste into an issue. The shape
+/// asserted here is structural: one `redblue` fence per line the session ran, and
+/// what the line said as a text block after it.
+#[test]
+fn edge_export_writes_a_two_line_session_as_two_fenced_markdown_blocks() {
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\nsay \"one\"\nsay \"two\"\n.export\n:quit\n"
+    ));
+
+    s.assert_exited_ok();
+    let document = exported_document(&s.stdout);
+
+    assert!(
+        document.starts_with(EXPORT_HEADER),
+        "the document says what it is:\n{document}"
+    );
+    assert_eq!(
+        document.matches(EXPORT_FENCE).count(),
+        2,
+        "one fence per line the session ran, and no other:\n{document}"
+    );
+    assert_eq!(
+        fenced_blocks(&document)
+            .iter()
+            .map(|(language, body)| (language.as_str(), body.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("redblue", "say \"one\""), ("redblue", "say \"two\""),],
+        "each block is what the user typed, in the order they typed it:\n{document}"
+    );
+    assert_eq!(
+        document.lines().collect::<Vec<_>>(),
+        vec![
+            EXPORT_HEADER,
+            "",
+            EXPORT_FENCE,
+            "say \"one\"",
+            "```",
+            "one",
+            "",
+            EXPORT_FENCE,
+            "say \"two\"",
+            "```",
+            "two",
+        ],
+        "the whole document, line for line: a fence holding what was typed, and \
+         what it said as a text block after it:\n{document}"
+    );
+    assert!(
+        !document.contains('\u{1b}'),
+        "an export carries no escape sequence, however the session was coloured"
+    );
+    assert!(
+        !document.contains(EXPORT_PROMPT),
+        "and no prompt between the exchanges: what it holds is the session, not \
+         the terminal it was typed at:\n{document}"
+    );
+}
+
+/// The outputs are in the export, and reading the fences back out of a file gives
+/// the session to run again.
+///
+/// Pinned on a fixed two-line session and nothing about wall time: the round trip
+/// is export → read the blocks → run them in a fresh session → the same lines of
+/// output, which is the whole claim.
+#[test]
+fn edge_a_session_exported_to_a_file_runs_again_from_the_fences_read_back() {
+    let path = scratch_path("exported-session", "md");
+    let first = session(&format!(
+        "say \"one\"\nsay \"two\"\n.export {}\n:quit\n",
+        path.display()
+    ));
+    first
+        .assert_exited_ok()
+        .assert_stdout_contains("Exported 2 exchange(s)");
+
+    let document = std::fs::read_to_string(&path).expect("the export should be readable");
+    let _ = std::fs::remove_file(&path);
+
+    let blocks = fenced_blocks(&plain(&document));
+    let inputs: Vec<&str> = blocks
+        .iter()
+        .filter(|(language, _)| language == "redblue")
+        .map(|(_, body)| body.as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        vec!["say \"one\"", "say \"two\""],
+        "the file holds the session's own lines, fenced:\n{document}"
+    );
+
+    let second = session(&format!("{}\n:quit\n", inputs.join("\n")));
+    second
+        .assert_exited_ok()
+        .assert_stdout_contains("one")
+        .assert_stdout_contains("two");
+    for said in ["one", "two"] {
+        assert_eq!(
+            second.count_stdout(said),
+            1,
+            "each line of the read-back session says {said:?} once, as it did \
+             before it was exported\n--- actual ---\n{}",
+            second.stdout
+        );
+    }
+}
+
+/// A path that cannot be written is named in the complaint.
+///
+/// `/nonexistent-directory/session.md` names a directory that is not there, so
+/// the write fails on every platform this runs on. The message has to carry the
+/// path: "No such file or directory" on its own tells the user nothing about
+/// which of the paths in the command was the one at fault.
+#[test]
+fn edge_export_to_a_path_that_cannot_be_written_names_the_path() {
+    let unwritable = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/tmp/no-such-directory-for-export")
+        .join("session.md");
+
+    let s = session(&format!(
+        "say \"one\"\n.export {}\n:quit\n",
+        unwritable.display()
+    ));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Could not export")
+        .assert_stdout_contains(&unwritable.display().to_string());
+    assert!(
+        !unwritable.exists(),
+        "a failed export leaves nothing behind at the path it named"
+    );
+}
+
+/// A session that has run nothing exports a document that says so, rather than a
+/// file of nothing a reader has to interpret.
+#[test]
+fn edge_export_of_a_session_that_has_run_nothing_says_so() {
+    let s = session(&format!(":prompt {EXPORT_PROMPT}\n.export\n:quit\n"));
+
+    s.assert_exited_ok();
+    let document = exported_document(&s.stdout);
+    assert_eq!(
+        document.matches(EXPORT_FENCE).count(),
+        0,
+        "nothing ran, so nothing is fenced:\n{document}"
+    );
+    assert!(
+        document.contains("Nothing has been run"),
+        "and the document says why it is empty:\n{document}"
     );
 }
