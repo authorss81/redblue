@@ -324,19 +324,29 @@ method_decl      = 'to' 'can' identifier [ '(' [ parameter { ',' parameter } ] '
 ```
 try_statement    = 'try'
                     { statement }
-                    { 'catch' [ identifier [ identifier ] ]
+                    { 'catch' [ identifier [ identifier ]
+                                [ 'of' failure_kind
+                                  [ identifier ] ] ]
                       { statement } }
                     [ 'finally'
                       { statement } ]
                     'end'
+
+failure_kind     = 'Error' | 'Runtime' | 'Io' | 'Limit'
 ```
 
 A `catch` names what it caught by naming it, and the name is an `identifier` like
 any other — `error` is not a keyword. So `catch e` binds `e`, `catch error` binds
 a name spelled `error`, and `catch error e` is the same handler with the name
 written after the word, which is read when a second identifier follows `error` on
-the same line. There is no `catch error of <Type>`: `of` is not a word in the
-language.
+the same line. A handler may instead match the kind of failure it caught:
+`catch error of <failure_kind>` binds the failure and runs its body only for that
+kind, and a failure of any other kind is not handled there — it belongs to
+whatever is written around the `try`. The list of names is closed; anything else
+after `of` is a parse error, as is `of` with no name after it at all, and
+`SPEC.md` § "Handling Failures by Kind" says what each name matches. `of` is
+read as an ordinary identifier that happens to be spelled `of`, so it is not a
+keyword and a program may still bind that name.
 
 The word is matched exactly, the way every other word in the language is: `catch
 ERROR err` is a `catch` that binds a name spelled `ERROR`, and `err` is left
@@ -345,8 +355,9 @@ name being an ordinary identifier — a `catch error <name>` may bind a name
 spelled `error` again (`catch error error` binds `error`), and the binder belongs
 to the `catch` body alone, so it is not readable before the `try`, after the
 `end`, or in a `finally` beside it. `rb format` writes the canonical `catch
-<name>` and drops the handler word; the formatted program reads back to the same
-tree and handles the same failure.
+<name>` — or `catch error of <failure_kind> <name>` for a typed handler — and
+drops the handler word; the formatted program reads back to the same tree and
+handles the same failures.
 
 The `catch` is optional, and a `try` without one is not a handler: the `finally`
 is still owed however its region is left — a failure runs it before the failure is

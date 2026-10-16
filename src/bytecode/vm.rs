@@ -281,16 +281,26 @@ struct Handler {
     catch: Option<CatchHandler>,
     /// The name a `catch` binds, empty when there is no `catch` to bind it.
     catch_var: String,
-    /// The kind a typed `catch` matches, or `None` for an untyped handler and
-    /// for a `try` with no `catch`.
+    /// The kind a typed `catch` matches: the outer `Option` is `None` for an
+    /// untyped handler and for a `try` with no `catch`, and the inner one is the
+    /// kind — or `None` for a catch block naming a kind this build does not know.
     ///
     /// Read off the catch block's parameter list where `TRY` installs the
-    /// handler, and asked once per failure. `None` rather than a kind that
-    /// matches everything, because `Error` is a kind a program writes and means
-    /// every failure: a typed handler that catches everything still binds the
-    /// failure, where an untyped one binds the word `error`, and one flag
-    /// cannot say which of the two a handler is.
-    catch_kind: Option<FailureKind>,
+    /// handler, and asked once per failure. The outer `Option` rather than a
+    /// kind that matches everything, because `Error` is a kind a program writes
+    /// and means every failure: a typed handler that catches everything still
+    /// binds the failure, where an untyped one binds the word `error`, and one
+    /// flag cannot say which of the two a handler is.
+    ///
+    /// The inner `Option` rather than a single kind, because the two absences
+    /// are opposites. A kind this build does not know is a `.rbc` written by a
+    /// build that had one, and its handler matches *no* failure: reading it as
+    /// no kind at all would widen a handler the writer narrowed into one that
+    /// catches everything, which is the opposite of what it says. It cannot be
+    /// written by the frontend today — the parser refuses a name outside the
+    /// closed list — so it is a `.rbc` from elsewhere, and a handler that does
+    /// nothing is the honest reading of it.
+    catch_kind: Option<Option<FailureKind>>,
     /// The `finally` body, or `None` for a `try` with no `finally`.
     finally: Option<(Arc<Chunk>, Vec<u32>)>,
     /// The operand stack height the protected code started at, which is what the
@@ -3276,15 +3286,18 @@ impl BytecodeVm {
             let catch_block = self.block_of(&chunk, &path)?;
             let catch_var = catch_block.name.clone();
             // The kind a typed handler matches is the catch block's first
-            // parameter; an untyped handler has none, and a name this build does
-            // not know matches no failure rather than every one — a file that
-            // named a kind no longer in the list is a file whose handler does
-            // nothing, and failing loudly about that is not what this read is
-            // for.
+            // parameter. Three answers, and the middle one is not the same as
+            // the first: no parameter at all is an untyped handler, which
+            // matches every failure and binds the word `error`; a parameter
+            // this build does not recognise is a `.rbc` written by a build that
+            // had that kind, and it matches no failure rather than every one.
+            // A file that named a kind no longer in the list is a file whose
+            // handler does nothing, and catching everything instead would be
+            // the opposite of what it says.
             catch_kind = catch_block
                 .params
                 .first()
-                .and_then(|name| FailureKind::from_name(name));
+                .map(|name| FailureKind::from_name(name));
             Some(((chunk, path), catch_var))
         };
         let finally = if instruction.aux == NO_BLOCK {
@@ -3395,11 +3408,16 @@ impl BytecodeVm {
             // does not run at all, and the failure belongs to whatever is
             // written around it — the same road a `try` with no `catch` hands
             // it down, and the same road the tree-walking VM's `?` walks when a
-            // typed handler declines.
-            let declined = catch_kind.is_some_and(|kind| !kind.matches(error));
+            // typed handler declines. A kind this build does not know declines
+            // every failure and not just the ones it would have matched, so the
+            // name is asked whether it resolves rather than only whether it
+            // matches.
+            let declined = match catch_kind {
+                Some(kind) => !kind.is_some_and(|kind| kind.matches(error)),
+                None => false,
+            };
             let bodies = if declined {
-                self.run_finally(&handler)
-                    .map(|finally| finally.is_left())
+                self.run_finally(&handler).map(|finally| finally.is_left())
             } else {
                 self.run_catch(&handler, error).and_then(|caught| {
                     self.run_finally(&handler)

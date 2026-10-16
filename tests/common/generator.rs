@@ -930,6 +930,13 @@ const RUNTIME_ERRORS: &[&str] = &[
     "set caught to no\ntry\n    say [1][7]\ncatch error\n    set caught to yes\nend\nsay caught\n",
     "set caught to no\ntry\n    say (1 + \"a\") + \"b\"\ncatch error\n    set caught to yes\nend\nsay caught\n",
     "set caught to no\ntry\n    say \"abc\"[0]\ncatch error\n    set caught to yes\nend\nsay caught\n",
+    // The typed catch, `catch error of <Type>`: one handler naming the kind it
+    // matches and binding the failure, one that named no binder and so binds
+    // `error` where the untyped handler binds it, and the `finally` a declining
+    // handler is still owed. The kind and the record's type are read rather than
+    // its position, because a `.rbc` instruction carries a line and no column
+    // and the two engines place a failure at different columns by convention.
+    "set caught to no\ntry\n    say 1 + \"a\"\ncatch error of Runtime failure\n    say failure.kind\n    say type_of(failure)\n    set caught to yes\nend\ntry\n    say 1 / 0\ncatch error of Runtime\n    say error.kind\nfinally\n    say \"cleanup\"\nend\nsay caught\n",
 ];
 
 fn runtime_errors(out: &mut Vec<(String, String)>) {

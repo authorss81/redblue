@@ -12,9 +12,15 @@
 //! record of `kind`, `message`, `line` and `column`.
 //!
 //! Both engines call the same two functions, so a failure caught on the
-//! tree-walking VM and the same failure caught on the bytecode VM are the same
-//! value, field for field, rather than two shapes a program would have to tell
-//! apart.
+//! tree-walking VM and the same failure caught on the bytecode VM are built the
+//! same way: the same four fields, in the same order, by the same code. What
+//! they are not is the same *failure* — the two engines place a runtime failure
+//! at different columns by their own convention, because a `.rbc` instruction
+//! carries a line and no column (`src/bytecode/vm.rs`, `line_span`). So the
+//! `kind` and the `message` a handler reads are the same on both engines, and
+//! the `line` is too, while `column` says where each engine says it happened. A
+//! program that compares the whole record across the two is comparing two
+//! different failures; one that reads `kind` is not.
 //!
 //! The list is closed and small. A program cannot invent a kind, cannot raise
 //! one, and cannot match `Io` against a failure that never touched the host:
@@ -113,10 +119,9 @@ fn kind_of(error: &Error) -> FailureKind {
     match error {
         Error::Io(_) => FailureKind::Io,
         Error::Limit(_, _) => FailureKind::Limit,
-        Error::Lexer(_, _)
-        | Error::Parser(_, _)
-        | Error::Analyzer(_, _)
-        | Error::Runtime(_, _) => FailureKind::Runtime,
+        Error::Lexer(_, _) | Error::Parser(_, _) | Error::Analyzer(_, _) | Error::Runtime(_, _) => {
+            FailureKind::Runtime
+        }
     }
 }
 
@@ -141,7 +146,10 @@ pub fn value_of(error: &Error) -> Value {
     };
 
     let mut fields = Fields::new();
-    fields.insert("kind".to_string(), Value::Text(kind_of(error).name().to_string()));
+    fields.insert(
+        "kind".to_string(),
+        Value::Text(kind_of(error).name().to_string()),
+    );
     fields.insert(
         "message".to_string(),
         Value::Text(error.message().to_string()),
@@ -157,8 +165,20 @@ pub fn value_of(error: &Error) -> Value {
 /// Built through the same arithmetic every other number in the language is, so
 /// a line past `usize` cannot become a value the language has no spelling for;
 /// a position that large is not one a source file has.
+///
+/// Saturating rather than `as`, because the narrowing conversion of a `usize`
+/// past `2^53` is not a rounding the language can name: every number it holds is
+/// an `f64`, and the largest one it can write back out is `2^53`. A line that
+/// big is not a line, so the position saturates at the largest number there is
+/// rather than becoming a different one.
 fn position(n: usize) -> Value {
-    Value::Number(n as f64)
+    const LARGEST: f64 = 9_007_199_254_740_992.0; // 2^53
+    let as_number = n as f64;
+    if as_number > LARGEST {
+        Value::Number(LARGEST)
+    } else {
+        Value::Number(as_number)
+    }
 }
 
 /// The kind `error` is, for a caller that is not a handler: the linter, the

@@ -1653,10 +1653,18 @@ impl Parser {
             // `catch error e`.
             if self.catch_keyword_ahead() {
                 self.advance(); // consume 'error'
+
                 // `catch error of <Type>` — a handler that runs only for the
                 // kinds it names. Read here rather than left as two orphan
                 // statements, which is what `of <Type>` used to be.
-                if self.catch_type_ahead() {
+                //
+                // `of` alone is the typed spelling and nothing else: there is no
+                // `catch error of` that is an untyped handler with a name
+                // spelled `of`, so it is read as the head of a typed catch and
+                // the kind after it is required. `failure_kind` refuses what is
+                // not there, which keeps the closed list's refusal the only way
+                // a kind is not read.
+                if self.of_keyword_ahead() {
                     self.advance(); // consume 'of'
                     catch_kind = Some(self.failure_kind()?);
                     // A typed handler binds the word `error` even when the source
@@ -2045,55 +2053,48 @@ impl Parser {
         )
     }
 
-    /// Whether the current position is the `of <Type>` of a typed
+    /// Whether the current position is the `of` of a typed
     /// `catch error of <Type>`.
     ///
-    /// The same shape as [`Parser::catch_keyword_ahead`] — the word `of` and a
-    /// second identifier on the same line — because that is the only place two
-    /// identifiers sit next to each other on a `catch`. `catch error` whose body
-    /// starts on the next line is the untyped handler whatever its body's first
-    /// word is, and a `catch` with no `error` before its `of` binds a name spelled
-    /// `of`, exactly as it did before.
-    fn catch_type_ahead(&self) -> bool {
-        if !self.is_word_ahead(0, "of") {
-            return false;
-        }
-        let Some(first) = self.current() else {
-            return false;
-        };
-        matches!(
-            self.tokens.get(self.pos + 1),
-            Some(Token {
-                kind: TokenKind::Identifier(_),
-                line,
-                ..
-            }) if *line == first.line
-        )
+    /// The word on its own, with nothing after it: `of` is the head of a typed
+    /// catch, so it is not a binder and not the start of one either — the kind
+    /// after it is required, and [`Parser::failure_kind`] refuses a missing one
+    /// rather than leaving `catch error of` to bind the name `of`.
+    ///
+    /// Asked only where [`Parser::catch_keyword_ahead`] has already read the
+    /// word `error` and a second identifier on the same line, which is the only
+    /// place two words sit next to each other on a catch. A `catch` with no
+    /// `error` before its `of` binds a name spelled `of`, exactly as it did
+    /// before, and a `catch error` whose body starts on the next line is the
+    /// untyped handler whatever its body's first word is.
+    fn of_keyword_ahead(&self) -> bool {
+        self.is_word_ahead(0, "of")
     }
 
-    /// The failure kind named after `of`, refusing any name outside the closed
-    /// list.
+    /// The failure kind named after `of`, refusing a missing name and any name
+    /// outside the closed list.
     ///
     /// Refused here, where the name is read, so the program is told what it
     /// wrote instead of compiling into a handler that matches no failure at all
     /// — the refusal names the kinds that do exist, because "unknown kind" on
-    /// its own leaves the writer to guess.
+    /// its own leaves the writer to guess. Nothing is skipped looking for it, so
+    /// the name has to be the token after `of`: a kind on the next line is the
+    /// body of a handler that never named one, which is `catch error of` and a
+    /// refusal.
     fn failure_kind(&mut self) -> Result<FailureKind> {
+        let expected = format!(
+            "expected a failure kind after 'of'; a catch matches {}",
+            FailureKind::names()
+        );
         let Some(token) = self.current() else {
-            return Err(Error::Parser(
-                "expected a failure kind after 'of'".to_string(),
-                self.span(),
-            ));
+            return Err(Error::Parser(expected, self.span()));
         };
         let Token {
             kind: TokenKind::Identifier(name),
             ..
         } = token
         else {
-            return Err(Error::Parser(
-                "expected a failure kind after 'of'".to_string(),
-                token.span(),
-            ));
+            return Err(Error::Parser(expected, token.span()));
         };
         let name = name.clone();
         let span = token.span();

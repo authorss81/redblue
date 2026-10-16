@@ -112,6 +112,8 @@ instruction of its own block.**
 ```
 kind            1 byte
 arity           4 bytes  u32
+param count     4 bytes  u32
+params          that many length-prefixed UTF-8 strings
 name length     4 bytes  u32
 name            that many bytes of UTF-8
 instruction count 4 bytes u32
@@ -133,7 +135,16 @@ child blocks    variable
 
 `arity` is the parameter count of a function, method or test block and `0`
 for everything else. `name` is the declaration's name; for a catch body it is
-the name the `catch` bound, which is empty when `catch` bound nothing. Child
+the name the `catch` bound, which is empty when `catch` bound nothing. `params`
+is that block's parameter list, and it is empty for every kind of block except a
+function, a method and a test — with one exception that is not a parameter: a
+catch body whose `catch` named a kind (`catch error of Runtime …`) carries that
+one name there, because a catch body is entered by its handler and not by a call
+and so has no arguments to bind. `TRY` reads the kind off that list where it
+installs the handler; a name it does not recognise matches no failure rather than
+every one. A typed `catch` therefore costs one constant and one block field, and
+no instruction an operand: `rb dis` writes it as `catch body (Runtime)` on the
+block header and `TRY` is written exactly as it is for an untyped handler. Child
 blocks are in the order the compiler emitted them, and an instruction refers to
 one by its **index in that list**, so the order is part of the format.
 

@@ -214,6 +214,17 @@ fn stage2_is_byte_identical_for_each_statement_kind() {
             "try\n    say 1 / 0\ncatch error problem\n    say problem\nend\n",
         ),
         (
+            // The typed catch. Stage 2 has to read `of <Type>` where the catch
+            // line is read and write the kind into the catch block's parameter
+            // list: without that arm it binds the name `of`, leaves the kind an
+            // orphan statement of its own, and emits a `.rbc` that differs from
+            // stage 1's in bytes and fails at run time. Both spellings are here
+            // — a name after the kind, and the default binder — with a `finally`
+            // the handler is owed either way.
+            "try_catch_typed",
+            "try\n    say 1 / 0\ncatch error of Runtime problem\n    say problem.kind\nfinally\n    say \"cleanup\"\nend\ntry\n    say 1 / 0\ncatch error of Error\n    say error.kind\nend\n",
+        ),
+        (
             "try_finally",
             "try\n    say \"body\"\nfinally\n    say \"finally\"\nend\n",
         ),
@@ -651,16 +662,16 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
     // missing without anything noticing, because `refused == 9` and
     // `checked >= 300` are both still true afterwards.
     assert_eq!(
-        checked, 314,
+        checked, 315,
         "only {checked} corpus programs were compared; stage 2 is byte-identical on \
-         every program of the corpus the frontend accepts, which is 314 of the 323 in \
+         every program of the corpus the frontend accepts, which is 315 of the 324 in \
          the families above — the other 9 are refused by the frontend, and the 46 in \
          `malformed` are refused too"
     );
     assert_eq!(
         checked + refused,
-        323,
-        "the 15 families above hold 323 programs between them; this walk saw \
+        324,
+        "the 15 families above hold 324 programs between them; this walk saw \
          {checked} compared and {refused} refused, which is not all of them — a file \
          has been added or removed and the counts below still hold"
     );
@@ -1363,7 +1374,7 @@ fn edge_stage3_is_byte_identical_on_the_awkward_shapes() {
 /// the tree-walker executing the compiler. This one makes it with the bytecode VM
 /// executing the compiler, which is the only execution path S3 has: a stage 2
 /// that is byte-identical under one engine and wrong under the other is not a
-/// compiler, it is a coincidence. 312 programs, about 24 seconds.
+/// compiler, it is a coincidence. 313 programs, about 24 seconds.
 #[test]
 fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
@@ -1386,8 +1397,8 @@ fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     // saw the whole corpus rather than a subset of it.
     let total = entries.len();
     assert_eq!(
-        total, 323,
-        "the corpus holds 323 programs outside `malformed`, and this walk found {total}; \
+        total, 324,
+        "the corpus holds 324 programs outside `malformed`, and this walk found {total}; \
          a family has been added or removed and the counts below are not the whole \
          corpus any more"
     );
@@ -1433,9 +1444,9 @@ fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     // program the frontend accepts is byte-identical through the bytecode path.
     // A floor cannot carry that claim — only the count itself can.
     assert_eq!(
-        checked, 314,
+        checked, 315,
         "{checked} corpus programs were compared through the bytecode path, not the \
-         314 of the 323 outside `malformed` that the frontend accepts; stage 2 run \
+         315 of the 324 outside `malformed` that the frontend accepts; stage 2 run \
          as bytecode is byte-identical on every one of them"
     );
     assert_eq!(

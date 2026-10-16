@@ -905,22 +905,97 @@ line is writing is decided by whether a second name follows it **on the same
 line**. A `catch error` whose body starts on the next line is the first spelling,
 whatever the body's first word is.
 
-The name is bound to the text `error` — the word that says a failure was handled.
-Redblue errors are messages, not tagged values: there is no error object with a
-type to dispatch on, so `say error` is the whole of what a handler can say about
-what it caught.
+An untyped handler binds the name to the text `error` — the word that says a
+failure was handled, and the whole of what such a handler can say about what it
+caught. A handler that names a kind binds the failure itself instead, which is
+what the next section is about.
+
+### Handling Failures by Kind
+
+A `try` has **one** `catch`. There is no second `catch` and no chain of handlers
+to try in turn, but a handler can ask what kind of failure it caught and match on
+it: `catch error of <Type>` runs its body only for the kinds `<Type>` names.
+
+```redblue
+try
+    set record to files.read("records/cleo.rb")
+catch error of Io problem
+    say "could not read the record: {problem.message}"
+    give back
+end
+```
+
+A failure of any other kind is not handled here. A handler that does not match
+does not run at all — the `finally` beside it is still owed — and the failure
+belongs to whatever is written around this `try`: a `catch` there takes it, and a
+program with nothing around it stops with it as its own.
+
+The list of names is closed, and it is short:
+
+| Name | The failures it matches |
+|---|---|
+| `Error` | every kind below — what an untyped `catch` matches, spelled as a match |
+| `Runtime` | the program's own expression went wrong: a type mismatch, an index past the end of a list, a division by zero, a name that is not bound |
+| `Io` | the host's filesystem and environment: a file that is not there, a path that cannot be read, a module that cannot be loaded |
+| `Limit` | one of the host's resource limits: the step budget, the call-depth limit, or a loop's iteration cap |
+
+Any other name is refused by the parser, which quotes the name that was written
+and the four that exist — `catch error of FileError` does not compile into a
+handler that matches no failure at all. So is `of` with nothing after it: the
+kind is on the same line as the `of`, and `catch error of` alone is refused
+rather than read as a handler binding the name `of`. The host's other kinds,
+`Lexer`, `Parser` and `Analyzer`, are not in the list: they are raised before the
+program runs, so there is no `try` inside a program that could catch one.
+
+### The Caught Failure
+
+A handler that names a kind binds the failure, and the failure is a record of
+four fields:
+
+| Field | What it holds |
+|---|---|
+| `kind` | the kind that was caught — `Runtime`, `Io` or `Limit` — even by a handler that matched `Error` |
+| `message` | the failure's own message, which an untyped handler's `error` cannot give you |
+| `line` | the line it happened on, or `0` for a failure with no position |
+| `column` | the column it happened at, or `0` for a failure with no position |
+
+```redblue
+try
+    set sum to 1 + "a"
+catch error of Runtime problem
+    say "{problem.kind} on line {problem.line}"
+    say problem.message
+end
+```
+
+```
+Runtime on line 2
+Cannot add non-numbers
+```
+
+The failure is a value like any other: it goes into a list, into a record, and
+back out of a function. `0` is a line no source file has, which is how a failure
+with no position says so without a second spelling. `line` is the position to
+read on both engines — a `.rbc` instruction carries a line and no column, so the
+two place a failure at a different column by their own convention.
+
+The name a typed handler binds is an ordinary name, and it is optional:
+`catch error of Runtime problem` binds `problem`, and `catch error of Runtime`
+binds `error` — the same word the untyped handler binds it as, written where the
+untyped handler writes it. What a typed handler binds is not the word, though: an
+untyped handler's `error` is the text `error`, and a typed one's is the record
+below.
+
+The kind a failure was matched on is not the name it is *reported* under when
+nothing caught it: an uncaught `Io` failure prints `IoError`, and an uncaught
+`Limit` prints `RuntimeError`, because a limit is a runtime failure.
 
 ### Handling Failures by Hand
 
-A `try` has **one** `catch`. There is no `catch error of <Type>`, no second
-`catch`, and no type a failure could be matched against — `of` is not a word in
-the language, so `catch error of FileError` reads as a binder named `of` and
-leaves `FileError` as a statement of its own. A handler written that way fails
-the analyzer, naming the orphan.
-
-Asking what kind of failure it was is work for the program, not for the handler:
-the failing operation is inside the `try`, and its own result is what says which
-kind it was.
+Matching a kind is not the only way to handle a failure. Sometimes the failing
+operation is the thing that answers — `might fail` turns a failure into a value
+the program can test — and a handler that matched `Error` would swallow the
+distinction the program was asking about:
 
 ```redblue
 try

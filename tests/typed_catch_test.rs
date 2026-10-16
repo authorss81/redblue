@@ -204,7 +204,10 @@ end
 
     let printed = lines(&tree);
     assert_eq!(printed[0], "record", "a failure is bound as a record");
-    assert_eq!(printed[1], "Runtime", "the kind is the one the handler named");
+    assert_eq!(
+        printed[1], "Runtime",
+        "the kind is the one the handler named"
+    );
     // The failure is on line 3 of the program, and `line` is 1-based like every
     // other line the language reports.
     assert_eq!(printed[2], "3", "the position is where it happened");
@@ -213,7 +216,10 @@ end
         "the message is the failure's own, got {:?}",
         printed[3]
     );
-    assert_eq!(printed[4], "1", "the failure goes into a list like any value");
+    assert_eq!(
+        printed[4], "1",
+        "the failure goes into a list like any value"
+    );
     assert_eq!(
         printed[5], "yes",
         "a failure is equal to a record holding the same fields"
@@ -230,7 +236,8 @@ end
     // engines place a failure at a different column by their own convention — a
     // `.rbc` instruction carries a line and no column — so a printing that both
     // must agree on cannot include it.
-    let rendering = "try\n    set sum to 1 + \"a\"\ncatch error of Runtime failure\n    say failure\nend\n";
+    let rendering =
+        "try\n    set sum to 1 + \"a\"\ncatch error of Runtime failure\n    say failure\nend\n";
     let printed = lines(&tree_walk(rendering));
     assert_eq!(
         printed[0],
@@ -345,10 +352,7 @@ say "program ends here"
     let (tree, _bytes) = both_engines(source);
     assert_eq!(
         lines(&tree),
-        vec![
-            "outer untyped handler: error",
-            "program ends here"
-        ]
+        vec!["outer untyped handler: error", "program ends here"]
     );
 }
 
@@ -371,10 +375,7 @@ end
 "#;
 
     let (tree, _bytes) = both_engines(source);
-    assert_eq!(
-        lines(&tree),
-        vec!["cleanup", "outer handler took it"]
-    );
+    assert_eq!(lines(&tree), vec!["cleanup", "outer handler took it"]);
 }
 
 #[test]
@@ -476,6 +477,129 @@ fn edge_handlers_nested_as_deep_as_the_language_allows_each_bind_or_decline_a_fa
     );
 }
 
+#[test]
+fn edge_a_typed_handler_that_wrote_no_name_still_binds_the_word_error() {
+    // `catch error of Io` names no binder of its own, so it binds `error` — the
+    // word the untyped handler binds and the one it is written where. The
+    // default is the only thing the two forms share, and it is what a handler
+    // written as `catch error of Io` has to reach the record through, so it is
+    // read here rather than only written about: a change that dropped the
+    // default binder would leave every test that spells a name passing.
+    let source = r#"
+try
+    set contents to files.read("typed-catch-missing-file.txt")
+catch error of Io
+    say type_of(error)
+    say error.kind
+    say error.message
+end
+say "after"
+"#;
+
+    let (tree, _bytes) = both_engines(source);
+
+    let printed = lines(&tree);
+    assert_eq!(
+        printed[0], "record",
+        "the default binder is the failure itself"
+    );
+    assert_eq!(
+        printed[1], "Io",
+        "and it carries the kind the handler named"
+    );
+    assert!(
+        printed[2].contains("typed-catch-missing-file.txt"),
+        "and the failure's own message, got {:?}",
+        printed[2]
+    );
+    assert_eq!(printed[3], "after", "the handler handled it: {printed:?}");
+
+    // The same record by every field the default binder reaches, on both engines.
+    let same = r#"
+try
+    set sum to 1 + "a"
+catch error of Runtime
+    set copy to {kind: error.kind, message: error.message, line: error.line, column: error.column}
+    say error is copy
+    say error.line is greater than 0
+end
+"#;
+    let (tree, _bytes) = both_engines(same);
+    let printed = lines(&tree);
+    assert_eq!(
+        printed[0], "yes",
+        "the record equals one holding its own fields"
+    );
+    assert_eq!(printed[1], "yes", "and it says where it happened");
+}
+
+#[test]
+fn edge_of_without_a_kind_is_refused_rather_than_read_as_a_binder() {
+    // `of` is the head of a typed catch, so `catch error of` with nothing after
+    // it names no kind and there is no kind it can fall back to: reading it as a
+    // binder spelled `of` would leave the handler matching everything and would
+    // make a half-written kind a program that runs. Both engines refuse it, and
+    // the refusal says what was expected.
+    for source in [
+        "try\n    set sum to 1 + \"a\"\ncatch error of\n    say \"nope\"\nend\n",
+        // A kind on the next line is the body of a handler that named none.
+        "try\n    set sum to 1 + \"a\"\ncatch error of\n    Runtime\nend\n",
+        "try\n    set sum to 1 + \"a\"\ncatch error of 1\n    say \"nope\"\nend\n",
+    ] {
+        let (tree, _bytes) = both_engines(source);
+        let (label, message) = failure(&tree);
+        assert_eq!(label, "ParserError", "for {source:?}, got {message:?}");
+        assert!(
+            message.contains("expected a failure kind"),
+            "the refusal says what was expected, got {message:?}"
+        );
+        for name in ["Error", "Runtime", "Io", "Limit"] {
+            assert!(
+                message.contains(name),
+                "the refusal must list {name}, got {message:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn edge_a_catch_naming_a_kind_this_build_does_not_know_matches_no_failure() {
+    // The kind travels into the `.rbc` as text, so a file can carry one this
+    // build has no name for — written by a build that had it. Reading that as
+    // "no kind at all" would turn a handler that matches nothing into one that
+    // catches everything, which is the opposite of what the file says, so the
+    // two absences are kept apart: a catch block with no parameter is untyped
+    // and catches everything, and a catch block with a parameter this build
+    // cannot resolve catches nothing.
+    let mut chunk = compile_source(
+        "try\n    set sum to 1 + \"a\"\ncatch error of Runtime problem\n    say \"must not run\"\nend\nsay \"after\"\n",
+    )
+    .expect("the typed program compiles");
+    assert_eq!(
+        chunk.main.blocks[0].params,
+        vec!["Runtime".to_string()],
+        "the kind is the catch block's only parameter"
+    );
+
+    chunk.main.blocks[0].params = vec!["Banana".to_string()];
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    let result = vm.run(&chunk);
+    let printed = vm.take_output();
+
+    assert!(
+        printed.is_empty(),
+        "a handler matching no failure must not run its body, got {printed:?}"
+    );
+    let error = result.expect_err("the failure is not handled, so it is reported");
+    assert_eq!(error.label(), "RuntimeError", "got {}", error.message());
+    assert!(
+        error.message().contains("add"),
+        "and it is the failure the handler declined, got {}",
+        error.message()
+    );
+}
+
 /// One four-space stop in front of every line of `source`.
 fn indent(source: &str) -> String {
     source
@@ -527,8 +651,14 @@ fn every_kind_the_language_documents_is_the_only_kind_a_catch_may_name() {
     // proved by nothing, so every pairing here has a direction that has to fail.
     let failures = [
         ("Runtime", "set sum to 1 + \"a\""),
-        ("Io", "set contents to files.read(\"typed-catch-missing-file.txt\")"),
-        ("Limit", "set stopped to 0\n    while stopped is 0\n        set stopped to stopped\n    end"),
+        (
+            "Io",
+            "set contents to files.read(\"typed-catch-missing-file.txt\")",
+        ),
+        (
+            "Limit",
+            "set stopped to 0\n    while stopped is 0\n        set stopped to stopped\n    end",
+        ),
     ];
     let cap = 50;
 
@@ -569,7 +699,7 @@ fn every_kind_the_language_documents_is_the_only_kind_a_catch_may_name() {
             let (label, _) = failure(&tree);
             assert_eq!(
                 label,
-                label_of(*kind),
+                label_of(kind),
                 "a {other} handler must not catch a {kind} failure"
             );
         }
@@ -588,7 +718,8 @@ fn every_kind_the_language_documents_is_the_only_kind_a_catch_may_name() {
         "a name outside the closed list must not resolve to a kind"
     );
 
-    let invented = "try\n    set sum to 1 + \"a\"\ncatch error of Banana failure\n    say \"nope\"\nend\n";
+    let invented =
+        "try\n    set sum to 1 + \"a\"\ncatch error of Banana failure\n    say \"nope\"\nend\n";
     let (tree, _bytes) = both_engines(invented);
     let (label, message) = failure(&tree);
     assert_eq!(label, "ParserError", "got {message:?}");
@@ -609,7 +740,10 @@ fn the_failure_a_handler_binds_is_the_record_the_host_documents() {
     // The shape, read from the host side: `redblue::failure_value` is what both
     // engines build, so asserting on it here pins the fields and their order for
     // a program that reads them by name.
-    let error = Error::Runtime("Cannot add non-numbers".to_string(), redblue::Span::new(7, 5));
+    let error = Error::Runtime(
+        "Cannot add non-numbers".to_string(),
+        redblue::Span::new(7, 5),
+    );
     let value = redblue::failure_value(&error);
 
     let fields = match &value {
@@ -676,5 +810,145 @@ end
     assert!(
         formatted.contains("catch error of Io\n"),
         "the default binder must not be written twice, got:\n{formatted}"
+    );
+}
+
+#[test]
+fn edge_a_typed_catch_changes_no_operand_shape_in_the_bytecode() {
+    // The kind travels in the catch block's parameter list, which is a field
+    // every block header already had. So: the same opcodes, the same operands,
+    // the same block tree, the same format version — and a `.rbc` written by a
+    // build that never heard of a typed catch still decodes.
+    //
+    // The two programs differ in one word and nothing else: same body, same
+    // binder, same statements. The kind is in the pool, so a `PUSH_CONST` index
+    // moves by one and is compared by the value it names rather than by its
+    // number — the number is a pool position, not an operand shape.
+    let untyped = "try\n    set sum to 1 + \"a\"\ncatch error problem\n    say problem\nend\n";
+    let typed =
+        "try\n    set sum to 1 + \"a\"\ncatch error of Runtime problem\n    say problem\nend\n";
+
+    let plain = compile_source(untyped).expect("the untyped program compiles");
+    let typed_chunk = compile_source(typed).expect("the typed program compiles");
+
+    // Every instruction, in every block, spelled with its operands resolved.
+    let listing_of = |chunk: &redblue::bytecode::Chunk| -> Vec<String> {
+        fn block_lines(
+            chunk: &redblue::bytecode::Chunk,
+            block: &redblue::bytecode::Block,
+            path: &str,
+            into: &mut Vec<String>,
+        ) {
+            into.push(format!(
+                "{path} ({}, arity {}) params {:?}",
+                block.kind.name(),
+                block.arity,
+                block.params
+            ));
+            for instruction in &block.code {
+                let operand = |value: u32| match instruction.opcode {
+                    redblue::bytecode::Opcode::PushConst => {
+                        format!(" = {:?}", chunk.constants[value as usize])
+                    }
+                    _ => value.to_string(),
+                };
+                into.push(format!(
+                    "{:?} {} {}",
+                    instruction.opcode,
+                    operand(instruction.arg),
+                    operand(instruction.aux)
+                ));
+            }
+            for (index, child) in block.blocks.iter().enumerate() {
+                block_lines(chunk, child, &format!("{path}.blocks[{index}]"), into);
+            }
+        }
+        let mut lines = Vec::new();
+        block_lines(chunk, &chunk.main, "main", &mut lines);
+        lines
+    };
+
+    let plain_lines = listing_of(&plain);
+    let typed_lines = listing_of(&typed_chunk);
+    let difference: Vec<&String> = typed_lines
+        .iter()
+        .zip(plain_lines.iter())
+        .filter(|pair| pair.0 != pair.1)
+        .map(|(typed, _)| typed)
+        .collect();
+    assert_eq!(
+        typed_lines.len(),
+        plain_lines.len(),
+        "the typed program must compile to the same number of instructions"
+    );
+    assert_eq!(
+        difference.len(),
+        1,
+        "the only difference between the two listings must be the catch block's \
+         parameter list, not an instruction:\n  typed: {typed_lines:?}\n  plain: \
+         {plain_lines:?}"
+    );
+    assert!(
+        difference[0].contains("params [\"Runtime\"]"),
+        "and the difference must be the kind, got {:?}",
+        difference[0]
+    );
+    assert!(
+        !plain_lines.iter().any(|line| line.contains("Runtime")),
+        "an untyped handler must carry no kind at all"
+    );
+
+    // `rb dis` writes it in the block header, and the `TRY` line is line for line
+    // the line an untyped handler's is: no new operand, no new column.
+    let listing = redblue::bytecode::disassemble(&typed_chunk);
+    assert!(
+        listing.contains("main.blocks[0] (catch body, arity 0) (Runtime)"),
+        "the kind must be readable in the listing, got:\n{listing}"
+    );
+    let try_line = |listing: &str| {
+        listing
+            .lines()
+            .find(|line| line.contains(" TRY "))
+            .unwrap_or_else(|| panic!("no TRY instruction in:\n{listing}"))
+            .to_string()
+    };
+    assert_eq!(
+        try_line(&redblue::bytecode::disassemble(&plain)),
+        try_line(&listing),
+        "a typed handler must not change how TRY is written"
+    );
+
+    // The format did not move, so a `.rbc` written today decodes and still names
+    // the kind the handler matches.
+    assert_eq!(
+        redblue::bytecode::FORMAT_VERSION,
+        6,
+        "the format version is unchanged"
+    );
+    let round_tripped =
+        redblue::bytecode::Chunk::decode(&typed_chunk.encode()).expect("a .rbc decodes");
+    assert_eq!(
+        round_tripped.main.blocks[0].params,
+        vec!["Runtime".to_string()],
+        "the kind must survive the encoding"
+    );
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    let value = vm.run(&round_tripped).expect("the decoded chunk runs");
+    let printed = vm.take_output();
+    assert_eq!(
+        printed.len(),
+        1,
+        "the handler says one thing, got {printed:?}"
+    );
+    assert!(
+        printed[0].contains("kind: Runtime"),
+        "the decoded handler must still bind the failure it matches, got {:?}",
+        printed[0]
+    );
+    assert_eq!(
+        value,
+        Value::Nothing,
+        "the program says its piece and stops"
     );
 }

@@ -1604,54 +1604,130 @@ end
 to parse_try_catch(tokens, pos, depth, line, body)
     set parse_try_catch_out to nothing
     if token_kind(tokens, pos) is "catch" then
-        set parse_try_catch_out to parse_try_catch_body(tokens, pos + 1, depth, line, body, [])
+        set parse_try_catch_out to parse_try_catch_body(tokens, pos + 1, depth, line, body, [], [])
     end
     if type_of(parse_try_catch_out) is "nothing" then
-        set parse_try_catch_out to parse_try_finally(tokens, pos, depth, line, body, [], [])
+        set parse_try_catch_out to parse_try_finally(tokens, pos, depth, line, body, [], [], [])
     end
     give back parse_try_catch_out
 end
 
-to parse_try_catch_body(tokens, pos, depth, line, body, catch_name)
+to parse_try_catch_body(tokens, pos, depth, line, body, catch_name, catch_kind)
     set parse_try_catch_body_out to nothing
+    // `catch error of <Type> [name]` — the word `of` and the kind after it on
+    // the same line as `error`. Read before the arms below, because `of` is a
+    // word the lexer hands back as an identifier and the arm for a plain binder
+    // would take it: a typed handler would bind the name `of` and leave the kind
+    // a statement of its own, which is what this used to do.
+    set parse_try_catch_body_out to parse_try_catch_typed(tokens, pos, depth, line, body)
     // `catch error <name>` — the word `error` with a second identifier after it
     // on the same line — binds the name after it. Same rule as the Rust parser:
     // `catch error` on its own still binds a name spelled `error`.
-    if word_at(tokens, pos) is "error" then
-        if token_kind(tokens, pos + 1) is "id" then
-            if token_line(tokens, pos + 1) is token_line(tokens, pos) then
-                set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos + 2, depth, line, body, tokens[pos + 1].b)
+    if type_of(parse_try_catch_body_out) is "nothing" then
+        if word_at(tokens, pos) is "error" then
+            if token_kind(tokens, pos + 1) is "id" then
+                if token_line(tokens, pos + 1) is token_line(tokens, pos) then
+                    set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos + 2, depth, line, body, tokens[pos + 1].b, catch_kind)
+                end
             end
         end
     end
     if type_of(parse_try_catch_body_out) is "nothing" then
         if token_kind(tokens, pos) is "id" then
-            set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos + 1, depth, line, body, tokens[pos].b)
+            set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos + 1, depth, line, body, tokens[pos].b, catch_kind)
         end
     end
     if type_of(parse_try_catch_body_out) is "nothing" then
-        set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos, depth, line, body, catch_name)
+        set parse_try_catch_body_out to parse_try_catch_body_tail(tokens, pos, depth, line, body, catch_name, catch_kind)
     end
     give back parse_try_catch_body_out
 end
 
-to parse_try_catch_body_tail(tokens, pos, depth, line, body, catch_name)
+// The typed handler, and `nothing` when the tokens are not one — so the caller
+// falls through to the plain arms rather than binding the name `of`.
+to parse_try_catch_typed(tokens, pos, depth, line, body)
+    set parse_try_catch_typed_of to no
+    if word_at(tokens, pos) is "error" then
+        if word_at(tokens, pos + 1) is "of" then
+            if token_line(tokens, pos + 1) is token_line(tokens, pos) then
+                set parse_try_catch_typed_of to yes
+            end
+        end
+    end
+    set parse_try_catch_typed_out to nothing
+    if parse_try_catch_typed_of is yes then
+        // `catch error of` with no kind after it is refused rather than read as
+        // a binder: `of` names a kind or it is a refusal, and stage 1 refuses it
+        // the same way.
+        set parse_try_catch_typed_kind to failure_kind_at(tokens, pos + 2, pos)
+        // No name after the kind: the handler binds the word `error`, which is
+        // where the untyped handler binds it too. As bytes, like every other
+        // name a block header is written with — the encoder writes them as they
+        // are, and a text would be written as nothing at all.
+        set parse_try_catch_typed_name to bytes.from_text("error")
+        set parse_try_catch_typed_q to pos + 3
+        if token_kind(tokens, pos + 3) is "id" then
+            if token_line(tokens, pos + 3) is token_line(tokens, pos) then
+                set parse_try_catch_typed_name to tokens[pos + 3].b
+                set parse_try_catch_typed_q to pos + 4
+            end
+        end
+        set parse_try_catch_typed_out to parse_try_catch_body_tail(tokens, parse_try_catch_typed_q, depth, line, body, parse_try_catch_typed_name, parse_try_catch_typed_kind)
+    end
+    give back parse_try_catch_typed_out
+end
+
+// The kind written after `of`, refused unless it is one of the four names a
+// program may write: the same closed list `FailureKind::KINDS` is in stage 1
+// (`src/failure.rs`), refused the same way, because a handler naming a kind that
+// does not exist would compile to a block matching nothing at all.
+to failure_kind_at(tokens, pos, of_pos)
+    set failure_kind_at_name to 0
+    set failure_kind_at_name to ""
+    set failure_kind_at_ok to no
+    if token_kind(tokens, pos) is "id" then
+        if token_line(tokens, pos) is token_line(tokens, of_pos) then
+            set failure_kind_at_name to bytes.text(tokens[pos].b)
+            if failure_kind_at_name is "Error" then
+                set failure_kind_at_ok to yes
+            end
+            if failure_kind_at_name is "Runtime" then
+                set failure_kind_at_ok to yes
+            end
+            if failure_kind_at_name is "Io" then
+                set failure_kind_at_ok to yes
+            end
+            if failure_kind_at_name is "Limit" then
+                set failure_kind_at_ok to yes
+            end
+        end
+    end
+    if failure_kind_at_ok is no then
+        if length(failure_kind_at_name) > 0 then
+            refuse(token_line(tokens, pos), "'" + failure_kind_at_name + "' is not a failure kind; a catch matches Error, Runtime, Io, Limit")
+        end
+        refuse(token_line(tokens, pos), "expected a failure kind after 'of'; a catch matches Error, Runtime, Io, Limit")
+    end
+    give back tokens[pos].b
+end
+
+to parse_try_catch_body_tail(tokens, pos, depth, line, body, catch_name, catch_kind)
     set parse_try_catch_body_tail_inner to parse_block_body(tokens, pos, depth, ["finally", "end"])
     set parse_try_catch_body_tail_out to nothing
-    set parse_try_catch_body_tail_out to parse_try_finally(tokens, parse_try_catch_body_tail_inner[1], depth, line, body, catch_name, parse_try_catch_body_tail_inner[0])
+    set parse_try_catch_body_tail_out to parse_try_finally(tokens, parse_try_catch_body_tail_inner[1], depth, line, body, catch_name, catch_kind, parse_try_catch_body_tail_inner[0])
     give back parse_try_catch_body_tail_out
 end
 
-to parse_try_finally(tokens, pos, depth, line, body, catch_name, catch_body)
+to parse_try_finally(tokens, pos, depth, line, body, catch_name, catch_kind, catch_body)
     set parse_try_finally_out to nothing
     if token_kind(tokens, pos) is "finally" then
         set parse_try_finally_inner to parse_block_body(tokens, pos + 1, depth, ["end"])
         set parse_try_finally_q to expect_kind(tokens, parse_try_finally_inner[1], "end")
-        set parse_try_finally_out to [{s: "try", l: line, t: body, cn: catch_name, c: catch_body, f: parse_try_finally_inner[0]}, parse_try_finally_q]
+        set parse_try_finally_out to [{s: "try", l: line, t: body, cn: catch_name, ck: catch_kind, c: catch_body, f: parse_try_finally_inner[0]}, parse_try_finally_q]
     end
     if type_of(parse_try_finally_out) is "nothing" then
         set parse_try_finally_q to expect_kind(tokens, pos, "end")
-        set parse_try_finally_out to [{s: "try", l: line, t: body, cn: catch_name, c: catch_body, f: []}, parse_try_finally_q]
+        set parse_try_finally_out to [{s: "try", l: line, t: body, cn: catch_name, ck: catch_kind, c: catch_body, f: []}, parse_try_finally_q]
     end
     give back parse_try_finally_out
 end
@@ -2821,10 +2897,10 @@ end
 to compile_try(stmt, depth, line)
     set compile_try_catch_index to NO_CONST
     if length(stmt.cn) > 0 then
-        set compile_try_catch_index to nested_block(stmt.c, 5, stmt.cn, 0, [], depth, no, "statements")
+        set compile_try_catch_index to nested_block(stmt.c, 5, stmt.cn, 0, compile_try_catch_params(stmt.ck), depth, no, "statements")
     else
         if length(stmt.c) > 0 then
-            set compile_try_catch_index to nested_block(stmt.c, 5, [], 0, [], depth, no, "statements")
+            set compile_try_catch_index to nested_block(stmt.c, 5, [], 0, compile_try_catch_params(stmt.ck), depth, no, "statements")
         end
     end
     set compile_try_finally_index to NO_CONST
@@ -2840,6 +2916,23 @@ to compile_try(stmt, depth, line)
     // popped and the `finally` runs, whether or not the protected code failed.
     emit(0, END_TRY_MARKER, 0, line)
     end
+
+// The parameter list a catch block is written with: the kind a typed handler
+// matches, and nothing for an untyped one.
+//
+// The kind rides in `ps`, a field every block header already had and that only
+// function declarations used (`src/bytecode/format.rs`), so `TRY`'s two operands
+// stay what they were and a typed catch changes no `.rbc` shape. The VM reads it
+// where it installs the handler, and a catch body is entered by that handler
+// rather than by a call, so a parameter here binds nothing: it is metadata, and
+// `arity` stays 0 for a catch either way.
+to compile_try_catch_params(kind)
+    set compile_try_catch_params_out to []
+    if length(kind) > 0 then
+        set compile_try_catch_params_out to [kind]
+    end
+    give back compile_try_catch_params_out
+end
 
 // `module NAME ... end`: a block run in a scope of its own, opening with the run
 // of `EXPORT`s that says what it publishes.

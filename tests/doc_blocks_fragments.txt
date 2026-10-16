@@ -59,17 +59,17 @@ SPEC.md:626	excerpt - placeholder body (`// parameters`) plus `default`, which t
 SPEC.md:639	excerpt - a type-annotated signature; `a as number` and `as number` are not forms the parser accepts
 SPEC.md:738	excerpt - `Employee extends Person` with no `Person` in the block; the parent is declared elsewhere
 SPEC.md:881	excerpt - `process` is bound nowhere in the block, and `config.rb` is a file the block never creates
-SPEC.md:934	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
-SPEC.md:943	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
-SPEC.md:1033	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
-SPEC.md:1211	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
-SPEC.md:1239	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
-SPEC.md:1283	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
+SPEC.md:1009	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
+SPEC.md:1018	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
+SPEC.md:1108	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
+SPEC.md:1286	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
+SPEC.md:1314	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
+SPEC.md:1358	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
 
 # --- docs/GRAMMAR.md --------------------------------------------------------
 
-docs/GRAMMAR.md:526	excerpt - the guarded read is bound to `report`, but the third line reads `body`, which is bound nowhere. The first two lines are the forms this block documents
-docs/GRAMMAR.md:606	excerpt - `age` is bound in the preceding block and not in this one, so the two are one fragment written as two
+docs/GRAMMAR.md:537	excerpt - the guarded read is bound to `report`, but the third line reads `body`, which is bound nowhere. The first two lines are the forms this block documents
+docs/GRAMMAR.md:617	excerpt - `age` is bound in the preceding block and not in this one, so the two are one fragment written as two
 
 # --- PHILOSOPHY.md ----------------------------------------------------------
 
