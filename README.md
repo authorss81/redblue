@@ -195,7 +195,7 @@ say content
 | `import Mod`, `import a, b as c` | modules |
 | `constant PI to 3.14159` | module-level constant |
 
-Full grammar: [`docs/GRAMMAR.md`](docs/GRAMMAR.md). Design rationale: [`PHILOSOPHY.md`](PHILOSOPHY.md). Specification: [`SPEC.md`](SPEC.md).
+Full grammar: [`docs/GRAMMAR.md`](docs/GRAMMAR.md). Memory model: [`docs/MEMORY.md`](docs/MEMORY.md). Design rationale: [`PHILOSOPHY.md`](PHILOSOPHY.md). Specification: [`SPEC.md`](SPEC.md).
 
 ## Standard Library
 
