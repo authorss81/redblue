@@ -1183,3 +1183,108 @@ fn edge_which_names_every_module_one_import_binds_and_a_reset_forgets_their_line
         s.stdout
     );
 }
+
+/// `.bytecode` answers the question the session is the right place to ask: what
+/// does this compile to. The version in the listing is the format the compiler
+/// in this build emits, read from the crate rather than written out here, so the
+/// assertion moves when the format moves instead of failing.
+#[test]
+fn bytecode_shows_the_instruction_listing_the_session_compiles_to() {
+    let version = redblue::bytecode::FORMAT_VERSION;
+
+    let s = session(".bytecode say 1\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains(&format!("redblue bytecode v{version}"))
+        .assert_stdout_contains("PUSH_CONST")
+        .assert_stdout_contains("SAY")
+        .assert_stdout_lacks("Unknown command");
+}
+
+/// `.bytecode` given nothing names what it wanted rather than listing an empty
+/// program: whitespace compiles to no instructions at all, so a listing with no
+/// instructions in it would be an answer to a question nobody asked.
+#[test]
+fn edge_bytecode_with_no_argument_is_told_what_it_wanted() {
+    let s = session(".bytecode\n:asm\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Usage: :bytecode <expression>")
+        .assert_stdout_contains("Usage: :asm <expression>")
+        .assert_stdout_lacks("redblue bytecode");
+}
+
+/// An expression the frontend refuses is reported as the refusal it is. A
+/// listing of a program that was never built would read as a program with
+/// nothing in it, which is a different and wrong answer.
+#[test]
+fn bytecode_reports_a_compile_error_instead_of_listing_nothing() {
+    let s = session(".bytecode might fail 1 +\n:asm might fail 1 +\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Error")
+        .assert_stdout_lacks("redblue bytecode")
+        .assert_stdout_lacks("Unknown command");
+}
+
+/// `.asm` at the prompt is `rb dis` on the same source, byte for byte: the same
+/// frontend, the same chunk, the same renderer. Only the header line the prompt
+/// adds is the prompt's own, so the test writes the file, compiles it,
+/// disassembles it, and diffs what the session printed against that.
+#[test]
+fn asm_at_the_prompt_agrees_with_rb_dis_on_the_same_source() {
+    let program = "say \"Hello, World!\"";
+    let path = scratch_file("prompt-asm", &format!("{program}\n"));
+    let rbc = scratch_path("prompt-asm", "rbc");
+
+    let compile = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("compile")
+        .arg(&path)
+        .arg("-o")
+        .arg(&rbc)
+        .output()
+        .expect("rb should be runnable");
+    assert!(
+        compile.status.success(),
+        "rb compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let dis = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("dis")
+        .arg(&rbc)
+        .output()
+        .expect("rb should be runnable");
+    assert!(
+        dis.status.success(),
+        "rb dis failed: {}",
+        String::from_utf8_lossy(&dis.stderr)
+    );
+    let expected = String::from_utf8(dis.stdout).expect("disassembly is text");
+
+    let s = session(&format!(".asm {program}\n:quit\n"));
+    s.assert_exited_ok();
+
+    let printed: Vec<&str> = s.stdout.lines().collect();
+    let header = printed
+        .iter()
+        .position(|line| line.contains("asm: `"))
+        .unwrap_or_else(|| panic!("the session printed no .asm header\n{}", s.stdout));
+    let body: Vec<&str> = printed[header + 1..]
+        .iter()
+        .take_while(|line| !line.contains("Goodbye"))
+        .copied()
+        .collect();
+
+    assert_eq!(
+        body.join("\n"),
+        expected.trim_end_matches('\n'),
+        "`.asm` should print what `rb dis` prints for the same source, modulo the \
+         header the prompt adds"
+    );
+    assert!(
+        body.len() > 3,
+        "and the annotated form is more than a header and a block: {} lines",
+        body.len()
+    );
+}
