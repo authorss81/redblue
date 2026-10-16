@@ -174,6 +174,15 @@ fn runaway_loop_is_catchable_from_inside_redblue() {
     let mut vm = Vm::with_max_iterations(100);
     vm.run(&parse(source))
         .expect("the loop's RuntimeError must be catchable");
+    // The `expect` in the program is the assertion, and it is **not** the same as
+    // the run having succeeded: a failed `expect` is recorded and the run carries
+    // on. So the run's own success says nothing here and the recorded
+    // expectation is what has to be read.
+    assert!(
+        vm.take_expectation_failure().is_none(),
+        "`expect caught to be yes` failed, so the loop's RuntimeError was not \
+         catchable from inside the program"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -271,10 +280,18 @@ fn edge_iteration_cap_applies_to_each_loop_form() {
 #[test]
 fn edge_nested_loops_each_get_the_full_cap() {
     let mut vm = Vm::with_max_iterations(10);
-    let program = parse("set n to 0\nfor each outer in [1, 2, 3]\n    for each inner in [1, 2, 3, 4]\n        set n to n + 1\n    end\nend");
+    let program = parse("set n to 0\nfor each outer in [1, 2, 3]\n    for each inner in [1, 2, 3, 4]\n        set n to n + 1\n    end\nend\nsay n");
 
     vm.run(&program)
         .expect("each loop stays inside the cap, so nesting must not double-charge");
+    // Twelve increments: 3 outer turns of 4 inner turns each. A cap charged once
+    // per program rather than once per loop would stop this part-way and fail
+    // below, which a "did not fail" assertion could not see.
+    assert_eq!(
+        vm.take_output(),
+        vec!["12".to_string()],
+        "3 outer turns of 4 inner turns must add up to 12"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -310,9 +327,16 @@ fn step_budget_does_not_fire_under_the_limit() {
     let mut vm = Vm::with_max_steps(10_000);
 
     vm.run(&parse(
-        "set n to 0\nrepeat 10 times\n    set n to n + 1\nend",
+        "set n to 0\nrepeat 10 times\n    set n to n + 1\nend\nsay n",
     ))
     .expect("a program inside the budget must run");
+    // Ten turns, one line, `10`. A budget that fired one turn early would fail
+    // this run, and "the run succeeded" would not have noticed.
+    assert_eq!(
+        vm.take_output(),
+        vec!["10".to_string()],
+        "a program inside the budget must run all ten turns untouched"
+    );
 }
 
 /// The budget counts steps actually taken, so a loop that is never entered
@@ -320,11 +344,22 @@ fn step_budget_does_not_fire_under_the_limit() {
 /// spend budget it never uses.
 #[test]
 fn edge_step_budget_is_not_spent_by_unentered_loops() {
-    for (name, source) in [
-        ("while", "set i to 5\nwhile i is 0\n    say \"never\"\nend"),
+    for (name, source, expected) in [
+        // `never` is the only line this program could print, and it must not be
+        // printed: the loop's condition is false on entry, so the body runs zero
+        // times.
+        (
+            "while",
+            "set i to 5\nwhile i is 0\n    say \"never\"\nend",
+            "nothing",
+        ),
+        // An empty list, a loop over it, and a line after it that *does* run —
+        // which is what proves the budget was not merely enough for the first
+        // statement and then spent.
         (
             "for each",
-            "set n to 0\nfor each x in []\n    set n to 1\nend",
+            "for each x in []\n    set n to 1\nend\nsay \"after\"",
+            "after",
         ),
     ] {
         let mut vm = Vm::with_max_steps(4);
@@ -334,6 +369,21 @@ fn edge_step_budget_is_not_spent_by_unentered_loops() {
                 name, error
             )
         });
+        let printed = vm.take_output();
+        assert!(
+            !printed.iter().any(|line| line == "never"),
+            "an unentered {} loop must not run its body, and `never` is what \
+             would say so. It printed {printed:?}",
+            name,
+        );
+        if expected != "nothing" {
+            assert_eq!(
+                printed,
+                vec![expected.to_string()],
+                "the statement after an unentered {} loop must still run",
+                name,
+            );
+        }
     }
 }
 
@@ -582,22 +632,94 @@ fn edge_fractional_and_negative_counts_run_zero_times() {
 /// Edge: a count that is not a number is not a loop at all. This is the
 /// pre-existing behaviour and the cap must not change it into an error or a
 /// hang.
+///
+/// The literal `never` in the body is what makes the assertion possible: without
+/// a line only this run could print, "did not run" and "ran and said nothing" are
+/// the same observation, and a loop that ran its body zero times out of luck would
+/// pass. Reading the output is the difference between a reachability check and a
+/// claim about what the loop did.
 #[test]
 fn edge_type_mismatch_count_is_not_a_loop() {
     let mut vm = Vm::with_max_iterations(5);
 
     vm.run(&parse("repeat \"five\" times\n    say \"never\"\nend"))
         .expect("a text count is not a number, so the loop does not run");
+    assert_eq!(
+        vm.take_output(),
+        Vec::<String>::new(),
+        "a text count must not run the loop body, and `never` is what would say so"
+    );
 }
 
 /// Edge: `for each` over something that is not a list is likewise not a loop,
-/// and cannot be made into a hang by the cap.
+/// and cannot be made into a hang by the cap. Same `never`, same reason.
 #[test]
 fn edge_type_mismatch_iterable_is_not_a_loop() {
     let mut vm = Vm::with_max_iterations(5);
 
     vm.run(&parse("for each x in 5\n    say \"never\"\nend"))
         .expect("a number is not a list, so the loop does not run");
+    assert_eq!(
+        vm.take_output(),
+        Vec::<String>::new(),
+        "a number is not a list, so the body must not run, and `never` is what would say so"
+    );
+}
+
+/// A loop that runs must run **every** turn: the counterpart to the two tests
+/// above, which pin the zero-turn case.
+///
+/// Three turns of `repeat`, one line each, in order. A cap that stopped the loop
+/// after one turn, or that skipped a turn, or that ran it once too many, changes
+/// one of these three lines and fails — where the `never` tests could not tell a
+/// loop that ran nothing from a loop that was never reached.
+#[test]
+fn edge_a_loop_that_does_run_prints_one_line_per_turn_in_order() {
+    let mut vm = Vm::with_max_iterations(5);
+
+    vm.run(&parse(
+        "set n to 0\nrepeat 3 times\n    set n to n + 1\n    say n\nend",
+    ))
+    .expect("three turns is inside a cap of five");
+    assert_eq!(
+        vm.take_output(),
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "three turns must print 1, 2, 3 — one line per turn, in order"
+    );
+}
+
+/// A loop with nothing to print prints nothing, and that is not the same as a
+/// loop that did not run.
+///
+/// The empty-output row in its own right: `take_output` hands back an empty
+/// `Vec` for "the body ran and said nothing" and for "the body never ran", so a
+/// test that only checked emptiness could pass on a loop that had been skipped.
+/// This one proves the loop ran by counting it, and then proves that the count is
+/// what it is.
+#[test]
+fn edge_a_loop_whose_body_says_nothing_still_runs_every_turn() {
+    let mut vm = Vm::with_max_iterations(5);
+
+    let outcome = vm
+        .run(&parse(
+            "set n to 0\nrepeat 4 times\n    set n to n + 1\nend\nsay n",
+        ))
+        .expect("four turns is inside a cap of five");
+    assert_eq!(
+        vm.take_output(),
+        vec!["4".to_string()],
+        "the body said nothing, but the loop still ran all four turns"
+    );
+    // The value the program ended on, taken from the run itself rather than from
+    // its printing. A loop statement is worth `nothing` — not the value of the
+    // statement after it, and not the count it reached — so this pins that, and
+    // a loop that began answering with something else would be a change in the
+    // language's shape rather than in its numbers.
+    assert_eq!(
+        outcome,
+        redblue::Value::Nothing,
+        "a loop statement is worth nothing"
+    );
 }
 
 /// Edge: a loop nested inside a function that a loop calls is still bounded.
@@ -644,6 +766,7 @@ fn edge_deeply_nested_loops_terminate() {
     for _ in 0..depth {
         source.push_str("end\n");
     }
+    source.push_str("say n\n");
 
     let mut vm = Vm::with_max_iterations(5);
     vm.run(&parse(&source)).unwrap_or_else(|error| {
@@ -652,6 +775,16 @@ fn edge_deeply_nested_loops_terminate() {
             depth, error
         )
     });
+    // 2^16 = 65536 turns of the innermost statement. The count is what makes this
+    // a test of nesting rather than a test of "it stopped": a nesting bug that ran
+    // 2^15 times, or that ran the whole thing twice, prints a different number.
+    assert_eq!(
+        vm.take_output(),
+        vec!["65536".to_string()],
+        "{} levels of a 2-iteration loop must run 2^{} turns exactly",
+        depth,
+        depth
+    );
 }
 
 // ---------------------------------------------------------------------------
