@@ -529,6 +529,7 @@ impl Compiler {
             Statement::Try {
                 body,
                 catch_var,
+                catch_kind,
                 catch_body,
                 finally_body,
             } => {
@@ -536,12 +537,23 @@ impl Compiler {
                 // stays a straight run of instructions with no jump patching.
                 let catch = if catch_var.is_some() || !catch_body.is_empty() {
                     let name = catch_var.clone().unwrap_or_default();
+                    // A typed handler's kind travels in the catch block's
+                    // parameter list, which is empty for every other block of
+                    // this kind. The VM reads it where `TRY` installs the
+                    // handler, and a catch body is entered by that handler and
+                    // not by a call, so a parameter here binds nothing: it is
+                    // metadata, and the alternative — a new operand on `TRY` —
+                    // would change what every `.rbc` written so far decodes as.
+                    let kind: Vec<String> = match catch_kind {
+                        Some(kind) => vec![kind.name().to_string()],
+                        None => Vec::new(),
+                    };
                     self.nested(
                         Decl {
                             kind: BlockKind::CatchBody,
                             name: &name,
                             arity: 0,
-                            params: &[],
+                            params: &kind,
                             body: catch_body,
                             span: stmt.span,
                         },

@@ -314,18 +314,25 @@ fn same_statement(a: &Statement, b: &Statement) -> bool {
             Statement::Try {
                 body: b1,
                 catch_var: cv1,
+                catch_kind: ck1,
                 catch_body: cb1,
                 finally_body: fb1,
             },
             Statement::Try {
                 body: b2,
                 catch_var: cv2,
+                catch_kind: ck2,
                 catch_body: cb2,
                 finally_body: fb2,
             },
         ) => {
             same_stmts(b1, b2)
                 && same_optional_string(cv1, cv2)
+                // The kind a typed handler matches is part of the handler: a
+                // formatter that dropped it would widen a `catch error of Io`
+                // into a handler that catches failures the program wrote it not
+                // to catch, and this is the comparison that would notice.
+                && ck1 == ck2
                 && same_stmts(cb1, cb2)
                 && same_stmts(fb1, fb2)
         }

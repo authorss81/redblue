@@ -7,6 +7,7 @@
 
 use crate::debugger::{DebugEvent, DebugHook};
 use crate::error::{Error, Result, Span};
+use crate::failure::{value_of as failure_value, FailureKind};
 use crate::lexer::Lexer;
 use crate::parser as redblue_parser;
 use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
@@ -1816,6 +1817,7 @@ impl Vm {
             Statement::Try {
                 body,
                 catch_var,
+                catch_kind,
                 catch_body,
                 finally_body,
             } => {
@@ -1835,7 +1837,15 @@ impl Vm {
                 let has_catch = catch_var.is_some() || !catch_body.is_empty();
 
                 if let Some(failure) = failure {
-                    // No catch to handle it. The `finally` is owed anyway: a
+                    // A typed handler is a handler only for the kinds it names.
+                    // One that does not match is not a handler at all, and the
+                    // failure it declined belongs to whatever is written around
+                    // it — which is the same road a `try` with no `catch` hands
+                    // it down, and the same road both engines walk it.
+                    let declined = catch_kind.is_some_and(|kind| !kind.matches(&failure));
+
+                    // No catch to handle it, or one that declined it. The
+                    // `finally` is owed anyway: a
                     // `try ... finally` promises its cleanup whatever the region
                     // does, and returning above `run_finally_body` skipped it on
                     // exactly the path where the cleanup is wanted — the region
@@ -1844,7 +1854,7 @@ impl Vm {
                     // which is also what an enclosing `try` written around this
                     // one expects: `?` hands the failure to it, and it is the
                     // `catch` there that decides what the program does next.
-                    if !has_catch {
+                    if !has_catch || declined {
                         self.run_finally_body(finally_body)?;
                         // A cleanup that left the region abruptly is the way the
                         // region was left, so the failure is not the one leaving
@@ -1863,7 +1873,7 @@ impl Vm {
                         }
                         return Ok(Value::Nothing);
                     }
-                    self.run_catch_body(catch_var.as_deref(), catch_body)?;
+                    self.run_catch_body(*catch_kind, catch_var.as_deref(), &failure, catch_body)?;
                 }
 
                 self.run_finally_body(finally_body)?;
@@ -1958,18 +1968,34 @@ impl Vm {
     }
 
     /// The `catch` body of a `try`, in a scope of its own, with `catch_var`
-    /// bound to the word `error` if there is one to bind.
+    /// bound to the failure if there is one to bind.
+    ///
+    /// An untyped handler binds the word `error` — the text it has always bound,
+    /// so `say error` in a handler written before typed failures still prints
+    /// what it printed. A typed handler binds the failure itself: the record of
+    /// its kind, its message and where it happened, which is the value there is
+    /// something to read the kind off.
     ///
     /// The scope is truncated rather than popped on the way out, so a `catch`
     /// that fails part way through — or that a `break` leaves part way through
     /// — does not leave the name it binds alive in the enclosing block.
-    fn run_catch_body(&mut self, catch_var: Option<&str>, catch_body: &[Stmt]) -> Result<()> {
+    fn run_catch_body(
+        &mut self,
+        catch_kind: Option<FailureKind>,
+        catch_var: Option<&str>,
+        failure: &Error,
+        catch_body: &[Stmt],
+    ) -> Result<()> {
+        let bound = match catch_kind {
+            Some(_) => failure_value(failure),
+            None => Value::Text("error".to_string()),
+        };
         let scope_base = self.locals.len();
         self.push_scope();
         let outcome = match catch_var {
             Some(var) => {
                 self.declare(var);
-                self.set_var(var, Value::Text("error".to_string()))
+                self.set_var(var, bound)
             }
             None => Ok(()),
         }

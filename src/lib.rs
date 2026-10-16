@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod bytecode;
 pub mod debugger;
 mod error;
+pub mod failure;
 pub mod formatter;
 mod interpreter;
 pub mod lexer;
@@ -28,6 +29,7 @@ use crate::lexer::Lexer;
 use testing::reporter::Reporter;
 
 pub use error::{Error, Span};
+pub use failure::{value_of as failure_value, FailureKind};
 pub use lsp::{
     diagnostics, diagnostics_json, diagnostics_to_json, textmate_grammar, Diagnostic, Severity,
     GRAMMAR_PATH, LANGUAGE_CONFIG_PATH,

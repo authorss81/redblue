@@ -1,4 +1,5 @@
 use crate::error::{Error, Result, Span};
+use crate::failure::FailureKind;
 use crate::lexer::{Token, TokenKind};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -250,6 +251,14 @@ pub enum Statement {
     Try {
         body: Vec<Stmt>,
         catch_var: Option<String>,
+        /// The kind `catch error of <Type>` names, or `None` for an untyped
+        /// handler.
+        ///
+        /// An `Option` rather than a name a program wrote and this kept as text:
+        /// the closed list is checked here, where the name is read, so an
+        /// invented kind is a parse failure rather than a handler that matches
+        /// nothing at run time.
+        catch_kind: Option<FailureKind>,
         catch_body: Vec<Stmt>,
         finally_body: Vec<Stmt>,
     },
@@ -1623,6 +1632,7 @@ impl Parser {
         }
 
         let mut catch_var = None;
+        let mut catch_kind = None;
         let mut catch_body = Vec::new();
 
         if let Some(Token {
@@ -1643,6 +1653,20 @@ impl Parser {
             // `catch error e`.
             if self.catch_keyword_ahead() {
                 self.advance(); // consume 'error'
+                // `catch error of <Type>` — a handler that runs only for the
+                // kinds it names. Read here rather than left as two orphan
+                // statements, which is what `of <Type>` used to be.
+                if self.catch_type_ahead() {
+                    self.advance(); // consume 'of'
+                    catch_kind = Some(self.failure_kind()?);
+                    // A typed handler binds the word `error` even when the source
+                    // wrote no name after the kind. It is written where the
+                    // untyped handler is and names what it caught the same way,
+                    // so `catch error of Io` reads the failure as `error` without
+                    // saying so twice; a name written after the kind overrides
+                    // it below.
+                    catch_var = Some("error".to_string());
+                }
             }
             if let Some(Token {
                 kind: TokenKind::Identifier(name),
@@ -1690,6 +1714,7 @@ impl Parser {
         Ok(Some(Statement::Try {
             body,
             catch_var,
+            catch_kind,
             catch_body,
             finally_body,
         }))
@@ -2018,6 +2043,71 @@ impl Parser {
                 ..
             }) if *line == first.line
         )
+    }
+
+    /// Whether the current position is the `of <Type>` of a typed
+    /// `catch error of <Type>`.
+    ///
+    /// The same shape as [`Parser::catch_keyword_ahead`] — the word `of` and a
+    /// second identifier on the same line — because that is the only place two
+    /// identifiers sit next to each other on a `catch`. `catch error` whose body
+    /// starts on the next line is the untyped handler whatever its body's first
+    /// word is, and a `catch` with no `error` before its `of` binds a name spelled
+    /// `of`, exactly as it did before.
+    fn catch_type_ahead(&self) -> bool {
+        if !self.is_word_ahead(0, "of") {
+            return false;
+        }
+        let Some(first) = self.current() else {
+            return false;
+        };
+        matches!(
+            self.tokens.get(self.pos + 1),
+            Some(Token {
+                kind: TokenKind::Identifier(_),
+                line,
+                ..
+            }) if *line == first.line
+        )
+    }
+
+    /// The failure kind named after `of`, refusing any name outside the closed
+    /// list.
+    ///
+    /// Refused here, where the name is read, so the program is told what it
+    /// wrote instead of compiling into a handler that matches no failure at all
+    /// — the refusal names the kinds that do exist, because "unknown kind" on
+    /// its own leaves the writer to guess.
+    fn failure_kind(&mut self) -> Result<FailureKind> {
+        let Some(token) = self.current() else {
+            return Err(Error::Parser(
+                "expected a failure kind after 'of'".to_string(),
+                self.span(),
+            ));
+        };
+        let Token {
+            kind: TokenKind::Identifier(name),
+            ..
+        } = token
+        else {
+            return Err(Error::Parser(
+                "expected a failure kind after 'of'".to_string(),
+                token.span(),
+            ));
+        };
+        let name = name.clone();
+        let span = token.span();
+        let kind = FailureKind::from_name(&name).ok_or_else(|| {
+            Error::Parser(
+                format!(
+                    "'{name}' is not a failure kind; a catch matches {}",
+                    FailureKind::names()
+                ),
+                span,
+            )
+        })?;
+        self.advance();
+        Ok(kind)
     }
 
     /// Whether the whole `or equal to` tail of a compound word comparison sits

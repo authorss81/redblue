@@ -44,6 +44,7 @@ use crate::bytecode::{
     END_TRY_MARKER, MIGHT_FAIL_END_MARKER, NO_BLOCK, NO_CONST, STATEMENT_MARKER,
 };
 use crate::error::{Error, Result, Span};
+use crate::failure::{value_of as failure_value, FailureKind};
 use crate::interpreter::{qualified_member, DeclaredModule};
 use crate::interpreter::{
     resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps,
@@ -280,6 +281,16 @@ struct Handler {
     catch: Option<CatchHandler>,
     /// The name a `catch` binds, empty when there is no `catch` to bind it.
     catch_var: String,
+    /// The kind a typed `catch` matches, or `None` for an untyped handler and
+    /// for a `try` with no `catch`.
+    ///
+    /// Read off the catch block's parameter list where `TRY` installs the
+    /// handler, and asked once per failure. `None` rather than a kind that
+    /// matches everything, because `Error` is a kind a program writes and means
+    /// every failure: a typed handler that catches everything still binds the
+    /// failure, where an untyped one binds the word `error`, and one flag
+    /// cannot say which of the two a handler is.
+    catch_kind: Option<FailureKind>,
     /// The `finally` body, or `None` for a `try` with no `finally`.
     finally: Option<(Arc<Chunk>, Vec<u32>)>,
     /// The operand stack height the protected code started at, which is what the
@@ -3257,11 +3268,23 @@ impl BytecodeVm {
 
     /// `TRY`: installs the handlers the rest of this block runs under.
     fn push_handler(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
+        let mut catch_kind = None;
         let catch = if instruction.arg == NO_BLOCK {
             None
         } else {
             let (chunk, path) = self.child_path(frame, instruction.arg)?;
-            let catch_var = self.block_of(&chunk, &path)?.name.clone();
+            let catch_block = self.block_of(&chunk, &path)?;
+            let catch_var = catch_block.name.clone();
+            // The kind a typed handler matches is the catch block's first
+            // parameter; an untyped handler has none, and a name this build does
+            // not know matches no failure rather than every one — a file that
+            // named a kind no longer in the list is a file whose handler does
+            // nothing, and failing loudly about that is not what this read is
+            // for.
+            catch_kind = catch_block
+                .params
+                .first()
+                .and_then(|name| FailureKind::from_name(name));
             Some(((chunk, path), catch_var))
         };
         let finally = if instruction.aux == NO_BLOCK {
@@ -3275,6 +3298,7 @@ impl BytecodeVm {
                 .as_ref()
                 .map(|(_, var)| var.clone())
                 .unwrap_or_default(),
+            catch_kind,
             finally,
             stack_base: self.frames[frame].stack_base,
             loop_base: self.loops.len(),
@@ -3359,6 +3383,7 @@ impl BytecodeVm {
             // it is a different failure leaving the region, and that is what tells
             // the `try` with no `catch` below from stopping when it has.
             let enclosing_handlers = self.handlers.len();
+            let catch_kind = handler.catch_kind;
             // The two bodies run inside this window, and what it changes is what they
             // read: a `break` in the `catch` leaves the loop the body is inside, but
             // the turn it stops has not ended until this `finally` has run, so the
@@ -3366,10 +3391,21 @@ impl BytecodeVm {
             // back below, once both bodies are done. Saved and restored rather than
             // set, because a failure inside either body is handled in its own right.
             let enclosing = std::mem::replace(&mut self.handling_failure, true);
-            let bodies = self.run_catch(&handler).and_then(|caught| {
+            // A typed handler that does not match is not a handler: its body
+            // does not run at all, and the failure belongs to whatever is
+            // written around it — the same road a `try` with no `catch` hands
+            // it down, and the same road the tree-walking VM's `?` walks when a
+            // typed handler declines.
+            let declined = catch_kind.is_some_and(|kind| !kind.matches(error));
+            let bodies = if declined {
                 self.run_finally(&handler)
-                    .map(|finally| caught.is_left() || finally.is_left())
-            });
+                    .map(|finally| finally.is_left())
+            } else {
+                self.run_catch(&handler, error).and_then(|caught| {
+                    self.run_finally(&handler)
+                        .map(|finally| caught.is_left() || finally.is_left())
+                })
+            };
             self.handling_failure = enclosing;
             self.restore_deferred_bindings();
             // The `finally` is owed whether the `catch` handled the failure or not,
@@ -3396,7 +3432,7 @@ impl BytecodeVm {
             // left over: the original is spent — the tree-walking VM drops it the
             // same way, where the failing `finally` replaces it — and the `try` that
             // took the body's is what has already said where the program goes next.
-            if handler.catch.is_none() {
+            if handler.catch.is_none() || declined {
                 if self.handlers.len() < enclosing_handlers {
                     return Ok(true);
                 }
@@ -3502,16 +3538,23 @@ impl BytecodeVm {
     /// function's parameter scope, so every name it declared afterwards was
     /// unknown. Top-level programs did not show it, because a program's names live
     /// in globals rather than in a scope a `catch` could take.
-    fn run_catch(&mut self, handler: &Handler) -> Result<Exit> {
+    fn run_catch(&mut self, handler: &Handler, failure: &Error) -> Result<Exit> {
         let Some(((chunk, path), _)) = &handler.catch else {
             return Ok(Exit::Finished);
         };
         self.locals.push(CapturedScope::new());
         if !handler.catch_var.is_empty() {
+            // A typed handler binds the failure itself — the record of its kind,
+            // its message and where it happened — and an untyped one binds the
+            // word `error`, which is what it bound before either of them existed.
+            let bound = match handler.catch_kind {
+                Some(_) => failure_value(failure),
+                None => Value::Text("error".to_string()),
+            };
             self.locals
                 .last_mut()
                 .expect("a scope to bind into")
-                .insert(handler.catch_var.clone(), Value::Text("error".to_string()));
+                .insert(handler.catch_var.clone(), bound);
         }
         let mut catch_frame = self.frame_for(chunk, path.clone());
         catch_frame.locals_base = self.locals.len() - 1;

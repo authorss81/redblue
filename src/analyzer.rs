@@ -475,6 +475,7 @@ impl Analyzer {
                 catch_var,
                 catch_body,
                 finally_body,
+                ..
             } => {
                 self.analyze_body(body);
                 if self.stopped() {

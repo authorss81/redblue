@@ -493,6 +493,7 @@ impl Formatter {
             Statement::Try {
                 body,
                 catch_var,
+                catch_kind,
                 catch_body,
                 finally_body,
             } => {
@@ -519,7 +520,28 @@ impl Formatter {
                         // name is written first, then the one trailing comment.
                         self.write_indent();
                         self.write("catch ");
-                        self.write(var);
+                        // The kind a typed handler matches is part of the handler
+                        // and not a note on it, so it is written between the
+                        // keyword and the name. It comes first because dropping it
+                        // would widen the handler into one that catches failures
+                        // it was written not to catch — the formatter deleting a
+                        // restriction the program depends on is worse than
+                        // leaving the line alone.
+                        match catch_kind {
+                            // A typed handler's name is the word `error` unless
+                            // the source gave it another one, and writing that
+                            // word back after the kind would say the same thing
+                            // twice: `catch error of Io error`.
+                            Some(kind) => {
+                                self.write("error of ");
+                                self.write(kind.name());
+                                if var != "error" {
+                                    self.write(" ");
+                                    self.write(var);
+                                }
+                            }
+                            None => self.write(var),
+                        }
                         self.write_trailing_comment(self.last_line);
                         self.newline();
                         closed_by = self.format_block(catch_body);

@@ -315,6 +315,7 @@ impl Linter {
                 catch_var,
                 catch_body,
                 finally_body,
+                ..
             } => {
                 self.analyze_body(body);
                 self.scopes.push(HashSet::new());
