@@ -240,6 +240,28 @@ fn edge_text_length_mixed_script_text_is_the_sum_of_its_characters() {
 }
 
 #[test]
+fn edge_text_length_of_a_long_mixed_string_is_exact() {
+    // The "very long strings" row, and the only place the count is anything but
+    // small: three hundred characters and eight hundred bytes, built by a loop
+    // so the string is grown rather than written out. A byte count would say 800
+    // here and a guess would say 300 by accident; both numbers are asserted, and
+    // the loop is fixed-iteration, so there is nothing nondeterministic in it.
+    //
+    // Growth is what makes this worth its own row: a counting bug that only
+    // shows at size — an off-by-one accumulating per concatenation, a stale
+    // cached length, a reallocation that truncates — cannot hide in a
+    // three-character string.
+    let program = "set s to \"\"\nset i to 0\nrepeat 100 times\n    set s to s + \"日本é\"\n    set i to i + 1\nend\nsay length(s)\n";
+    both_engines_say("300", program);
+    let bytes = "set s to \"\"\nset i to 0\nrepeat 100 times\n    set s to s + \"日本é\"\n    set i to i + 1\nend\nsay length(bytes.from_text(s))\n";
+    both_engines_say("800", bytes);
+    // One fewer iteration is one fewer three-character group, so the count is
+    // tracking the string rather than a constant.
+    let shorter = "set s to \"\"\nset i to 0\nrepeat 99 times\n    set s to s + \"日本é\"\n    set i to i + 1\nend\nsay length(s)\n";
+    both_engines_say("297", shorter);
+}
+
+#[test]
 fn both_engines_answer_every_row_of_the_table_identically() {
     // The engines are compared to each other rather than each restated, so a
     // divergence is a diff rather than two rows that were meant to match.
