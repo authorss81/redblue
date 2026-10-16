@@ -23,6 +23,7 @@ pub use introspect::Definition;
 
 use crate::analyzer;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
+use crate::error::Error;
 use crate::interpreter::Vm;
 use crate::lexer::{Lexer, TokenKind};
 use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
@@ -396,6 +397,59 @@ pub enum SessionEnd {
 fn farewell(end: SessionEnd) -> &'static str {
     match end {
         SessionEnd::Quit | SessionEnd::Eof | SessionEnd::InputError => "Goodbye!",
+    }
+}
+
+/// Renders a failure the session is about to report, without the `Error: ` the
+/// caller prefixes it with.
+///
+/// The whole language already knows how to draw a failure: [`Error::render`]
+/// writes the label, the message, the `--> file:line:column` location, the
+/// offending line of the source and a caret under the column that failed. A
+/// session printed the first two through [`std::fmt::Display`] and stopped
+/// there, so the same program showed more under `rb run` than at the prompt —
+/// and the prompt is where a reader tries a line and looks to see what it did.
+///
+/// The buffer, not the history, is the source: a block the user typed over
+/// several prompts is one program, and the line that failed is line *n* of the
+/// block rather than a line of the session.
+///
+/// A function rather than a `println!` because what a session prints is
+/// otherwise nothing a test can read.
+fn render_error(style: &Style, code: &str, file: &str, error: &Error) -> String {
+    paint_diagnostic(style, &error.render(code, Some(file)))
+}
+
+/// Paints the parts of a rendered failure that are about the failure — the
+/// label and message, the location, and the caret — and leaves the source line
+/// between them exactly as the user wrote it.
+///
+/// Colour wraps a diagnostic; it never rewrites one. So a line is painted whole
+/// or not at all, and with colour off this is the identity on the rendered text:
+/// what a session prints about a failure is byte for byte what `rb run` prints
+/// for the same program.
+fn paint_diagnostic(style: &Style, rendered: &str) -> String {
+    rendered
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 || line.trim_start().starts_with("-->") || is_caret_line(line) {
+                style.paint(Paint::Error, line)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether `line` is a drawn failure's caret or underline rather than a line of
+/// the program: the gutter of a source line carries its number, and the gutter
+/// of a caret carries only the spaces that line up with it.
+fn is_caret_line(line: &str) -> bool {
+    match line.split_once(" | ") {
+        Some((gutter, _)) => !gutter.is_empty() && gutter.chars().all(|c| c == ' '),
+        None => false,
     }
 }
 
@@ -1023,8 +1077,7 @@ impl Repl {
                 }
             }
             Err(e) => {
-                let line = format!("Error: {}", e);
-                println!("{}", self.style.paint(Paint::Error, &line));
+                println!("Error: {}", render_error(&self.style, code, file, &e));
             }
         }
     }
@@ -4894,6 +4947,505 @@ mod tests {
             assert!(
                 repl.time_answer("\"héllo \" + \"🙂\"").is_ok(),
                 "a unicode expression is timed like any other"
+            );
+        }
+    }
+
+    /// A failure a session reports points at the line the user typed.
+    ///
+    /// Every failure already carries a position and [`Error::render`] already
+    /// draws it — label, location, the offending source line and a caret under
+    /// the column. A session used to print only the first two of those through
+    /// [`std::fmt::Display`], so the same program showed more at `rb run` than
+    /// at the prompt, and the one place a reader can try a line and see what it
+    /// does was the one place that refused to show them which part of it was
+    /// wrong.
+    ///
+    /// The properties pinned here are the ones a REPL reader depends on: the
+    /// line and caret are there, they are the language's own rendering rather
+    /// than a second format, they are positioned by the buffer and not by the
+    /// history, and a failure with no position renders as the message alone
+    /// rather than reaching for a line that is not there.
+    mod error_rendering {
+        use super::Repl;
+        use crate::error::{Error, Span};
+        use crate::repl::introspect::SESSION_FILE;
+        use crate::repl::render_error;
+        use crate::repl::style::{Paint, Style};
+
+        /// Strips every escape sequence, so a test asserts on the text and
+        /// cannot fail because the palette changed.
+        fn plain(rendered: &str) -> String {
+            let mut out = String::new();
+            let mut chars = rendered.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for skip in chars.by_ref() {
+                        if skip == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+
+        /// The `line:column` a rendered failure is drawn at, with the file
+        /// dropped.
+        ///
+        /// The file is the one half that must differ: a session's failure is in
+        /// `<session>` and the same program run from disk is in its own path.
+        /// The last two fields are what both have to agree on.
+        fn position(rendered: &str) -> String {
+            let line = rendered
+                .lines()
+                .find(|line| line.trim_start().starts_with("-->"))
+                .unwrap_or_else(|| panic!("no location in:\n{}", rendered));
+            let location = line.trim().trim_start_matches("-->").trim();
+            let fields: Vec<&str> = location.split(':').collect();
+            assert!(fields.len() >= 2, "no line:column in {}", line);
+            fields[fields.len() - 2..].join(":")
+        }
+
+        /// The `N | text` line drawn for buffer line `n`.
+        fn source_line(rendered: &str, n: usize) -> &str {
+            rendered
+                .lines()
+                .find(|line| line.starts_with(&format!("{} | ", n)))
+                .unwrap_or_else(|| {
+                    panic!("line {} of the buffer is not drawn in:\n{}", n, rendered)
+                })
+        }
+
+        /// The caret or underline line: the only drawn line whose gutter carries
+        /// no line number.
+        fn caret(rendered: &str) -> &str {
+            rendered
+                .lines()
+                .find(|line| {
+                    line.split_once(" | ").is_some_and(|(gutter, _)| {
+                        !gutter.is_empty() && gutter.chars().all(|c| c == ' ')
+                    })
+                })
+                .unwrap_or_else(|| panic!("no caret in:\n{}", rendered))
+        }
+
+        /// Runs `code` in a session and hands back the failure it was given,
+        /// rather than the text it printed.
+        fn failure_of(code: &str) -> Error {
+            let mut repl = Repl::new();
+            repl.run_code(code)
+                .expect_err("the program under test is meant to fail")
+        }
+
+        /// What a session prints about `code`, with colour off and the escapes
+        /// stripped, so what is asserted on is the text a reader sees.
+        fn session_render(code: &str) -> String {
+            plain(&render_error(
+                &Style::forced(false),
+                code,
+                SESSION_FILE,
+                &failure_of(code),
+            ))
+        }
+
+        /// The property the finding is about: a failure is drawn with the line it
+        /// happened on, and the caret is put where the failure says.
+        ///
+        /// `say nosuchvar` fails at column 1, because the analyzer reports an
+        /// unknown variable at the statement that read it — the same caret `rb
+        /// run` prints for the same program. `set x to 1 +` is the case where
+        /// the column is not 1, and it is here because a caret pinned to
+        /// column 1 everywhere would pass the first and fail the second.
+        #[test]
+        fn a_failure_a_line_produces_is_drawn_with_that_line_under_it() {
+            let code = "say nosuchvar";
+            let rendered = session_render(code);
+
+            assert!(
+                rendered.contains("--> <session>:1:1"),
+                "the failure names the file, the line and the column it failed at:\n{}",
+                rendered
+            );
+            assert_eq!(
+                source_line(&rendered, 1),
+                "1 | say nosuchvar",
+                "the line the user typed is quoted back at them:\n{}",
+                rendered
+            );
+            assert_eq!(
+                caret(&rendered),
+                "  | ^",
+                "the caret sits under the span the failure carries:\n{}",
+                rendered
+            );
+            assert!(
+                rendered.starts_with("AnalyzerError: Unknown variable 'nosuchvar'"),
+                "the message is unchanged — colour may wrap it, never rewrite it:\n{}",
+                rendered
+            );
+
+            let unfinished = session_render("set x to 1 +");
+            assert_eq!(
+                position(&unfinished),
+                "1:13",
+                "a column past the first character is reported as itself:\n{}",
+                unfinished
+            );
+            assert_eq!(
+                caret(&unfinished),
+                "  |             ^",
+                "and the caret is drawn under that column, not under the start \
+                 of the line:\n{}",
+                unfinished
+            );
+
+            // A failure of another kind, drawn the same way: the label is the
+            // failure's own, and the line is quoted whichever kind it was.
+            let mismatch = session_render("say 1 + \"a\"");
+            assert!(
+                mismatch.starts_with("RuntimeError: Cannot add non-numbers"),
+                "a runtime failure is labelled as one:\n{}",
+                mismatch
+            );
+            assert_eq!(
+                source_line(&mismatch, 1),
+                "1 | say 1 + \"a\"",
+                "and its line is quoted like any other:\n{}",
+                mismatch
+            );
+        }
+
+        /// A span covering more than one line is drawn the way the language
+        /// draws it: every line it covers, then the `~~~` under where it opens.
+        #[test]
+        fn a_failure_covering_several_lines_is_drawn_across_them() {
+            let code = "say \"unterminated\nstill going\n";
+            let rendered = session_render(code);
+
+            assert_eq!(
+                source_line(&rendered, 1),
+                "1 | say \"unterminated",
+                "the line the string opened on is drawn whole:\n{}",
+                rendered
+            );
+            assert_eq!(
+                source_line(&rendered, 2),
+                "2 | still going",
+                "and so is the line it ran on to:\n{}",
+                rendered
+            );
+            assert_eq!(
+                caret(&rendered),
+                "  |     ^~~~~~~~~~~~~~",
+                "the underline covers the string, from the column it opened at:\n{}",
+                rendered
+            );
+        }
+
+        /// A session's failure is the rendering the file runner prints, byte for
+        /// byte once colour is off, and it says the same place.
+        ///
+        /// Both halves are run for real — the session through the engine a REPL
+        /// runs, the file through the same path `rb run` takes — so they cannot
+        /// agree by agreeing with themselves.
+        #[test]
+        fn a_session_failure_says_the_same_place_run_does() {
+            let code = "set total to 1\nsay total + nosuchvar\n";
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/tmp/repl-error-render");
+            std::fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+            let path = dir.join("diagnostic.rb");
+            std::fs::write(&path, code).expect("the file should be writable");
+            let path = path.to_str().expect("a path built here is valid UTF-8");
+
+            let from_file = crate::run_file_with_diagnostic(path)
+                .expect_err("the program under test is meant to fail");
+            let walked = plain(&from_file);
+
+            let failure = failure_of(code);
+            let in_session = plain(&render_error(
+                &Style::forced(false),
+                code,
+                SESSION_FILE,
+                &failure,
+            ));
+
+            assert_eq!(
+                position(&in_session),
+                position(&walked),
+                "a line and the same program in a file must fail at the same \
+                 line and column\nsession:\n{}\nfile:\n{}",
+                in_session,
+                walked
+            );
+            assert_eq!(
+                walked,
+                render_error(&Style::forced(false), code, path, &failure),
+                "the two must differ in the file they name and in nothing else:\n\
+                 session:\n{}\nfile:\n{}",
+                in_session,
+                walked
+            );
+            assert_eq!(
+                in_session.replace(SESSION_FILE, path).lines().count(),
+                walked.lines().count(),
+                "both draw the label, the location, the source line and the caret:\n\
+                 session:\n{}\nfile:\n{}",
+                in_session,
+                walked
+            );
+            assert!(
+                walked.contains("2 | say total + nosuchvar") && walked.contains("  | ^"),
+                "the source line and its caret are drawn:\n{}",
+                walked
+            );
+        }
+
+        /// The other engine reports the same failure in the same place.
+        ///
+        /// A session runs one engine, so that the two agree is not something a
+        /// REPL test can watch happen; it is pinned here by running the bytecode
+        /// VM over the same text and diffing what the two render.
+        #[test]
+        fn the_bytecode_engine_reports_the_same_failure_in_the_same_place() {
+            let code = "set xs to [1, 2]\nsay xs[9]\n";
+
+            let walked = failure_of(code);
+            let chunk = crate::compile_source(code).expect("the program compiles to bytecode");
+            let compiled = crate::bytecode::vm::BytecodeVm::new()
+                .run(&chunk)
+                .expect_err("index 9 is out of bounds in both engines");
+
+            let from_walker = plain(&render_error(
+                &Style::forced(false),
+                code,
+                SESSION_FILE,
+                &walked,
+            ));
+            let from_bytecode = plain(&render_error(
+                &Style::forced(false),
+                code,
+                SESSION_FILE,
+                &compiled,
+            ));
+
+            assert_eq!(
+                from_walker, from_bytecode,
+                "the same failure, drawn the same way by both engines — the same \
+                 message, the same line, the same column, the same caret\n\
+                 tree-walker:\n{}\nbytecode:\n{}",
+                from_walker, from_bytecode
+            );
+            assert!(
+                from_bytecode.contains("Index 9 is out of bounds"),
+                "and it is the failure that was expected, not some other:\n{}",
+                from_bytecode
+            );
+        }
+
+        /// A block fails on the line inside it that failed, not on the first
+        /// line of the buffer and not on the prompt's own numbering.
+        #[test]
+        fn edge_a_failure_inside_a_block_points_into_the_block() {
+            let code = "repeat 2 times\n    say total\nend";
+            let rendered = session_render(code);
+
+            assert_eq!(
+                source_line(&rendered, 2),
+                "2 |     say total",
+                "the offending line is drawn from the block, numbered as the \
+                 buffer numbers it:\n{}",
+                rendered
+            );
+            assert!(
+                !rendered.contains("\n1 | repeat"),
+                "line 1 of the block is not where the failure was:\n{}",
+                rendered
+            );
+            assert_eq!(
+                position(&rendered),
+                "2:5",
+                "the position is line 2 of the block, not line 2 of the session:\n{}",
+                rendered
+            );
+            assert_eq!(
+                caret(&rendered),
+                "  |     ^",
+                "the caret is under `total` on the line it was written on:\n{}",
+                rendered
+            );
+        }
+
+        /// A failure with no position — an `Io` failure never has a span — draws
+        /// the message and nothing else, and does not reach past the end of the
+        /// buffer for a line to quote.
+        #[test]
+        fn edge_a_failure_with_no_position_renders_the_message_alone() {
+            let rendered = plain(&render_error(
+                &Style::forced(false),
+                "",
+                SESSION_FILE,
+                &Error::Io("No such file or directory".to_string()),
+            ));
+
+            assert_eq!(
+                rendered, "IoError: No such file or directory",
+                "a failure with no position is its message and its label:\n{}",
+                rendered
+            );
+            assert!(
+                !rendered.contains("-->") && !rendered.contains('|'),
+                "nothing is invented for a failure that has no place:\n{}",
+                rendered
+            );
+        }
+
+        /// A position past the end of the buffer draws the location and stops,
+        /// rather than indexing a line that is not there.
+        #[test]
+        fn edge_a_position_beyond_the_buffer_renders_the_location_and_stops() {
+            let code = "set x to 1\n";
+            let rendered = plain(&render_error(
+                &Style::forced(false),
+                code,
+                SESSION_FILE,
+                &Error::Runtime("something went wrong".to_string(), Span::new(99, 3)),
+            ));
+
+            assert_eq!(
+                position(&rendered),
+                "99:3",
+                "the location is still the failure's own:\n{}",
+                rendered
+            );
+            assert_eq!(
+                rendered.lines().count(),
+                2,
+                "no source line is drawn for a line the buffer does not have:\n{}",
+                rendered
+            );
+        }
+
+        /// An empty line is a line: a failure whose span is on one is drawn as a
+        /// source line with nothing in it rather than as nothing at all.
+        #[test]
+        fn edge_a_failure_on_an_empty_line_is_drawn_as_an_empty_line() {
+            let code = "\nset x to 1\nsay nope\n";
+            let rendered = plain(&render_error(
+                &Style::forced(false),
+                code,
+                SESSION_FILE,
+                &Error::Runtime("out of fuel".to_string(), Span::new(1, 1)),
+            ));
+
+            assert_eq!(
+                source_line(&rendered, 1),
+                "1 | ",
+                "the empty line the failure is on is drawn as it is:\n{}",
+                rendered
+            );
+            assert_eq!(
+                caret(&rendered),
+                "  | ^",
+                "and the caret still lands on its column:\n{}",
+                rendered
+            );
+        }
+
+        /// A long line is drawn whole and the caret still lines up with the
+        /// column it names, whatever follows it.
+        #[test]
+        fn edge_a_wide_line_is_drawn_whole_and_the_caret_stays_under_its_column() {
+            let head = "set x to nosuchvar //";
+            let code = format!("{}{}", head, " ".repeat(500 - head.len()));
+            assert_eq!(code.chars().count(), 500, "the line is 500 characters wide");
+
+            let rendered = session_render(&code);
+
+            assert_eq!(
+                source_line(&rendered, 1),
+                format!("1 | {}", code),
+                "a wide line is drawn whole, not cut down to the terminal:\n{}",
+                rendered
+            );
+            assert_eq!(
+                caret(&rendered),
+                "  | ^",
+                "the caret is where the failure says, whatever follows it:\n{}",
+                rendered
+            );
+        }
+
+        /// Unicode before and after the failure: the line is drawn with every
+        /// character it was written with, and the caret does not drift.
+        #[test]
+        fn edge_a_line_with_wide_characters_is_drawn_intact() {
+            let code = "say nosuchvar // 🎉 ünïcode 日本語";
+            let rendered = session_render(code);
+
+            assert!(
+                rendered.contains(code),
+                "the source line keeps every character it was written with:\n{}",
+                rendered
+            );
+            assert_eq!(
+                caret(&rendered),
+                "  | ^",
+                "and the caret is where the failure says it is:\n{}",
+                rendered
+            );
+        }
+
+        /// Colour wraps a diagnostic and does not become one: the label, the
+        /// location and the caret are painted, the user's own source line is
+        /// left plain, and with colour off the rendering is the language's own,
+        /// byte for byte.
+        #[test]
+        fn colour_paints_the_diagnostic_and_leaves_the_source_line_plain() {
+            let code = "say nosuchvar";
+            let error = failure_of(code);
+            let off = Style::forced(false);
+            let on = Style::forced(true);
+
+            let uncoloured = render_error(&off, code, SESSION_FILE, &error);
+            let painted = render_error(&on, code, SESSION_FILE, &error);
+
+            assert_eq!(
+                uncoloured,
+                error.render(code, Some(SESSION_FILE)),
+                "with colour off a session's failure is byte for byte what the \
+                 language renders — no reformatting of its own:\n{}",
+                uncoloured
+            );
+            assert_eq!(
+                plain(&painted),
+                uncoloured,
+                "colour is the only difference between the two renderings"
+            );
+            assert!(
+                painted.contains(
+                    &on.paint(Paint::Error, "AnalyzerError: Unknown variable 'nosuchvar'",)
+                ),
+                "the label and message are painted:\n{:?}",
+                painted
+            );
+            assert!(
+                painted.contains(&on.paint(Paint::Error, &format!("  --> {}:1:1", SESSION_FILE))),
+                "the location is painted:\n{:?}",
+                painted
+            );
+            assert!(
+                painted.contains("\n1 | say nosuchvar\n"),
+                "the source line is the reader's own text and is left plain:\n{:?}",
+                painted
+            );
+            assert!(
+                painted.contains(&on.paint(Paint::Error, "  | ^")),
+                "the caret is painted:\n{:?}",
+                painted
             );
         }
     }
