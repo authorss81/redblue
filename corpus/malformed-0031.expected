@@ -1,4 +1,4 @@
 #label AnalyzerError
-#position 1:1
+#position 1:5
 #value nothing
 #message Unknown variable 'unknown_variable'

@@ -231,7 +231,7 @@ fn a_failure_at_the_prompt_shows_the_line_that_failed() {
     s.assert_exited_ok()
         .assert_stdout_contains("Unknown variable 'nosuchvar'")
         .assert_stdout_contains("1 | say nosuchvar")
-        .assert_stdout_contains("  | ^");
+        .assert_stdout_contains("  |     ^");
 }
 
 #[test]

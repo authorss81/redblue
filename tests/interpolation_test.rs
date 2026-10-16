@@ -239,8 +239,8 @@ fn edge_a_substitution_inside_a_function_body_reaches_the_parameters() {
 fn edge_a_name_nothing_binds_inside_braces_is_an_analyzer_error() {
     // The braces hold an expression, so the name inside them is resolved the
     // way any other name is. It must not reach the VM as the text `{nope}`.
-    // The statement is written at column 5, so the column it is reported at is
-    // a position and not a default.
+    // The name is written inside the literal, at column 16 of the `say`, so the
+    // column it is reported at is a position under that name and not a default.
     let source = "to f()\n    say \"n is {nope}\"\nend\nf()\n";
     for (engine, error) in [
         ("tree", tree_failure(source)),
@@ -263,8 +263,8 @@ fn edge_a_name_nothing_binds_inside_braces_is_an_analyzer_error() {
         );
         assert_eq!(
             error.span().map(|s| s.column),
-            Some(5),
-            "{engine}: and the column of the statement holding it"
+            Some(16),
+            "{engine}: and the column of the name inside the braces"
         );
     }
 }
@@ -383,7 +383,7 @@ fn the_parser_builds_the_node_the_ast_declares() {
     };
     assert_eq!(parts.len(), 3, "a text, the expression, and a text");
     assert!(matches!(parts[0], Expr::Text(ref t) if t == "a"));
-    assert!(matches!(parts[1], Expr::Variable(ref n) if n == "b"));
+    assert!(matches!(parts[1], Expr::Variable(ref n, _) if n == "b"));
     assert!(matches!(parts[2], Expr::Text(ref t) if t == "c"));
 }
 

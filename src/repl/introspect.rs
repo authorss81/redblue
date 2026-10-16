@@ -474,7 +474,7 @@ fn push_expression<'a>(
 ) {
     match expression {
         Expr::Number(_) | Expr::Text(_) | Expr::YesNo(_) | Expr::Nothing => {}
-        Expr::Variable(_) => {}
+        Expr::Variable(..) => {}
         Expr::Binary { left, right, .. } => {
             pending.push(Pending::Expr(right));
             pending.push(Pending::Expr(left));
@@ -645,7 +645,7 @@ fn receiver_name(expression: &Expr) -> String {
     let mut current = expression;
     loop {
         match current {
-            Expr::Variable(name) => {
+            Expr::Variable(name, _) => {
                 parts.push(name.as_str());
                 break;
             }

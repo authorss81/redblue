@@ -2,10 +2,11 @@
 
 Work that is real, evidenced, and **not** this phase's. Recorded for the auditor.
 
-## F1 — an unknown variable is reported at the statement, not at the name
+## F1 — ~~an unknown variable is reported at the statement, not at the name~~ (done here)
 
-**Evidence.** `src/analyzer.rs` records the span of the expression that read the name
-rather than the identifier's own span. Reproduced at `d514651` and unchanged since:
+**Evidence.** At `d514651` the analyzer recorded the span of the expression that read
+a name rather than the identifier's own span, so the caret under an unknown variable
+pointed at the `say` around it:
 
 ```
 $ printf 'say nosuchvar\n' > probe.rb && rb run probe.rb
@@ -15,24 +16,18 @@ Error: AnalyzerError: Unknown variable 'nosuchvar'
   | ^
 ```
 
-The name starts at column 5; the caret is at column 1.
+The name starts at column 5; the caret is at column 1. This was recorded here as
+follow-up work because moving the span changes `rb run`, the LSP
+(`src/lsp.rs:130` consumes spans) and `wasm.rs`. **Phase 059 did it**: the parser
+records a span per name (`Expr::Variable(String, Span)`), the analyzer reports the
+name through `name_position`, and the position lands under the identifier
+(`1:5`, and `1:9` for `say 1 + nosuchvar`, `1:12` for a name inside `{}`).
 
-**Why it matters.** A diagnostic is most useful when the caret is under the thing
-that is wrong. Today the reader is shown the line (good) and then told the *statement*
-is at fault, which is the same information as the line above it. Cases where the span
-does land mid-line are already good: `set x to 1 +` → `1:13`, an unterminated string →
-the `~~~` over the literal.
-
-**Why it is not phase-059.** Phase 059's finding is that the REPL discards the
-rendering the language already owns. Fixing that means showing the same caret `rb run`
-shows, which is what this phase does. Moving the span is a change to what a position
-*means* for one class of analyzer error, it changes `rb run`, the LSP
-(`src/lsp.rs` consumes spans) and `wasm.rs`, and it would make existing golden
-diagnostics move. It needs its own phase with its own acceptance gate.
-
-**Suggested phase.** "Point an unknown-variable diagnostic at the identifier", with
-`must_touch: ["src/analyzer.rs"]`, gated on the existing span tests plus a new one
-asserting `1 | say nosuchvar` / `  |     ^` from `rb run`.
+The four corpus goldens that pinned the old positions and
+`tests/tooling_grammar_test.rs::diagnostics_surface_a_spanned_analyzer_error` were
+updated to the new ones; the behaviour is pinned by
+`tests/span_test.rs::edge_an_unknown_variable_is_reported_under_the_name_it_names`.
+There is nothing left to do here.
 
 ## F2 — `rbops/verify.sh` is not in this checkout
 

@@ -446,11 +446,32 @@ fn paint_diagnostic(style: &Style, rendered: &str) -> String {
 /// Whether `line` is a drawn failure's caret or underline rather than a line of
 /// the program: the gutter of a source line carries its number, and the gutter
 /// of a caret carries only the spaces that line up with it.
+///
+/// The marker past the gutter is required as well as the blank gutter. A gutter
+/// is blank on the notice [`Error::render`] leaves when it cuts a range short
+/// (`… 3 more line(s) not drawn`) — that is the renderer saying something about
+/// the drawing, not part of the drawing, and painting it as a failure would
+/// colour the reader's own report that the diagnostic was cut.
 fn is_caret_line(line: &str) -> bool {
     match line.split_once(" | ") {
-        Some((gutter, _)) => !gutter.is_empty() && gutter.chars().all(|c| c == ' '),
+        Some((gutter, marked)) => {
+            !gutter.is_empty() && gutter.chars().all(|c| c == ' ') && marked.contains(['^', '~'])
+        }
         None => false,
     }
+}
+
+/// One line of `Error: ` plus a rendered failure, for a session printing a
+/// failure a *command* ran rather than one the run path found.
+///
+/// The same prefix, the same renderer and the same colour contract as
+/// [`Repl::execute_code_from`], so `.type` and `.time` do not answer a
+/// misspelling with a worse picture of it than typing the line would.
+fn failure_line(style: &Style, code: &str, error: &Error) -> String {
+    format!(
+        "Error: {}",
+        render_error(style, code, introspect::SESSION_FILE, error)
+    )
 }
 
 pub struct Repl {
@@ -1633,7 +1654,11 @@ impl Repl {
                 }
             }
             Err(message) => {
-                println!("{}", self.style.paint(Paint::Error, &message));
+                // `paint_diagnostic`, not a whole-string paint: a failure that
+                // arrives rendered carries the reader's own source line, and
+                // that line is left as they typed it. A one-line refusal has no
+                // gutter to be read from, so it is still painted whole.
+                println!("{}", paint_diagnostic(&self.style, &message));
             }
         }
     }
@@ -1659,7 +1684,7 @@ impl Repl {
     /// own `set` writes a global, and `uppercase` is a builtin rather than a
     /// statement.
     fn type_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
-        let program = parse_only(code).map_err(|error| format!("Error: {}", error))?;
+        let program = parse_only(code).map_err(|error| failure_line(&self.style, code, &error))?;
         let expression = introspect::expression_of(&program)?;
         if let Some(call) = self.effectful_call_in(expression) {
             return Err(format!(
@@ -1668,7 +1693,7 @@ impl Repl {
                 call, call
             ));
         }
-        let value = self.evaluate_for_question(&program)?;
+        let value = self.evaluate_for_question(&program, code)?;
         let definition = self.definition_of_expression(code);
         Ok(introspect::type_lines(&value, definition.as_ref()))
     }
@@ -1780,14 +1805,17 @@ impl Repl {
     /// had its say, so the message the user reads is the early one wherever the
     /// early one can see it, and an error naming the offending call where it
     /// cannot.
-    fn evaluate_for_question(&self, program: &Program) -> Result<Value, String> {
+    /// `code` is the question as the user typed it, and is what a failure is
+    /// drawn against: a fork answers about the program in the command, so the
+    /// line to quote is the command and not the history.
+    fn evaluate_for_question(&self, program: &Program, code: &str) -> Result<Value, String> {
         analyzer::analyze_with_bound_names(program, &self.session_names())
-            .map_err(|error| format!("Error: {}", error))?;
+            .map_err(|error| failure_line(&self.style, code, &error))?;
         let mut scratch = self.vm.fork();
         scratch.ask_questions(true);
         scratch
             .run_quietly(program)
-            .map_err(|error| format!("Error: {}", error))
+            .map_err(|error| failure_line(&self.style, code, &error))
     }
 
     /// Where `:type`'s expression was written, when it is a bare name this
@@ -1934,7 +1962,11 @@ impl Repl {
                 }
             }
             Err(message) => {
-                println!("{}", self.style.paint(Paint::Error, &message));
+                // The same painting contract as the run path: a rendered
+                // failure keeps the reader's own source line plain, and a
+                // one-line refusal — `.time` asked for no expression at all —
+                // has no gutter, so it is painted whole.
+                println!("{}", paint_diagnostic(&self.style, &message));
             }
         }
     }
@@ -1983,10 +2015,10 @@ impl Repl {
         &mut self,
         measurement: &measure::Measurement<'_>,
     ) -> Result<Vec<Duration>, String> {
-        let program =
-            parse_only(measurement.expression).map_err(|error| format!("Error: {}", error))?;
+        let program = parse_only(measurement.expression)
+            .map_err(|error| failure_line(&self.style, measurement.expression, &error))?;
         analyzer::analyze_with_bound_names(&program, &self.session_names())
-            .map_err(|error| format!("Error: {}", error))?;
+            .map_err(|error| failure_line(&self.style, measurement.expression, &error))?;
 
         let mut samples = Vec::with_capacity(measurement.runs);
         for _ in 0..measurement.runs {
@@ -1998,7 +2030,7 @@ impl Repl {
             // `.bench say 1` is a thing a user will type.
             self.vm.take_output();
             samples.push(elapsed);
-            outcome.map_err(|error| format!("Error: {}", error))?;
+            outcome.map_err(|error| failure_line(&self.style, measurement.expression, &error))?;
         }
         Ok(samples)
     }
@@ -4970,8 +5002,8 @@ mod tests {
         use super::Repl;
         use crate::error::{Error, Span};
         use crate::repl::introspect::SESSION_FILE;
-        use crate::repl::render_error;
         use crate::repl::style::{Paint, Style};
+        use crate::repl::{is_caret_line, render_error};
 
         /// Strips every escape sequence, so a test asserts on the text and
         /// cannot fail because the palette changed.
@@ -5019,16 +5051,13 @@ mod tests {
                 })
         }
 
-        /// The caret or underline line: the only drawn line whose gutter carries
-        /// no line number.
+        /// The caret or underline line: the drawn line the painter calls a caret
+        /// line. It asks [`is_caret_line`] rather than repeating it, so a test
+        /// cannot pass on a reading of the drawing that production does not have.
         fn caret(rendered: &str) -> &str {
             rendered
                 .lines()
-                .find(|line| {
-                    line.split_once(" | ").is_some_and(|(gutter, _)| {
-                        !gutter.is_empty() && gutter.chars().all(|c| c == ' ')
-                    })
-                })
+                .find(|line| is_caret_line(line))
                 .unwrap_or_else(|| panic!("no caret in:\n{}", rendered))
         }
 
@@ -5054,18 +5083,19 @@ mod tests {
         /// The property the finding is about: a failure is drawn with the line it
         /// happened on, and the caret is put where the failure says.
         ///
-        /// `say nosuchvar` fails at column 1, because the analyzer reports an
-        /// unknown variable at the statement that read it — the same caret `rb
-        /// run` prints for the same program. `set x to 1 +` is the case where
-        /// the column is not 1, and it is here because a caret pinned to
-        /// column 1 everywhere would pass the first and fail the second.
+        /// `say nosuchvar` fails at column 5, under the name: the analyzer
+        /// records where a name was written, so a diagnostic points at the thing
+        /// that is wrong rather than at the statement that read it. `set x to 1 +`
+        /// is the other shape — a parser failure that is not about a name — and
+        /// it is here because a caret pinned to the first column would pass the
+        /// first and fail the second.
         #[test]
         fn a_failure_a_line_produces_is_drawn_with_that_line_under_it() {
             let code = "say nosuchvar";
             let rendered = session_render(code);
 
             assert!(
-                rendered.contains("--> <session>:1:1"),
+                rendered.contains("--> <session>:1:5"),
                 "the failure names the file, the line and the column it failed at:\n{}",
                 rendered
             );
@@ -5077,8 +5107,9 @@ mod tests {
             );
             assert_eq!(
                 caret(&rendered),
-                "  | ^",
-                "the caret sits under the span the failure carries:\n{}",
+                "  |     ^",
+                "the caret sits under the name, not under the `say` that read \
+                 it:\n{}",
                 rendered
             );
             assert!(
@@ -5197,9 +5228,11 @@ mod tests {
                 in_session,
                 walked
             );
-            assert!(
-                walked.contains("2 | say total + nosuchvar") && walked.contains("  | ^"),
-                "the source line and its caret are drawn:\n{}",
+            assert_eq!(
+                caret(&walked),
+                "  |             ^",
+                "the source line and its caret are drawn, and the caret is under \
+                 the name the failure names:\n{}",
                 walked
             );
         }
@@ -5267,13 +5300,13 @@ mod tests {
             );
             assert_eq!(
                 position(&rendered),
-                "2:5",
+                "2:9",
                 "the position is line 2 of the block, not line 2 of the session:\n{}",
                 rendered
             );
             assert_eq!(
                 caret(&rendered),
-                "  |     ^",
+                "  |         ^",
                 "the caret is under `total` on the line it was written on:\n{}",
                 rendered
             );
@@ -5373,8 +5406,9 @@ mod tests {
             );
             assert_eq!(
                 caret(&rendered),
-                "  | ^",
-                "the caret is where the failure says, whatever follows it:\n{}",
+                "  |          ^",
+                "the caret is under the name on the wide line, not under its \
+                 first character:\n{}",
                 rendered
             );
         }
@@ -5393,7 +5427,7 @@ mod tests {
             );
             assert_eq!(
                 caret(&rendered),
-                "  | ^",
+                "  |     ^",
                 "and the caret is where the failure says it is:\n{}",
                 rendered
             );
@@ -5433,7 +5467,7 @@ mod tests {
                 painted
             );
             assert!(
-                painted.contains(&on.paint(Paint::Error, &format!("  --> {}:1:1", SESSION_FILE))),
+                painted.contains(&on.paint(Paint::Error, &format!("  --> {}:1:5", SESSION_FILE))),
                 "the location is painted:\n{:?}",
                 painted
             );
@@ -5443,8 +5477,58 @@ mod tests {
                 painted
             );
             assert!(
-                painted.contains(&on.paint(Paint::Error, "  | ^")),
+                painted.contains(&on.paint(Paint::Error, "  |     ^")),
                 "the caret is painted:\n{:?}",
+                painted
+            );
+        }
+
+        /// Colour marks the failure and nothing else — in particular not the
+        /// note the renderer leaves when it cuts a long range short, which has
+        /// the blank gutter of a caret and is not one.
+        #[test]
+        fn colour_leaves_the_renderers_own_truncation_notice_unpainted() {
+            // Longer than the renderer draws, so the notice is really there:
+            // an unterminated string runs to end of input.
+            let mut code = String::from("say \"unterminated");
+            for n in 1..14 {
+                code.push_str(&format!("\nline {n} of a string that never closes"));
+            }
+            let error = failure_of(&code);
+            let on = Style::forced(true);
+            let painted = render_error(&on, &code, SESSION_FILE, &error);
+            let notice = plain(&render_error(
+                &Style::forced(false),
+                &code,
+                SESSION_FILE,
+                &error,
+            ))
+            .lines()
+            .find(|line| line.contains("more line(s) not drawn"))
+            .expect("a range longer than the drawing limit says what it left out")
+            .to_string();
+
+            assert!(
+                !is_caret_line(&notice),
+                "the notice is the renderer's own report, not a line of the \
+                 drawing: {}",
+                notice
+            );
+            assert!(
+                painted.contains(&format!("\n{notice}\n")),
+                "and it is left as the reader's plain text rather than painted as \
+                 a failure:\n{:?}",
+                painted
+            );
+            assert!(
+                !painted.contains(&on.paint(Paint::Error, &notice)),
+                "painting the notice would colour the reader's own report that \
+                 the diagnostic was cut:\n{:?}",
+                painted
+            );
+            assert!(
+                painted.contains(&on.paint(Paint::Error, "   |     ^~~~~~~~~~~~~~")),
+                "the underline of the range it does draw is still painted:\n{:?}",
                 painted
             );
         }

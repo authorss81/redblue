@@ -2026,7 +2026,7 @@ impl Vm {
             Expr::Text(s) => Ok(Value::Text(s.clone())),
             Expr::YesNo(b) => Ok(Value::YesNo(*b)),
             Expr::Nothing => Ok(Value::Nothing),
-            Expr::Variable(name) => self
+            Expr::Variable(name, _) => self
                 .get_var(name)
                 .ok_or_else(|| Error::Runtime(format!("Unknown variable '{}'", name), self.span())),
             Expr::Binary { op, left, right } => {
@@ -2288,7 +2288,7 @@ impl Vm {
         let args = arg_values?;
 
         let name = match receiver {
-            Expr::Variable(name) => name.clone(),
+            Expr::Variable(name, _) => name.clone(),
             _ => {
                 let this = self.evaluate(receiver)?;
                 // `xs.map(f)` is the method spelling of the higher-order builtin,

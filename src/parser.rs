@@ -12,7 +12,12 @@ pub enum Expr {
     Nothing,
 
     // Variables
-    Variable(String),
+    //
+    // The name and the position it was written at. The span is what makes
+    // `Unknown variable 'x'` point at `x` rather than at the statement that
+    // read it: every other expression here is carried around for what it
+    // evaluates to, and a name is carried around for being the name.
+    Variable(String, Span),
 
     // Binary operations
     Binary {
@@ -2393,7 +2398,7 @@ impl Parser {
                 // exactly those; every other call reads `by` as the variable it
                 // has always been able to be.
                 let callee = match &expr {
-                    Expr::Variable(name) => Some(name.as_str()),
+                    Expr::Variable(name, _) => Some(name.as_str()),
                     Expr::Property { property, .. } => Some(property.as_str()),
                     _ => None,
                 };
@@ -2442,7 +2447,11 @@ impl Parser {
                 self.expect(&TokenKind::RightParen)?;
 
                 match expr {
-                    Expr::Variable(name) => {
+                    // The callee's own span is dropped with the variable: a call is
+                    // answered by the callee's binding, not by where the name was
+                    // written, so a span here would only be carried by a field no
+                    // failure reads.
+                    Expr::Variable(name, _) => {
                         expr = Expr::Call { name, args };
                     }
                     Expr::Property { object, property } => {
@@ -2567,14 +2576,14 @@ impl Parser {
                     });
                 }
                 self.advance();
-                Ok(Expr::Variable(name.clone()))
+                Ok(Expr::Variable(name.clone(), token.span()))
             }
             // `this` is a plain variable that only a method call binds, so a
             // program that reaches for it outside a method gets the ordinary
             // "Unknown variable 'this'" error rather than a silent nothing.
             TokenKind::This => {
                 self.advance();
-                Ok(Expr::Variable("this".to_string()))
+                Ok(Expr::Variable("this".to_string(), token.span()))
             }
             // A `to` here is a function literal, never a declaration: a
             // declaration is a statement, and [`Parser::parse_statement`] takes
@@ -2726,7 +2735,12 @@ impl Parser {
             }
 
             let inner: String = chars[index + 1..scan].iter().collect();
-            let expression = self.read_interpolated(&inner, span)?;
+            // The first character *inside* the braces sits one column right of
+            // the `{`, and the `{` sits one column right of the literal's own
+            // first character, so a name read out of the braces can be reported
+            // where it was written rather than where the string is.
+            let inner_column = span.column + 2 + index;
+            let expression = self.read_interpolated(&inner, Span::new(span.line, inner_column))?;
             let Some(expression) = expression else {
                 literal.push('{');
                 index += 1;
@@ -2752,8 +2766,11 @@ impl Parser {
     /// when it is not one.
     ///
     /// `None` is not an error: it is what makes `{` an ordinary character
-    /// again. The tokens are re-spanned onto `span` so a failure inside the
-    /// braces is reported at the string.
+    /// again. The tokens are re-spanned onto `span` — the position of the first
+    /// character inside the braces — so a failure inside them is reported at the
+    /// text it was written in, and a token that moved keeps the word it was
+    /// lexed from: a rejection about one of them still has to name what the
+    /// writer typed.
     fn read_interpolated(&mut self, source: &str, span: Span) -> Result<Option<Expr>> {
         if source.trim().is_empty() {
             return Ok(None);
@@ -2780,11 +2797,16 @@ impl Parser {
         };
         let tokens = tokens
             .into_iter()
-            // Every token read out of an interpolation is moved onto the
-            // position of the literal, and a token that moved keeps the word
-            // it was lexed from: a rejection about one of them still has to
-            // name what the writer wrote inside the braces.
-            .map(|token| token.at(span.line, span.column))
+            // Every token read out of an interpolation is moved onto the text
+            // it was written in, keeping its own offset within it — so `{a + b}`
+            // puts `a` and `b` under the two characters the reader sees — and a
+            // token that moved keeps the word it was lexed from: a rejection
+            // about one of them still has to name what the writer wrote inside
+            // the braces.
+            .map(|token| {
+                let column = span.column + token.column.saturating_sub(1);
+                token.at(span.line, column)
+            })
             .collect();
         let mut inner = Parser::new(tokens);
         inner.interp_depth = Rc::clone(&self.interp_depth);
@@ -3333,7 +3355,7 @@ mod tests {
         assert!(
             matches!(
                 outer.read_interpolated("x", span),
-                Ok(Some(Expr::Variable(ref name))) if name == "x"
+                Ok(Some(Expr::Variable(ref name, _))) if name == "x"
             ),
             "a name inside the braces is read as an expression"
         );
@@ -3359,7 +3381,7 @@ mod tests {
         assert!(
             matches!(
                 inner.read_interpolated("x", span),
-                Ok(Some(Expr::Variable(ref name))) if name == "x"
+                Ok(Some(Expr::Variable(ref name, _))) if name == "x"
             ),
             "the last level of the budget is still usable"
         );

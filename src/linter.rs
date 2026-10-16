@@ -359,7 +359,7 @@ impl Linter {
     fn analyze_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Number(_) | Expr::Text(_) | Expr::YesNo(_) | Expr::Nothing => {}
-            Expr::Variable(name) => {
+            Expr::Variable(name, _) => {
                 self.use_name(name);
             }
             Expr::Binary { left, right, .. } => {
