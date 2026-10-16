@@ -218,6 +218,22 @@ fn repl_reports_an_uncaught_error_and_stays_alive() {
         .assert_stdout_contains("alive");
 }
 
+/// A failure typed at the prompt is drawn the way `rb run` draws it: the line
+/// that failed, quoted back, with a caret under the column that failed.
+///
+/// The end-to-end half of what `render_error` does. A session that described
+/// the failure without drawing it left the reader to work out which part of
+/// what they had just typed was the part that was wrong.
+#[test]
+fn a_failure_at_the_prompt_shows_the_line_that_failed() {
+    let s = session("say nosuchvar\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Unknown variable 'nosuchvar'")
+        .assert_stdout_contains("1 | say nosuchvar")
+        .assert_stdout_contains("  | ^");
+}
+
 #[test]
 fn repl_runs_a_program_that_catches_its_own_error() {
     let program = scratch_file(
