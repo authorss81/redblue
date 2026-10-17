@@ -679,7 +679,7 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
         refused, 6,
         "{refused} corpus programs in the families above are refused by the frontend. \
          There were 9 when this test was written: phase-112 made the three \
-         the three `corpus/control-flow-0003/0004/0005.rb` programs parse, and each of the 6 left \
+         `corpus/control-flow-0003/0004/0005.rb` programs parse, and each of the 6 left \
          is listed in phases/phase-021/FINDINGS.md section 2"
     );
     for family in UNSUPPORTED {

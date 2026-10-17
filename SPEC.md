@@ -444,14 +444,15 @@ own, so this is a three-armed `if` and the one below is a nested one that means
 the same thing:
 
 ```redblue
-if x > 0 then        if x > 0 then
-    say "positive"   else
-else                     if x < 0 then
-    say "zero"            say "negative"
-end                      else
-                           say "zero"
+if x > 0 then          if x > 0 then
+    say "positive"         say "positive"
+else if x < 0 then   else
+    say "negative"            if x < 0 then
+else                            say "negative"
+    say "zero"              else
+end                            say "zero"
+                           end
                        end
-                   end
 ```
 
 ### When (Pattern Matching)
