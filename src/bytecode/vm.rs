@@ -2776,7 +2776,7 @@ impl BytecodeVm {
             // The `builtin != name` half is what stops a name bound to a
             // builtin of the same name from calling itself for ever: that call
             // falls through to the refusal below.
-            Some(Value::Builtin(builtin)) if &builtin != name => {
+            Some(Value::Builtin(builtin)) if builtin.as_str() != name => {
                 let resolved = crate::stdlib::builtin(self.span(), &builtin, args)?;
                 match resolved {
                     Some(value) => {

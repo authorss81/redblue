@@ -2299,7 +2299,9 @@ impl Vm {
             // The `builtin != name` half is what stops a name bound to a
             // builtin of the same name (`set sqrt to sqrt`) from calling itself
             // for ever: that call falls through to the refusal below.
-            Some(Value::Builtin(builtin)) if &builtin != name => self.call(&builtin, args),
+            Some(Value::Builtin(builtin)) if builtin.as_str() != name => {
+                self.call(builtin.as_str(), args)
+            }
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),

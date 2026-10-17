@@ -396,7 +396,7 @@ fn edge_multiple_assignment_of_many_names() {
     let short = format!(
         "set {} to {}",
         names.join(", "),
-        values[..count as usize - 1].join(", ")
+        values[..count - 1].join(", ")
     );
     assert_parser_error(&short, "64 names");
     assert_parser_error(&short, "63 values");

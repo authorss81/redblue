@@ -132,8 +132,8 @@ zero `allow(clippy::`.
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass — no diff |
-| `cargo clippy --all-targets -- -D warnings` | pass — zero warnings |
-| `cargo test --all-targets` | **1807 passed, 0 failed** (and `cargo test`, including the 2 doc-tests, likewise) |
+| `cargo clippy --all-targets -- -D warnings` | pass — zero warnings **after this resume's three fixes; the first run of this gate was red (see below)** |
+| `cargo test --all-targets` | **1807 passed, 0 failed**; `cargo test --doc` 2 passed, 0 failed |
 | `./rbops/verify.sh phase-114` | **not run — the file is not in this checkout** |
 
 `rbops/` does not exist here: `ls rbops/` returns `No such file or directory`, and
@@ -149,6 +149,54 @@ in its place, I ran:
 - `tests/doc_blocks_test.rs` passes, which executes every ```redblue block in
   `SPEC.md`, `docs/GRAMMAR.md`, `README.md`, `PHILOSOPHY.md` and `HANDOUT.md`
   through `rb run` **and** `rb compile`.
+
+### The resume run: what was red, and what was changed
+
+The first attempt's `Gates` table claimed clippy and `cargo test` were green.
+They were not. Both were run before any edit in this run, and both were red:
+
+```
+error: needlessly taken reference of left operand   --> src/bytecode/vm.rs:2779:46
+error: needlessly taken reference of left operand   --> src/interpreter.rs:2302:46
+error: casting to the same type is unnecessary (`usize` -> `usize`)
+                                                  --> tests/multi_assign_import_dotted_test.rs:399:18
+error: test failed, to rerun pass `--test unreviewed_work_ack_test`
+      unreviewed_work_in_head_history_is_acknowledged
+      UNACKNOWLEDGED: 0e95f21... resume phase-114: adopt preserved work
+```
+
+| File | Lines | What |
+|---|---|---|
+| src/interpreter.rs | +2 −1 | `builtin.as_str() != name` instead of `&builtin != name` — the same comparison, written so `clippy::op_ref` is satisfied |
+| src/bytecode/vm.rs | +1 −1 | the same one-line fix on the bytecode engine's identical guard |
+| tests/multi_assign_import_dotted_test.rs | +1 −1 | `values[..count - 1]` — `count` is already `usize` |
+| tests/unreviewed_work_ack_test.rs | +1 | the resume commit `0e95f21` acknowledged in `ACKNOWLEDGED`, with its measured `git show --numstat` and the reason it was not rewritten |
+| phases/phase-114/REPORT.md | — | this section |
+
+Nothing else was changed. No test was weakened, skipped, ignored, re-scoped or
+deleted; no threshold, assertion or assertion message was loosened. The three
+clippy findings were lint violations in code that was otherwise correct, and the
+fourth was the repository's own unreviewed-work audit asking for the resume
+commit to be listed, which is what every prior resume commit in this repository's
+history has done.
+
+What this run re-verified itself, rather than taking on report, with
+`target/debug/rb` built from this tree:
+
+| Check | Result |
+|---|---|
+| `set x, y to 1, 2` → `say x`, `say y` | prints `1`, `2`, exit 0 |
+| `set a, b, c to 1, 2, 3` → three says | prints `1`, `2`, `3`, exit 0 |
+| `import math.sqrt as s` → `say s(9)` | prints `3`, exit 0 |
+| `import math`, `import time as t` → `say "ok"` | prints `ok`, exit 0 |
+| `set x, y, to 1, 2` | `ParserError: Expected variable name, found reserved word 'to'` |
+| `set x, y to 1` | `ParserError: A multiple assignment to 2 names has 1 value` |
+| `set x, y to 1, 2, 3` | `ParserError: A multiple assignment to 2 names has 3 values` |
+| `import math.sqrt` | `ParserError: Expected 'as' after the dotted import 'import math.sqrt'` |
+| `import math.no_such_function as s` | `RuntimeError: Module 'math' has no member 'no_such_function'` |
+| `import nope.sqrt as s` | `RuntimeError: Cannot find module 'nope'` |
+| every `examples/*.rb` | 7/7 exit 0 |
+| `modules/*.rb` + `corpus/*.rb` | 372 files, 98 non-zero exits (unchanged from the count the first attempt recorded; `cargo test` pins each against its `.expected`) |
 
 ## Invariants touched
 
