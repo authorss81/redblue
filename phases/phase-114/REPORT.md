@@ -51,6 +51,9 @@ same three programs print `1`, `2`, `3` and `ok`.
 | `docs/BYTECODE.md` | +7 −1 | `IMPORT`'s primary operand may be `module.member`; no new opcode and no version bump |
 | `tests/doc_blocks_*.txt` | +38 −37 | block keys moved down with the text above them; one block added to the running bucket |
 | `tests/multi_assign_import_dotted_test.rs` | +457 (new) | 22 tests |
+| `tests/unreviewed_work_ack_test.rs` | +1 −1 | housekeeping for the resume commit itself — the `ACKNOWLEDGED` data list, one entry swapped (see *This resume run* below) |
+| `docs/GRAMMAR.md` | +4 −3 | § 3.1: "an alias is required in this form (`as`, or the older `to`)", which is what the parser has always accepted and what the formatter emits |
+| `tests/doc_blocks_runs.txt`, `tests/doc_blocks_fragments.txt` | +10 −10 | the ten `docs/GRAMMAR.md:<line>` keys below § 3.1, moved down by one because the sentence above them is one line longer. Data only — no bucket gained or lost a block. |
 
 No opcode was added, no instruction byte changed, and `Chunk::encode`'s output
 for every program that does not use the new spellings is byte-identical — which
@@ -74,9 +77,14 @@ the examples and the modules) is unaffected.
   binds `s` to `sqrt`'s own value; the module's own name is *not* bound, in
   either VM and in the analyzer. A program that asked for one member did not ask
   for the namespace.
-- **`as` is required** for the dotted form, because the grammar writes it and
+- **An alias is required** for the dotted form, because the grammar writes it and
   because binding a member under its own name would shadow a program name the
-  program never wrote. `import math.sqrt` is a parse error naming the `as`.
+  program never wrote. `import math.sqrt` is a parse error naming the missing
+  alias. The alias keyword is `as` (what § 3.1 writes) or `to` (the older
+  spelling, already accepted for the plain form and kept because programs under
+  `tests/` use it) — which is also why the formatter writes
+  `import math.sqrt to s`, and why `edge_the_formatter_keeps_both_new_spellings`
+  runs what the formatter wrote rather than string-matching `as`.
 
 ## Tests added
 
@@ -124,17 +132,24 @@ zero `allow(clippy::`.
 - **unicode** — covered: `edge_multiple_assignment_of_unicode_names`.
 - **nesting_recursion** — N/A: neither form nests (the grammar writes no nested list of names), and neither adds recursion. The interpreter's call-depth and block-depth limits are unchanged and already pinned by `tests/call_depth_test.rs`.
 - **duplicate_missing_keys** — N/A: no record is built. The nearest analogue is a name repeated inside one statement — `set x, x to 1, 2` — which is *not* an error here, matching `set x to 1` then `set x to 2`, so there is nothing to assert. Recorded in FINDINGS.md as the one semantic this phase had to pick.
-- **malformed_input** — covered: trailing comma, arity mismatch both ways, no names, empty right-hand side, property target, `import math.sqrt` with no `as`, `import math. as s`, `import math.sqrt as` with no alias, `import as s`, CRLF, empty program.
+- **malformed_input** — covered: trailing comma, arity mismatch both ways, no names, empty right-hand side, property target, `import math.sqrt` with no alias keyword, `import math. as s`, `import math.sqrt as` with no alias name, `import as s`, CRLF, empty program.
 - **resource_limit** — covered: 64 names and 64 values in one statement (`edge_multiple_assignment_of_many_names`). The 64 is not a limit the parser imposes; it is the largest list this phase's tests drive, and both engines answer it identically.
 
 ## Gates
 
 | Gate | Result |
 |---|---|
-| `cargo fmt --all -- --check` | pass — no diff |
-| `cargo clippy --all-targets -- -D warnings` | pass — zero warnings **after this resume's three fixes; the first run of this gate was red (see below)** |
-| `cargo test --all-targets` | **1807 passed, 0 failed**; `cargo test --doc` 2 passed, 0 failed |
+| `cargo fmt --all -- --check` | **pass** — no diff |
+| `cargo clippy --all-targets -- -D warnings` | **pass** — zero warnings |
+| `cargo test --all-targets` | **1807 passed, 0 failed** (sum of every binary's `test result` line) |
 | `./rbops/verify.sh phase-114` | **not run — the file is not in this checkout** |
+
+All three runnable rows are from a clean re-run **at the end of this resume**,
+after every edit. Two of them were red before then, and both reds are recorded
+above rather than smoothed over: the first `cargo test` here was red on
+`unreviewed_work_in_head_history_is_acknowledged`, and `tests/doc_blocks_test.rs`
+went red twice in this run while § 3.1's sentence was being made precise and its
+block keys re-shifted. The 1807/0 is the final figure, not the first one.
 
 `rbops/` does not exist here: `ls rbops/` returns `No such file or directory`, and
 so does `./rbops/verify.sh`. That gate is the pipeline's, not the agent's, and I
@@ -170,8 +185,47 @@ error: test failed, to rerun pass `--test unreviewed_work_ack_test`
 | src/interpreter.rs | +2 −1 | `builtin.as_str() != name` instead of `&builtin != name` — the same comparison, written so `clippy::op_ref` is satisfied |
 | src/bytecode/vm.rs | +1 −1 | the same one-line fix on the bytecode engine's identical guard |
 | tests/multi_assign_import_dotted_test.rs | +1 −1 | `values[..count - 1]` — `count` is already `usize` |
-| tests/unreviewed_work_ack_test.rs | +1 | the resume commit `0e95f21` acknowledged in `ACKNOWLEDGED`, with its measured `git show --numstat` and the reason it was not rewritten |
+| tests/unreviewed_work_ack_test.rs | +1 −1 | the resume commit acknowledged in `ACKNOWLEDGED`, with its measured `git show --numstat` and the reason it was not rewritten |
 | phases/phase-114/REPORT.md | — | this section |
+
+### This resume run: the same audit, one commit further on
+
+The gates were run again before any edit in this run. `cargo fmt` and
+`cargo clippy` were green; `cargo test --all-targets` was **red on exactly one
+test**, and it was the same housekeeping audit, one commit further on:
+
+```
+test unreviewed_work_in_head_history_is_acknowledged ... FAILED
+unreviewed-work commits selected: 30 | acknowledged: 30 | unacknowledged: 1
+  | stale: 1
+  | UNACKNOWLEDGED: 70029f7a66e1dda09bc3f1814fff57082b66bbd7  resume phase-114: adopt preserved work
+  | STALE: 0e95f21cb545f4dfc7394e7f63fe1b4c712f417f
+```
+
+That audit selects commits whose subject marks unreviewed work and requires two
+things of the list in `tests/unreviewed_work_ack_test.rs:66`: every selected
+commit is acknowledged, and **no entry names a commit `HEAD` does not contain**
+(the `scan.stale` assertion at `tests/unreviewed_work_ack_test.rs:492`). The
+previous run's list named `0e95f21` — correct then, because that commit *was*
+`HEAD`. The pipeline then committed this work as `70029f7a`, which made
+`0e95f21` a commit `HEAD` does not contain (stale) and left `70029f7a`
+unacknowledged. The list was swapped from one to the other and the reason's
+`numstat` figures were re-derived from `git show --shortstat` (19 files,
++1304/−66; +433/−28 under `src/`). `cargo test --test unreviewed_work_ack_test`
+is 13/13 after it.
+
+Nothing else was changed in this run: no production code, no test assertion, no
+selector, no threshold. `ACKNOWLEDGED` is data, the entries before and after are
+both full lowercase object ids with non-empty reasons, and the edit is the
+`+1/−1` of one line.
+
+One further change was forced by that one: making § 3.1's sentence precise
+(`docs/GRAMMAR.md`, +4 −3) made it one line longer, and
+`tests/doc_blocks_test.rs` classifies every ```redblue block by the line it
+starts on, so the ten `docs/GRAMMAR.md:<line>` keys after it moved down by one.
+Those keys are shifted in `tests/doc_blocks_runs.txt` and
+`tests/doc_blocks_fragments.txt` and nowhere else — no bucket gained or lost a
+block, and `tests/doc_blocks_test.rs` is 7/7 after it.
 
 Nothing else was changed. No test was weakened, skipped, ignored, re-scoped or
 deleted; no threshold, assertion or assertion message was loosened. The three
