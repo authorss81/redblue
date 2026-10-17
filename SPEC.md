@@ -831,6 +831,19 @@ import MathUtils as M
 set area to M.circle_area(5)
 ```
 
+`import Name.member as Alias` is the third import form: it imports **one member**
+of the module `Name` and binds `Alias` to that member's own value, so `Alias(..)`
+is the call rather than a namespace to reach through — `import math.sqrt as s`
+then `s(9)` is `sqrt(9)`. The `as` is required, because a member imported under
+its own name would shadow a name the program never wrote over. A member the
+module does not have is a runtime error naming it.
+
+`set a, b to 1, 2` binds both names, one per value, left to right: each value is
+evaluated and bound before the next is evaluated, so a multiple assignment is
+the same run of bindings a run of consecutive `set` statements would have made.
+The two lists must be the same length, and a statement that is not is a parse
+error naming both counts.
+
 ### Constants
 
 `constant NAME to <expr>` binds a name to a value that no later assignment may

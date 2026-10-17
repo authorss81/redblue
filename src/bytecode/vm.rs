@@ -2767,6 +2767,29 @@ impl BytecodeVm {
                 self.advance(frame);
                 Ok(())
             }
+            // A name bound to a builtin is that builtin under another name —
+            // `import math.sqrt as s` binds `s` to `sqrt`, so `s(9)` is
+            // `sqrt(9)`. Asked by the builtin's own name, so it is the same
+            // call the tree-walker makes for the same program: the resolver
+            // above is asked with the builtin's name rather than the alias's.
+            //
+            // The `builtin != name` half is what stops a name bound to a
+            // builtin of the same name from calling itself for ever: that call
+            // falls through to the refusal below.
+            Some(Value::Builtin(builtin)) if builtin.as_str() != name => {
+                let resolved = crate::stdlib::builtin(self.span(), &builtin, args)?;
+                match resolved {
+                    Some(value) => {
+                        self.push(value);
+                        self.advance(frame);
+                        Ok(())
+                    }
+                    None => Err(Error::Runtime(
+                        format!("Unknown function '{}'", name),
+                        self.span(),
+                    )),
+                }
+            }
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),
@@ -3662,8 +3685,17 @@ impl BytecodeVm {
     /// module's syntax tree, because this VM has no evaluator — but the selection
     /// is the tree-walking VM's, so the bindings that appear are the same ones.
     fn import(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
-        let name = self.constant_text(instruction.arg)?;
+        let spelling = self.constant_text(instruction.arg)?;
         let alias = self.constant_text(instruction.aux)?;
+        // `import math.sqrt as s` compiles to one `IMPORT` whose module operand
+        // is the dotted spelling: the head is the module to load, the tail is
+        // the one member to bind. Resolved here rather than by a second
+        // opcode, so a file written before the dotted form reads the same way
+        // it always did — an operand with no dot in it is the whole of it.
+        let (name, member) = match spelling.split_once('.') {
+            Some((module, member)) => (module.to_string(), Some(member.to_string())),
+            None => (spelling.to_string(), None),
+        };
 
         // A module reaching itself through the import chain is a cycle, and
         // saying so is the difference between a clean error and a load that
@@ -3744,27 +3776,40 @@ impl BytecodeVm {
         // the alias resolves to — the tree-walking VM's own copy.
         if let Some(declared) = self.declared_modules.get(&name) {
             let members = declared.members.clone();
-            for (member, _, value) in members {
+            for (declared_member, _, value) in members {
                 self.globals
-                    .insert(qualified_member(&alias, &member), value);
+                    .insert(qualified_member(&alias, &declared_member), value);
             }
         }
 
-        // The alias is a name for the module, so a call written through it
-        // reaches the same function the unaliased name does. The module's own
-        // name names it too, which is what leaves `json.stringify` working after
-        // `import json as J`.
-        self.module_aliases.insert(alias.clone(), name.clone());
-        self.module_aliases
-            .entry(name.clone())
-            .or_insert_with(|| name.clone());
+        // A dotted import binds one member of the module and nothing else:
+        // `import math.sqrt as s` loads the module so its members are
+        // published, then binds `s` to that member's own value, so `s(9)` is a
+        // call rather than a namespace read. The module's name is not bound —
+        // a program that asked for one member did not ask for the namespace,
+        // and the tree-walking VM declines to bind it for the same reason.
+        let dotted = match &member {
+            Some(dotted_member) => Some(self.imported_member(&name, dotted_member)?),
+            None => None,
+        };
 
-        // The module's *own* name is a name of the program as well, so an
-        // unbound one is bound to `nothing` — which is what makes `say MathUtils`
-        // read a module rather than fail on an unknown variable. The tree-walking
-        // VM binds it under the same guard.
-        if self.get_var(&name).is_none() {
-            self.globals.insert(name.clone(), Value::Nothing);
+        if dotted.is_none() {
+            // The alias is a name for the module, so a call written through it
+            // reaches the same function the unaliased name does. The module's own
+            // name names it too, which is what leaves `json.stringify` working after
+            // `import json as J`.
+            self.module_aliases.insert(alias.clone(), name.clone());
+            self.module_aliases
+                .entry(name.clone())
+                .or_insert_with(|| name.clone());
+
+            // The module's *own* name is a name of the program as well, so an
+            // unbound one is bound to `nothing` — which is what makes `say MathUtils`
+            // read a module rather than fail on an unknown variable. The tree-walking
+            // VM binds it under the same guard.
+            if self.get_var(&name).is_none() {
+                self.globals.insert(name.clone(), Value::Nothing);
+            }
         }
 
         self.advance(frame);
@@ -3781,11 +3826,36 @@ impl BytecodeVm {
             Some(next) if next.opcode == Opcode::Store
         );
         if self.get_var(&alias).is_none() {
-            self.push(Value::Nothing);
+            self.push(dotted.unwrap_or(Value::Nothing));
         } else if follows {
             self.advance(frame);
         }
         Ok(())
+    }
+
+    /// The value `import module.member as alias` binds: the member itself, so
+    /// that the alias is callable rather than a namespace to reach through.
+    ///
+    /// The tree-walking VM's `Vm::imported_member`, asked the same two
+    /// questions in the same order — the `module_member` name a loaded or
+    /// declared module published, and the bare builtin a flat-backed stdlib
+    /// member answers as (`math.sqrt` is `sqrt`). A module with no such member
+    /// is refused by name, because binding `nothing` and letting the program
+    /// find out at the first call is the one answer an import cannot give.
+    fn imported_member(&self, module: &str, member: &str) -> Result<Value> {
+        let qualified = qualified_member(module, member);
+        if let Some(value) = self.get_var(&qualified) {
+            return Ok(value.clone());
+        }
+        if let Some(bare) = stdlib::module_member_name(&qualified) {
+            if let Some(value) = self.get_var(bare) {
+                return Ok(value.clone());
+            }
+        }
+        Err(Error::Runtime(
+            format!("Module '{module}' has no member '{member}'"),
+            self.span(),
+        ))
     }
 
     /// Whether `name` names a module this program built: a module file it
