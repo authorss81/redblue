@@ -136,7 +136,25 @@ to_op        = 'to'
 
 ### 2.1 Type Expressions
 
+Not implemented. Redblue has no static types, no type expressions and no type
+annotations: every production in this section is kept here as the shape a future
+implementation has to match, and nothing below parses today. `number`, `text`,
+`list of`, `record of`, `function` and the type names a program would spell are
+ordinary identifiers, not reserved words — `set number to 1` is a program, and
+`set numbers to list of number` is a refusal naming the three names it could not
+resolve.
+
+The five productions that read a `type_expression` back — §4.1's annotated
+`declaration`, §4.5's `function_decl` and `parameter`, §4.6's `property_decl` —
+carry the same note. Each is pinned by `tests/type_annotation_test.rs`, which
+runs every annotated form in the language and requires the parser to refuse it;
+the moment one of them is implemented that test goes red and the note has to come
+off in the same change.
+
 ```
+// NOT IMPLEMENTED. Nothing below parses today: `type_expression` is written down
+// as the shape a future implementation has to match, and §4.1, §4.5 and §4.6 all
+// carry this same note on the productions that read a type expression back.
 type_expression  = primitive_type
                  | list_type
                  | record_type
@@ -190,13 +208,19 @@ script           = { statement }
 ### 4.1 Declaration Statements
 
 ```
-// Variable declaration
+// Variable declaration — NOT IMPLEMENTED in the annotated form: the
+// `':' type_expression` bracket is a §2.1 type expression and the parser does
+// not read one, so `set x : number to 1` is a parser error and `set x to 1` is
+// the whole of what parses today. The multiple-assignment form below, which
+// carries no annotation, does parse.
 declaration      = 'set' identifier [ ':' type_expression ] 'to' expression
 
 // Multiple assignment
 declaration      = 'set' identifier { ',' identifier } 'to' expression { ',' expression }
 
-// Constant declaration
+// Constant declaration — NOT IMPLEMENTED in the annotated form, for the reason
+// the `set` declaration above gives: `constant C : number to 1` is a parser
+// error, and `constant C to 1` is the whole of what parses today.
 declaration      = 'constant' identifier [ ':' type_expression ] 'to' expression
 ```
 
@@ -291,12 +315,20 @@ it, so a `break` in one is refused too. See SPEC.md, "Break and Skip".
 ### 4.5 Function Declaration
 
 ```
+// NOT IMPLEMENTED in the annotated forms. `needs` and `gives` are not reserved
+// words: they are ordinary identifiers, so `to f(a) needs number` parses as two
+// expressions in a row and is refused by the analyzer with `Unknown variable
+// 'needs'`. A bare `to f(a)` is the whole of what parses today. The parameter
+// list below carries the same note on the parameters themselves.
 function_decl    = 'to' identifier [ '(' [ parameter { ',' parameter } ] ')' ]
                    [ 'needs' type_expression { ',' type_expression } ]
                    [ 'gives' type_expression ]
                    { statement }
                    'end'
 
+// NOT IMPLEMENTED in both forms. Neither `to f(x : number)` nor `to f(x of
+// number)` parses: the first is a parser error at the colon, the second at the
+// word `of`. `to f(x)` is the whole of what parses today.
 parameter        = identifier [ ':' type_expression ]
                  | identifier 'of' type_expression
 ```
@@ -308,6 +340,10 @@ object_decl      = 'object' identifier [ 'extends' identifier ]
                     { property_decl | method_decl }
                     'end'
 
+// NOT IMPLEMENTED in the annotated form: `has x : number` and `has x default 1`
+// are both parser errors, and `has x` is the whole of what parses today. A
+// property is given its value by writing to the declaration — see SPEC.md,
+// "Lookup order and shadowing".
 property_decl    = 'has' identifier [ ':' type_expression ] [ 'default' expression ]
 
 method_decl      = 'to' identifier [ '(' [ parameter { ',' parameter } ] ')' ]

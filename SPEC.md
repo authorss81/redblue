@@ -182,7 +182,35 @@ Whitespace is ignored except as a statement separator. Use newlines or `end` to 
 | `yes/no` | Boolean values | `yes`, `no` |
 | `nothing` | Null/void | `nothing` |
 
+These four name the kinds a *value* can have, which is what the table above
+documents. None of them is a type a program can write down: Redblue has no type
+system, no type expressions and no type annotations, and none of the words in the
+left-hand column is reserved — `set number to 1` is an ordinary program that
+binds an ordinary name. See "Complex Types" below.
+
 ### Complex Types
+
+Not implemented. Nothing in this section parses. `list of`, `record of`,
+`function` and the type names after them are ordinary identifiers, not reserved
+words, so each line below is a program the front end refuses rather than a
+declaration:
+
+- `set numbers to list of number` — `AnalyzerError: Unknown variable 'list'`,
+  then the same for `of` and `number`, because the parser reads three
+  identifiers in a row;
+- `set Point to record { x: number, y: number }` — `AnalyzerError: Unknown
+  variable 'record'`. The record literal Redblue does have is spelled `{ x:
+  1 }`, with the braces and no leading word; see "Records";
+- `set Person to object` — `ParserError: Unexpected token 'object'`.
+
+The grammar that would have to be implemented to make them work is written down
+in `docs/GRAMMAR.md` §2, marked Not Implemented there in the same way as the
+async and pattern-matching productions. The annotation the grammar reads back —
+`set x : number to 1`, `constant C : number to 1`, `to f(x : number)`,
+`object P` / `has x : number`, `to f(a) needs number` — is refused too, and
+`tests/type_annotation_test.rs` runs every one of those forms and requires the
+rejection. A future phase that implements them has to take the note off in the
+same change; the test is what stops the promise from drifting back in.
 
 ```redblue
 // List of a type
@@ -206,6 +234,12 @@ set name to "Hi"   // name is text
 ```
 
 ### Explicit Types
+
+Not implemented. Redblue has no type annotations at all, so there is no `as` form
+to write: `set x to 10 as number` is `ParserError: Unexpected token 'as'`,
+because `as` is reserved for `import ... as ...` and the expression reader has
+no rule for it here. The annotation the grammar does spell — `set x : number to
+1` — is not implemented either, for the reason "Complex Types" above gives.
 
 ```redblue
 set x to 10 as number
@@ -635,6 +669,14 @@ end
 ```
 
 ### Type Annotations
+
+Not implemented. There are no type annotations in Redblue, and the two spellings
+the grammar has ever offered are both refused: `to add(a as number, b as number)
+as number` is a parser error at the first `as`, because `as` is reserved for
+`import ... as ...` and the parameter reader has no rule for it, and the
+`identifier ':' type_expression` parameter of `docs/GRAMMAR.md` §4.5 — written
+`to add(a : number)` — is a parser error at the colon. A parameter is written
+`to add(a, b)`, and nothing checks what it is given. See "Complex Types" above.
 
 ```redblue
 to add(a as number, b as number) as number
