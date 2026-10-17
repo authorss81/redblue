@@ -132,6 +132,15 @@ pub enum Statement {
         value: Expr,
     },
 
+    // set x, y to 1, 2 — § 4.1's multiple assignment. Every name is bound
+    // and every value is evaluated, left to right; the parser has already
+    // refused a statement whose two lists are not the same length, so a name
+    // and a value here always correspond by position.
+    SetMultiple {
+        names: Vec<String>,
+        values: Vec<Expr>,
+    },
+
     // constant NAME to <expr> — a name bound once, which no assignment may
     // rebind. A module file uses it for the values every function of the
     // module shares, as `modules/MathUtils.rb` does for `PI`.
@@ -289,6 +298,21 @@ pub enum Statement {
 pub struct ImportItem {
     pub name: String,
     pub alias: Option<String>,
+    /// The one member `import name.member as alias` imports, per § 3.1's
+    /// second arm. `None` for `import name` and `import name as alias`, which
+    /// import the module as a namespace.
+    pub member: Option<String>,
+}
+
+impl ImportItem {
+    /// The name this item binds: the alias it was given, else the member for a
+    /// dotted import, else the module's own name.
+    pub fn bound_name(&self) -> &str {
+        self.alias
+            .as_deref()
+            .or(self.member.as_deref())
+            .unwrap_or(&self.name)
+    }
 }
 
 /// A statement together with the source position it was parsed from.
@@ -646,6 +670,49 @@ impl Parser {
                         let name = name.clone();
                         self.advance();
 
+                        // `import a.b as c` imports one member of the module
+                        // `a` and binds `c` to that member, per § 3.1's second
+                        // arm. The `as` is required — the grammar writes it, and
+                        // binding the member under its own name instead would
+                        // quietly shadow a name the program may already hold.
+                        let member = if let Some(Token {
+                            kind: TokenKind::Dot,
+                            ..
+                        }) = self.current()
+                        {
+                            self.advance();
+                            let member = match self.current() {
+                                Some(Token {
+                                    kind: TokenKind::Identifier(member),
+                                    ..
+                                }) => {
+                                    let m = member.clone();
+                                    self.advance();
+                                    m
+                                }
+                                _ => {
+                                    return Err(Error::Parser(
+                                        expected_name("member name", self.current()),
+                                        self.span(),
+                                    ))
+                                }
+                            };
+                            if !matches!(
+                                self.current().map(|token| &token.kind),
+                                Some(TokenKind::As) | Some(TokenKind::To)
+                            ) {
+                                return Err(Error::Parser(
+                                    format!(
+                                        "Expected 'as' after the dotted import 'import {name}.{member}'"
+                                    ),
+                                    self.span(),
+                                ));
+                            }
+                            Some(member)
+                        } else {
+                            None
+                        };
+
                         let alias =
                             match self.current().map(|t| &t.kind) {
                                 // `as` is the spelling `SPEC.md` and
@@ -672,7 +739,11 @@ impl Parser {
                                 _ => None,
                             };
 
-                        items.push(ImportItem { name, alias });
+                        items.push(ImportItem {
+                            name,
+                            alias,
+                            member,
+                        });
                     } else {
                         return Err(Error::Parser(
                             expected_name("module name", self.current()),
@@ -758,6 +829,20 @@ impl Parser {
                 }
             };
 
+            // `set a.b, c to 1, 2` assigns to a property, which the multiple
+            // form does not reach. It is named here rather than reported as a
+            // missing `to` at the comma, which is not where the problem is.
+            if let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = self.current()
+            {
+                return Err(Error::Parser(
+                    "A multiple assignment cannot assign to a property".to_string(),
+                    self.span(),
+                ));
+            }
+
             self.expect(&TokenKind::To)?;
             let value = self.parse_expression()?;
 
@@ -768,10 +853,99 @@ impl Parser {
             }));
         }
 
+        // `set x, y to 1, 2` — § 4.1's multiple assignment. A comma here
+        // cannot be anything else: the property target above took `x.y`, so
+        // what follows a name is either `to`, a dot or a comma.
+        if let Some(Token {
+            kind: TokenKind::Comma,
+            ..
+        }) = self.current()
+        {
+            return self.parse_set_multiple(name).map(Some);
+        }
+
         self.expect(&TokenKind::To)?;
         let value = self.parse_expression()?;
 
         Ok(Some(Statement::Set { name, value }))
+    }
+
+    /// Parses the rest of `set a, b, c to <expr>, <expr>, <expr>` — the comma
+    /// after the first name has been seen, and `first` is already parsed.
+    ///
+    /// The grammar writes `{ ',' identifier }` and `{ ',' expression }`, so a
+    /// trailing comma is not one of them: `set x, y, to 1, 2` is refused at the
+    /// `to`, naming what a name was expected to be, rather than being read as
+    /// a third name the program did not write. The two counts must agree, and a
+    /// program whose values do not outnumber or match its names is refused
+    /// here rather than binding half of itself and leaving the rest unbound.
+    fn parse_set_multiple(&mut self, first: String) -> Result<Statement> {
+        let mut names = vec![first];
+
+        while let Some(Token {
+            kind: TokenKind::Comma,
+            ..
+        }) = self.current()
+        {
+            self.advance();
+            let name = match self.current() {
+                Some(Token {
+                    kind: TokenKind::Identifier(name),
+                    ..
+                }) => {
+                    let n = name.clone();
+                    self.advance();
+                    n
+                }
+                _ => {
+                    return Err(Error::Parser(
+                        expected_name("variable name", self.current()),
+                        self.span(),
+                    ))
+                }
+            };
+            // `set a.b, c to 1, 2` assigns to a property, which the multiple
+            // form does not reach: it is named rather than reported as a
+            // missing `to` at a position that is not where the problem is.
+            if let Some(Token {
+                kind: TokenKind::Dot,
+                ..
+            }) = self.current()
+            {
+                return Err(Error::Parser(
+                    "A multiple assignment cannot assign to a property".to_string(),
+                    self.span(),
+                ));
+            }
+            names.push(name);
+        }
+
+        self.expect(&TokenKind::To)?;
+
+        let mut values = vec![self.parse_expression()?];
+        while let Some(Token {
+            kind: TokenKind::Comma,
+            ..
+        }) = self.current()
+        {
+            self.advance();
+            values.push(self.parse_expression()?);
+        }
+
+        if values.len() != names.len() {
+            return Err(Error::Parser(
+                format!(
+                    "A multiple assignment to {} name{} has {} value{}",
+                    names.len(),
+                    if names.len() == 1 { "" } else { "s" },
+                    values.len(),
+                    if values.len() == 1 { "" } else { "s" }
+                ),
+                self.span(),
+            ));
+        }
+
+        Ok(Statement::SetMultiple { names, values })
     }
 
     /// Parses `constant NAME to <expr>` — a `set` whose name may not be bound

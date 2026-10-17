@@ -324,6 +324,17 @@ impl Analyzer {
                 self.analyze_expr(value, &span);
                 self.declare_assigned(name);
             }
+            // Every name of a multiple assignment is bound by the statement, and
+            // every value is evaluated by it, so both lists are walked in the
+            // order they were written.
+            Statement::SetMultiple { names, values } => {
+                for value in values {
+                    self.analyze_expr(value, &span);
+                }
+                for name in names {
+                    self.declare_assigned(name);
+                }
+            }
             // A `constant` binds its name for every statement after it, exactly
             // as a `set` does — whether the name may be bound again is a runtime
             // question, because a function body and a module file can each
@@ -540,7 +551,16 @@ impl Analyzer {
                     // it may give it under are names of the program: an
                     // import's own name is readable (`import json as J` leaves
                     // `json.parse` working), so both are declared.
-                    self.declare(&item.name);
+                    //
+                    // A dotted import is the exception: `import math.sqrt as s`
+                    // imports one member, and what it binds is `s` and nothing
+                    // else. Declaring `math` as well would let a program read
+                    // a namespace it never asked for — and the runtime does not
+                    // bind it, so the read would pass analysis and die at run
+                    // time on a name the analyzer invented.
+                    if item.member.is_none() {
+                        self.declare(&item.name);
+                    }
                     if let Some(alias) = &item.alias {
                         self.declare(alias);
                     }
@@ -765,6 +785,7 @@ fn collect_later_names(
             Statement::Say(_)
             | Statement::Print(_)
             | Statement::Set { .. }
+            | Statement::SetMultiple { .. }
             | Statement::SetProperty { .. }
             | Statement::Return(_)
             | Statement::GiveBack(_)

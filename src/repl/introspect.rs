@@ -349,7 +349,7 @@ fn statement_keyword(statement: &Statement) -> &'static str {
         Statement::Say(_) => "say",
         Statement::Expr(_) => "an expression",
         Statement::Print(_) => "print",
-        Statement::Set { .. } => "set",
+        Statement::Set { .. } | Statement::SetMultiple { .. } => "set",
         Statement::Constant { .. } => "constant",
         Statement::SetProperty { .. } => "set",
         Statement::If { .. } => "if",
@@ -559,6 +559,13 @@ fn push_body<'a>(body: &'a [Stmt], _calls: &mut Vec<Call>, pending: &mut Vec<Pen
             | Statement::SetProperty { value, .. }
             | Statement::Return(Some(value))
             | Statement::GiveBack(Some(value)) => pending.push(Pending::Expr(value)),
+            // A multiple assignment reads every value it binds, last first,
+            // because this walk goes backwards through the body.
+            Statement::SetMultiple { values, .. } => {
+                for value in values.iter().rev() {
+                    pending.push(Pending::Expr(value));
+                }
+            }
             Statement::ForEach { iterable, body, .. } => {
                 pending.push(Pending::Body(body));
                 pending.push(Pending::Expr(iterable));

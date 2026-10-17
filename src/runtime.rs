@@ -62,12 +62,22 @@ pub fn module_bindings(
     // what an import currently contributes.
     let mut bound = Vec::new();
     for stmt in crate::parser::module_body(program) {
-        let (name, value, is_const) = match &stmt.statement {
-            Statement::Set { name, value } => (name, value, false),
-            Statement::Constant { name, value } => (name, value, true),
+        match &stmt.statement {
+            Statement::Set { name, value } => {
+                bound.push((name.clone(), evaluate(value)?, false));
+            }
+            Statement::Constant { name, value } => {
+                bound.push((name.clone(), evaluate(value)?, true));
+            }
+            // A multiple assignment binds one name per value, and a module's
+            // names are what the importer receives, so all of them are.
+            Statement::SetMultiple { names, values } => {
+                for (name, value) in names.iter().zip(values) {
+                    bound.push((name.clone(), evaluate(value)?, false));
+                }
+            }
             _ => continue,
-        };
-        bound.push((name.clone(), evaluate(value)?, is_const));
+        }
     }
 
     Ok(bound)

@@ -296,6 +296,21 @@ impl Formatter {
                 self.write(" to ");
                 self.format_expression(value);
             }
+            Statement::SetMultiple { names, values } => {
+                self.write("set ");
+                self.write(&names.join(", "));
+                self.write(" to ");
+                // The two lists are the same length by the time the parser has
+                // built this, but a formatter that indexed them would be one
+                // panic away from a statement it did not write, so it walks
+                // what it was given rather than counting into it.
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        self.write(", ");
+                    }
+                    self.format_expression(value);
+                }
+            }
             Statement::Constant { name, value } => {
                 self.write("constant ");
                 self.write(name);
@@ -578,6 +593,15 @@ impl Formatter {
                         self.write(", ");
                     }
                     self.write(&item.name);
+                    // The dotted import names one member of the module, and the
+                    // member is part of the module's name for this purpose: a
+                    // format that dropped it would turn `import math.sqrt as s`
+                    // into `import math as s`, which is a different program that
+                    // happens to parse.
+                    if let Some(member) = &item.member {
+                        self.write(".");
+                        self.write(member);
+                    }
                     if let Some(alias) = &item.alias {
                         self.write(" to ");
                         self.write(alias);
