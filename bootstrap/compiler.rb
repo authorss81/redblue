@@ -1182,6 +1182,13 @@ to is_operand_start(tokens, pos)
     if is_operand_start_k is "to" then
         set is_operand_start_starts to yes
     end
+    // `this` is a primary — `parse_primary` below reads it as the ordinary
+    // variable it is — so it is an operand like every other primary. Without it
+    // stage 2 refused `length of this` and split `this.xs at this` into two
+    // statements, exactly as stage 1 did.
+    if is_operand_start_k is "this" then
+        set is_operand_start_starts to yes
+    end
     give back is_operand_start_starts
 end
 
