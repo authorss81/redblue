@@ -293,7 +293,7 @@ redblue/
 │   ├── lexer.rs         # Tokenizer
 │   ├── parser.rs        # AST builder
 │   ├── analyzer.rs      # Semantic analysis
-│   ├── vm.rs            # Tree-walking interpreter
+│   ├── interpreter.rs   # Tree-walking interpreter
 │   ├── bytecode/        # Bytecode format, compiler, disassembler, VM
 │   ├── stdlib.rs        # Standard library
 │   ├── formatter.rs     # Code formatter
@@ -335,7 +335,7 @@ cargo clippy
 - [x] Bytecode compiler + VM (`rb compile`, `rb dis`, `rb vm`)
 - [ ] IDE extensions (in progress)
 - [ ] Package manager (planned)
-- [ ] Self-hosting: the compiler rewritten in Redblue, then compiling itself (in progress — see ROADMAP.md)
+- [x] Self-hosting: the compiler rewritten in Redblue (`bootstrap/compiler.rb`), then compiling itself — three consecutive self-compilations are byte-identical, which `tests/bootstrap_selfhost_test.rs` asserts
 
 ## License
 

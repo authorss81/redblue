@@ -109,10 +109,7 @@ set arr to [1, 2, 3]
 set words to ["hello", "world"]
 
 // Records
-set person to record {
-    name: "Alice",
-    age: 30
-}
+set person to {name: "Alice", age: 30}
 ```
 
 #### Escapes in a text literal
@@ -613,7 +610,7 @@ to add(a, b)
 end
 
 to max(a, b)
-    if a > b
+    if a > b then
         give back a
     else
         give back b
@@ -648,7 +645,7 @@ end
 set double to to (x) give back x * 2
 
 set numbers to [1, 2, 3]
-set doubled to numbers.map(double)
+set doubled to list.map(numbers, double)
 ```
 
 A function literal is an expression, so a function is a value: it can be held in
@@ -1091,7 +1088,7 @@ the program carries on where it would otherwise have stopped:
 
 ```redblue
 set config to might fail files.read("config.rb")
-if config is nothing
+if config is nothing then
     say "using defaults"
 end
 ```
@@ -1383,7 +1380,7 @@ There is no `formats` module. JSON and CSV are their own modules, spelled
 
 ```redblue
 set data to bytes.from_text("Hi")        // [72, 105] — a byte list
-set back to bytes.text(data)             // "Hi"
+set text_back to bytes.text(data)        // "Hi"
 bytes.write("out.bin", data)             // write a byte list to a file
 ```
 
