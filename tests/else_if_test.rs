@@ -275,6 +275,36 @@ fn edge_an_else_if_chain_inside_a_loop_body_takes_its_branch_per_iteration() {
     );
 }
 
+/// `while` and `repeat` open their body the same way `for` does, so the chain's
+/// one `end` has to be told apart from the loop's one `end` in all three. `while`
+/// is the sharper of the two: its condition is an expression, so a chain in its
+/// body has to stop at the chain's `end` rather than swallow the loop's.
+#[test]
+fn edge_an_else_if_chain_closes_inside_a_while_body_and_a_repeat_body() {
+    let while_source = "set hit to \"\"\n\
+                        set i to 0\n\
+                        while i < 4\n    if i is 0 then\n        set hit to hit + \"0\"\n\
+                        else if i is 3 then\n        set hit to hit + \"3\"\n\
+                        else\n        set hit to hit + \"m\"\n    end\n    set i to i + 1\nend\n";
+    assert_eq!(
+        branch_on_both_engines(while_source),
+        "0mm3",
+        "a chain in a `while` body must end at the chain's `end` and leave the \
+         loop's alone"
+    );
+
+    let repeat_source = "set hit to \"\"\n\
+                         repeat 3 times\n    if 1 is 2 then\n        set hit to hit + \"x\"\n\
+                         else if 1 is 1 then\n        set hit to hit + \"y\"\n\
+                         else\n        set hit to hit + \"z\"\n    end\nend\n";
+    assert_eq!(
+        branch_on_both_engines(repeat_source),
+        "yyy",
+        "a chain in a `repeat` body must end at the chain's `end` and leave the \
+         loop's alone"
+    );
+}
+
 #[test]
 fn edge_a_nested_if_inside_an_else_if_arm_keeps_its_own_end() {
     assert_eq!(
