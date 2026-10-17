@@ -1304,3 +1304,58 @@ fn asm_at_the_prompt_agrees_with_rb_dis_on_the_same_source() {
         body.len()
     );
 }
+
+/// `:builtins` and `:modules` answer the question the REPL used to make you leave
+/// it to ask: what does this language have?
+///
+/// The listing is read out of the registry, so the proof that it is not prose is
+/// that the names it prints are the ones a program can go on to call — which is
+/// what the last two lines of each session do.
+#[test]
+fn repl_builtins_and_modules_list_what_a_program_can_then_call() {
+    let s = session(
+        ":builtins\n:modules\nsay to_text(json.parse(\"{\\\"a\\\":1}\"))\nsay \
+         to_text(list.length([1, 2]))\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        // A builtin with its module beside it, and a bare one with `-` where the
+        // module would be: the empty field is the one a listing gets wrong
+        // quietly, so it is checked through a pipe and not only in a unit test.
+        .assert_stdout_contains("json_parse")
+        .assert_stdout_contains("json")
+        .assert_stdout_contains("-        to_text(any) -> text")
+        // And a module with its members, spelled as a program spells them.
+        .assert_stdout_contains("json.parse, json.stringify")
+        // Everything either listing names is callable in the next line.
+        .assert_stdout_contains("{a: 1}")
+        .assert_stdout_contains("2")
+        .assert_stdout_lacks("Unknown command");
+}
+
+/// `:prompt` reports the prompt it set, quoted so the space a prompt ends in is
+/// visible, and the session keeps reading at it.
+#[test]
+fn repl_prompt_reports_the_prompt_it_set_and_the_session_reads_at_it() {
+    let s = session(":prompt rb> \nsay \"after\"\n:prompt\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Prompt: \"rb> \"")
+        .assert_stdout_contains("rb> after")
+        // Bare `:prompt` puts the default back, so what it reports afterwards is
+        // the default rather than the one that was there.
+        .assert_stdout_contains("Prompt: \">>> \"")
+        .assert_stdout_contains("Goodbye!");
+}
+
+/// `:help` names the two commands, because a listing nobody can find is a
+/// listing nobody has.
+#[test]
+fn repl_help_names_the_introspection_commands() {
+    let s = session(":help\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains(":builtins")
+        .assert_stdout_contains(":modules")
+        .assert_stdout_contains(":prompt <format>");
+}

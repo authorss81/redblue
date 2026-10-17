@@ -170,6 +170,151 @@ pub fn which_lines(name: &str, origin: &Origin) -> Vec<String> {
     }
 }
 
+/// The `:builtins` answer: every name [`stdlib::BUILTIN_NAMES`] holds, with the
+/// module that exposes it and the shape it takes.
+///
+/// Read out of the registry rather than written down, for the reason
+/// [`doc_lines`] is: this is the listing a user reads to find out whether the
+/// language has a function, so a second list here would be a second thing to
+/// forget. The order is [`stdlib::BUILTIN_NAMES`]'s own, which is a `&'static
+/// [T]` and not a `HashMap`, so two consecutive calls print the same listing in
+/// the same order — the defect this project's `HashMap`-in-output rule exists to
+/// catch, and one a `HashMap`-built listing would have shipped.
+pub fn builtins_lines() -> Vec<String> {
+    let entries: Vec<(&str, &str)> = stdlib::BUILTIN_NAMES
+        .iter()
+        .map(|name| (*name, builtin_module(name).unwrap_or(NO_MODULE)))
+        .collect();
+
+    let name_width = entries
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        .max("builtin".len());
+    let module_width = entries
+        .iter()
+        .map(|(_, module)| module.len())
+        .max()
+        .unwrap_or(0)
+        .max("module".len());
+
+    let mut lines = vec![format!("Builtins ({}):", stdlib::BUILTIN_NAMES.len())];
+    lines.push(format!(
+        "{:name_width$}  {:module_width$}  shape",
+        "builtin",
+        "module",
+        name_width = name_width,
+        module_width = module_width
+    ));
+    for (name, module) in entries {
+        lines.push(format!(
+            "  {:name_width$}  {:module_width$}  {shape}",
+            name,
+            module,
+            // A shape may be written over several lines — one per overload — and
+            // a second line here lands under the name column of the row below it,
+            // so the listing stops reading as a table at the first overload.
+            shape = stdlib::builtin_signature(name)
+                .map(|shape| shape.replace('\n', "; "))
+                .unwrap_or_else(|| "no shape is written down".to_string()),
+            name_width = name_width,
+            module_width = module_width
+        ));
+    }
+    lines.push(
+        "a builtin with no module is reached by its own name; ':doc <module>' lists one \
+         module in full"
+            .to_string(),
+    );
+    lines
+}
+
+/// What the module column says when no module exposes the name.
+///
+/// A word rather than a blank, so a listing stays aligned and a reader can tell
+/// "no module claims this" from a column that has been cut off by the terminal.
+const NO_MODULE: &str = "-";
+
+/// The module that exposes `name`, or `None` when it is a bare builtin.
+///
+/// Two passes, and the order matters: `list_map` and `map` are both in the
+/// registry, `list.map` is the spelling of the first and `map` the flat builtin
+/// the second is reached through. A flat name that a member list also names is
+/// therefore credited to that module — it *is* how `map` is reached — while a
+/// `<module>_<member>` entry is credited by its own spelling first, so `list_map`
+/// reads as a member of `list` rather than being matched as a bare `map`.
+fn builtin_module(name: &str) -> Option<&'static str> {
+    for (module, members) in stdlib::MODULE_MEMBERS {
+        if members
+            .iter()
+            .any(|member| format!("{module}_{member}") == name)
+        {
+            return Some(module);
+        }
+    }
+    for (module, members) in stdlib::MODULE_MEMBERS {
+        if members
+            .iter()
+            .any(|member| stdlib::module_member_name(&format!("{module}_{member}")) == Some(name))
+        {
+            return Some(module);
+        }
+    }
+    None
+}
+
+/// The `:modules` answer: every module in [`stdlib::MODULES`] and every member
+/// [`stdlib::MODULE_MEMBERS`] gives it.
+///
+/// Both are `&'static` slices in a fixed order, so this is deterministic for the
+/// same reason [`builtins_lines`] is.
+pub fn modules_lines() -> Vec<String> {
+    let members_of = |module: &str| -> &[&str] {
+        stdlib::MODULE_MEMBERS
+            .iter()
+            .find(|(listed, _)| *listed == module)
+            .map(|(_, members)| *members)
+            .unwrap_or(&[])
+    };
+
+    let module_width = stdlib::MODULES
+        .iter()
+        .map(|module| module.len())
+        .max()
+        .unwrap_or(0)
+        .max("module".len());
+
+    let mut lines = vec![format!("Modules ({}):", stdlib::MODULES.len())];
+    lines.push(format!(
+        "{:module_width$}  members",
+        "module",
+        module_width = module_width
+    ));
+    for module in stdlib::MODULES {
+        let members = members_of(module);
+        lines.push(format!(
+            "  {:module_width$}  {members}",
+            module,
+            // Qualified, as a caller writes them: `json.parse` is the spelling
+            // the language has, and a listing of bare member names would make the
+            // reader reconstruct it. `:doc <module>` then answers the same
+            // spelling with a shape beside it.
+            members = if members.is_empty() {
+                NO_MODULE.to_string()
+            } else {
+                members
+                    .iter()
+                    .map(|member| format!("{module}.{member}"))
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            },
+            module_width = module_width
+        ));
+    }
+    lines
+}
+
 /// The `.doc` answer for `module`, or `None` when it is not a module at all.
 ///
 /// Every member is read out of [`stdlib::MODULE_MEMBERS`] and every shape out of
