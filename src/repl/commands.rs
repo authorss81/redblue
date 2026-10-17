@@ -67,6 +67,13 @@ pub enum ReplCommand {
     /// The same chunk, annotated: constants table and a comment per instruction.
     Asm(String),
     Example,
+    /// Lists the colour themes this build ships, each with a sample of it.
+    Themes,
+    /// Switches to the theme called `name`, for the rest of the session.
+    ///
+    /// The name is the argument rather than a flag because it is the one thing
+    /// about a theme a user has to know, and `:themes` is what tells them.
+    Theme(String),
     /// Sets the prompt from a format string, or restores the default when given
     /// no argument.
     ///
@@ -387,6 +394,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |_| ReplCommand::Example,
     },
     CommandSpec {
+        names: &["themes"],
+        description: "List the colour themes",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Themes,
+    },
+    CommandSpec {
+        names: &["theme"],
+        description: "Switch colour theme; :themes lists them",
+        usage: Some("<name>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Theme(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["prompt"],
         description: "Set the prompt from {engine}, {version}, {history}; none restores it",
         usage: Some("<format>"),
@@ -591,7 +614,8 @@ impl ReplCommand {
             | ReplCommand::Bytecode(value)
             | ReplCommand::Asm(value)
             | ReplCommand::Break(value)
-            | ReplCommand::Delete(value) => Some(value.as_str()),
+            | ReplCommand::Delete(value)
+            | ReplCommand::Theme(value) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
             _ => None,
         }
@@ -661,6 +685,9 @@ mod tests {
             (":tokens 1 + 1", "Tokens", "1 + 1"),
             (":example", "Example", ""),
             (":examples", "Example", ""),
+            (":themes", "Themes", ""),
+            (":theme light", "Theme", "light"),
+            (":theme none", "Theme", "none"),
             // `:prompt` is the one command whose argument may be left out and the
             // one whose argument keeps its trailing whitespace, so it is listed in
             // all three of its shapes: bare, whitespace only, and with the space
@@ -691,7 +718,8 @@ mod tests {
                 | ReplCommand::Ast(value)
                 | ReplCommand::Tokens(value)
                 | ReplCommand::Break(value)
-                | ReplCommand::Delete(value) => value.as_str(),
+                | ReplCommand::Delete(value)
+                | ReplCommand::Theme(value) => value.as_str(),
                 // The two `Prompt` shapes are told apart by the variant itself:
                 // `Prompt(None)` is a command that restores the default and falls
                 // to the empty argument below, `Prompt(Some(..))` is one that was

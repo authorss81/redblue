@@ -1304,3 +1304,106 @@ fn asm_at_the_prompt_agrees_with_rb_dis_on_the_same_source() {
         body.len()
     );
 }
+
+// --- themes -----------------------------------------------------------------
+
+/// The switch has to be visible on the very next thing the session draws, or it
+/// is not a switch. A piped session under `REDBLUE_COLOR=always` is the only way
+/// to see escapes from a test at all, and it is honest about the order: the
+/// prompt painted before `:theme` carries the dark palette's bold blue, and the
+/// prompt painted after carries the light palette's bold black.
+///
+/// It also has to leave the session working, because a theme is a cosmetic
+/// choice and a REPL that cannot run a program afterwards is worse than one with
+/// the wrong colours.
+#[test]
+fn theme_switches_at_runtime_and_the_next_line_uses_it() {
+    let s = session_with_env(
+        ":theme light\nsay \"after the switch\"\n:quit\n",
+        &[("REDBLUE_COLOR", "always")],
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("after the switch");
+    let dark_prompt = "\u{1b}[1;34m";
+    let light_prompt = "\u{1b}[1;30m";
+    assert!(
+        s.stdout.contains(dark_prompt),
+        "the first prompt is drawn before the switch, in the default theme:\n{:?}",
+        s.stdout
+    );
+    assert!(
+        s.stdout.contains(light_prompt),
+        "and the prompt after :theme light is drawn in the light theme:\n{:?}",
+        s.stdout
+    );
+    assert!(
+        s.stdout.find(light_prompt) > s.stdout.find(dark_prompt),
+        "the light theme has to come after the switch, not before it:\n{:?}",
+        s.stdout
+    );
+    s.assert_stdout_contains("Theme: light");
+}
+
+/// `:themes` is the only way a user learns what exists, so it has to name every
+/// theme — and its samples are painted by the theme being sampled, which is why
+/// the dark line carries the dark prompt's escape and the `none` line carries no
+/// escape at all.
+#[test]
+fn edge_themes_lists_every_theme_with_a_sample_of_its_own_colours() {
+    let s = session_with_env(":themes\n:quit\n", &[("REDBLUE_COLOR", "always")]);
+
+    s.assert_exited_ok();
+    for name in ["dark", "light", "none"] {
+        s.assert_stdout_contains(name);
+    }
+    assert!(
+        s.stdout.contains("\u{1b}[1;34m>>> \u{1b}[0m"),
+        "the dark line samples the dark prompt colour:\n{:?}",
+        s.stdout
+    );
+    assert!(
+        s.stdout.contains("\u{1b}[1;30m>>> \u{1b}[0m"),
+        "and the light line samples the light one:\n{:?}",
+        s.stdout
+    );
+    let none_line = s
+        .stdout
+        .lines()
+        .find(|line| line.contains("none"))
+        .unwrap_or_else(|| panic!("no line for the none theme:\n{:?}", s.stdout));
+    assert!(
+        !none_line.contains('\u{1b}'),
+        "the no-colour theme's sample must be plain text: {:?}",
+        none_line
+    );
+}
+
+/// A name that is not a theme is an error naming the ones that are, and the
+/// session keeps the theme it had and keeps working: it is a refused request,
+/// not a broken session and not a silent reset to the first theme in the table.
+#[test]
+fn edge_an_unknown_theme_is_refused_and_the_session_still_runs_programs() {
+    let s = session_with_env(
+        ":theme neon\nsay \"still working\"\n:theme\nsay \"still working\"\n:quit\n",
+        &[("REDBLUE_COLOR", "always")],
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Unknown theme 'neon'")
+        .assert_stdout_contains("dark, light, none")
+        .assert_stdout_contains("Usage: :theme");
+    assert_eq!(
+        s.count_stdout("still working"),
+        2,
+        "a refused theme and a missing argument both leave the session able to \
+         run a program:\n{}",
+        s.stdout
+    );
+    // Nothing was switched to, so the prompt is still the default's.
+    assert!(
+        s.stdout.contains("\u{1b}[1;34m"),
+        "the session must still be on the theme it started in:\n{:?}",
+        s.stdout
+    );
+}

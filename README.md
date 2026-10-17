@@ -134,6 +134,22 @@ rb dis hello.rbc
 rb vm hello.rbc
 ```
 
+### REPL themes
+
+`rb` with no arguments opens the REPL. `:themes` lists the colour themes this
+build ships, each with a sample, and `:theme <name>` switches to one — the next
+line printed already uses it, with no restart. Names are matched without regard to
+case or surrounding spaces; a name that is not one of them is an error that names
+the ones that are, and leaves the session on the theme it had.
+
+- `dark` — dark terminal background. The default.
+- `light` — light terminal background: dark foreground colours.
+- `none` — no colour: exactly what colour-off prints, byte for byte.
+
+Whether colour is on is a separate question, answered by `REDBLUE_COLOR=always`,
+`REDBLUE_COLOR=never` or `NO_COLOR` and otherwise by whether stdout is a terminal.
+A theme chooses *which* colours, not whether there are any.
+
 ### Examples
 
 ```redblue
