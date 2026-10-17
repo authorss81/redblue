@@ -69,55 +69,105 @@ right.
 Every line number in the finding is also off by between 6 and 38, and two of the
 `edge_*` test names it quotes do not exist under those names.
 
-## 4. `../rbops/verify.sh phase-082` is red on a test-policy scanner that reads 0
+## 4. `verify.sh`'s test-policy scanner reads the working tree, not history
+
+**Corrected by measurement. The previous entry in this file was wrong.**
+
+The previous attempt recorded the scanner returning `0 rust / 0 edge_* / no
+failure assertion` against a file with 11 `#[test]` functions and four failure
+assertions, and concluded the scanner was broken. It was not. It reads the diff
+against `HEAD`, and the previous attempt's work had been committed into the
+resume checkpoint `cd7aed7`, so the working tree was clean:
 
 ```
-== report
-  FAIL  /home/runner/work/rbops/rbops/phases/phase-082/REPORT.md missing
+$ ../rbops/verify.sh phase-082          # immediately after the checkpoint landed
+== diff hygiene
+  FAIL  no changed files detected against HEAD
+  FAIL  diff too small: +0 (min +5)
+  FAIL  no implementation change - must_touch requires a change under one of: tests/
 == test policy
-  FAIL  no test asserts a failure is produced — mandatory
+  FAIL  no test asserts a failure is produced - mandatory
   FAIL  test quota not met: 0 rust (need 3) and 0 redblue (need 2)
-  FAIL  no test named edge_* — mandatory
+  FAIL  no test named edge_* - mandatory
 ```
 
-Two separate problems, and neither is a gate this phase may weaken.
+Every `0` in the test-policy block was the **same fact** as the diff-hygiene
+failure: no changed files. With the work uncommitted the same script printed
 
-**The report path is outside the checkout.** `verify.sh` reads
-`/home/runner/work/rbops/rbops/phases/phase-082/REPORT.md`; the project root is
-`/home/runner/work/rbops/rbops/redblue`. `phases/phase-080/REPORT.md` and
-`phases/phase-081/REPORT.md` are inside the checkout and committed, so the report
-is written there, where AGENTS.md § 4 names it. Syncing the two copies is the
-dispatcher's step. This is the same finding as phase-081 § 6.
+```
+== diff hygiene
+  PASS  diff substance: +974 -311 (min +5)
+  PASS  implementation touched tests/ (must_touch: tests/)
+== test policy
+  PASS  failure-asserting test present: 6
+  PASS  test quota met: 12 rust / 0 redblue (need 3 or 2)
+  PASS  edge case test present: 11
+```
 
-**The test-policy scanner reads 0 tests.** `tests/doc_accuracy_test.rs` has 11
-`#[test]` functions, 9 of them named `edge_*`, and four separate failure
-assertions (`edge_a_single_quoted_string_in_a_program_is_a_lexer_error`,
-`edge_every_claim_the_documents_dropped_is_still_a_refusal`,
-`edge_the_remaining_known_gaps_are_documented_as_missing`, and
-`edge_a_documented_source_file_that_is_not_there_is_reported`). Phase-081 tried
-four git states for the same scanner against a different new file in the same
-directory — untracked, staged, intent-to-add, committed — and each returned 0.
-This phase used intent-to-add, the only state in which `diff hygiene` passes
-(it read the new file and counted `+1009`), and the scanner still returned 0.
+So there is no conflict between the two checks and nothing to fix in
+`verify.sh`. The rule for whoever runs a phase next: **the gate runs before the
+dispatcher commits**, and a phase whose work is already committed is measured
+against an empty diff. Phase-081 recorded the identical `0 / 0 / 0` against the
+identical cause.
 
-Note the conflict: `diff hygiene` wants the work visible and uncommitted; the
-test scanner wants it somewhere it cannot see from the four states that were
-tried. One of those two checks cannot be satisfied for a *new* test file, and
-the fix is in `verify.sh`, which is not this phase's to touch.
+## 5. `tests/doc_blocks_*.txt` were keyed to line numbers that no longer resolved
 
-What was tried, so nobody repeats it:
+The bucket files match blocks on `<doc>:<line>`. At the start of this phase
+**49 of the 101 keys named no block at all** — `SPEC.md:117`, `SPEC.md:1006`,
+`HANDOUT.md:160`, `docs/GRAMMAR.md:541` and 45 others — and four blocks were in
+no bucket, so `cargo test` failed on
+`every_documentation_block_is_classified_exactly_once`,
+`running_every_block_agrees_with_the_bucket_it_is_in` and
+`edge_a_known_fail_recording_that_is_wrong_is_rejected`.
 
-| State | `diff hygiene` | `test policy` |
-|---|---|---|
-| untracked | PASS | 0 rust, 0 `edge_*`, no failure assertion |
-| staged (`git add`) | PASS | 0 rust, 0 `edge_*`, no failure assertion |
-| intent-to-add (`git add -N`) | PASS (`+1009`) | 0 rust, 0 `edge_*`, no failure assertion |
-| committed | FAIL ("no changed files detected", `+0`) | 0 rust, 0 `edge_*`, no failure assertion |
+The keys last matched the documents at `bf9ffc3`. `e008f0b` (phase-089) moved
+17 lines in `SPEC.md` and 21 in `docs/GRAMMAR.md` without re-pointing them. This
+is the third time a document edit has silently invalidated the whole file.
 
-The prompt forbids inspecting `rbops/`, so the script was not read to find out
-which of the five views it takes. Recorded as a blocked gate.
+Rebuilt by measurement this phase: all 105 blocks extracted, written to a file,
+run under `rb run` **and** `rb compile`, and classified from the result.
 
-## 5. `README.md` has no `docs/` or `bootstrap/` entry in its project structure
+**Follow-up for the auditor:** the fix is a block *content* hash in place of a
+line number. A key that survives an edit above it removes this whole failure
+class, and it is a change to `tests/doc_blocks_test.rs`'s matcher and the two
+data files — no production code. Not done here because it is a rewrite of
+another phase's harness and this phase's mandate is the documents.
+
+## 6. `KNOWN_GAPS` is not gated, so it can grow silently
+
+`tests/stdlib_module_docs_test.rs:709` exempts `filter` and `reduce`. Nothing
+fails if a third name is added there without a test that calls it and asserts
+its value. Both names *are* still refused, and both are pinned by
+`edge_the_remaining_known_gaps_are_documented_as_missing` in
+`tests/doc_accuracy_test.rs`, so a name that starts working is caught — but a
+name that is added as an exemption for a working builtin is not.
+
+This is the finding's worst sentence, in the one direction it is still open: the
+list is no longer stale in the permissive direction, but it is unpoliceable. A
+gate would be a test asserting every `KNOWN_GAPS` entry is refused *and* named in
+some `answerable_builtins()`-style row's negative case.
+
+## 7. `verify.sh` reads a `REPORT.md` this phase may not write, and does not re-sync
+
+`verify.sh` reads `/home/runner/work/rbops/rbops/phases/phase-082/REPORT.md` —
+one level above the project root. The dispatcher copies the in-checkout
+`phases/phase-082/REPORT.md` there at phase start, which is how the previous
+attempt's report was found. It does **not** re-copy after that, so the report
+honesty check still reads the previous attempt's number:
+
+```
+== report honesty
+  WARN  report claims 1555 passing, actual run has 1808 - under-claimed, fix the number
+  PASS  reported test count (1555) does not exceed actual (1808)
+```
+
+`WARN`, not `FAIL`, so the gate is green. The report this phase wrote claims
+1808, which is what `cargo test --all-targets` printed and what `verify.sh`
+itself printed in its `cargo test` section. Syncing it is the dispatcher's step;
+the phase contract forbids writing outside the checkout, so it was not done
+here.
+
+## 8. `README.md` has no `docs/` or `bootstrap/` entry in its project structure
 
 `README.md:266-289` lists `src/`, `tests/`, `corpus/`, `examples/`, `modules/`
 and `tooling/vscode/`. It does not list `bootstrap/`, `docs/`, `phases/` or

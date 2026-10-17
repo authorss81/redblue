@@ -174,29 +174,44 @@ fn occurrences(name: &str, text: &str, needle: &str) -> Vec<String> {
 
 /// Whether a `'` in `body` opens a Redblue string literal.
 ///
-/// Redblue has no single-quoted string, so a `'` is a lexer error — except when
-/// it is an apostrophe inside a double-quoted one, which is legal and which
-/// `SPEC.md` itself uses: `say "I'm {this.name}"` is a `RUNS` entry. The two
-/// are told apart by what precedes the quote: an opening quote follows
-/// whitespace, an opening bracket, a comma or nothing at all, while an
-/// apostrophe follows a word character, a closing bracket or a closing quote.
+/// Redblue has no single-quoted string, so a `'` is a lexer error — except where
+/// it cannot be one. Two places a `'` is not a program are skipped:
 ///
-/// Getting this wrong in the permissive direction is the bug this test exists to
-/// prevent — a `RUNS` block with `'{"name": "Alice"}'` passes today only because
-/// the check is not this blunt.
+///  - **inside a double-quoted string**, which is legal and which `SPEC.md`
+///    itself uses: `say "I'm {this.name}"` is a `RUNS` entry. `\"` does not end
+///    the string, so `say "he said \"hi\""` is read to its real closing quote.
+///  - **inside a `//` comment**, which runs to the end of the line and cannot
+///    contain a program either. `SPEC.md:143` is a catalogue of the escapes the
+///    lexer refuses and writes the refusals beside them — `// LexerError:
+///    Unknown escape '\q' in text` — so a rule that reported every `'` would
+///    report a document that is being precise about an error.
+///
+/// A `'` that opens a Redblue string is outside both, by definition, so skipping
+/// them costs no detection. What remains is reported.
 fn quote_opens_a_string(body: &str) -> bool {
-    body.char_indices().any(|(index, ch)| {
-        ch == '\''
-            && match body[..index].chars().next_back() {
-                None => true,
-                Some(previous) => {
-                    !previous.is_alphanumeric()
-                        && previous != ')'
-                        && previous != ']'
-                        && previous != '"'
-                }
+    let mut in_text = false;
+    let mut in_comment = false;
+    let mut escaped = false;
+    for ch in body.chars() {
+        if in_comment {
+            in_comment = ch != '\n';
+        } else if in_text {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_text = false;
             }
-    })
+        } else if ch == '"' {
+            in_text = true;
+        } else if ch == '/' {
+            in_comment = true;
+        } else if ch == '\'' {
+            return true;
+        }
+    }
+    false
 }
 
 /// The names a document is not allowed to present as working Redblue.
@@ -888,5 +903,698 @@ fn edge_the_replacement_examples_answer() {
         "p082_list_map_captures",
         "set factor to 10\nsay list.map([1, 2], to (x) give back x * factor)",
         "[10, 20]",
+    );
+}
+
+// ============================================ the project structure: directories
+
+/// Every `/`-suffixed entry the README's project-structure tree names exists.
+///
+/// [`every_source_file_the_project_structure_lists_exists`] reads the same fence
+/// but keeps only the `.rs` tokens, because the finding it pins was a missing
+/// *file* (`src/vm.rs`). The directories were therefore never checked by
+/// anything: `source_entries` records them as parent directories and returns
+/// nothing for them. A tree naming `src/repl/` or `tooling/vscode/` that has
+/// moved would pass every gate in this repository, and a reader who follows it
+/// concludes the REPL or the editor extension is not shipped.
+///
+/// Nine directories are named and all nine are checked, including the deepest
+/// one (`tooling/vscode/`, two levels below the tree root), because a reader
+/// that stopped at depth 1 would find the top eight and miss the ninth.
+#[test]
+fn every_directory_the_project_structure_names_exists() {
+    let listed = directory_entries(&read_doc("README.md"));
+
+    assert!(
+        !listed.is_empty(),
+        "no directory was read out of README.md's project structure, so this \
+         assertion is not checking anything: the tree fence must have changed shape"
+    );
+
+    let missing: Vec<String> = listed
+        .iter()
+        .filter(|entry| !Path::new(ROOT).join(entry).is_dir())
+        .cloned()
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "README.md's project structure names directories that are not there: {missing:?}. \
+         A reader follows a directory line before a file line, so a missing one sends \
+         them looking for a subtree that does not exist."
+    );
+}
+
+/// The `/`-suffixed paths out of the project-structure fence.
+///
+/// The mirror image of [`source_entries`]: same fence, same depth arithmetic,
+/// and the two halves of the tree collected separately so a missing file and a
+/// missing directory are reported as the different problems they are. A token
+/// ending in `/` is a directory *at* its own depth and a `.rs` token is a file
+/// in the directory one level up, so `├── src/` at depth 0 makes
+/// `│   ├── bytecode/` at depth 1 the path `src/bytecode/` and
+/// `│   ├── lexer.rs` at depth 1 the path `src/lexer.rs`.
+fn directory_entries(text: &str) -> Vec<String> {
+    let Some(fence) = project_structure_fence(text) else {
+        return Vec::new();
+    };
+
+    let mut directories: BTreeMap<usize, String> = BTreeMap::new();
+    let mut entries = Vec::new();
+    // The fence's first line is the tree root — the checkout's own directory
+    // name — and not a child of anything, so it is not an entry.
+    for line in fence.iter().skip(1) {
+        let indent = line
+            .chars()
+            .take_while(|ch| *ch == '│' || *ch == ' ')
+            .count();
+        let Some(token) = line
+            .split_whitespace()
+            .find(|token| token.ends_with('/') || token.ends_with(".rs"))
+        else {
+            continue;
+        };
+        let level = indent / 4;
+        if let Some(name) = token.strip_suffix('/') {
+            let parent = if level == 0 {
+                String::new()
+            } else {
+                match directories.get(&(level - 1)) {
+                    Some(parent) => format!("{parent}/"),
+                    None => continue,
+                }
+            };
+            directories.insert(level, name.to_string());
+            entries.push(format!("{parent}{name}"));
+        }
+    }
+    entries
+}
+
+/// The directory reader reports what is not there, and reads what is.
+///
+/// The fixtures are the two mistakes that would each make the real assertion
+/// pass on nothing: a tree naming `src/vmr/`, one level deep and spelled like
+/// the directory that does exist, and `tooling/emacs/`, the missing sibling of
+/// the `tooling/vscode/` the README really names. Both have to come back as
+/// paths that do not resolve, and the reader has to reach depth 2 to find the
+/// second one. A reader that dropped directories, or stopped at the first level,
+/// would return nothing for either and let a stale README through.
+#[test]
+fn edge_a_directory_the_project_structure_names_that_is_not_there_is_reported() {
+    // Joined rather than written with `\` line continuations, which would strip
+    // the leading `│   ` and the nesting the fixture is about.
+    let tree = [
+        "```",
+        "redblue/",
+        "├── src/",
+        "│   ├── bytecode/       # Bytecode format, compiler, VM",
+        "│   ├── vmr/            # the directory this phase checks for",
+        "│   └── lexer.rs        # Tokenizer",
+        "├── tests/              # Rust + Redblue test suites",
+        "└── tooling/",
+        "    └── emacs/          # a sibling of the real tooling/vscode/",
+        "```",
+    ]
+    .join("\n");
+
+    assert_eq!(
+        directory_entries(&tree),
+        vec![
+            "src".to_string(),
+            "src/bytecode".to_string(),
+            "src/vmr".to_string(),
+            "tests".to_string(),
+            "tooling".to_string(),
+            "tooling/emacs".to_string(),
+        ],
+        "the directory reader must join a nested entry to its own parent, not to the root"
+    );
+
+    let resolved = |name: &str| Path::new(ROOT).join(name).is_dir();
+    assert!(
+        !resolved("src/vmr"),
+        "src/vmr exists, so this fixture no longer proves the check has teeth; \
+         either it was created or the name changed and the fixture should follow it"
+    );
+    assert!(
+        !resolved("tooling/emacs"),
+        "tooling/emacs exists, so the nested fixture proves nothing"
+    );
+    assert!(
+        resolved("src/bytecode") && resolved("tooling/vscode"),
+        "the real directories must exist or the fixtures beside them prove nothing"
+    );
+
+    // Boundary: a document with no fence, and one whose fence has no tree root,
+    // both yield no entries rather than a panic.
+    assert_eq!(
+        directory_entries("no fence here at all"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        directory_entries("```\nsome other code block\n```"),
+        Vec::<String>::new()
+    );
+}
+
+// ============================================ every bucket, not just RUNS
+
+/// The `doc:line` keys a bucket file holds, comments and blanks removed.
+///
+/// One reader for all three files, so the three scans below cannot drift apart
+/// in how they parse a key: a key that is not `doc:<number>` is a `panic!`
+/// naming it, because a bucket this file cannot read is a bucket it cannot
+/// vouch for.
+fn bucket_keys(name: &str) -> Vec<String> {
+    let path = Path::new(ROOT).join("tests").join(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "{} must be checked in for this scan: {error}",
+            path.display()
+        )
+    });
+    parse_bucket_keys(name, &text)
+}
+
+/// [`bucket_keys`] on text given directly, so the refusals can be driven from a
+/// fixture rather than only from a checked-in file.
+///
+/// Every malformed input is a `panic!` naming the line, never an `unwrap` and
+/// never a key skipped in silence: a bucket entry this reader cannot read is an
+/// entry every scan below would silently not check.
+fn parse_bucket_keys(name: &str, text: &str) -> Vec<String> {
+    let keys: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let key = line.split_once('\t').map_or(line, |(key, _)| key);
+            let (doc, rest) = key
+                .split_once(':')
+                .unwrap_or_else(|| panic!("{name} holds a key that is not `doc:line`: {line}"));
+            let number: usize = rest
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} holds a line that is not a number: {line}"));
+            assert!(
+                DOCS.contains(&doc),
+                "{name} holds a key naming a document this file never reads: {doc}:{number}. \
+                 The key would be checked against nothing."
+            );
+            format!("{doc}:{number}")
+        })
+        .collect();
+    assert!(
+        !keys.is_empty(),
+        "{name} is empty, so scanning it would pass on nothing"
+    );
+    keys
+}
+
+/// The 1-based line of every opening ```redblue fence in `text`.
+fn block_openings(text: &str) -> Vec<usize> {
+    let mut lines = Vec::new();
+    let mut inside = false;
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```redblue") {
+            inside = true;
+            lines.push(index + 1);
+        } else if inside && trimmed.starts_with("```") {
+            inside = false;
+        }
+    }
+    lines
+}
+
+/// No block in *any* of the three buckets may contain a `'`, not only the ones
+/// in the RUNS file.
+///
+/// [`edge_no_running_document_block_contains_a_single_quote`] reads one bucket.
+/// The other two are where a single-quoted example can hide: demote a broken
+/// block from RUNS to FRAGMENT with a plausible reason and nothing executes it,
+/// or move it to KNOWN-FAIL and the recorded stderr stops being about the block
+/// it names. Both routes end with `HANDOUT.md` promising `formats.parse_json`
+/// again and every gate green. All three files are read here, which is the
+/// only way that route is closed.
+#[test]
+fn edge_no_document_block_in_any_bucket_contains_a_single_quote() {
+    let mut scanned = 0usize;
+    for bucket in [
+        "doc_blocks_runs.txt",
+        "doc_blocks_fragments.txt",
+        "doc_blocks_known_fail.txt",
+    ] {
+        for key in bucket_keys(bucket) {
+            let (doc, line) = key
+                .split_once(':')
+                .unwrap_or_else(|| panic!("{bucket} produced a key that is not `doc:line`: {key}"));
+            let body = block_body(
+                doc,
+                line.parse()
+                    .unwrap_or_else(|_| panic!("{bucket} produced a non-numeric line: {key}")),
+            );
+            assert!(
+                !body.trim().is_empty(),
+                "{bucket} lists {key} and there is no block there. \
+                 tests/doc_blocks_test.rs owns that check; asserting it here too would \
+                 make one stale key fail two tests."
+            );
+            scanned += 1;
+            if let Err(offence) = first_single_quoted(&[(key, body)]) {
+                panic!("classified in {bucket}, {offence}");
+            }
+        }
+    }
+
+    assert!(
+        scanned > 100,
+        "only {scanned} blocks were scanned for a quote the lexer refuses; the three \
+         buckets hold more than a hundred keys between them, so the scan missed some"
+    );
+}
+
+/// The first `(key, body)` whose body opens a single-quoted string, or `Ok(())`.
+///
+/// A `Result`, not a `bool`, because the caller needs the *which block* and not
+/// only the *that one exists*: three buckets are scanned, and "a document
+/// contains a single quote" is not an actionable failure message while
+/// `HANDOUT.md:149 is classified in doc_blocks_runs.txt and its body opens a
+/// single-quoted string` is. The failure channel is exercised directly by
+/// [`edge_the_single_quote_scan_names_the_block_it_found`], so this cannot be a
+/// function that has only ever been shown the clean case.
+fn first_single_quoted(blocks: &[(String, String)]) -> Result<(), String> {
+    for (key, body) in blocks {
+        if quote_opens_a_string(body) {
+            return Err(format!(
+                "{key} opens a single-quoted string, which the lexer refuses:\n{body}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The scan reports the block it found, and is silent when there is nothing.
+///
+/// A scan whose every outcome is `Ok` cannot be shown to find anything, which is
+/// the gap this file closed in its previous attempt: three tests asserted the
+/// absence of a quote in the documents and none of them could fail for the
+/// right reason if the rule underneath them stopped working. So the rule's own
+/// checker is handed the exact body this phase removed from `HANDOUT.md` — the
+/// `formats.parse_json('{"name": "Alice"}')` the finding quotes — and must come
+/// back `Err` naming it.
+///
+/// The neighbours are here too, because a checker that reported every `'` would
+/// fail on `SPEC.md:143`, which writes the escape it refuses inside a comment,
+/// and one that reported none would fail on the first case.
+#[test]
+fn edge_the_single_quote_scan_names_the_block_it_found() {
+    let reverted = (
+        "HANDOUT.md:149".to_string(),
+        r#"set data to formats.parse_json('{"name": "Alice"}')"#.to_string(),
+    );
+    let err = first_single_quoted(&[reverted])
+        .expect_err("the body this phase removed opens a single-quoted string");
+    assert!(
+        err.contains("HANDOUT.md:149"),
+        "the report does not name the block, so nobody can act on it: {err}"
+    );
+    assert!(
+        err.contains("single-quoted"),
+        "the report does not say what is wrong: {err}"
+    );
+
+    // Empty and singleton: nothing to find, and one clean block.
+    assert!(
+        first_single_quoted(&[]).is_ok(),
+        "an empty scan has nothing to report and must say so"
+    );
+    assert!(
+        first_single_quoted(&[("SPEC.md:1".to_string(), "say \"hi\"".to_string())]).is_ok(),
+        "one clean block is not an offence"
+    );
+
+    // The two shapes a blunt rule gets wrong, in the other direction.
+    for (key, body) in [
+        (
+            "SPEC.md:684",
+            r#"object Person
+    has name
+    to introduce()
+        say "I'm {this.name}"
+    end
+end"#,
+        ),
+        (
+            "SPEC.md:143",
+            "say \"\\q\"            // LexerError: Unknown escape '\\q' in text",
+        ),
+    ] {
+        assert!(
+            first_single_quoted(&[(key.to_string(), body.to_string())]).is_ok(),
+            "{key} contains a quote that cannot open a string, so reporting it would \
+             make the scan a ban on apostrophes"
+        );
+    }
+
+    // The first offence is the one reported, out of a list of three.
+    let many = [
+        ("README.md:9".to_string(), "say \"hi\"".to_string()),
+        ("README.md:33".to_string(), "say 'hi'".to_string()),
+        ("README.md:46".to_string(), "say 'bye'".to_string()),
+    ];
+    let err = first_single_quoted(&many).expect_err("two of the three offend");
+    assert!(
+        err.contains("README.md:33") && !err.contains("README.md:46"),
+        "the first offence in order is the one to report: {err}"
+    );
+}
+
+/// A bucket key that is not `doc:<number>` is refused, and the refusal names it.
+///
+/// The reader below turns three checked-in files into the keys every scan in
+/// this file runs on, so a key it cannot parse is a key nothing checks. Silently
+/// dropping it would leave a whole bucket unscanned with every test green, which
+/// is how a block ends up in a list that no longer describes it.
+#[test]
+#[should_panic(expected = "holds a key that is not `doc:line`")]
+fn edge_a_bucket_key_that_is_not_doc_line_is_rejected() {
+    parse_bucket_keys("fixture.txt", "# a comment\n\nREADME.md:9\nREADME.md\n");
+}
+
+/// A bucket line whose number is not a number is refused the same way.
+#[test]
+#[should_panic(expected = "holds a line that is not a number")]
+fn edge_a_bucket_line_that_is_not_a_number_is_rejected() {
+    parse_bucket_keys("fixture.txt", "README.md:nine\n");
+}
+
+/// A key naming a document this file never reads is refused.
+///
+/// Otherwise the key resolves against a document no scan opens, and the block it
+/// names is one nothing has looked at.
+#[test]
+#[should_panic(expected = "naming a document this file never reads")]
+fn edge_a_bucket_key_naming_an_unread_document_is_rejected() {
+    parse_bucket_keys("fixture.txt", "ROADMAP.md:1\n");
+}
+
+/// An empty bucket file is a failure, not a clean scan.
+#[test]
+#[should_panic(expected = "is empty, so scanning it would pass on nothing")]
+fn edge_an_empty_bucket_file_is_rejected() {
+    parse_bucket_keys("fixture.txt", "# every line is a comment\n\n");
+}
+
+/// Every ```redblue block in the five documents is in one of the three buckets
+/// this file scans.
+///
+/// The hole the previous test closes is only closed if the buckets *cover* the
+/// documents. A block in none of them is executed by nothing, corrected by
+/// nothing and described by nothing: the `formats` section could be deleted
+/// from `HANDOUT.md` entirely, or a new `list.filter` example added and left out
+/// of every list, and the quote scan and the claims scan would both read a
+/// document that no longer says what it says now and say nothing.
+///
+/// So this asserts the union of the three buckets is exactly the set of blocks —
+/// no key pointing at nothing, and no block missing from all three.
+#[test]
+fn edge_every_documentation_block_is_in_a_bucket_this_file_scans() {
+    let mut keys: Vec<String> = Vec::new();
+    for bucket in [
+        "doc_blocks_runs.txt",
+        "doc_blocks_fragments.txt",
+        "doc_blocks_known_fail.txt",
+    ] {
+        keys.extend(bucket_keys(bucket));
+    }
+
+    let mut blocks: Vec<String> = Vec::new();
+    for doc in DOCS {
+        for line in block_openings(&read_doc(doc)) {
+            blocks.push(format!("{doc}:{line}"));
+        }
+    }
+
+    let duplicated: Vec<String> = keys
+        .iter()
+        .filter(|key| keys.iter().filter(|other| *other == *key).count() > 1)
+        .cloned()
+        .collect();
+    assert!(
+        duplicated.is_empty(),
+        "a block is in two buckets at once, so this file cannot say which one it was \
+         checked against: {duplicated:?}"
+    );
+
+    let unclassified: Vec<String> = blocks
+        .iter()
+        .filter(|key| !keys.contains(key))
+        .cloned()
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "these ```redblue blocks are in none of the three buckets, so nothing in this \
+         file reads them: {unclassified:?}. An example that no bucket holds is an example \
+         nothing runs."
+    );
+
+    assert_eq!(
+        blocks.len(),
+        keys.len(),
+        "the buckets hold {} keys and the documents hold {} blocks; the two must be the \
+         same set",
+        keys.len(),
+        blocks.len()
+    );
+}
+
+/// The quote rule catches an opening quote and spares an apostrophe.
+///
+/// Both directions, because the check in
+/// [`edge_no_document_block_in_any_bucket_contains_a_single_quote`] is only
+/// worth running if the rule underneath it distinguishes the two. Ban every
+/// apostrophe and the scan goes green by refusing `say "I'm {this.name}"`,
+/// which is `SPEC.md`'s own object example and a `RUNS` entry. Catch every
+/// opening quote and the scan goes red on a block Redblue runs.
+///
+/// The tricky case is the one Redblue itself needs: a `'` straight after a
+/// closing `"`, which reads like an opening quote after the eye has finished
+/// the string and is not one.
+#[test]
+fn edge_the_single_quote_rule_spares_an_apostrophe_and_catches_a_quote() {
+    for body in [
+        r#"set data to formats.parse_json('{"name": "Alice"}')"#,
+        "say 'hi'",
+        "say json.parse('{ \"n\": 1 }')",
+        "set xs to ['a', 'b']",
+        r#"say "it's" + 'no'"#,
+    ] {
+        assert!(
+            quote_opens_a_string(body),
+            "a single-quoted string is here and the rule missed it, so a broken example \
+             would pass the scan:\n{body}"
+        );
+    }
+
+    for body in [
+        r#"say "I'm {this.name}""#,
+        r#"say "don't say that""#,
+        "say \"it's {x}'s\"",
+        r#"set greeting to "hello, world""#,
+        "",
+        "set apostrophe to 39",
+    ] {
+        assert!(
+            !quote_opens_a_string(body),
+            "no quote opens a string in this body, and the rule claimed one did, so \
+             `say \"I'm {{this.name}}\"` would be reported as a broken example:\n{body}"
+        );
+    }
+
+    // The empty string and the singleton are the boundaries: one character of
+    // body, and one `'` with nothing around it at all.
+    assert!(!quote_opens_a_string(""));
+    assert!(quote_opens_a_string("'"));
+    assert!(!quote_opens_a_string(r#"""#));
+
+    // Premise for the scan above: the block the rule must spare is a real one in
+    // a real document, in the RUNS bucket, so sparing it is not a way of saying
+    // "the scan does not reach it".
+    let spec = read_doc("SPEC.md");
+    let runs = bucket_keys("doc_blocks_runs.txt");
+    let spared: Vec<String> = runs
+        .iter()
+        .filter(|key| {
+            let (doc, line) = key.split_once(':').expect("a key is doc:line");
+            block_body(doc, line.parse().expect("a key line is a number")).contains(r#"I'm"#)
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !spared.is_empty(),
+        "no RUNS block in SPEC.md uses an apostrophe inside a string, so the \
+         `quote_opens_a_string` cases above are checked against a body the \
+         repository does not actually contain: {spec:?}"
+    );
+}
+
+// ============================================ the corrections are executed
+
+/// The 1-based line of the fenced ```redblue block in `text` whose body
+/// contains `needle`, or `None` when no block does.
+///
+/// The line, not the literal, because the bucket files are keyed on it — so a
+/// correction is located by *what it says* and then looked up in the buckets,
+/// which means moving an example up a document does not quietly drop it out of
+/// the bucket and out of this test.
+fn block_line_containing(text: &str, needle: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut inside = false;
+    let mut start = 0usize;
+    let mut body = String::new();
+    let mut found = None;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```redblue") {
+            inside = true;
+            start = index + 1;
+            body.clear();
+        } else if inside && trimmed.starts_with("```") {
+            inside = false;
+            if body.contains(needle) && found.is_none() {
+                found = Some(start);
+            }
+        } else if inside {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    found
+}
+
+/// Each corrected example is in the RUNS bucket, so the suite executes it.
+///
+/// The phase's own definition of done says the corrected examples must be in a
+/// bucket produced by the harness *and* executed by a test. Being executed is
+/// checked here and by [`edge_the_replacement_examples_answer`]; this is the
+/// other half — that the *document's* block, the one a reader copies, is the
+/// same program and is classified as working. A correction written in one place
+/// while the document keeps a fragment that was never run would satisfy the
+/// first and not this.
+///
+/// Each needle is a line of a corrected document, not a claim about one, so
+/// deleting the correction fails the same way reverting it does.
+#[test]
+fn edge_the_corrected_examples_are_executed_from_the_bucket_that_holds_them() {
+    let runs = bucket_keys("doc_blocks_runs.txt");
+    let fragments = bucket_keys("doc_blocks_fragments.txt");
+    let known_fail = bucket_keys("doc_blocks_known_fail.txt");
+
+    for (doc, needle, what) in [
+        (
+            "HANDOUT.md",
+            "json.parse",
+            "the section that replaced `formats`",
+        ),
+        (
+            "HANDOUT.md",
+            "csv.parse",
+            "the CSV half of the same replacement",
+        ),
+        ("SPEC.md", "list.map(", "the `list` module example"),
+        (
+            "PHILOSOPHY.md",
+            "set active to yes",
+            "the block the `formats.parse_json` and `set active` corrections landed in",
+        ),
+    ] {
+        let key = block_line_containing(&read_doc(doc), needle).unwrap_or_else(|| {
+            panic!(
+                "no ```redblue block in {doc} contains `{needle}` any more, so the \
+                 correction this phase made there is gone. {what} is not documented."
+            )
+        });
+        let key = format!("{doc}:{key}");
+
+        assert!(
+            runs.contains(&key),
+            "{key} holds {what} but is not in tests/doc_blocks_runs.txt, so nothing \
+             executes the example a reader copies out of {doc}. It is in FRAGMENT: \
+             {}, or in KNOWN-FAIL: {}.",
+            fragments.contains(&key),
+            known_fail.contains(&key)
+        );
+        assert!(
+            !quote_opens_a_string(&block_body(
+                doc,
+                key.rsplit(':').next().unwrap().parse().unwrap_or(0)
+            )),
+            "{key} holds {what} and opens a single-quoted string, which is the defect \
+             this phase corrected"
+        );
+    }
+}
+
+// ============================================ a refusal, in full
+
+/// The refusal a single-quoted program gets is a caret on the quote, not just a
+/// word in a message.
+///
+/// [`edge_a_single_quoted_string_in_a_program_is_a_lexer_error`] pins the
+/// message. This pins what a person sees, because a `LexerError` that named the
+/// character but not the place would send them to the start of the file. The
+/// file is one line, so `1:5` is the only position it can be: the quote is the
+/// fifth character of `say 'hi'`.
+///
+/// The unterminated string is the neighbouring failure and is here so the two
+/// cannot be confused: both are lexer errors at `1:5`, and only the message
+/// says which of the two mistakes was made.
+#[test]
+fn edge_a_single_quoted_program_is_refused_with_a_caret_at_the_quote() {
+    let (ok, _, stderr) = run_named("p082_quote", "say 'hi'\n");
+
+    assert!(
+        !ok,
+        "a single-quoted program was accepted; the lexer must refuse it"
+    );
+    assert!(
+        stderr.contains("LexerError"),
+        "the refusal is not a lexer error, so it is not saying what is wrong:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Unexpected character"),
+        "the refusal does not name the offending character:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(r"'\''"),
+        "the refusal does not show the quote itself:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(":1:5"),
+        "the refusal does not point at column 5 of line 1, which is where the quote is:\n{stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.trim_start().starts_with('|') && line.contains('^')),
+        "the refusal prints no caret, so a reader is told what is wrong and not where:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("say 'hi'"),
+        "the refusal does not echo the offending line:\n{stderr}"
+    );
+
+    // The neighbouring failure: same position, different message.
+    let (ok, _, stderr) = run_named("p082_unterminated", "say \"hi\n");
+    assert!(!ok, "an unterminated string was accepted");
+    assert!(
+        stderr.contains("Unterminated string"),
+        "the two lexer failures must not be confused:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Unexpected character"),
+        "an unterminated string is not an unexpected character:\n{stderr}"
     );
 }
