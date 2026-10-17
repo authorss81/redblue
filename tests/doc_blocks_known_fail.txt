@@ -22,17 +22,18 @@
 #   <doc>:<line><TAB><first line of stderr>
 #
 # COUNTS, as of the run that wrote this file
-#   SPEC.md 3 · PHILOSOPHY.md 0 · HANDOUT.md 0 · docs/GRAMMAR.md 0 · README.md 0
-#   3 of 101 blocks.
+#   SPEC.md 3
+#   3 of 105 blocks.
 
 # --- SPEC.md ---------------------------------------------------------------
+SPEC.md:668	Error: ParserError: Expected 'end' but got Eof
+SPEC.md:1127	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
+SPEC.md:1178	Error: AnalyzerError: Unknown variable 'async'
 
-SPEC.md:628	Error: ParserError: Expected 'end' but got Eof
-SPEC.md:1012	Error: RuntimeError: Maximum call depth of 1000 reached while calling 'endless'
-SPEC.md:1063	Error: AnalyzerError: Unknown variable 'async'
+# --- README.md -------------------------------------------------------------
 
-# --- PHILOSOPHY.md ----------------------------------------------------------
+# --- PHILOSOPHY.md ---------------------------------------------------------
 
+# --- HANDOUT.md ------------------------------------------------------------
 
-# --- HANDOUT.md -------------------------------------------------------------
-
+# --- docs/GRAMMAR.md -------------------------------------------------------
