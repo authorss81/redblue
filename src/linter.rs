@@ -206,6 +206,16 @@ impl Linter {
                 self.assign(name, span);
                 self.analyze_expr(value);
             }
+            // A multiple assignment binds every name it lists, so it is not one
+            // unused variable but as many as it names, and every value is read.
+            Statement::SetMultiple { names, values } => {
+                for name in names {
+                    self.assign(name, span);
+                }
+                for value in values {
+                    self.analyze_expr(value);
+                }
+            }
             // A `constant` binds a name exactly as a `set` does, so it is not an
             // unused variable either: a module's constant is read by whoever
             // imports the module, which this file cannot see.

@@ -1495,6 +1495,31 @@ impl Vm {
         Ok(())
     }
 
+    /// The value `import module.member as alias` binds: the member itself, so
+    /// that the alias is callable rather than a namespace to reach through.
+    ///
+    /// Looked up by the same two rules a dotted call uses: the `module_member`
+    /// name a loaded or declared module publishes under, and the bare builtin a
+    /// flat-backed stdlib member answers as (`math.sqrt` is `sqrt`). A module
+    /// with no such member is refused by name — a member that does not exist is
+    /// the one thing an import cannot report by binding `nothing` and letting
+    /// the program find out at the first call.
+    fn imported_member(&self, module: &str, member: &str) -> Result<Value> {
+        let qualified = qualified_member(module, member);
+        if let Some(value) = self.get_var_ref(&qualified) {
+            return Ok(value.clone());
+        }
+        if let Some(bare) = stdlib::module_member_name(&qualified) {
+            if let Some(value) = self.get_var_ref(bare) {
+                return Ok(value.clone());
+            }
+        }
+        Err(Error::Runtime(
+            format!("Module '{module}' has no member '{member}'"),
+            self.span(),
+        ))
+    }
+
     fn set_var(&mut self, name: &str, value: Value) -> Result<()> {
         for scope in self.locals.iter_mut().rev() {
             if scope.contains_key(name) {
@@ -1609,6 +1634,19 @@ impl Vm {
             Statement::Set { name, value } => {
                 let val = self.evaluate(value)?;
                 self.set_var(name, val)?;
+                Ok(Value::Nothing)
+            }
+            // `set x, y to 1, 2` binds one name per value, left to right, in
+            // the order written: each value is evaluated and bound before the
+            // next is evaluated, so a later value reads the bindings the
+            // earlier ones made — the same order `set` statements would have.
+            // The parser refused a statement whose two lists differ in length,
+            // so the two always correspond by position.
+            Statement::SetMultiple { names, values } => {
+                for (name, value) in names.iter().zip(values) {
+                    let val = self.evaluate(value)?;
+                    self.set_var(name, val)?;
+                }
                 Ok(Value::Nothing)
             }
             Statement::Constant { name, value } => {
@@ -1915,6 +1953,26 @@ impl Vm {
                             format!("Cannot find module '{}'", item.name),
                             self.span(),
                         ));
+                    }
+
+                    // A dotted import binds one member of the module and nothing
+                    // else: `import math.sqrt as s` loads the module so its
+                    // members are published, then binds `s` to the member's
+                    // own value, so `s(9)` is a call and not a namespace read.
+                    // The module's name is deliberately not bound — a program
+                    // that asked for one member did not ask for the namespace,
+                    // and the analyzer declares the alias alone for the same
+                    // reason.
+                    if let Some(member) = item.member.clone() {
+                        let value = self.imported_member(&item.name, &member)?;
+                        let bound = item.bound_name().to_string();
+                        // The same shadowing rule as every other name an import
+                        // binds: a name the program already holds is that
+                        // program's, and the import does not take it over.
+                        if self.get_var(&bound).is_none() {
+                            self.set_var(&bound, value)?;
+                        }
+                        continue;
                     }
 
                     let target_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
@@ -2232,6 +2290,16 @@ impl Vm {
         }
         match self.get_var(name) {
             Some(Value::Function(function)) => self.call_user_function(name, &function, args),
+            // A name bound to a builtin *is* that builtin under another name:
+            // `import math.sqrt as s` binds `s` to `sqrt`, so `s(9)` is `sqrt(9)`.
+            // Asked by the builtin's own name, so every guard above — the
+            // effectful refusal, `append`'s write-through, `map`'s higher-order
+            // call — applies to the alias exactly as it does to the builtin.
+            //
+            // The `builtin != name` half is what stops a name bound to a
+            // builtin of the same name (`set sqrt to sqrt`) from calling itself
+            // for ever: that call falls through to the refusal below.
+            Some(Value::Builtin(builtin)) if &builtin != name => self.call(&builtin, args),
             _ => Err(Error::Runtime(
                 format!("Unknown function '{}'", name),
                 self.span(),

@@ -229,7 +229,7 @@ always `0`.
 | 40 | `DEF_OBJECT` | block index | parent name index, or `NO_CONST` | starts an object body; the block holds its fields and methods |
 | 41 | `DEF_FIELD` | field name index | — | pops the field's initial value and declares it on the object being defined |
 | 42 | `TRY` | catch block index, or `NO_BLOCK` | finally block index, or `NO_BLOCK` | runs what follows with those handlers in place |
-| 43 | `IMPORT` | module name index | alias name index | imports a module, binding it the alias; the module's own name when the source wrote none |
+| 43 | `IMPORT` | module name index, or `module.member` for a dotted import | alias name index | imports a module, binding it the alias; the module's own name when the source wrote none, and for `import a.b as c` the member `b` of `a` |
 | 44 | `TEST` | block index | — | runs the test body |
 | 45 | `EXPECT` | — | — | pops the expected and the actual value and compares them |
 | 46 | `DECLARE_CONST` | name index | — | pops into a variable as a constant: the name may not be bound again, and no `STORE` writes it |
@@ -462,6 +462,12 @@ the module. See SPEC.md, "Break and Skip".
 `import Name as Alias` compiles `IMPORT` naming the module and the alias, then
 `STORE Alias`. A VM that finds the alias already bound steps over the `STORE`
 rather than running it: an import does not take over a name the program holds.
+
+`import Name.member as Alias` is one `IMPORT` too, and says which member it is by
+the module operand: the operand is the dotted spelling `Name.member`, and the VM
+resolves the head of it as the module to load and binds the tail's member to the
+alias. Nothing about the file changes shape — an operand with no dot in it is the
+whole of it, and a version-4 `IMPORT` is read exactly as it was.
 
 ## Reading a file that is not one of ours
 

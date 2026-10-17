@@ -276,6 +276,16 @@ impl Compiler {
                 let name = self.text(name);
                 emit(code, Opcode::Store, name, 0, line);
             }
+            // `set x, y to 1, 2` is one `STORE` per name, in the order written,
+            // so the bytecode is the same sequence of stores the tree-walking VM
+            // performs and nothing new has to be invented for it to run here.
+            Statement::SetMultiple { names, values } => {
+                for (name, value) in names.iter().zip(values) {
+                    self.expr(value, code, blocks, depth, line)?;
+                    let name = self.text(name);
+                    emit(code, Opcode::Store, name, 0, line);
+                }
+            }
             // `constant` is its own opcode, not the `STORE` a `set` compiles to: the
             // name is read-only, and the file has to say so for an interpreter
             // to enforce it. A `STORE` naming a constant is what the
@@ -590,14 +600,23 @@ impl Compiler {
             }
             Statement::Import(items) => {
                 for item in items {
-                    let module = self.text(&item.name);
+                    // A dotted import names one member of the module, so the
+                    // module operand carries the dotted spelling `a.b` and the
+                    // interpreter resolves the head of it as the module. The
+                    // name it binds is still the second operand, which for a
+                    // dotted import is the alias — `import math.sqrt as s`
+                    // binds `s` to `sqrt`, not a namespace called `s`.
+                    let module = self.text(&match item.member {
+                        Some(ref member) => format!("{}.{}", item.name, member),
+                        None => item.name.clone(),
+                    });
                     // The name the import binds is a second operand rather than
                     // left to the `STORE` that follows: the importer has to know
                     // *which* name it bound to resolve a call through the alias,
                     // and the `STORE` is the importer's own binding, not the
                     // import's. An import with no alias binds its module's own
                     // name, so the operand is never reserved.
-                    let bound = self.text(item.alias.as_ref().unwrap_or(&item.name));
+                    let bound = self.text(item.bound_name());
                     emit(code, Opcode::Import, module, bound, line);
                     emit(code, Opcode::Store, bound, 0, line);
                 }

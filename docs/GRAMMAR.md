@@ -177,6 +177,15 @@ export_statement = 'export' identifier { ',' identifier }
                  | 'export' 'all'
 ```
 
+`import Name` and `import Name as Alias` import the module `Name` as a
+namespace: `Alias.member(..)` is `Name.member(..)`, and `Name.member(..)` keeps
+working alongside it. `import Name.member as Alias` imports **one member** of the
+module and binds `Alias` to that member's own value, so `Alias(..)` is the call
+and not a namespace read — `import math.sqrt as s` then `s(9)` is `sqrt(9)`.
+The `as` is required in this form: a member imported under its own name would
+shadow a program name without the program having written it. A member the module
+does not have is a runtime error naming it (`Module 'math' has no member 'sq'`).
+
 ### 3.2 Standalone Script
 
 ```
@@ -198,6 +207,21 @@ declaration      = 'set' identifier { ',' identifier } 'to' expression { ',' exp
 
 // Constant declaration
 declaration      = 'constant' identifier [ ':' type_expression ] 'to' expression
+```
+
+A multiple assignment binds one name per value, **left to right**: each value is
+evaluated and bound before the next one is evaluated, so it is the same order a
+run of consecutive `set` statements would have made — `set x, y to 1, 2` binds
+`x` then `y`, and a value may not read a name its own statement binds. The two
+lists must be the same length; a statement that is not is a parse error naming
+both counts (`A multiple assignment to 2 names has 1 value`). Neither list takes
+a trailing comma — `{ ',' identifier }` and `{ ',' expression }` have no empty
+tail — and a multiple assignment does not reach a property target
+(`set a.b, c to 1, 2` is refused).
+
+```redblue
+set width, height to 4, 3
+say width * height
 ```
 
 A `constant` binds a name of the whole program, so it may be declared once
