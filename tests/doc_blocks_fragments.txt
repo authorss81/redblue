@@ -47,29 +47,30 @@ SPEC.md:340	excerpt - `name`, `x` and `y` are introduced by the prose about inte
 SPEC.md:347	excerpt - `person` and `point` are introduced by the prose about field access and bound nowhere in the block
 SPEC.md:361	excerpt - `items` and `words` are bound nowhere, and the closing `if "hello" is in words` has no body and no `end`. The `items at 0` and `length of items` forms this block documents are covered one at a time by tests/index_words_test.rs; the block as written is not a program
 SPEC.md:418	excerpt - placeholder bodies (`// statements`, `// then branch`) and an unbound `condition`
-SPEC.md:440	excerpt - `when` is documented as NOT IMPLEMENTED in docs/GRAMMAR.md § 4.3, where `when` is an ordinary identifier; `value` is also bound nowhere
-SPEC.md:450	excerpt - `is_valid` is introduced by the prose about `unless` and bound nowhere in the block
-SPEC.md:458	excerpt - `items` is introduced by the prose about `for each ... in` and bound nowhere in the block
-SPEC.md:504	excerpt - `x` is introduced by the prose about `while` and bound nowhere in the block
-SPEC.md:512	excerpt - `x` is introduced by the prose about `repeat`/`until` and bound nowhere in the block
-SPEC.md:520	excerpt - `items` and `process` are bound nowhere in the block
-SPEC.md:557	excerpt - `names` and `record` are bound nowhere in the block
-SPEC.md:574	excerpt - `break` on its own, shown to document the loop-control keyword; it is only valid inside a loop
-SPEC.md:626	excerpt - placeholder body (`// parameters`) plus `default`, which the parser does not accept in a parameter list
-SPEC.md:639	excerpt - a type-annotated signature; `a as number` and `as number` are not forms the parser accepts
-SPEC.md:738	excerpt - `Employee extends Person` with no `Person` in the block; the parent is declared elsewhere
-SPEC.md:881	excerpt - `process` is bound nowhere in the block, and `config.rb` is a file the block never creates
-SPEC.md:1009	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
-SPEC.md:1018	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
-SPEC.md:1108	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
-SPEC.md:1286	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
-SPEC.md:1314	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
-SPEC.md:1358	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
+SPEC.md:446	excerpt - the two spellings of the same `if` set side by side so the line that tells them apart can be seen; read as one program it is two statements sharing a line, and `x` is bound nowhere
+SPEC.md:459	excerpt - `when` is documented as NOT IMPLEMENTED in docs/GRAMMAR.md § 4.3, where `when` is an ordinary identifier; `value` is also bound nowhere
+SPEC.md:469	excerpt - `is_valid` is introduced by the prose about `unless` and bound nowhere in the block
+SPEC.md:477	excerpt - `items` is introduced by the prose about `for each ... in` and bound nowhere in the block
+SPEC.md:523	excerpt - `x` is introduced by the prose about `while` and bound nowhere in the block
+SPEC.md:531	excerpt - `x` is introduced by the prose about `repeat`/`until` and bound nowhere in the block
+SPEC.md:539	excerpt - `items` and `process` are bound nowhere in the block
+SPEC.md:576	excerpt - `names` and `record` are bound nowhere in the block
+SPEC.md:593	excerpt - `break` on its own, shown to document the loop-control keyword; it is only valid inside a loop
+SPEC.md:645	excerpt - placeholder body (`// parameters`) plus `default`, which the parser does not accept in a parameter list
+SPEC.md:658	excerpt - a type-annotated signature; `a as number` and `as number` are not forms the parser accepts
+SPEC.md:757	excerpt - `Employee extends Person` with no `Person` in the block; the parent is declared elsewhere
+SPEC.md:900	excerpt - `process` is bound nowhere in the block, and `config.rb` is a file the block never creates
+SPEC.md:1028	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
+SPEC.md:1037	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
+SPEC.md:1127	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
+SPEC.md:1305	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
+SPEC.md:1333	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
+SPEC.md:1377	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
 
 # --- docs/GRAMMAR.md --------------------------------------------------------
 
-docs/GRAMMAR.md:537	excerpt - the guarded read is bound to `report`, but the third line reads `body`, which is bound nowhere. The first two lines are the forms this block documents
-docs/GRAMMAR.md:617	excerpt - `age` is bound in the preceding block and not in this one, so the two are one fragment written as two
+docs/GRAMMAR.md:559	excerpt - the guarded read is bound to `report`, but the third line reads `body`, which is bound nowhere. The first two lines are the forms this block documents
+docs/GRAMMAR.md:639	excerpt - `age` is bound in the preceding block and not in this one, so the two are one fragment written as two
 
 # --- PHILOSOPHY.md ----------------------------------------------------------
 
