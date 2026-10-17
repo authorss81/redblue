@@ -68,8 +68,8 @@ SPEC.md:1371	network - `network.get` and `network.post` are live HTTP requests; 
 
 # --- docs/GRAMMAR.md --------------------------------------------------------
 
-docs/GRAMMAR.md:561	excerpt - the guarded read is bound to `report`, but the third line reads `body`, which is bound nowhere. The first two lines are the forms this block documents
-docs/GRAMMAR.md:641	excerpt - `age` is bound in the preceding block and not in this one, so the two are one fragment written as two
+docs/GRAMMAR.md:562	excerpt - the guarded read is bound to `report`, but the third line reads `body`, which is bound nowhere. The first two lines are the forms this block documents
+docs/GRAMMAR.md:642	excerpt - `age` is bound in the preceding block and not in this one, so the two are one fragment written as two
 
 # --- PHILOSOPHY.md ----------------------------------------------------------
 

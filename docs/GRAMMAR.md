@@ -182,9 +182,10 @@ namespace: `Alias.member(..)` is `Name.member(..)`, and `Name.member(..)` keeps
 working alongside it. `import Name.member as Alias` imports **one member** of the
 module and binds `Alias` to that member's own value, so `Alias(..)` is the call
 and not a namespace read — `import math.sqrt as s` then `s(9)` is `sqrt(9)`.
-The `as` is required in this form: a member imported under its own name would
-shadow a program name without the program having written it. A member the module
-does not have is a runtime error naming it (`Module 'math' has no member 'sq'`).
+An alias is required in this form (`as`, or the older `to`): a member imported
+under its own name would shadow a program name without the program having
+written it. A member the module does not have is a runtime error naming it
+(`Module 'math' has no member 'sq'`).
 
 ### 3.2 Standalone Script
 
