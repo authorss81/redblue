@@ -231,6 +231,28 @@ if_statement     = 'if' expression
                       { statement } ]
                     'end'
 
+// An `else if` chain is sugar for nested `if`s and closes on ONE `end`, as the
+// rule above writes it: each arm desugars to an `if` whose `else` is the rest of
+// the chain. `else if` is therefore only the chain's next arm when the `if` is on
+// the *same line* as the `else`; an `if` written on the line after `else` is an
+// ordinary statement of the else block and carries the `end` of its own:
+//
+//     if a then          else if b then          if a then
+//         A             else if c then              A
+//     else if b then        D                     else
+//         B             else                       if b then
+//     else                  E                           B
+//         C             end                       else
+//     end                                        if c then
+//                                                   D
+//                                               else
+//                                                   E
+//                                               end
+//                                           end
+//
+// The two are the same words, so the line between them is what tells them
+// apart — the only place in the grammar where a line break carries meaning.
+
 // When statement (pattern matching) — NOT IMPLEMENTED, and `when` is not a
 // reserved word: it is an ordinary identifier. Left here so the form a future
 // `when` has to parse is written down rather than invented again.

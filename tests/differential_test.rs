@@ -698,59 +698,91 @@ fn edge_a_column_is_compared_exactly_wherever_both_engines_can_name_one() {
     );
 }
 
-/// The `else if` the phase's summary claimed does not exist.
+/// The `else if` the docs write, running on **both** engines.
 ///
-/// `SPEC.md:353` and `docs/GRAMMAR.md:206` both write `else if` as part of an
-/// `if`, and **neither engine parses it**: every corpus program that writes one
-/// is recorded as a `ParserError`, so the claimed `if/else if/else` coverage was
-/// `if/else` with three refusals counted as successes. Rather than claim a form
-/// the corpus does not hold, this measures both halves — the two-arm `else` that
-/// works, and the `else if` that does not, pinned on both engines — so a day when
-/// `else if` parses, this test says so instead of the summary quietly becoming
-/// true.
+/// This test used to assert the opposite: `SPEC.md:431` and
+/// `docs/GRAMMAR.md:227` both write `else if`, **neither engine parsed it**, and
+/// every corpus program that wrote one was recorded as a `ParserError` — so the
+/// claimed `if/else if/else` coverage was `if/else` with three refusals counted as
+/// successes. Phase-112 parses the chain, so those three programs run, and the
+/// claim here is the one the coverage can now carry: each one runs to completion,
+/// the two engines say the same thing about it, and the golden records what they
+/// printed. A day when the chain stops parsing, or when one engine handles it and
+/// the other does not, this says so instead of the summary quietly becoming true.
 #[test]
-fn edge_the_control_flow_family_covers_the_if_else_it_has_and_pins_the_else_if_it_does_not() {
-    let mut with_else = 0usize;
+fn edge_the_control_flow_family_runs_the_else_if_it_writes_on_both_engines() {
     let mut with_else_if = Vec::new();
+    let mut branches_taken = Vec::new();
+    let mut with_else = 0usize;
     for path in corpus::corpus() {
         let source = source_of(&path);
         let expected = corpus::expectation(&path).unwrap_or_else(|e| panic!("{e}"));
         if source.contains("else if") {
             with_else_if.push(path.clone());
-            assert_eq!(
-                expected.label,
-                "ParserError",
-                "{}: `else if` parses now, so its golden and the coverage claim \
-                 both need revisiting rather than a passing test",
+            assert!(
+                !expected.must_fail(),
+                "{}: `else if` parses now, so the golden records a {} rather than \
+                 what the program printed",
                 path.display(),
+                expected.label
             );
-            // Both engines: a refusal is a property of the language, not of one
-            // of them.
+            assert!(
+                !expected.output.is_empty(),
+                "{}: an `else if` program that printed nothing covers no branch",
+                path.display()
+            );
+            // Both engines: a chain one engine reads and the other refuses is the
+            // divergence this runner exists to find, so it is asked for directly
+            // rather than left to the family walk below.
             for (engine, outcome) in [
                 ("tree-walking VM", vm::tree_walk(&source)),
                 ("bytecode VM", vm::bytecode(&source)),
             ] {
                 assert_eq!(
-                    outcome.label(),
-                    Some("ParserError"),
-                    "{engine}: {} does not refuse an `else if`",
+                    outcome.result,
+                    Ok(Typed::Nothing),
+                    "{engine}: {} did not run an `else if`: {}",
                     path.display(),
+                    show_outcome(&outcome)
+                );
+                assert_eq!(
+                    outcome.output,
+                    expected.output,
+                    "{engine}: {} printed what the golden does not record",
+                    path.display()
+                );
+                assert!(
+                    outcome.agrees_with(&vm::tree_walk(&source)),
+                    "{engine}: {} disagrees with the tree-walking VM",
+                    path.display()
                 );
             }
+            branches_taken.push((expected.output.join("\n"), path.clone()));
         } else if !expected.must_fail() && source.contains("else\n") {
             with_else += 1;
         }
     }
     assert!(
         with_else_if.len() >= 3,
-        "only {} corpus program(s) write an `else if`; the refusal is the only \
-         coverage there is of it",
-        with_else_if.len(),
+        "only {} corpus program(s) write an `else if`; the chain is only covered \
+         as far as the corpus writes it",
+        with_else_if.len()
+    );
+    branches_taken.sort();
+    branches_taken.dedup_by(|a, b| a.0 == b.0);
+    assert!(
+        branches_taken.len() >= 2,
+        "every `else if` program printed {:?}, so the corpus covers one position of \
+         the chain and the other arms are untested",
+        branches_taken
+            .iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
     );
     assert!(
         with_else >= 5,
         "only {with_else} corpus programs run an `if`/`else` that takes its \
-         `else` branch; the two-arm form is the one the family really covers",
+         `else` branch; the two-arm form is the one the family really covers"
     );
 }
 

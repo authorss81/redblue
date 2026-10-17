@@ -435,6 +435,25 @@ else
 end
 ```
 
+An `else if` chain is sugar for nested `if`s and closes on **one** `end`: each
+arm runs only when no arm before it did, and the trailing `else` — which is
+optional — runs when none did. `else if` is the chain's next arm only when the
+`if` is on the *same line* as the `else`; an `if` written on the line after
+`else` is an ordinary statement of the else block and brings the `end` of its
+own, so this is a three-armed `if` and the one below is a nested one that means
+the same thing:
+
+```redblue
+if x > 0 then        if x > 0 then
+    say "positive"   else
+else                     if x < 0 then
+    say "zero"            say "negative"
+end                      else
+                           say "zero"
+                       end
+                   end
+```
+
 ### When (Pattern Matching)
 
 ```redblue
