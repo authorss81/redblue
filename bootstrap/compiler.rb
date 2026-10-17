@@ -1313,32 +1313,49 @@ end
 to parse_if_then(tokens, pos, depth, line, cond)
     set parse_if_then_p to expect_kind(tokens, skip_newlines(tokens, pos), "then")
     set parse_if_then_body to parse_block_body(tokens, parse_if_then_p, check_depth(line, depth + 1, "blocks"), ["end", "else"])
-    set parse_if_then_out to nothing
-    if token_kind(tokens, parse_if_then_body[1]) is "else" then
-        set parse_if_then_out to parse_if_else_branch(tokens, parse_if_then_body[1] + 1, depth + 1, line, cond, parse_if_then_body[0])
-    end
-    if type_of(parse_if_then_out) is "nothing" then
-        set parse_if_then_q to expect_kind(tokens, parse_if_then_body[1], "end")
-        set parse_if_then_out to [{s: "if", l: line, c: cond, t: parse_if_then_body[0], e: []}, parse_if_then_q]
-    end
-    give back parse_if_then_out
+    give back parse_if_else(tokens, parse_if_then_body[1], depth + 1, line, cond, parse_if_then_body[0])
 end
 
-// The `else` branch, and the `end` that closes the `if` after it. `then_branch`
-// is a parameter rather than a name read out of `parse_if_then_body`, because
-// the body parsed here can hold another `if ... else`, which runs
-// `parse_if_then` again — and a name a Redblue function assigns is one
-// program-wide name, so `parse_if_then_body` would come back holding the
-// *inner* branch and the outer `if` would compile the wrong statements.
-to parse_if_else_branch(tokens, pos, depth, line, cond, then_branch)
-    set parse_if_else_branch_tail to parse_block_body(tokens, pos, depth, ["end"])
-    give back parse_if_finish(tokens, parse_if_else_branch_tail[1], line, cond, then_branch, parse_if_else_branch_tail[0])
+// The `else` after one arm, and the `end` that closes the chain. `else if`
+// written on one line is the next arm of the chain: its arms after it are parsed
+// first, so as the recursion unwinds each arm becomes an `if` holding the rest
+// of the chain as its one `else`, and one `end` closes them all — the shape
+// stage 1 parser builds. An `if` on the line *after* `else` is a statement of
+// the else block and carries the `end` of its own, which is what
+// `parse_block_body` reads.
+//
+// `then_branch` is a parameter rather than a name read out of a caller's
+// result, because a name a Redblue function assigns is one program-wide name,
+// so a name read here would come back holding the *inner* branch.
+to parse_if_else(tokens, pos, depth, line, cond, then_branch)
+    set parse_if_else_out to nothing
+    if token_kind(tokens, pos) is "else" then
+        if token_kind(tokens, pos + 1) is "if" then
+            set parse_if_else_arm to parse_if_arm(tokens, pos + 1, depth + 1)
+            set parse_if_else_rest to parse_if_else(tokens, parse_if_else_arm[3], depth + 1, parse_if_else_arm[0], parse_if_else_arm[1], parse_if_else_arm[2])
+            set parse_if_else_node to {s: "if", l: line, c: cond, t: then_branch, e: [parse_if_else_rest[0],]}
+            set parse_if_else_out to [parse_if_else_node, parse_if_else_rest[1]]
+        else
+            set parse_if_else_tail to parse_block_body(tokens, pos + 1, depth, ["end"])
+            set parse_if_else_q to expect_kind(tokens, parse_if_else_tail[1], "end")
+            set parse_if_else_out to [{s: "if", l: line, c: cond, t: then_branch, e: parse_if_else_tail[0]}, parse_if_else_q]
+        end
+    end
+    if type_of(parse_if_else_out) is "nothing" then
+        set parse_if_else_q to expect_kind(tokens, pos, "end")
+        set parse_if_else_out to [{s: "if", l: line, c: cond, t: then_branch, e: []}, parse_if_else_q]
+    end
+    give back parse_if_else_out
 end
 
-to parse_if_finish(tokens, pos, line, cond, then_branch, else_branch)
-    set parse_if_finish_q to expect_kind(tokens, pos, "end")
-    set parse_if_finish_out to [{s: "if", l: line, c: cond, t: then_branch, e: else_branch}, parse_if_finish_q]
-    give back parse_if_finish_out
+// One `else if` arm: the line its `if` is written on, its condition, its body,
+// and the token after that body.
+to parse_if_arm(tokens, pos, depth)
+    set parse_if_arm_line to token_line(tokens, pos)
+    set parse_if_arm_cond to parse_expression(tokens, pos + 1, 0, 0)
+    set parse_if_arm_p to expect_kind(tokens, skip_newlines(tokens, parse_if_arm_cond[1]), "then")
+    set parse_if_arm_body to parse_block_body(tokens, parse_if_arm_p, check_depth(parse_if_arm_line, depth, "blocks"), ["end", "else"])
+    give back [parse_if_arm_line, parse_if_arm_cond[0], parse_if_arm_body[0], parse_if_arm_body[1]]
 end
 
 // `unless` has no `else` arm: the grammar refuses one, so a block that writes
