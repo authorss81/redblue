@@ -20,7 +20,8 @@
 10. [Error Handling](#error-handling)
 11. [Asynchronous Programming](#asynchronous-programming)
 12. [Standard Library](#standard-library)
-13. [Grammar](#grammar)
+13. [The REPL](#the-repl)
+14. [Grammar](#grammar)
 
 ---
 
@@ -1428,6 +1429,41 @@ time whatever the clock says. A program that wants a timer rather than a pause
 has to read the clock itself — `time.now()` twice and `time.sleep` between them.
 The calls that block besides `time.sleep` are `network.get` and `network.post`,
 which wait for a response.
+
+---
+
+## The REPL
+
+`rb` with no arguments opens a read-evaluate-print loop: it reads a line, runs it,
+prints what it produced, and reads the next one. A line beginning with `:` or `.`
+is a command about the session rather than a program — `:help` lists every
+command, and `.` is accepted everywhere `:` is.
+
+### REPL themes
+
+The REPL's colours come from a named theme. `:themes` lists the themes this
+build ships, each with a sample painted in that theme, and `:theme <name>`
+switches to one: the change is immediate, and the next line the session prints
+already uses it. The switch lasts for the session; there is no per-role override,
+because a theme is one colour per role and picking the theme is how a user picks
+the colours.
+
+- `dark` — dark terminal background. The default.
+- `light` — light terminal background: dark foreground colours.
+- `none` — no colour: exactly what colour-off prints.
+
+A theme name is trimmed and matched without regard to case, because it is typed
+by a human: `:theme Light ` is the same request as `:theme light`. A name that is
+not one of them is refused with a message naming the ones that are, and the
+session stays on the theme it had — a refused switch never silently becomes the
+first theme in the table.
+
+Whether colour is emitted at all is a separate decision, and one the environment
+makes: `REDBLUE_COLOR=always` or `never` overrides detection, `NO_COLOR` turns
+colour off whatever `REDBLUE_COLOR` says, and otherwise colour is on when stdout
+is a terminal. A theme chooses *which* colours, not whether there are any, and
+the `none` theme prints exactly the bytes `REDBLUE_COLOR=never` prints — no
+escape sequence around text that colour off left alone.
 
 ---
 

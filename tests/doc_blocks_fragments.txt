@@ -36,35 +36,35 @@
 
 # --- SPEC.md ---------------------------------------------------------------
 
-SPEC.md:146	excerpt - a catalogue of five refusals, one per line, each of which is a separate program that fails on purpose; run as one program it is neither a program nor a promise about a single outcome
-SPEC.md:187	excerpt - a type-declaration catalogue: `list of number` and `record { x: number, y: number }` are not Redblue syntax, and SPEC.md's own keyword table lists no type keywords
-SPEC.md:210	excerpt - an "Explicit Types" illustration; `as number` is not a form the parser accepts, and the block above it says the same thing without it
-SPEC.md:221	excerpt - `value` is introduced by the prose about rebinding and bound nowhere in the block
-SPEC.md:229	excerpt - `new_value` is introduced by the prose and bound nowhere in the block
-SPEC.md:315	excerpt - a comparison catalogue: ten bare `if` headers, no bodies and no `end`; this is a table of spellings, not a program
-SPEC.md:332	excerpt - a boolean-operator catalogue: three bare `if` headers, no bodies and no `end`; the operators `and`, `or` and `not` are spelled correctly, only the statements around them are not there
-SPEC.md:340	excerpt - `name`, `x` and `y` are introduced by the prose about interpolation and bound nowhere in the block
-SPEC.md:347	excerpt - `person` and `point` are introduced by the prose about field access and bound nowhere in the block
-SPEC.md:361	excerpt - `items` and `words` are bound nowhere, and the closing `if "hello" is in words` has no body and no `end`. The `items at 0` and `length of items` forms this block documents are covered one at a time by tests/index_words_test.rs; the block as written is not a program
-SPEC.md:418	excerpt - placeholder bodies (`// statements`, `// then branch`) and an unbound `condition`
-SPEC.md:440	excerpt - `when` is documented as NOT IMPLEMENTED in docs/GRAMMAR.md § 4.3, where `when` is an ordinary identifier; `value` is also bound nowhere
-SPEC.md:450	excerpt - `is_valid` is introduced by the prose about `unless` and bound nowhere in the block
-SPEC.md:458	excerpt - `items` is introduced by the prose about `for each ... in` and bound nowhere in the block
-SPEC.md:504	excerpt - `x` is introduced by the prose about `while` and bound nowhere in the block
-SPEC.md:512	excerpt - `x` is introduced by the prose about `repeat`/`until` and bound nowhere in the block
-SPEC.md:520	excerpt - `items` and `process` are bound nowhere in the block
-SPEC.md:557	excerpt - `names` and `record` are bound nowhere in the block
-SPEC.md:574	excerpt - `break` on its own, shown to document the loop-control keyword; it is only valid inside a loop
-SPEC.md:626	excerpt - placeholder body (`// parameters`) plus `default`, which the parser does not accept in a parameter list
-SPEC.md:639	excerpt - a type-annotated signature; `a as number` and `as number` are not forms the parser accepts
-SPEC.md:738	excerpt - `Employee extends Person` with no `Person` in the block; the parent is declared elsewhere
-SPEC.md:881	excerpt - `process` is bound nowhere in the block, and `config.rb` is a file the block never creates
-SPEC.md:1009	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
-SPEC.md:1018	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
-SPEC.md:1108	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
-SPEC.md:1286	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
-SPEC.md:1314	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
-SPEC.md:1358	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
+SPEC.md:147	excerpt - a catalogue of five refusals, one per line, each of which is a separate program that fails on purpose; run as one program it is neither a program nor a promise about a single outcome
+SPEC.md:188	excerpt - a type-declaration catalogue: `list of number` and `record { x: number, y: number }` are not Redblue syntax, and SPEC.md's own keyword table lists no type keywords
+SPEC.md:211	excerpt - an "Explicit Types" illustration; `as number` is not a form the parser accepts, and the block above it says the same thing without it
+SPEC.md:222	excerpt - `value` is introduced by the prose about rebinding and bound nowhere in the block
+SPEC.md:230	excerpt - `new_value` is introduced by the prose and bound nowhere in the block
+SPEC.md:316	excerpt - a comparison catalogue: ten bare `if` headers, no bodies and no `end`; this is a table of spellings, not a program
+SPEC.md:333	excerpt - a boolean-operator catalogue: three bare `if` headers, no bodies and no `end`; the operators `and`, `or` and `not` are spelled correctly, only the statements around them are not there
+SPEC.md:341	excerpt - `name`, `x` and `y` are introduced by the prose about interpolation and bound nowhere in the block
+SPEC.md:348	excerpt - `person` and `point` are introduced by the prose about field access and bound nowhere in the block
+SPEC.md:362	excerpt - `items` and `words` are bound nowhere, and the closing `if "hello" is in words` has no body and no `end`. The `items at 0` and `length of items` forms this block documents are covered one at a time by tests/index_words_test.rs; the block as written is not a program
+SPEC.md:419	excerpt - placeholder bodies (`// statements`, `// then branch`) and an unbound `condition`
+SPEC.md:441	excerpt - `when` is documented as NOT IMPLEMENTED in docs/GRAMMAR.md § 4.3, where `when` is an ordinary identifier; `value` is also bound nowhere
+SPEC.md:451	excerpt - `is_valid` is introduced by the prose about `unless` and bound nowhere in the block
+SPEC.md:459	excerpt - `items` is introduced by the prose about `for each ... in` and bound nowhere in the block
+SPEC.md:505	excerpt - `x` is introduced by the prose about `while` and bound nowhere in the block
+SPEC.md:513	excerpt - `x` is introduced by the prose about `repeat`/`until` and bound nowhere in the block
+SPEC.md:521	excerpt - `items` and `process` are bound nowhere in the block
+SPEC.md:558	excerpt - `names` and `record` are bound nowhere in the block
+SPEC.md:575	excerpt - `break` on its own, shown to document the loop-control keyword; it is only valid inside a loop
+SPEC.md:627	excerpt - placeholder body (`// parameters`) plus `default`, which the parser does not accept in a parameter list
+SPEC.md:640	excerpt - a type-annotated signature; `a as number` and `as number` are not forms the parser accepts
+SPEC.md:739	excerpt - `Employee extends Person` with no `Person` in the block; the parent is declared elsewhere
+SPEC.md:882	excerpt - `process` is bound nowhere in the block, and `config.rb` is a file the block never creates
+SPEC.md:1010	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
+SPEC.md:1019	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
+SPEC.md:1109	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
+SPEC.md:1287	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
+SPEC.md:1315	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
+SPEC.md:1359	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
 
 # --- docs/GRAMMAR.md --------------------------------------------------------
 

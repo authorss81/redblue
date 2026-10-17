@@ -27,7 +27,7 @@ use crate::error::Error;
 use crate::interpreter::Vm;
 use crate::lexer::{Lexer, TokenKind};
 use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
-use crate::repl::style::{Paint, Style};
+use crate::repl::style::{Paint, Palette, Style};
 use crate::stdlib;
 use crate::value::{FunctionBody, Value};
 
@@ -611,6 +611,11 @@ impl Repl {
         source: &mut S,
         names: &SessionNames,
     ) -> SessionEnd {
+        // The style last handed to the reader, so a session that never switches
+        // theme hands it over once. `None` rather than a default `Style` because
+        // "never pushed" and "pushed the default" are different states, and a
+        // default built by detection would be equal to the second by accident.
+        let mut pushed_style: Option<Style> = None;
         loop {
             if !self.running {
                 return SessionEnd::Quit;
@@ -622,6 +627,18 @@ impl Repl {
             // it cannot be lent them while they are being borrowed to read a
             // line, so it is given a snapshot refreshed here.
             *names.borrow_mut() = self.session_names();
+
+            // The reader is handed the style again whenever it has changed,
+            // because `:theme` changes it mid-session: without this the prompt
+            // would keep the colours the session started in while its output
+            // changed, which is the switch appearing not to work on the very line
+            // the user is looking at when they try it. Re-cloning the editor's
+            // helper every line would be the price of asking unconditionally, and
+            // this loop is the one that runs on every keystroke-return.
+            if pushed_style != Some(self.style) {
+                source.set_style(self.style);
+                pushed_style = Some(self.style);
+            }
 
             let line = match source.read_line(&prompt) {
                 Ok(Line::Text(text)) => text,
@@ -915,6 +932,34 @@ impl Repl {
             }
             ReplCommand::Example => {
                 self.show_examples();
+                true
+            }
+            ReplCommand::Themes => {
+                // Printed as they come: each line's sample is already painted by
+                // the theme it samples, and wrapping the whole line in a colour
+                // of this session's own would dim the plain sample of the theme
+                // that paints nothing — making it look like a colour it has not
+                // got.
+                for line in Palette::listing(&self.style) {
+                    println!("{}", line);
+                }
+                true
+            }
+            ReplCommand::Theme(name) => {
+                match self.style.set_theme(&name) {
+                    // The next line is printed in the theme just chosen, because
+                    // the style is the session's own field and nothing caches it.
+                    Ok(palette) => {
+                        println!(
+                            "{}",
+                            self.style
+                                .paint(Paint::Dim, &format!("Theme: {}", palette.name()))
+                        );
+                    }
+                    Err(message) => {
+                        println!("{}", self.style.paint(Paint::Error, &message));
+                    }
+                }
                 true
             }
             ReplCommand::Prompt(argument) => {

@@ -101,6 +101,16 @@ pub trait LineSource {
     fn highlights(&self) -> bool {
         false
     }
+
+    /// How this source should draw from the next line on.
+    ///
+    /// A no-op by default, and every source that draws something implements it:
+    /// `:theme` changes the session's style mid-session, and a reader holding the
+    /// one it was built with would keep painting the prompt in colours the
+    /// session no longer uses.
+    fn set_style(&mut self, style: Style) {
+        let _ = style;
+    }
 }
 
 /// The reader a session with no terminal gets: one line at a time off standard
@@ -159,6 +169,10 @@ impl LineSource for PlainSource {
             Ok(_) => Ok(Line::Text(input.trim_end_matches(['\r', '\n']).to_string())),
             Err(error) => Err(error),
         }
+    }
+
+    fn set_style(&mut self, style: Style) {
+        self.style = style;
     }
 }
 
@@ -435,6 +449,19 @@ impl LineSource for EditSource {
 
     fn highlights(&self) -> bool {
         true
+    }
+
+    fn set_style(&mut self, style: Style) {
+        // The style is the completer's: the prompt goes through the editor's own
+        // prompt rendering and the line through this helper's highlight hook, so
+        // changing the copy the helper holds is what changes both. Handed back to
+        // the editor as a new helper because that is how it is told which one to
+        // call, and cloned because the editor keeps its own handle for
+        // completion tests.
+        let mut completer = self.completer.clone();
+        completer.style = style;
+        self.completer = completer.clone();
+        self.editor.set_helper(Some(completer));
     }
 }
 
