@@ -1862,6 +1862,18 @@ impl Parser {
                 | TokenKind::Not
                 | TokenKind::Minus
                 | TokenKind::To
+                // `this` is a primary ([`Parser::parse_primary`] reads it as the
+                // ordinary variable it is), so it is an operand like every other
+                // primary. Leaving it out made the table disagree with the parser
+                // that uses it, and the two halves failed differently: `length of
+                // this` was refused here with "Expected something to measure",
+                // while `this.xs at this` was not read as an index at all —
+                // [`Parser::at_index_ahead`] saw no operand, `at` stayed a name,
+                // and the analyzer reported `Unknown variable 'at'`. Both are now
+                // one expression each, and a wrong operand is reported where a
+                // wrong operand is: at run time, by the check the bracket spelling
+                // already reached.
+                | TokenKind::This
         )
     }
 
