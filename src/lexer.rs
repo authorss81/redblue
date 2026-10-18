@@ -70,6 +70,17 @@ pub const KEYWORDS: &[(&str, TokenKind)] = &[
     ("extends", TokenKind::Extends),
 ];
 
+/// The name the last value is read under, and the one identifier a sigil may
+/// begin.
+///
+/// `$_` and not `_`: the REPL already binds `_` to each line's result, and a
+/// program cannot read it — the name is not in the VM's environment, so `say _`
+/// is refused as unknown however long the session has been running. `$_` is
+/// spelled the way a shell spells the same idea, so it cannot be mistaken for a
+/// variable the user chose, and the lexer gives it that spelling and nothing
+/// else: `$name` is still the `$` it always was.
+pub const LAST_VALUE_NAME: &str = "$_";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
@@ -508,6 +519,21 @@ impl Lexer {
             if c == '"' {
                 let text = lexer.read_text(Span::new(line, column))?;
                 tokens.push(Token::new(TokenKind::Text(text), line, column));
+                continue;
+            }
+
+            // The last value's name. Read before the operators, which is where
+            // a `$` used to land and be refused as a stray character, and
+            // matched exactly: only `$_` is a name, so `$foo` is still the error
+            // it has always been rather than a variable spelled with a sigil.
+            if c == '$' && lexer.peek() == Some('_') {
+                lexer.advance();
+                lexer.advance();
+                tokens.push(Token::new(
+                    TokenKind::Identifier(LAST_VALUE_NAME.to_string()),
+                    line,
+                    column,
+                ));
                 continue;
             }
 
