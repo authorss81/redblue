@@ -266,6 +266,25 @@ fn edge_every_citation_resolves_to_a_line_that_exists() {
             .map(|i| i + 1)
             .unwrap_or(0)
     );
+
+    // The finding this phase was dispatched on cited `src/stdlib.rs:612` for the
+    // comment. That line is `"uppercase" => {`. A citation that quietly moves is
+    // indistinguishable from one that was never right, so the entry has to name
+    // 612 *and* say it is not the anchor — which is what makes this a
+    // reconciliation rather than a swap.
+    assert!(
+        regex_entry.body.contains("src/stdlib.rs:612"),
+        "the regex entry never mentions src/stdlib.rs:612, the line the dispatched \
+         finding cited. Either the comment moved and SURVEY.md should say so, or \
+         612 carries the comment again and the entry is citing the wrong line."
+    );
+    let moved = stdlib_text.lines().nth(611).unwrap_or_default().trim();
+    assert!(
+        !moved.contains("no regex"),
+        "src/stdlib.rs:612 now reads `{moved}` and carries the comment again. The \
+         entry must cite it as the anchor instead of 637; this assertion exists so \
+         that fixing the survey is not silently undone."
+    );
 }
 
 /// Ranks 1..10, once each, and the counts they carry do not rise as the rank

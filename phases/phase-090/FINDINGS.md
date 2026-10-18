@@ -110,3 +110,77 @@ attempted and its failure is reported rather than papered over. Nothing else abo
 this phase is blocked by it — `.github/workflows/ci.yml` shards every
 `tests/*.rs` target, so `stdlib_gap_survey_test` runs in CI without anything in
 `rbops/` naming it.
+
+## F5 — the audit of unreviewed work had been destroyed by a prior resume run
+
+`c95062eb02a6e336f011a918daac7938f0efee6d`, whose subject is
+`ack: resume phase-088: add resume commit to ACKNOWLEDGED`, replaced
+`tests/unreviewed_work_ack_test.rs` with the single line
+`<the file content updated>` (`git show --numstat c95062e` → `1  927`). Thirteen
+tests, twelve of them `edge_*`, including the audit that is the only thing in the
+repository that reads `git log HEAD`, were gone. `222aa83` replaced the invalid
+Rust with a seven-line placeholder whose only assertion was `assert!(true, ..)`,
+which fails both gates this phase is measured by:
+
+```
+$ cargo fmt --all -- --check
+Diff in .../tests/unreviewed_work_ack_test.rs:3:  ... FMT_EXIT=1
+$ cargo clippy --all-targets -- -D warnings
+error: this assertion is always `true`      (clippy::assertions_on_constants)
+```
+
+The file was restored from `e008f0b`, the last commit in `HEAD`'s ancestry that
+held it (927 lines), and two acknowledgement entries were added for the commits
+the audit then correctly reported as unacknowledged:
+
+```
+unreviewed-work commits selected: 31 | acknowledged: 29 | unacknowledged: 2
+3c2085b7…  resume phase-090: adopt preserved work
+c95062eb…  ack: resume phase-088: add resume commit to ACKNOWLEDGED
+```
+
+The content was restored rather than the history rewritten: AGENTS.md §1.6 forbids
+rewriting published commits, and erasing them would make the audit green by
+destroying what it exists to record. The broader defect — a resume tool that
+writes a placeholder over a file instead of appending to it — is not a Redblue
+bug and is out of this phase's reach, so it is recorded here rather than fixed.
+
+## F6 — `cargo clippy --all-targets` was already red on `main`
+
+`tests/memory_model_test.rs:22` used `Arc<Node>` where `Node` holds a `RefCell`,
+so `Node` is `!Sync` and the value is not `Send`:
+
+```
+error: usage of an `Arc` that is not `Send` and `Sync`
+  --> tests/memory_model_test.rs:22:5
+```
+
+That file is byte-identical to `main`, so the lint predates this phase. CI runs
+`cargo clippy -- -D warnings` (no `--all-targets`), so CI does not see it; the
+phase's own method block asks for `--all-targets`, so this phase did. `Node` and
+its cycle now use `Rc`, which is what the value always was — constructed and
+dropped inside one test, never sent to a thread — and `Arc` is kept for the
+`Value` itself, where the test is pinning what `src/value.rs` uses. Same
+assertions, same strong counts, one less lint.
+
+Suggested phase: none needed for the lint. The thing worth auditing is the CI
+command: `cargo clippy -- -D warnings` lints no test target, so a lint in any of
+the 66 files under `tests/` cannot fail the build today.
+
+## F7 — `{nothing}` interpolates as the word `nothing`, silently
+
+Found while writing the malformed-input cases for this phase:
+
+```redblue
+say "a{nothing}b"
+```
+
+prints `anothingb` and the statement's value is `Nothing`. `Value::Nothing` has no
+display of its own, so the interpolation path renders its debug name instead of
+refusing. Every other interpolation of a non-text value is a type error; this one
+is a silent wrong answer, which is the F2 class.
+
+This is an interpreter change, so it is not this phase's work. Suggested phase:
+*refuse `{nothing}` in an interpolation, or render it as `nothing` deliberately
+and document that choice in `SPEC.md`* — a reviewer has to rule which, because
+both are defensible and they are not the same behaviour.

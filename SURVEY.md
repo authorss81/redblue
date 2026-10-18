@@ -165,6 +165,13 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
   `src/testing/runner.rs:252` is the `assert_matches_regex` helper behind it. No
   line outside `src/testing/` refers to `regex::` — which is why the crate is
   linked into a program that cannot use it.
+- **Citation drift, reconciled**: the finding this phase was dispatched on cites
+  `src/stdlib.rs:612` for that comment. That line is `"uppercase" => {`; the
+  comment it meant is the one at `src/stdlib.rs:637` above, and it is cited there
+  rather than at a line that says something else. Recorded as **F1** in
+  `phases/phase-090/FINDINGS.md`, and pinned by
+  `tests/stdlib_gap_survey_test.rs::edge_every_citation_resolves_to_a_line_that_exists`,
+  which fails if the anchor ever stops reading `no regex`.
 - **Why it ranks where it does**: log parsing, source scanning, HTML scraping and
   percent-decoding are four separate programs, and every one of them is a
   hand-rolled state machine in the language as it stands. It ranks second, not
