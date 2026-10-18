@@ -22,8 +22,13 @@ const DOCUMENTED: &[(&str, &str)] = &[
     ("list", "length"),
 ];
 
-/// The two that used to be documented and do not exist. Kept as a test so the
-/// correction cannot be silently reverted by a later edit to the tutorial.
+/// The two that used to be documented and do not exist.
+///
+/// Both are asserted to still be absent by
+/// `edge_the_wrongly_documented_names_stay_wrong`. That is the point of keeping
+/// them: a future phase that legitimately adds `list.filter` will fail this test,
+/// and that failure is the prompt to update the tutorial and delete the entry -
+/// not something to silence.
 const WRONGLY_DOCUMENTED: &[(&str, &str)] = &[("formats", "parse_json"), ("list", "filter")];
 
 /// The registry as the rest of the suite sees it.
@@ -154,6 +159,37 @@ fn a_member_that_does_not_exist_is_refused_rather_than_silently_accepted() {
         r#"set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)"#,
         "`list.filter`, which HANDOUT.md used to document and was never implemented",
     );
+}
+
+#[test]
+fn edge_the_wrongly_documented_names_stay_wrong() {
+    // The correction to HANDOUT.md is only safe while these two really do not
+    // exist. If a later phase adds `list.filter` or reintroduces a `formats`
+    // namespace, this fails - which is the signal to put the example back in the
+    // tutorial and drop the entry, rather than to delete the test.
+    let registry = module_members();
+    for (module, member) in WRONGLY_DOCUMENTED {
+        if !MODULES.contains(module) {
+            // `formats` was never a module: phase-050 split JSON and CSV out.
+            assert_eq!(
+                *module, "formats",
+                "module `{module}` now exists, so HANDOUT.md's old `formats` \
+                 section is no longer fiction. Restore the example and remove \
+                 this entry."
+            );
+            continue;
+        }
+        let members = registry
+            .iter()
+            .find(|(m, _)| m == module)
+            .map(|(_, members)| *members)
+            .unwrap_or_default();
+        assert!(
+            !members.contains(member),
+            "`{module}.{member}` now exists. HANDOUT.md should document it again \
+             and this entry should be deleted."
+        );
+    }
 }
 
 #[test]
