@@ -8,6 +8,7 @@ pub mod history;
 pub mod introspect;
 pub mod measure;
 pub mod style;
+pub mod transcript;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -20,6 +21,7 @@ pub use completer::ReplCompleter;
 pub use editor::{Line, LineSource, SessionNames};
 pub use history::ReplHistory;
 pub use introspect::Definition;
+pub use transcript::Transcript;
 
 use crate::analyzer;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
@@ -27,7 +29,7 @@ use crate::error::Error;
 use crate::interpreter::Vm;
 use crate::lexer::{Lexer, TokenKind};
 use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
-use crate::repl::style::{Paint, Style};
+use crate::repl::style::{strip_escapes, Paint, Style};
 use crate::stdlib;
 use crate::value::{FunctionBody, Value};
 
@@ -501,6 +503,21 @@ pub struct Repl {
     /// typed, and neither knew the other's half: `:inspect x` printed the value
     /// and its kind and nothing about the line three prompts ago that made it.
     definitions: HashMap<String, Definition>,
+    /// Every line this session ran and everything it said, which is what
+    /// `.export` writes and what the terminal is not.
+    ///
+    /// The history is not this and cannot be: it holds every line *typed*,
+    /// commands included, and holds no output at all. Sharing a session meant
+    /// copy-pasting scrollback — prompts, colour and banner included — because
+    /// this was the only record there was.
+    transcript: Transcript,
+    /// What the line just run said, before it is printed.
+    ///
+    /// Held between the VM printing it and the session recording it, because the
+    /// VM prints `say` output itself ([`Vm::run`]) and the session needs the same
+    /// lines as text. Cleared at the start of every line, so a line that failed to
+    /// parse — and so never reached the VM — cannot inherit the last one's output.
+    last_output: Vec<String>,
 }
 
 impl Repl {
@@ -517,6 +534,8 @@ impl Repl {
             style: Style::detect(),
             prompt_format: DEFAULT_PROMPT.to_string(),
             definitions: HashMap::new(),
+            transcript: Transcript::new(),
+            last_output: Vec::new(),
         }
     }
 
@@ -829,6 +848,10 @@ impl Repl {
                 self.restore_session(&path);
                 true
             }
+            ReplCommand::Export(path) => {
+                self.export_session(path.as_deref());
+                true
+            }
             ReplCommand::Reset => {
                 self.reset_session();
                 true
@@ -995,6 +1018,9 @@ impl Repl {
         self.definitions.clear();
         self.multiline_buffer.clear();
         self.in_multiline = false;
+        // The transcript with them: an export of a session that had forgotten the
+        // lines it ran would claim a session that no longer exists ran them.
+        self.transcript.clear();
         println!("REPL state reset.");
     }
 
@@ -1086,7 +1112,14 @@ impl Repl {
     /// the user typed has no line of its own but has a place in the history, and
     /// a file's line *is* its line.
     fn execute_code_from(&mut self, file: &str, line_offset: usize, code: &str) {
+        // A line that fails to parse never reaches the VM, so the output of the
+        // line before it has to be out of the way before the next line starts.
+        self.last_output.clear();
         let result = self.run_code(code);
+        // What the program said, whatever path it left by. Taken before the
+        // `= value` line is added, so the transcript records the program's own
+        // output and the session's echo of it separately, as it prints them.
+        let mut output = std::mem::take(&mut self.last_output);
 
         match result {
             Ok(value) => {
@@ -1095,12 +1128,22 @@ impl Repl {
                     let line = format!("= {}", value);
                     println!("{}", self.style.paint(Paint::Result, &line));
                     self.variables.insert("_".to_string(), value);
+                    output.push(line);
                 }
             }
             Err(e) => {
-                println!("Error: {}", render_error(&self.style, code, file, &e));
+                let rendered = format!("Error: {}", render_error(&self.style, code, file, &e));
+                println!("{}", rendered);
+                output.push(rendered);
             }
         }
+        // Recorded as plain text: what the session painted for a reader is not
+        // what a document should carry, so the escape sequences are taken off
+        // here rather than at the far end of the export.
+        self.transcript.record(
+            code.to_string(),
+            output.iter().map(|line| strip_escapes(line)).collect(),
+        );
     }
 
     /// Notes where `code` bound each name, for `.type` and `.which`.
@@ -1264,8 +1307,16 @@ impl Repl {
         self.arm_debugger(source);
         self.vm.take_output();
         let result = self.vm.run(program);
+        // What the program said, kept for the transcript `.export` writes. On the
+        // error path these are the lines the program printed before it failed,
+        // which are printed here rather than by [`Vm::run`] — the VM gives up
+        // before its print loop — and on the success path `Vm::run` has already
+        // printed them and left the buffer, so this is the same lines read once
+        // more. Drained either way: an export that re-printed them would be the
+        // bug this is here to prevent, one line later.
+        self.last_output = self.vm.take_output();
         if result.is_err() {
-            for line in self.vm.take_output() {
+            for line in &self.last_output {
                 println!("{}", line);
             }
         }
@@ -1424,6 +1475,34 @@ impl Repl {
                 self.history.len()
             ),
             Err(e) => println!("Could not save session: {}", e),
+        }
+    }
+
+    /// Writes the session as Markdown — to `path`, or to stdout when given
+    /// nothing — and says where it went.
+    ///
+    /// The other half of `:save`, and a different document. `:save` writes the
+    /// lines the session *typed*, one per line, so a session can be restored; this
+    /// writes what the session *ran* and what it said, so a reader who was not at
+    /// the terminal can read it. Neither is the other: a transcript of inputs and
+    /// no outputs is a log, and the scrollback it replaces carried the prompts and
+    /// the colour codes as well.
+    ///
+    /// The destination is part of what the command means, so the message names it
+    /// and a failure names the path that failed — "No such file or directory"
+    /// alone does not say which of the paths in the command was at fault.
+    fn export_session(&self, path: Option<&str>) {
+        let document = self.transcript.markdown();
+        match path {
+            None => println!("{}", document.trim_end()),
+            Some(path) => match std::fs::write(path, &document) {
+                Ok(()) => println!(
+                    "Exported {} exchange(s) to '{}'.",
+                    self.transcript.len(),
+                    path
+                ),
+                Err(e) => println!("Could not export session to '{}': {}", path, e),
+            },
         }
     }
 
