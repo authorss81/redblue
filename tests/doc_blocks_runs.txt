@@ -76,8 +76,6 @@ docs/GRAMMAR.md:642
 docs/GRAMMAR.md:657
 
 # --- HANDOUT.md----------------------------------------------------------
-HANDOUT.md:126
-HANDOUT.md:249
 
 # --- README.md-----------------------------------------------------------
 README.md:9
@@ -87,3 +85,7 @@ README.md:57
 README.md:139
 README.md:150
 README.md:162
+HANDOUT.md:126
+HANDOUT.md:149
+HANDOUT.md:156
+HANDOUT.md:250

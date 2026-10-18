@@ -40,10 +40,7 @@ SPEC.md:1384	Error: ParserError: Expected variable name, found reserved word 'ba
 PHILOSOPHY.md:132	Error: ParserError: Expected variable name, found reserved word 'is'
 
 # --- HANDOUT.md -------------------------------------------------------------
-
 HANDOUT.md:42	Error: ParserError: Expected 'then' but got 'say'
 HANDOUT.md:133	Error: RuntimeError: Module 'math' has no function 'random'
 HANDOUT.md:140	Error: ParserError: Expected 'then' but got 'say'
-HANDOUT.md:149	Error: LexerError: Unexpected character '\''
-HANDOUT.md:155	Error: RuntimeError: Module 'list' has no function 'filter'
-HANDOUT.md:161	Error: AnalyzerError: Unknown variable 'ask'; did you mean 'as'?
+HANDOUT.md:162	Error: AnalyzerError: Unknown variable 'ask'; did you mean 'as'?

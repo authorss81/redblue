@@ -145,16 +145,17 @@ if files.exists("config.txt")
 end
 ```
 
-### formats - JSON/CSV
+### json - JSON
 ```redblue
-set data to formats.parse_json('{"name": "Alice"}')
-set json to formats.to_json(data)
+set data to json.parse("{\"name\": \"Alice\"}")
+say data.name
+set text to json.stringify(data)
 ```
 
 ### list - List Operations
 ```redblue
 set doubled to list.map([1, 2, 3], to (x) give back x * 2)
-set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)
+set evens to [2, 4]
 ```
 
 ### console - I/O
