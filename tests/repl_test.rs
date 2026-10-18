@@ -1343,20 +1343,7 @@ const EXPORT_PROMPT: &str = "~rb~ ";
 /// Strips every escape sequence, so an assertion is about text and cannot fail
 /// because the palette changed.
 fn plain(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            for skip in chars.by_ref() {
-                if skip == 'm' {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    redblue::repl::style::strip_escapes(text)
 }
 
 /// The document a session printed, from its header to the next prompt.

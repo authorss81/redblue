@@ -276,7 +276,9 @@ fn split_fragment(fragment: &str) -> (&str, &str) {
 /// name that is not valid UTF-8 on this platform — offers nothing rather than
 /// failing: a TAB that reports nothing is better than a TAB that prints.
 pub fn complete_path_in(dir: &Path, fragment: &str) -> Vec<String> {
-    let (directory, name) = split_fragment(fragment);
+    let is_quoted = fragment.starts_with('"');
+    let unquoted = fragment.trim_matches('"');
+    let (directory, name) = split_fragment(unquoted);
     let listing = dir.join(directory);
     let prefix = name.to_lowercase();
     let Ok(entries) = std::fs::read_dir(&listing) else {
@@ -291,15 +293,17 @@ pub fn complete_path_in(dir: &Path, fragment: &str) -> Vec<String> {
         if entry_name.starts_with('.') || !entry_name.to_lowercase().starts_with(&prefix) {
             continue;
         }
-        let candidate = format!(
-            "{directory}{}{}",
-            quote_if_spaced(&entry_name),
-            if is_directory(&entry.path()) {
-                DIRECTORY_SEPARATOR
-            } else {
-                ""
-            }
-        );
+        let sep = if is_directory(&entry.path()) {
+            DIRECTORY_SEPARATOR
+        } else {
+            ""
+        };
+        let joined = format!("{directory}{entry_name}{sep}");
+        let candidate = if is_quoted || joined.contains(char::is_whitespace) {
+            format!("\"{joined}\"")
+        } else {
+            joined
+        };
         candidates.push(candidate);
     }
 
@@ -318,16 +322,6 @@ pub fn complete_path_in(dir: &Path, fragment: &str) -> Vec<String> {
 /// spelling as the tiebreak so two names differing only in case have one order.
 fn sort_key(candidate: &str) -> (String, String) {
     (candidate.to_lowercase(), candidate.to_string())
-}
-
-/// `name` wrapped in quotes when it holds whitespace, and left alone when it does
-/// not — a quoted name nobody needed quoted is noise in the line being typed.
-fn quote_if_spaced(name: &str) -> String {
-    if name.contains(char::is_whitespace) {
-        format!("\"{name}\"")
-    } else {
-        name.to_string()
-    }
 }
 
 /// Whether `path` is a directory, following a symlink to one.
@@ -793,13 +787,26 @@ mod tests {
         let dir = scratch_dir("spaced");
         file_in(&dir, "my file.rb");
         file_in(&dir, "plain.rb");
+        let sub = dir.join("my dir");
+        std::fs::create_dir_all(&sub).expect("create dir");
+        file_in(&sub, "nested.rb");
 
         let offered = complete_path_in(&dir, "my");
 
         assert_eq!(
             offered,
-            vec!["\"my file.rb\"".to_string()],
+            vec!["\"my dir/\"".to_string(), "\"my file.rb\"".to_string()],
             "quoted, because an unquoted name with a space in it is two words"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "\"my dir/"),
+            vec!["\"my dir/nested.rb\"".to_string()],
+            "and walking into a quoted directory completes entries inside it"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "\"my dir/\""),
+            vec!["\"my dir/nested.rb\"".to_string()],
+            "whether closed with a quote or left open"
         );
         assert_eq!(
             complete_path_in(&dir, "pl"),
@@ -837,10 +844,12 @@ mod tests {
             "a cursor past the end of the line is not a position to complete at"
         );
         assert_eq!(
-            path_argument(":loa\u{1F600}", 4),
+            path_argument(":load \u{1F600}", 7),
             None,
             "and a cursor inside a character is not one either"
         );
+        assert_eq!(path_argument(":load \u{1F600}", 8), None);
+        assert_eq!(path_argument(":load \u{1F600}", 9), None);
     }
 
     /// A dot-entry is not offered, which is what keeps `.git` and `.env` out of a

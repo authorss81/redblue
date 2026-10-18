@@ -115,3 +115,48 @@ The deeper question the same finding raises: a fix like this one is a phase that
 edits a file it does not own, in a diff whose subject is `.export`. It was done
 because the alternative was a red gate and an honest report of a red gate — but a
 pipeline that fixed the gates before dispatching a phase would not have to choose.
+
+## F5 — `:run` is not in the export, and `:load` is
+
+`src/repl/mod.rs:1452` — `load_file(&mut self, …)` calls `execute_code_from`, which
+records the exchange, so `:load notes.rb` appears in `.export` with what it said.
+`src/repl/mod.rs:1578` — `run_file(&self, …)` does not: it builds a VM of its own,
+runs the file in it, prints, and drops the bindings. There is nowhere for the
+transcript to go, because the method holds `&self` and `Transcript::record` needs
+`&mut self`.
+
+So a session that did everything with `:run` exports only the lines it typed, and
+the same session doing it with `:load` exports the file too. Verified on this
+tree:
+
+```
+$ printf ':run modules/MathUtils.rb\n.export\n:quit\n' | ./target/debug/rb | grep -c '```redblue'
+0
+$ printf ':load modules/MathUtils.rb\n.export\n:quit\n' | ./target/debug/rb | grep -c '```redblue'
+1
+```
+
+**Needed:** a decision first, then code. Either `:run`'s output belongs in the
+session's export — which means `run_file` becomes `&mut self` and records what its
+VM said, as `load_file` does — or it does not, and the asymmetry is deliberate and
+worth a line in `:help`. The phase's definition of done says the export holds "the
+session"; whether a file run in a throwaway VM is part of the session is a design
+question, not a bug, so it was recorded rather than changed.
+
+## F6 — TAB does not complete inside an opening quote
+
+`path_argument` (`src/repl/completer.rs`) takes everything after the first
+whitespace as the fragment, so `:load "my` completes against the literal prefix
+`"my` and offers nothing, while `:load my` offers `"my file.rb"` with the quotes
+already in it. `:load` opens the quotes it is given — `ReplCommand::unquote_path`
+strips a matched pair — so the two halves disagree about the same name.
+
+The whole case is a name with a space in it, and it is rare enough that the
+completer offering nothing is not wrong so much as unhelpful. Fixing it is a
+predicate change with one test: strip a leading `"` from the fragment before
+matching, and keep the quotes in the replacement.
+
+**Needed:** a phase, or a line in this one if the auditor judges it small enough.
+It was not done here because the phase's diff was already a fix to the round trip,
+and a second behaviour change in the same file is how a bug-fix phase turns into a
+refactor.

@@ -153,16 +153,18 @@ impl Transcript {
     /// hand-edited one.
     pub fn read_markdown(document: &str) -> Vec<String> {
         let mut blocks: Vec<String> = Vec::new();
+        let mut line_counts: Vec<usize> = Vec::new();
         let mut inside: Option<usize> = None;
         let mut fence = String::new();
         for line in document.lines() {
             let trimmed = line.trim();
             if !trimmed.starts_with("```") {
                 if let Some(index) = inside {
-                    if !blocks[index].is_empty() {
+                    if line_counts[index] > 0 {
                         blocks[index].push('\n');
                     }
                     blocks[index].push_str(line);
+                    line_counts[index] += 1;
                 }
                 continue;
             }
@@ -172,16 +174,18 @@ impl Transcript {
                 // widens, and why reading it back needs no separate rule.
                 Some(_) if trimmed == fence => inside = None,
                 Some(index) => {
-                    if !blocks[index].is_empty() {
+                    if line_counts[index] > 0 {
                         blocks[index].push('\n');
                     }
                     blocks[index].push_str(line);
+                    line_counts[index] += 1;
                 }
                 None => {
                     if fence_language(trimmed) == Some(FENCE_LANGUAGE) {
                         fence = trimmed.chars().take_while(|c| *c == '`').collect();
                         inside = Some(blocks.len());
                         blocks.push(String::new());
+                        line_counts.push(0);
                     }
                 }
             }
@@ -304,6 +308,18 @@ mod tests {
             Transcript::read_markdown(&transcript.markdown()),
             vec!["say \"one\"".to_string(), "say \"two\"".to_string()],
             "reading the document back gives the session that wrote it"
+        );
+    }
+
+    #[test]
+    fn a_block_starting_with_a_blank_line_round_trips() {
+        let mut transcript = Transcript::new();
+        transcript.record("\nsay \"one\"\nsay \"two\"".to_string(), vec![]);
+        let doc = transcript.markdown();
+        assert_eq!(
+            Transcript::read_markdown(&doc),
+            vec!["\nsay \"one\"\nsay \"two\"".to_string()],
+            "a leading empty line in an input block is preserved across markdown export and read"
         );
     }
 
