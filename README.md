@@ -68,7 +68,7 @@ end
 
 **Values that behave.** Numbers are 64-bit floats and always finite — `1 / 0` is a clean runtime error, never infinity. Text is fully Unicode. Records keep insertion order. Objects support inheritance and method dispatch, closures capture lexically.
 
-**Two engines that must agree.** Programs run on the tree-walking interpreter or compile to versioned bytecode (`.rbc`). A differential harness runs 369 programs on both and compares outcomes — if the engines ever disagree, it's a bug, and there's a test proving it.
+**Two engines that must agree.** Programs run on the tree-walking interpreter or compile to versioned bytecode (`.rbc`). A differential harness runs 370 programs on both and compares outcomes — if the engines ever disagree, it's a bug, and there's a test proving it.
 
 **Errors you can read.** Every error names its kind and points at the line:
 
