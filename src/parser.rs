@@ -803,6 +803,7 @@ impl Parser {
     }
 
     fn parse_if(&mut self) -> Result<Option<Statement>> {
+        let if_span = self.span();
         self.advance(); // consume 'if'
         let condition = self.parse_expression()?;
 
@@ -810,44 +811,93 @@ impl Parser {
         self.expect(&TokenKind::Then)?;
         self.skip_newlines();
 
-        let mut then_branch = Vec::new();
+        let then_branch = self.parse_if_arm_body()?;
+
+        // Every arm of the chain, outermost first: the `if` arm plus one entry
+        // per `else if`. A chain is sugar for nested `if`s, so it is desugared
+        // below rather than given a node of its own.
+        let mut arms = vec![(condition, then_branch, if_span)];
+        let mut else_branch = Vec::new();
+
+        // `else if` written on one line is the next arm of this chain and is
+        // closed by the same `end`; an `if` written on the line *after* `else`
+        // is a statement of the else block and carries the `end` of its own.
+        // The words are the same either way, so the line between them is what
+        // tells the two apart — which is also what keeps an `if` nested in an
+        // `else` block parsing the way it always has.
+        while self.current().map(|t| &t.kind) == Some(&TokenKind::Else) {
+            self.advance(); // consume 'else'
+            let next_is_an_arm = self.current().map(|t| &t.kind) == Some(&TokenKind::If);
+            self.skip_newlines();
+            if !next_is_an_arm {
+                else_branch = self.parse_if_arm_body()?;
+                break;
+            }
+            let arm_span = self.span();
+            // The arm desugars to an `if` nested in the `else` of the arm before
+            // it, so it costs a level of block depth however it is written — the
+            // budget has to reach it, or a chain reads as flat and the VM
+            // recurses once per arm with nothing counting.
+            self.enter_block()?;
+            self.advance(); // consume 'if'
+            let arm_condition = self.parse_expression()?;
+            self.skip_newlines();
+            self.expect(&TokenKind::Then)?;
+            self.skip_newlines();
+            let arm_body = self.parse_if_arm_body()?;
+            arms.push((arm_condition, arm_body, arm_span));
+            self.skip_newlines();
+        }
+
+        self.expect(&TokenKind::End)?;
+
+        // The innermost arm is the `if` it desugars to; every earlier arm holds
+        // the rest of the chain as its `else`. One `end` closes the whole chain,
+        // so no arm below carries an `end` of its own. Each arm is also one block
+        // level of the nesting it becomes, so each leaves the level it entered.
+        let (condition, then_branch, span) = arms.pop().expect("the if arm is always pushed");
+        let mut statement = Stmt {
+            span,
+            statement: Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            },
+        };
+        for (condition, then_branch, span) in arms.into_iter().rev() {
+            self.leave_block();
+            statement = Stmt {
+                span,
+                statement: Statement::If {
+                    condition,
+                    then_branch,
+                    else_branch: vec![statement],
+                },
+            };
+        }
+
+        Ok(Some(statement.statement))
+    }
+
+    /// Parses the statements of one `if` arm, stopping before the `end` that
+    /// closes the chain, the `else` that starts the next arm, or the end of the
+    /// file.
+    ///
+    /// An arm that is empty parses as no statements: `else if c then` followed
+    /// straight by the next `else if` is an arm that runs nothing, not a chain
+    /// that stops there.
+    fn parse_if_arm_body(&mut self) -> Result<Vec<Stmt>> {
+        let mut body = Vec::new();
         while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
             && self.current().map(|t| &t.kind) != Some(&TokenKind::Else)
             && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
         {
             if let Some(stmt) = self.parse_statement()? {
-                then_branch.push(stmt);
+                body.push(stmt);
             }
             self.skip_newlines();
         }
-
-        let mut else_branch = Vec::new();
-
-        if let Some(Token {
-            kind: TokenKind::Else,
-            ..
-        }) = self.current()
-        {
-            self.advance();
-            self.skip_newlines();
-
-            while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
-                && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
-            {
-                if let Some(stmt) = self.parse_statement()? {
-                    else_branch.push(stmt);
-                }
-                self.skip_newlines();
-            }
-        }
-
-        self.expect(&TokenKind::End)?;
-
-        Ok(Some(Statement::If {
-            condition,
-            then_branch,
-            else_branch,
-        }))
+        Ok(body)
     }
 
     /// Parses `unless <expr> then ... end`.
@@ -3053,13 +3103,20 @@ fn opens_block_at_statement_start(kind: &TokenKind) -> bool {
 pub fn open_block_depth(tokens: &[Token]) -> i32 {
     let mut depth = 0;
     let mut at_statement_start = true;
+    // Whether the `if` being read continues an `else if` chain, which the
+    // block's own `end` closes rather than one of its own.
+    let mut else_if_chain = false;
 
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         match &token.kind {
-            TokenKind::Newline => at_statement_start = true,
+            TokenKind::Newline => {
+                at_statement_start = true;
+                else_if_chain = false;
+            }
             TokenKind::End => {
                 depth -= 1;
                 at_statement_start = false;
+                else_if_chain = false;
             }
             // `repeat ... until <condition>` is opened by its `repeat` and closed
             // by its `until` — it has no `end` of its own, so a REPL waiting for
@@ -3067,18 +3124,35 @@ pub fn open_block_depth(tokens: &[Token]) -> i32 {
             TokenKind::Until => {
                 depth -= 1;
                 at_statement_start = false;
+                else_if_chain = false;
             }
             // A branch of a block already counted rather than a statement of its
-            // own, so the statement-start rule still holds after it: `else if x
-            // then` opens one more block.
-            TokenKind::Else | TokenKind::Catch | TokenKind::Finally => {
+            // own, so the statement-start rule still holds after it. An `else if`
+            // on the same line is the chain's next arm rather than a block of
+            // its own, which is the one `end` at the end of the chain closes.
+            TokenKind::Else => {
                 at_statement_start = true;
+                else_if_chain = tokens.get(index + 1).map(|t| &t.kind) == Some(&TokenKind::If);
+            }
+            TokenKind::Catch | TokenKind::Finally => {
+                at_statement_start = true;
+                else_if_chain = false;
+            }
+            // An arm of the chain: it is the block already counted, so it opens
+            // nothing and asks for no `end`.
+            TokenKind::If if else_if_chain => {
+                at_statement_start = false;
+                else_if_chain = false;
             }
             kind if at_statement_start && opens_block_at_statement_start(kind) => {
                 depth += 1;
                 at_statement_start = false;
+                else_if_chain = false;
             }
-            _ => at_statement_start = false,
+            _ => {
+                at_statement_start = false;
+                else_if_chain = false;
+            }
         }
     }
 
@@ -3206,14 +3280,24 @@ mod tests {
         );
     }
 
-    /// `else`, `catch` and `finally` are branches of a block already counted, so
-    /// the block after one of them is still counted — `else if ... then` opens a
-    /// second block needing a second `end`.
+    /// `else if` on one line is the chain's next arm rather than a block of its
+    /// own, so the `end` at the end of the chain closes the whole thing and the
+    /// depth reaches zero there.
     #[test]
-    fn open_block_depth_counts_the_block_inside_an_else_if() {
-        assert_eq!(depth_of("if x then\nelse if y then"), 2);
-        assert_eq!(depth_of("if x then\nelse if y then\nend"), 1);
-        assert_eq!(depth_of("if x then\nelse if y then\nend\nend"), 0);
+    fn open_block_depth_gives_an_else_if_chain_one_end() {
+        assert_eq!(depth_of("if x then\nelse if y then"), 1);
+        assert_eq!(depth_of("if x then\nelse if y then\nelse if z then"), 1);
+        assert_eq!(depth_of("if x then\nelse if y then\nend"), 0);
+    }
+
+    /// An `if` on the line *after* `else` is a statement of the else block
+    /// rather than an arm of the chain, so it opens the block its own `end`
+    /// closes — which is the shape `else` + a nested `if` is written in.
+    #[test]
+    fn open_block_depth_counts_the_block_inside_an_else() {
+        assert_eq!(depth_of("if x then\nelse\nif y then"), 2);
+        assert_eq!(depth_of("if x then\nelse\nif y then\nend"), 1);
+        assert_eq!(depth_of("if x then\nelse\nif y then\nend\nend"), 0);
     }
 
     #[test]

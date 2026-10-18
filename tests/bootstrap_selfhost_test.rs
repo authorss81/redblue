@@ -662,10 +662,10 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
     // missing without anything noticing, because `refused == 9` and
     // `checked >= 300` are both still true afterwards.
     assert_eq!(
-        checked, 315,
+        checked, 318,
         "only {checked} corpus programs were compared; stage 2 is byte-identical on \
-         every program of the corpus the frontend accepts, which is 315 of the 324 in \
-         the families above — the other 9 are refused by the frontend, and the 46 in \
+         every program of the corpus the frontend accepts, which is 318 of the 324 in \
+         the families above — the other 6 are refused by the frontend, and the 46 in \
          `malformed` are refused too"
     );
     assert_eq!(
@@ -676,10 +676,11 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
          has been added or removed and the counts below still hold"
     );
     assert_eq!(
-        refused, 9,
-        "{refused} corpus programs in the families above are refused by the frontend; \
-         there were 9 when this test was written, and each is listed in \
-         phases/phase-021/FINDINGS.md section 2"
+        refused, 6,
+        "{refused} corpus programs in the families above are refused by the frontend. \
+         There were 9 when this test was written: phase-112 made the three \
+         `corpus/control-flow-0003/0004/0005.rb` programs parse, and each of the 6 left \
+         is listed in phases/phase-021/FINDINGS.md section 2"
     );
     for family in UNSUPPORTED {
         assert!(
@@ -1439,20 +1440,22 @@ fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     }
 
     // Exact, for the reason `stage2_is_byte_identical_on_its_corpus_families`
-    // says it: `checked >= 300` and `refused == 9` are both still true after six
-    // corpus programs are deleted, and this test's whole claim is that *every*
-    // program the frontend accepts is byte-identical through the bytecode path.
+    // says it: `checked >= 300` and a fixed `refused` are both still true after
+    // six corpus programs are deleted, and this test's whole claim is that
+    // *every* program the frontend accepts is byte-identical through the
+    // bytecode path.
     // A floor cannot carry that claim — only the count itself can.
     assert_eq!(
-        checked, 315,
+        checked, 318,
         "{checked} corpus programs were compared through the bytecode path, not the \
-         315 of the 324 outside `malformed` that the frontend accepts; stage 2 run \
+         318 of the 324 outside `malformed` that the frontend accepts; stage 2 run \
          as bytecode is byte-identical on every one of them"
     );
     assert_eq!(
-        refused, 9,
-        "{refused} corpus programs outside `malformed` were refused by the frontend; \
-         there were 9 when this test was written"
+        refused, 6,
+        "{refused} corpus programs outside `malformed` were refused by the frontend. \
+         There were 9 when this test was written: phase-112 made the three \
+         `corpus/control-flow-0003/0004/0005.rb` programs parse"
     );
     assert_eq!(
         checked + refused,
