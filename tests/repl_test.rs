@@ -1723,3 +1723,77 @@ fn edge_a_session_that_ran_a_crlf_file_exports_and_reads_back() {
         "the file is one block however its lines were terminated:\n{document}"
     );
 }
+
+/// A line that *printed* a fence broke the round trip, and nothing else in the
+/// document did.
+///
+/// The fence around an exchange was widened for its input only, so a session
+/// whose output held ``` ```redblue ``` wrote that fence where a reader — and
+/// the reader this crate exports with — takes it for the opening of a block. The
+/// exchange written after it was then read as the body of that block rather than
+/// as a line the session ran, and a fresh session run from the fences would have
+/// been given source the session never typed.
+///
+/// The read-back here is [`redblue::repl::Transcript::read_markdown`] rather than
+/// the test file's own fence parser, because the claim is that *the* reader
+/// reproduces the session.
+#[test]
+fn edge_a_session_that_printed_a_fence_reads_back_as_the_lines_it_ran() {
+    let path = scratch_path("exported-fence", "md");
+    let first = session(&format!(
+        "set q to \"```redblue\"\nsay q\nsay \"after\"\n.export {}\n:quit\n",
+        path.display()
+    ));
+    first
+        .assert_exited_ok()
+        .assert_stdout_contains("Exported 3 exchange(s)");
+
+    let document = std::fs::read_to_string(&path).expect("the export should be readable");
+    let _ = std::fs::remove_file(&path);
+
+    let inputs = redblue::repl::Transcript::read_markdown(&document);
+    assert_eq!(
+        inputs,
+        vec![
+            "set q to \"```redblue\"".to_string(),
+            "say q".to_string(),
+            "say \"after\"".to_string(),
+        ],
+        "the fence the session printed was read back as a block of its own and \
+         swallowed the line after it:\n{document}"
+    );
+
+    let second = session(&format!("{}\n:quit\n", inputs.join("\n")));
+    second.assert_exited_ok();
+    assert_eq!(
+        second.count_stdout("after"),
+        1,
+        "the line written after the fence runs once in a fresh session, as it did \
+         before it was exported\n--- actual ---\n{}",
+        second.stdout
+    );
+}
+
+/// `.export` to a directory is a failure that names what it was asked to write.
+///
+/// The destination is part of what the command means, so a path that cannot be
+/// written — a directory, not a missing parent directory — is reported with the
+/// path in it and leaves the session running rather than stopping it.
+#[test]
+fn edge_export_to_a_directory_reports_the_failure_and_the_session_survives() {
+    let dir = scratch_dir();
+
+    let s = session(&format!(
+        "say \"one\"\n.export {}\nsay \"two\"\n:quit\n",
+        dir.display()
+    ));
+    s.assert_exited_ok()
+        .assert_stdout_contains("Could not export session to")
+        .assert_stdout_contains(&dir.display().to_string())
+        .assert_stdout_contains("two");
+    assert!(
+        !s.stdout.contains("Exported"),
+        "a directory is not a document, so nothing was written to one: {}",
+        s.stdout
+    );
+}
