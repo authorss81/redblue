@@ -20,6 +20,16 @@ pub enum ReplCommand {
     /// The other half of `:save`, which had no half: a saved file could not be
     /// loaded by any REPL path, so the round trip existed only in unit tests.
     Restore(String),
+/// The name this session is to be known by, or the name it already has.
+    ///
+    /// `Option` for the same reason [`ReplCommand::Prompt`] is: `:session` on
+    /// its own is not a command missing its argument, it is the one that says
+    /// what this session is called.
+    Session(Option<String>),
+    /// Lists the names sessions have been given this week.
+    Sessions,
+    /// Prints the value of the last line that returned one — what `$_` reads.
+    Last,
     Reset,
     Run(String),
     Debug,
@@ -209,6 +219,30 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Restore(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["session"],
+        description: "Name this session, or report the name it has",
+        usage: Some("<name>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Session(argument),
+    },
+    CommandSpec {
+        names: &["sessions"],
+        description: "List the names sessions have been given this week",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Sessions,
+    },
+    CommandSpec {
+        names: &["last"],
+        description: "Print the value of the last line that returned one",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Last,
     },
     CommandSpec {
         names: &["reset"],

@@ -6,12 +6,14 @@ pub mod editor;
 pub mod highlight;
 pub mod history;
 pub mod introspect;
+pub mod labels;
 pub mod measure;
 pub mod style;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -25,7 +27,7 @@ use crate::analyzer;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
 use crate::error::Error;
 use crate::interpreter::Vm;
-use crate::lexer::{Lexer, TokenKind};
+use crate::lexer::{Lexer, TokenKind, LAST_VALUE_NAME};
 use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
 use crate::repl::style::{Paint, Style};
 use crate::stdlib;
@@ -501,6 +503,13 @@ pub struct Repl {
     /// typed, and neither knew the other's half: `:inspect x` printed the value
     /// and its kind and nothing about the line three prompts ago that made it.
     definitions: HashMap<String, Definition>,
+    /// Where `:session` records a name and `:sessions` reads the listing back.
+    ///
+    /// `None` when there is no home directory to put it in, which is what a
+    /// `:session` then refuses with a message rather than silently dropping.
+    label_file: Option<PathBuf>,
+    /// The name `:session` gave this session, or `None` while it is unnamed.
+    session_label: Option<String>,
 }
 
 impl Repl {
@@ -517,6 +526,19 @@ impl Repl {
             style: Style::detect(),
             prompt_format: DEFAULT_PROMPT.to_string(),
             definitions: HashMap::new(),
+            label_file: labels::default_label_path(),
+            session_label: None,
+        }
+    }
+
+    /// A session whose names are recorded in `path` rather than under `$HOME`.
+    ///
+    /// For a test, and for a caller that owns where a session's records go; a
+    /// session built this way writes nothing outside the path it was given.
+    pub fn with_label_file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            label_file: Some(path.into()),
+            ..Self::new()
         }
     }
 
@@ -829,6 +851,27 @@ impl Repl {
                 self.restore_session(&path);
                 true
             }
+            ReplCommand::Session(name) => {
+                let answer = self.label_session(name.as_deref());
+                self.report(answer);
+                true
+            }
+            ReplCommand::Sessions => {
+                match self.sessions_answer() {
+                    Ok(names) => {
+                        for name in names {
+                            println!("  {}", name);
+                        }
+                    }
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
+                true
+            }
+            ReplCommand::Last => {
+                let answer = self.last_answer();
+                self.report(answer);
+                true
+            }
             ReplCommand::Reset => {
                 self.reset_session();
                 true
@@ -1094,6 +1137,12 @@ impl Repl {
                 if !matches!(value, Value::Nothing) {
                     let line = format!("= {}", value);
                     println!("{}", self.style.paint(Paint::Result, &line));
+                    // Seeded from a clone rather than a move, so the two
+                    // bindings are made of the same value: `$_` is what a program
+                    // reads and `_` is what `:vars` lists, and one of them being
+                    // a line behind the other is the disagreement `:last` exists
+                    // to rule out.
+                    self.vm.seed_binding(LAST_VALUE_NAME, value.clone());
                     self.variables.insert("_".to_string(), value);
                 }
             }
@@ -1832,6 +1881,19 @@ impl Repl {
         self.definitions.get(name).cloned()
     }
 
+    /// Prints what a command answered: the line it has, or the message saying why
+    /// it has none.
+    ///
+    /// The same two prefixes the run path uses for a value and a failure, so
+    /// `:last` reads like the `= <value>` echo it duplicates and a refusal reads
+    /// like the error a mistyped line would have printed.
+    fn report(&self, answer: Result<String, String>) {
+        match answer {
+            Ok(line) => println!("{}", self.style.paint(Paint::Result, &line)),
+            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+        }
+    }
+
     /// `:doc <module>` — what a module exposes, read out of the registry.
     ///
     /// A name that is not a module is refused by name. An empty listing would
@@ -1940,6 +2002,64 @@ impl Repl {
         self.variables
             .get(name)
             .or_else(|| self.vm.user_value(name))
+    }
+
+    /// The last value a line returned, in the words `:last` prints it.
+    ///
+    /// Read from the same binding the `= <value>` echo and the `$_` seed are
+    /// written from, in the same breath, so the three cannot disagree: there is
+    /// one write rather than three that could drift apart. An `Err` rather than
+    /// an empty line — a session whose first line is `:last` has no last value,
+    /// and printing nothing for it reads like a value that prints as nothing.
+    fn last_answer(&self) -> Result<String, String> {
+        self.variables
+            .get("_")
+            .map(|value| format!("= {value}"))
+            .ok_or_else(|| {
+                "Error: :last has nothing to print: no line in this session has returned a \
+                 value yet, so there is no last value for $_ to read either."
+                    .to_string()
+            })
+    }
+
+    /// The name `:session` gave this session, or `None` while it is unnamed.
+    fn current_label(&self) -> Option<&str> {
+        self.session_label.as_deref()
+    }
+
+    /// `:session <name>` — name this session, or report the name it has.
+    ///
+    /// The name is recorded as well as kept, so a session that is named once is
+    /// listed by the next week's `:sessions`; a name kept only in this process
+    /// would be gone with the process, which is the state `:restore` already
+    /// exists to end.
+    fn label_session(&mut self, name: Option<&str>) -> Result<String, String> {
+        let Some(requested) = name else {
+            return Ok(match self.current_label() {
+                Some(label) => format!("this session: {label}"),
+                None => "this session is unnamed: `:session <name>` names it.".to_string(),
+            });
+        };
+        let path = self.label_file.as_deref().ok_or_else(|| {
+            "Error: :session cannot name this session: there is no home directory to record \
+             the name in."
+                .to_string()
+        })?;
+        let requested = requested.trim();
+        labels::check_name(requested)?;
+        labels::record(path, requested, labels::now_epoch())?;
+        self.session_label = Some(requested.to_string());
+        Ok(format!("this session is now: {requested}"))
+    }
+
+    /// `:sessions` — every name recorded in the last week, in name order.
+    fn sessions_answer(&self) -> Result<Vec<String>, String> {
+        let path = self.label_file.as_deref().ok_or_else(|| {
+            "Error: :sessions cannot list names: there is no home directory they were \
+             recorded in."
+                .to_string()
+        })?;
+        labels::used(path, labels::now_epoch())
     }
 
     /// `:time <expression> [n times]` — wall time, and the mean of the runs.
@@ -2180,6 +2300,300 @@ mod tests {
         for _ in 0..count {
             repl.history.push(line.to_string());
             repl.execute_line(line);
+        }
+    }
+
+    /// `$_` is the last value *made usable*, not merely printed: the session
+    /// binds `_` after a line returns something and no program could ever read
+    /// it, so `say _` was refused as an unknown variable and `$` was not a
+    /// character the lexer knew at all.
+    #[test]
+    fn last_value_name_resolves_to_the_previous_lines_value() {
+        let mut repl = Repl::new();
+
+        feed(&mut repl, &["40 + 2"]);
+
+        let lines = repl
+            .type_answer("$_")
+            .expect("$_ is a name the session bound when the line returned 42");
+        assert!(
+            lines.iter().any(|line| line.contains("value: 42")),
+            "$_ reads the previous line's value: {lines:?}"
+        );
+    }
+
+    /// The last value, read three ways that must not disagree: `:last`, `$_`,
+    /// and the `_` the session has always bound. Asserted together because each
+    /// one alone can pass while the other two drift.
+    mod last_value {
+        use super::{feed, Repl};
+        use crate::lexer::LAST_VALUE_NAME;
+
+        /// `$_` and `:last` are two spellings of one value, so they are read in
+        /// the same test: a `:last` that printed the previous line while `$_`
+        /// read this one would satisfy each of them on its own.
+        #[test]
+        fn last_and_the_last_value_name_are_the_same_value() {
+            let mut repl = Repl::new();
+
+            feed(&mut repl, &["40 + 2"]);
+            let printed = repl
+                .last_answer()
+                .expect("a line returned 42, so there is a last value");
+            let bound = repl
+                .lookup(LAST_VALUE_NAME)
+                .expect("$_ is bound in the VM after a line returns a value")
+                .to_string();
+
+            assert_eq!(printed, "= 42", "`:last` prints the value it resolved to");
+            assert_eq!(bound, "42", "and $_ resolves to the same one");
+
+            let lines = repl
+                .type_answer(LAST_VALUE_NAME)
+                .expect("$_ is a name the session bound");
+            assert!(
+                lines.iter().any(|line| line.contains("value: 42")),
+                "the same value a program sees: {lines:?}"
+            );
+        }
+
+        /// The first line of a session has no last value. `$_` is a clean
+        /// unknown-variable refusal and `:last` names the condition, because a
+        /// command that printed nothing would read as a value that happens to
+        /// print as nothing.
+        #[test]
+        fn edge_last_value_read_before_any_line_has_returned_one() {
+            let mut repl = Repl::new();
+
+            let refusal = repl
+                .type_answer("$_ + 1")
+                .expect_err("nothing has succeeded, so there is nothing to read");
+            assert!(
+                refusal.contains("Unknown variable '$_'"),
+                "a program is told the name is unknown: {refusal}"
+            );
+
+            let refusal = repl
+                .last_answer()
+                .expect_err(":last on a session with no last value is a question with no answer");
+            assert!(
+                refusal.starts_with("Error:") && refusal.contains("no line"),
+                "and :last says so rather than printing nothing: {refusal}"
+            );
+        }
+
+        /// A line that fails is not a value. `$_` is the last line that
+        /// *succeeded*, so an error in between is skipped rather than becoming
+        /// the last value — which is what makes `$_` usable after a typo.
+        #[test]
+        fn edge_a_failed_line_leaves_the_last_successful_value_in_place() {
+            let mut repl = Repl::new();
+
+            feed(&mut repl, &["40 + 2"]);
+            feed(&mut repl, &["1 / 0"]);
+
+            assert_eq!(
+                repl.last_answer().unwrap(),
+                "= 42",
+                "the division failed, so the last value is still 42"
+            );
+            let lines = repl
+                .type_answer(LAST_VALUE_NAME)
+                .expect("$_ still reads the last value that was produced");
+            assert!(
+                lines.iter().any(|line| line.contains("value: 42")),
+                "and the program sees that value, not the error: {lines:?}"
+            );
+        }
+
+        /// `_` is the binding this phase must not touch. The session still binds
+        /// it exactly as before, on the same lines, and `:vars` still lists it.
+        #[test]
+        fn the_underscore_binding_is_unchanged_by_this() {
+            let mut repl = Repl::new();
+
+            feed(&mut repl, &["40 + 2"]);
+
+            assert_eq!(
+                repl.lookup("_").map(|value| value.to_string()),
+                Some("42".to_string()),
+                "_ still holds the last result, which is how it was bound before"
+            );
+            let listing = repl
+                .variable_lines()
+                .unwrap_or_default()
+                .join("\n");
+            assert!(
+                listing.contains("42"),
+                "and :vars still lists it: {listing:?}"
+            );
+        }
+    }
+
+    /// Naming a session, so a session that took twenty minutes can be recognised
+    /// as the same one when it is repeated.
+    mod session_names {
+        use super::{scratch_path, Repl};
+        use crate::repl::labels;
+
+        /// A fixed `now` for the tests, so "this week" is a statement about the
+        /// records rather than about the day they were run on.
+        const NOW: u64 = 1_700_000_000;
+
+        fn session_with_label_file(name: &str) -> (Repl, std::path::PathBuf) {
+            let path = scratch_path(name, "sessions");
+            (Repl::with_label_file(path.clone()), path)
+        }
+
+        /// The label reaches the listing, and the listing is sorted: a listing
+        /// built by appending would put the newest session last and would put
+        /// the same session twice for two sessions that shared a name.
+        #[test]
+        fn a_session_name_is_written_and_listed_in_sorted_order() {
+            let (mut repl, path) = session_with_label_file("labels-listed");
+            // The clock the session itself reads, so the records written by hand
+            // here and the ones written by `:session` are inside one window.
+            let now = labels::now_epoch();
+
+            for name in ["chasing a null pointer", "alpha"] {
+                labels::record(&path, name, now).expect("the name should be recordable");
+            }
+            repl.label_session(Some("beta")).expect(":session should name the session");
+
+            assert_eq!(
+                repl.sessions_answer().expect("the listing should be readable"),
+                vec![
+                    "alpha".to_string(),
+                    "beta".to_string(),
+                    "chasing a null pointer".to_string(),
+                ],
+                "every name used, once each, in name order"
+            );
+            assert_eq!(
+                repl.current_label().as_deref(),
+                Some("beta"),
+                "and the session knows the name it was given"
+            );
+        }
+
+        /// Naming a session must not change what a program does. Asserted by
+        /// running the same program either side of the command and comparing the
+        /// values, because "the command does not look like it does anything" is
+        /// not evidence that it does nothing.
+        #[test]
+        fn naming_a_session_changes_no_programs_behaviour() {
+            let (mut repl, _) = session_with_label_file("labels-neutral");
+            let before = repl
+                .type_answer("40 + 2")
+                .expect("the program should run");
+
+            repl.label_session(Some("before and after"))
+                .expect("naming works");
+
+            let after = repl
+                .type_answer("40 + 2")
+                .expect("the same program should run");
+            assert_eq!(
+                before, after,
+                "the same program answers the same either side of :session"
+            );
+            assert!(
+                after.iter().any(|line| line.contains("value: 42")),
+                "and the answer is still 42: {after:?}"
+            );
+        }
+
+        /// The edge cases of a name: spaces, a sigil, an empty name, a name that
+        /// would break the record file's own format, and one long enough to be
+        /// worth refusing. Each is a decision rather than a crash.
+        #[test]
+        fn edge_session_names_with_spaces_sigils_and_junk() {
+            let (mut repl, path) = session_with_label_file("labels-edges");
+
+            let spaced = repl
+                .label_session(Some("  sunday  debugging  "))
+                .expect("a name with spaces is a name");
+            assert!(
+                spaced.contains("sunday  debugging"),
+                "the name is trimmed at its ends, not inside: {spaced}"
+            );
+
+            let sigil = repl
+                .label_session(Some(":quit"))
+                .expect("a sigil is a character a name may carry");
+            assert!(
+                sigil.contains(":quit"),
+                "the sigil is part of the name and is not a command: {sigil}"
+            );
+
+            assert!(
+                repl.label_session(Some("")).is_err(),
+                "an empty name is refused"
+            );
+            assert!(
+                repl.label_session(Some("two\tcolumns")).is_err(),
+                "a tab would split the record it is written as"
+            );
+            assert!(
+                repl.label_session(Some(&"n".repeat(200))).is_err(),
+                "and a name long enough to be a file's problem rather than a session's"
+            );
+            assert!(
+                repl.handle_command(":session"),
+                ":session is a command, and with no name it is the one that reports"
+            );
+
+            assert_eq!(
+                labels::used(&path, labels::now_epoch()).expect("the listing should be readable"),
+                vec![":quit".to_string(), "sunday  debugging".to_string()],
+                "only the names that were accepted are in it, in name order"
+            );
+        }
+
+        /// The listing is a listing of *this week*. A record from eight days ago
+        /// is not what the user asked for, and a record dated in the future is
+        /// not a record at all — a clock that disagrees with itself does not get
+        /// to invent a session.
+        #[test]
+        fn edge_listing_covers_this_week_and_nothing_older() {
+            let path = scratch_path("labels-week", "sessions");
+
+            labels::record(&path, "old", NOW - labels::WEEK_SECONDS - 1)
+                .expect("an old name is still recordable");
+            labels::record(&path, "recent", NOW - labels::WEEK_SECONDS + 1)
+                .expect("a name at the edge of the week is recordable");
+            labels::record(&path, "future", NOW + 86_400)
+                .expect("a name dated ahead is recordable, if untrue");
+
+            assert_eq!(
+                labels::used(&path, NOW).expect("the listing should be readable"),
+                vec!["recent".to_string()],
+                "the week is a window, not a prefix"
+            );
+        }
+
+        /// A file that is not the format is not a session list to guess at: a
+        /// half-written record, an unreadable file and a missing one each have
+        /// their own answer, and none of them is a panic.
+        #[test]
+        fn edge_a_malformed_label_file_lists_nothing_rather_than_failing() {
+            let path = scratch_path("labels-malformed", "sessions");
+            std::fs::write(&path, "no tab here\n1700000000\t\n1700000000\tshould list\n")
+                .expect("the file should be writable");
+
+            assert_eq!(
+                labels::used(&path, NOW).expect("a malformed line is skipped, not fatal"),
+                vec!["should list".to_string()],
+                "the records that parse are listed and the rest are skipped"
+            );
+
+            let missing = scratch_path("labels-missing", "sessions");
+            std::fs::remove_file(&missing).expect("the scratch file should be removable");
+            assert_eq!(
+                labels::used(&missing, NOW).expect("no file is an empty list, not an error"),
+                Vec::<String>::new(),
+                "a session that has never been named has no names to list"
+            );
         }
     }
 
