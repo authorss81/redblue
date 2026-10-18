@@ -121,16 +121,31 @@ fn debug_answer(input: &str) -> Option<DebugAction> {
 /// Refused rather than rendered, because a prompt is printed before every single
 /// line: a format string with `{nope}` in it would put that text in front of the
 /// user once per line, forever, and the mistake would be invisible in a
-/// transcript of anything long. The size is refused for the same reason and by
-/// the same argument — see [`MAX_PROMPT_BYTES`] — and the refusal quotes the size
+/// transcript of anything long. The size is refused for the same reason and by the
+/// same argument — see [`MAX_PROMPT_BYTES`] — and the refusal quotes the size
 /// rather than the format, so saying "this is too long" cannot itself be the
 /// flood.
+///
+/// A line break is refused for the same reason one size is: a prompt is a *line*.
+/// One carrying a break prints the rest of itself on the line below, so every
+/// prompt after it pushes what the user typed down a row and a terminal that
+/// treats the second row as input eats it. Nothing types one — a line read from
+/// the terminal or a pipe never contains one — so it is only reachable through
+/// `!!`, a history file and this API, which is exactly where a check earns its
+/// keep.
 fn check_prompt_format(format: &str) -> Result<(), String> {
     if format.len() > MAX_PROMPT_BYTES {
         return Err(format!(
             "Error: a prompt format may be at most {MAX_PROMPT_BYTES} bytes, and \
              this one is {}.",
             format.len()
+        ));
+    }
+    if let Some(break_at) = format.find(['\n', '\r']) {
+        return Err(format!(
+            "Error: a prompt format may not contain a line break, and this one has \
+             one at byte {break_at}. A prompt is printed on one line; a break in it \
+             pushes everything the user types down a row."
         ));
     }
     let mut rest = format;
@@ -817,6 +832,14 @@ impl Repl {
                 self.print_functions();
                 true
             }
+            ReplCommand::Builtins => {
+                self.print_builtins();
+                true
+            }
+            ReplCommand::Modules => {
+                self.print_modules();
+                true
+            }
             ReplCommand::Load(path) => {
                 self.load_file(&path);
                 true
@@ -923,8 +946,22 @@ impl Repl {
                 // prompt ends with. Hence the command carries an `Option` and the
                 // table is not the one that decides it is missing.
                 let argument = argument.as_deref();
-                if let Err(message) = self.set_prompt_format(argument) {
-                    println!("{}", self.style.paint(Paint::Error, &message));
+                match self.set_prompt_format(argument) {
+                    Ok(()) => {
+                        // What the prompt is now, rather than what it was asked
+                        // for: `:prompt` was a command only someone who remembered
+                        // their own format could use, and the format is not the
+                        // prompt — placeholders are filled in before it is printed.
+                        //
+                        // Quoted, because a prompt ends in the space what is typed
+                        // lands after, and an unquoted `Prompt: rb> ` is
+                        // indistinguishable from a prompt that grew a newline.
+                        // The quotes make an empty prompt read as the empty string
+                        // it is, and make the trailing space visible, and both are
+                        // what the user is being shown.
+                        println!("Prompt: {:?}", self.render_prompt_format());
+                    }
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
                 }
                 true
             }
@@ -1385,6 +1422,32 @@ impl Repl {
         for line in lines {
             println!("{}", line);
         }
+    }
+
+    /// `:builtins` — what the language gives a program, read out of the registry.
+    ///
+    /// The answer is a function of the registry and nothing else, so there is no
+    /// session state for it to depend on and the same listing comes back every
+    /// time it is asked for.
+    fn print_builtins(&self) {
+        for line in self.builtins_answer() {
+            println!("{}", line);
+        }
+    }
+
+    fn builtins_answer(&self) -> Vec<String> {
+        introspect::builtins_lines()
+    }
+
+    /// `:modules` — every module the runtime exposes, with the members it has.
+    fn print_modules(&self) {
+        for line in self.modules_answer() {
+            println!("{}", line);
+        }
+    }
+
+    fn modules_answer(&self) -> Vec<String> {
+        introspect::modules_lines()
     }
 
     /// Reads the file at `path` and runs its source in this session's VM.
@@ -4143,6 +4206,297 @@ mod tests {
             );
         }
 
+        /// `:builtins` and `:modules` are commands, not words the parser has
+        /// never heard of.
+        ///
+        /// The completion tables know the answer — the completer offers every
+        /// module and a dozen-odd builtins from the same registry — and nothing
+        /// told the user, so `Unknown command 'builtins'` was the whole of what
+        /// the language could say about its own vocabulary.
+        #[test]
+        fn builtins_and_modules_are_commands_rather_than_unknown_words() {
+            assert_eq!(
+                ReplCommand::parse(":builtins"),
+                ReplCommand::Builtins,
+                "`:builtins` is a command"
+            );
+            assert_eq!(
+                ReplCommand::parse(":modules"),
+                ReplCommand::Modules,
+                "`:modules` is a command"
+            );
+        }
+
+        /// Every builtin the registry holds is in `:builtins`, and every one of
+        /// them names something a program can go on to call.
+        ///
+        /// The listing is derived from [`stdlib::BUILTIN_NAMES`] rather than
+        /// written out, so the assertion is derived from it too: a builtin added
+        /// to the language is listed without this test being edited, and one
+        /// dropped from it is a name `:builtins` still offers.
+        ///
+        /// "Callable in a following line" is checked by putting the bare name in a
+        /// program and asking the analyzer, rather than by running it: `input`
+        /// would block on a terminal and `files.delete` would delete something. An
+        /// unknown name fails as `Unknown variable` while a registered builtin is
+        /// a `<builtin abs>` value, so analysis is the whole of the question —
+        /// it is the step that decides whether the name exists at all.
+        ///
+        /// One name in the registry is not spelled as a bare name, and pretending
+        /// otherwise would make this test lie: `expect` is a keyword, so it is
+        /// probed with the statement a program writes. It is the only one, and
+        /// the assertion below says so — a second keyword builtin would have to
+        /// be listed here or this test would fail rather than quietly skip it.
+        #[test]
+        fn builtins_lists_every_registered_builtin_and_each_one_is_callable() {
+            let repl = Repl::new();
+            let answer = repl.builtins_answer();
+
+            for name in stdlib::BUILTIN_NAMES {
+                assert!(
+                    listed_names(&answer).contains(&name.to_string()),
+                    "{name} is in the registry, so :builtins lists it: {answer:?}"
+                );
+
+                let source = match *name {
+                    "expect" => "expect 1 to be 1".to_string(),
+                    other => format!("set probe to {other}"),
+                };
+                let analyzed = || -> Result<(), String> {
+                    let tokens = crate::lexer::Lexer::tokenize(&source)
+                        .map_err(|error| error.to_string())?;
+                    let program = crate::parser::Parser::new(tokens)
+                        .parse()
+                        .map_err(|error| error.to_string())?;
+                    crate::analyzer::analyze(&program).map_err(|error| error.to_string())
+                };
+                analyzed().unwrap_or_else(|error| {
+                    panic!(
+                        "{source} is how a program reaches {name}, and it does not work: {error}"
+                    )
+                });
+            }
+        }
+
+        /// The name column of every data row of a listing.
+        ///
+        /// Data rows are the indented ones: a listing's heading, its column header
+        /// and its footnote are all flush left, so indentation is the difference
+        /// between a row of the table and the text around it.
+        fn listed_names(answer: &[String]) -> Vec<String> {
+            answer
+                .iter()
+                .filter(|line| line.starts_with("  "))
+                .filter_map(|line| line.split_whitespace().next())
+                .map(|name| name.to_string())
+                .collect()
+        }
+
+        /// Every module the runtime exposes is in `:modules`, with the members
+        /// `MODULE_MEMBERS` gives it, and every one of them is a module a program
+        /// can write as the receiver of a dotted call.
+        #[test]
+        fn modules_lists_every_module_and_each_one_resolves() {
+            let repl = Repl::new();
+            let answer = repl.modules_answer();
+
+            for module in stdlib::MODULES {
+                let listing = answer
+                    .iter()
+                    .find(|line| line.starts_with(&format!("  {module} ")))
+                    .unwrap_or_else(|| {
+                        panic!("{module} is a module, so :modules lists it: {answer:?}")
+                    });
+                for (listed, members) in
+                    stdlib::MODULE_MEMBERS.iter().filter(|(m, _)| *m == *module)
+                {
+                    for member in *members {
+                        assert!(
+                            listing.contains(&format!("{listed}.{member}")),
+                            "{listed} lists {member}: {listing}"
+                        );
+                        assert!(
+                            stdlib::member_resolves(listed, member),
+                            "{listed}.{member} is listed as callable, so something has to \
+                             answer it"
+                        );
+                    }
+                }
+            }
+
+            assert_eq!(
+                stdlib::modules_without_functions(),
+                Vec::<&str>::new(),
+                "every module :modules lists resolves behind a function, so no listed \
+                 module is a namespace the runtime then refuses"
+            );
+        }
+
+        /// The completer and `:builtins`/`:modules` read the same registry, and
+        /// this is the assertion that says so.
+        ///
+        /// The two tables are the same answer written twice, and a table written
+        /// twice is a table that drifts: a builtin the completer offers and
+        /// `:builtins` does not list is a name the REPL suggests and then cannot
+        /// answer for, and it is found out by a user rather than by the gate.
+        ///
+        /// Two directions, and not the same direction. The module table is read
+        /// from `MODULES` by both, so it has to be equal — the completer's copy
+        /// being shorter is exactly the bug this test would catch. The builtin
+        /// table is a hand-kept *subset* of `BUILTIN_NAMES` (the flat names a user
+        /// types most often), so only the direction that can actually be wrong is
+        /// asserted: every name completion offers is one `:builtins` lists.
+        #[test]
+        fn the_completer_and_the_listing_commands_agree_on_the_name_set() {
+            let repl = Repl::new();
+            let completer = crate::repl::ReplCompleter::new();
+
+            let listed_modules: Vec<String> = listed_names(&repl.modules_answer());
+            assert_eq!(
+                completer.offered_modules(),
+                listed_modules,
+                "the module table is read from MODULES by both, so the completer and \
+                 `:modules` are the same list in the same order"
+            );
+
+            let listed_builtins = listed_names(&repl.builtins_answer());
+
+            // The completer's builtin table is modules *and* flat builtins, so a
+            // name it offers is accounted for by one listing or the other.
+            // A third kind answers here too: `PI` and `E` are global constants,
+            // not registry names, and the completer offers them because a program
+            // can write them. That is the same promise, so it is checked the same
+            // way rather than quietly excepted.
+            for offered in completer.offered_builtins() {
+                assert!(
+                    listed_builtins.contains(offered)
+                        || listed_modules.contains(offered)
+                        || stdlib::is_global(offered),
+                    "{offered} is offered by tab completion, so :builtins, :modules or a \
+                     global constant has to be what it is: builtins {:?} modules {:?}",
+                    listed_builtins,
+                    listed_modules
+                );
+            }
+        }
+
+        /// A builtin no module exposes is listed with a `-` in its module column
+        /// rather than with a blank or a guess.
+        ///
+        /// The empty field is the one a listing gets wrong quietly: a blank column
+        /// reads as the terminal cutting a line off, and a builtin's whole point in
+        /// a listing is that the reader can tell what reaches it as. There are real
+        /// cases — `filter`, `reduce`, `to_text`, `random` are all registered,
+        /// callable by their bare names, and members of no module at all, which is
+        /// what `MODULE_MEMBERS` deliberately leaves them out of.
+        ///
+        /// Which names those are is worked out from `MODULE_MEMBERS` here rather
+        /// than from the listing, so the check is not the listing agreeing with
+        /// itself: a name no member list contains has no module, whatever the
+        /// column says.
+        #[test]
+        fn edge_a_builtin_no_module_exposes_is_listed_with_a_dash() {
+            let repl = Repl::new();
+            let answer = repl.builtins_answer();
+            let bare: Vec<&str> = stdlib::BUILTIN_NAMES
+                .iter()
+                .copied()
+                .filter(|name| {
+                    let name: &str = name;
+                    // Neither a member of a module nor the internal spelling of
+                    // one — `list_map` is `list.map` under its storage name, so it
+                    // is a member of `list` even though no member list holds it.
+                    !stdlib::MODULE_MEMBERS.iter().any(|(module, members)| {
+                        members
+                            .iter()
+                            .any(|member| *member == name || format!("{module}_{member}") == name)
+                    })
+                })
+                .collect();
+
+            assert!(
+                !bare.is_empty(),
+                "the registry has builtins no module exposes, which is the case this \
+                 pins: {answer:?}"
+            );
+            for name in bare {
+                let row = answer
+                    .iter()
+                    .find(|line| line.starts_with(&format!("  {name}  ")))
+                    .unwrap_or_else(|| panic!("{name} is a builtin, so it is listed: {answer:?}"));
+                assert_eq!(
+                    row.split_whitespace().nth(1),
+                    Some("-"),
+                    "a builtin no module exposes says so rather than showing a blank \
+                     column: {row:?}"
+                );
+            }
+
+            // And no row has an empty column at all, which is what the above is
+            // really about: a listing that pads is a listing that can go blank.
+            for row in answer.iter().filter(|line| line.starts_with("  ")) {
+                assert!(
+                    row.split_whitespace().nth(1).is_some(),
+                    "every builtin row names a module or says `-`: {row:?}"
+                );
+            }
+        }
+
+        /// Every module row carries its members field, empty or not.
+        ///
+        /// A module with nothing behind it is the same empty field from the other
+        /// side, and the listing has to hold its shape for one: the column is
+        /// padded on the module name, not on what happens to be in it. No module
+        /// is empty today, so this asserts the shape rather than a case that does
+        /// not exist yet — `modules_without_functions` failing is what will bring
+        /// one, and `MODULES` is closed.
+        #[test]
+        fn edge_a_module_row_keeps_its_members_field_even_when_there_is_none() {
+            let repl = Repl::new();
+            let answer = repl.modules_answer();
+
+            let rows: Vec<&String> = answer
+                .iter()
+                .filter(|line| line.starts_with("  "))
+                .collect();
+            assert_eq!(
+                rows.len(),
+                stdlib::MODULES.len(),
+                "one row per module, so a module cannot be listed twice or missed: \
+                 {answer:?}"
+            );
+            for row in rows {
+                let fields: Vec<&str> = row.split_whitespace().collect();
+                assert!(
+                    fields.len() >= 2 && stdlib::MODULES.contains(&fields[0]),
+                    "a module row is its name and its members field, and the field is \
+                     never blank: {row:?}"
+                );
+            }
+        }
+
+        /// The two listings are the same every time they are asked for.
+        ///
+        /// Registry iteration order reaching output is a defect this project has
+        /// paid for before, and both listings are built from `&'static` slices
+        /// precisely so that they cannot inherit it — which is only worth anything
+        /// while something checks.
+        #[test]
+        fn edge_two_consecutive_listings_are_byte_for_byte_the_same() {
+            let repl = Repl::new();
+
+            assert_eq!(
+                repl.builtins_answer(),
+                repl.builtins_answer(),
+                "`:builtins` is deterministic: two calls, one listing"
+            );
+            assert_eq!(
+                repl.modules_answer(),
+                repl.modules_answer(),
+                "`:modules` is deterministic: two calls, one listing"
+            );
+        }
+
         /// `.sighelp` reads the shape table, and every builtin on it answers.
         #[test]
         fn sighelp_answers_for_every_registered_builtin() {
@@ -4238,8 +4592,10 @@ mod tests {
         use super::super::{MAX_PROMPT_BYTES, REPEAT};
         use super::{Repl, ScriptedSource, SessionEnd};
         use crate::repl::banner;
+        use crate::repl::commands::ReplCommand;
         use crate::repl::editor::Line;
         use crate::repl::style::Style;
+        use crate::value::Value;
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -4574,6 +4930,177 @@ mod tests {
                     .get(0)
                     .is_some_and(|entry| !entry.ends_with(['\n', '\r'])),
                 "…and it is a line without a terminator of its own"
+            );
+        }
+
+        /// A prompt of no width at all is a prompt, and the session still reads and
+        /// runs a program at it.
+        ///
+        /// `:prompt ""` is not a command that failed to be typed — the format is
+        /// empty, which is what was asked for, and the next line is read with no
+        /// gap in front of it. If reading stopped working at an empty prompt, the
+        /// setting would be a trap rather than a choice, so this asserts the
+        /// program still runs and still binds.
+        #[test]
+        fn a_prompt_of_no_width_still_parses_and_still_evaluates() {
+            let mut repl = Repl::new();
+
+            assert!(
+                repl.set_prompt_format(Some("")).is_ok(),
+                "an empty prompt is a prompt, not a refusal"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &["set x to 2 + 3", ":quit"]),
+                vec![String::new(), String::new()],
+                "every line is read at an empty prompt, and the block closes on :quit \
+                 rather than on a prompt"
+            );
+            assert_eq!(
+                repl.lookup("x").cloned(),
+                Some(Value::Number(5.0)),
+                "and the program still ran: 2 + 3 is 5 whatever the prompt says"
+            );
+        }
+
+        /// A prompt of nothing but spaces, and a prompt far wider than a terminal.
+        ///
+        /// Two edges of the same table. Spaces are display text like any other, so
+        /// a format made of them is kept verbatim rather than trimmed — and typing
+        /// them at the command line is *not* a way to set one, because a line whose
+        /// argument is only whitespace is the command with no argument, which puts
+        /// the default back. Both facts are asserted here because either alone is
+        /// half the rule.
+        ///
+        /// A long prompt is under [`MAX_PROMPT_BYTES`] and is therefore accepted;
+        /// what matters is that a prompt wider than the screen is still only
+        /// display, so the line after it is still parsed and run.
+        #[test]
+        fn edge_a_prompt_of_spaces_and_a_prompt_wider_than_a_terminal_are_kept() {
+            let mut repl = Repl::new();
+
+            assert!(
+                repl.set_prompt_format(Some("   ")).is_ok(),
+                "a prompt made of spaces is display text like any other"
+            );
+            assert_eq!(
+                repl.render_prompt_format(),
+                "   ",
+                "and it is kept whole rather than trimmed: the gap before what is typed \
+                 is the prompt"
+            );
+            assert!(
+                ReplCommand::parse(":prompt   ") == ReplCommand::Prompt(None),
+                "typing spaces at the command line is not a way to set one: a \
+                 whitespace-only argument is the command with no argument"
+            );
+            assert!(
+                repl.set_prompt_format(None).is_ok(),
+                "so the way back to a spaces prompt is the session, and :prompt puts \
+                 the default back"
+            );
+
+            let wide = "w".repeat(512);
+            assert!(
+                repl.set_prompt_format(Some(&wide)).is_ok(),
+                "a prompt wider than a terminal is under the size limit and is kept: \
+                 512 bytes of it, against a limit of 1024"
+            );
+            let prompts = prompts_for(&mut repl, &["set x to 1 + 1", ":quit"]);
+            assert_eq!(
+                prompts[0], wide,
+                "the wide prompt is what the next line is read at"
+            );
+            assert_eq!(
+                repl.lookup("x").cloned(),
+                Some(Value::Number(2.0)),
+                "and a prompt too wide to draw does not stop the line being run"
+            );
+        }
+
+        /// A prompt that spells `>>>` is still a prompt: it does not make the
+        /// session read a line as a command, and it does not disturb the numbered
+        /// continuation a block is read at.
+        ///
+        /// The prompt is display text and is passed to the reader as display text;
+        /// if any of it reached the parser, a prompt containing the session's own
+        /// marker would be parsed as the marker, and a block would be read at the
+        /// primary prompt rather than at its numbered continuation.
+        #[test]
+        fn edge_a_prompt_spelling_the_marker_does_not_break_continuation() {
+            let mut repl = Repl::new();
+
+            assert!(
+                repl.handle_command(":prompt >>> "),
+                ":prompt with the default marker in it is a command"
+            );
+            let prompts = prompts_for(
+                &mut repl,
+                &[
+                    "to double(n)",
+                    "return n * 2",
+                    "end",
+                    "set n to double(2)",
+                    ":quit",
+                ],
+            );
+            assert_eq!(prompts[0], ">>> ", "the primary prompt is the user's");
+            assert_eq!(
+                &prompts[1..3],
+                ["..  2 ", "..  3 "],
+                "inside the block the numbered continuation is used, so a prompt \
+                 containing the marker did not turn line 2 into a command"
+            );
+            assert_eq!(
+                prompts[3], ">>> ",
+                "and after the block the primary prompt is back"
+            );
+            assert_eq!(
+                prompts.len(),
+                5,
+                "and one prompt per line, so no line was read twice or not at all: \
+                 {prompts:?}"
+            );
+            assert_eq!(
+                repl.lookup("n").cloned(),
+                Some(Value::Number(4.0)),
+                "the block ran: double(2) is 4"
+            );
+        }
+
+        /// A prompt carrying a line break is refused by name, and the session keeps
+        /// the prompt it had.
+        ///
+        /// A prompt is printed before every line and is one line; a break in it
+        /// pushes whatever the user types onto the row below, where a terminal
+        /// reads it as input. Nothing types one, so the refusal is for the paths
+        /// that assemble a format rather than read it — `!!` and a history file —
+        /// and the promise is that the prompt is *only* ever display: a format the
+        /// session cannot print on one line never becomes the prompt at all.
+        #[test]
+        fn edge_a_prompt_with_a_line_break_is_refused_and_the_prompt_is_kept() {
+            let mut repl = Repl::new();
+            repl.set_prompt_format(Some("rb> "))
+                .expect("a plain prompt is accepted");
+
+            let refused = repl.set_prompt_format(Some("rb> \n"));
+            let message = refused.expect_err("a line break in a prompt is refused");
+            assert!(
+                message.contains("line break"),
+                "the refusal says what is wrong with the format: {message}"
+            );
+            assert!(
+                repl.set_prompt_format(Some("rb> \r>> ")).is_err(),
+                "a carriage return is the same break and is refused the same way"
+            );
+            assert_eq!(
+                repl.render_prompt_format(),
+                "rb> ",
+                "and the prompt the session had is still the prompt"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                "rb> ",
+                "which is what the next line is read at"
             );
         }
 

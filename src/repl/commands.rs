@@ -11,6 +11,13 @@ pub enum ReplCommand {
     Clear,
     History,
     Vars,
+    /// Lists every builtin the registry holds, with the module it belongs to.
+    ///
+    /// Read from the same [`crate::stdlib::BUILTIN_NAMES`] the completer and
+    /// `.sighelp` read, so the three cannot disagree about what the language has.
+    Builtins,
+    /// Lists every module the runtime exposes, with the members each one has.
+    Modules,
     Functions,
     Load(String),
     Save(String),
@@ -185,6 +192,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |_| ReplCommand::Functions,
+    },
+    CommandSpec {
+        names: &["builtins"],
+        description: "List every builtin, with the module it belongs to",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Builtins,
+    },
+    CommandSpec {
+        names: &["modules"],
+        description: "List every module, with the members it has",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Modules,
     },
     CommandSpec {
         names: &["load", "l"],

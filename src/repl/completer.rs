@@ -129,6 +129,27 @@ impl ReplCompleter {
         self.complete_with(word, &[])
     }
 
+    /// Every builtin name this completer offers, module names included.
+    ///
+    /// Read by `:builtins`' own test rather than taken on trust, because the two
+    /// are the same registry read twice and only a comparison can say so. The
+    /// table is a hand-kept *subset* of [`crate::stdlib::BUILTIN_NAMES`], so the
+    /// test asserts the direction that matters: a name completion offers is a name
+    /// `:builtins` lists. Completion may offer less — it never may offer a name
+    /// the listing does not have, which is how a user finds out the REPL cannot
+    /// answer what it just suggested.
+    pub fn offered_builtins(&self) -> &[String] {
+        &self.builtins
+    }
+
+    /// Every module name this completer offers.
+    ///
+    /// Exactly [`crate::stdlib::MODULES`], in that order, which is what makes the
+    /// equality assertion against `:modules` a two-way one.
+    pub fn offered_modules(&self) -> Vec<String> {
+        module_names()
+    }
+
     /// Completes `word` against the language's own vocabulary plus `names`, the
     /// bindings a live session has made — its variables, the functions it
     /// defined and the modules it imported.
