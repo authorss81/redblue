@@ -34,3 +34,5 @@ secrets.txt
 # Test outputs
 *.tmp
 *.log
+# Local build redirect (my machine puts target/ on F); not project config.
+.cargo/
