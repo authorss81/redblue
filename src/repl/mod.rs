@@ -8,10 +8,12 @@ pub mod history;
 pub mod introspect;
 pub mod measure;
 pub mod style;
+pub mod transcript;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -20,14 +22,15 @@ pub use completer::ReplCompleter;
 pub use editor::{Line, LineSource, SessionNames};
 pub use history::ReplHistory;
 pub use introspect::Definition;
+pub use transcript::Transcript;
 
 use crate::analyzer;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
 use crate::error::Error;
 use crate::interpreter::Vm;
-use crate::lexer::{Lexer, TokenKind};
+use crate::lexer::{Lexer, Token, TokenKind};
 use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
-use crate::repl::style::{Paint, Style};
+use crate::repl::style::{strip_escapes, Paint, Style};
 use crate::stdlib;
 use crate::value::{FunctionBody, Value};
 
@@ -501,6 +504,45 @@ pub struct Repl {
     /// typed, and neither knew the other's half: `:inspect x` printed the value
     /// and its kind and nothing about the line three prompts ago that made it.
     definitions: HashMap<String, Definition>,
+    /// Every line this session ran and everything it said, which is what
+    /// `.export` writes and what the terminal is not.
+    ///
+    /// The history is not this and cannot be: it holds every line *typed*,
+    /// commands included, and holds no output at all. Sharing a session meant
+    /// copy-pasting scrollback — prompts, colour and banner included — because
+    /// this was the only record there was.
+    transcript: Transcript,
+    /// What the line just run said, before it is printed.
+    ///
+    /// Held between the VM printing it and the session recording it, because the
+    /// VM prints `say` output itself ([`Vm::run`]) and the session needs the same
+    /// lines as text. Cleared at the start of every line, so a line that failed to
+    /// parse — and so never reached the VM — cannot inherit the last one's output.
+    last_output: Vec<String>,
+    /// The file `:load` or `:format` last succeeded on, which is what `.reload`
+    /// and `.format` act on when they are given no path of their own.
+    ///
+    /// `:load` and `:format`, and *only* those two: they are the commands that
+    /// put a file into the session and leave it there. `:run` names a file too,
+    /// and deliberately does not set this — it builds a VM of its own and drops
+    /// the bindings when it is done (`[`Repl::run_file`]`), so a bare `:reload`
+    /// after a `:run` would re-run the file into bindings the session never
+    /// kept, which is a different command from the one the user just used. A
+    /// `.reload` after a `:load` re-runs into the bindings that load kept, which
+    /// is the same command. `:save` and `:restore` name *sessions*, not sources,
+    /// and are about the history rather than the VM, so they do not set it
+    /// either. Both choices are pinned by tests rather than left to this comment
+    /// (`edge_run_does_not_make_the_file_a_bare_reload_act_on`,
+    /// `edge_reset_forgets_the_file_a_bare_reload_would_act_on`).
+    ///
+    /// The two commands that need it are the ones a user reaches for *after*
+    /// editing a file somewhere else: naming the path again at a prompt is the
+    /// step the loop exists to remove, and `:format` is how a file comes to be
+    /// the one being worked on as often as `:load` is. A file is recorded once it
+    /// has been read and dealt with — a path that could not be read is not a file
+    /// the session holds — so `None` is a session that has named no file it could
+    /// open, and it is reported as such rather than guessed at.
+    last_file: Option<String>,
 }
 
 impl Repl {
@@ -517,6 +559,9 @@ impl Repl {
             style: Style::detect(),
             prompt_format: DEFAULT_PROMPT.to_string(),
             definitions: HashMap::new(),
+            transcript: Transcript::new(),
+            last_output: Vec::new(),
+            last_file: None,
         }
     }
 
@@ -829,6 +874,18 @@ impl Repl {
                 self.restore_session(&path);
                 true
             }
+            ReplCommand::Export(path) => {
+                self.export_session(path.as_deref());
+                true
+            }
+            ReplCommand::Reload(path) => {
+                self.reload_file(path.as_deref());
+                true
+            }
+            ReplCommand::Format(path) => {
+                self.format_file(path.as_deref());
+                true
+            }
             ReplCommand::Reset => {
                 self.reset_session();
                 true
@@ -968,6 +1025,81 @@ impl Repl {
         self.execute_code(&code);
     }
 
+    /// Format-on-enter: the whole program a completed buffer holds is normalised
+    /// by the formatter before the session writes it down.
+    ///
+    /// A block typed on one line — `if x is 3 then say "a" end` — is the shape a
+    /// user types and not the shape the formatter writes, so what `.export` handed
+    /// a reader was in the shape nobody would. The block is normalised at the
+    /// moment the buffer balances rather than line by line, so continuation mode is
+    /// untouched: only a complete program is ever rewritten, and the lines that
+    /// went into it are still the ones on screen.
+    ///
+    /// What it rewrites is what is *written down*, not what is *run* — see
+    /// [`Repl::execute_code`], which is where that decision lives and why the two
+    /// are separate. Normalising here rather than there is deliberate: the guard
+    /// below is the guard, and it reads better next to the sentence that says what
+    /// the normalised text is for.
+    ///
+    /// Only the *layout* may change, and [`Repl::same_tokens`] is what holds that
+    /// line. The formatter rewrites words as well as whitespace — `import files,
+    /// network as net` comes back as `… to net`, and `give` and `back` are one
+    /// kind to the parser — and a session that quietly rewrote the words a user
+    /// typed would write down a program they never ran. A program the formatter
+    /// would change beyond its layout is recorded exactly as it was typed.
+    fn format_on_enter(code: &str) -> String {
+        match crate::formatter::format(code) {
+            Ok(formatted) if formatted.trim_end() != code.trim_end() => {
+                if Self::same_tokens(code, &formatted) {
+                    formatted
+                } else {
+                    code.to_string()
+                }
+            }
+            _ => code.to_string(),
+        }
+    }
+
+    /// Whether two programs are the same program, laid out differently.
+    ///
+    /// Compares the token streams rather than the text: indentation and line
+    /// breaks are what format-on-enter is for, and the words are what it is not
+    /// allowed to touch. `word` is compared beside `kind` because a kind on its
+    /// own does not say which word was typed: the lexer gives `give` and `back`
+    /// the same [`TokenKind::GiveBack`], so a comparison reading only the kind
+    /// would call `give x back` and `give y back` the same program and rewrite
+    /// one into the other. (`as` and `to` are *not* such a pair — they are
+    /// [`TokenKind::As`] and [`TokenKind::To`], one kind each, so the
+    /// `import … as x` rewrite is rejected by the kind comparison on its own.)
+    ///
+    /// [`TokenKind::Newline`] is the one kind left out, because it *is* the line
+    /// break: leaving it in would make every block the formatter unfolded read as
+    /// a different program from the line it was typed on. Nothing else is
+    /// dropped — the [`TokenKind::Eof`] both streams end with is compared, and
+    /// comparing it costs nothing.
+    ///
+    /// A program either side cannot lex is one this cannot compare, and an
+    /// unproven rewrite is not made.
+    fn same_tokens(before: &str, after: &str) -> bool {
+        fn significant(tokens: Vec<Token>) -> Vec<Token> {
+            tokens
+                .into_iter()
+                .filter(|token| token.kind != TokenKind::Newline)
+                .collect()
+        }
+        match (Lexer::tokenize(before), Lexer::tokenize(after)) {
+            (Ok(before), Ok(after)) => {
+                let (before, after) = (significant(before), significant(after));
+                before.len() == after.len()
+                    && before
+                        .iter()
+                        .zip(after.iter())
+                        .all(|(a, b)| a.kind == b.kind && a.word == b.word)
+            }
+            _ => false,
+        }
+    }
+
     /// Forgets everything the session has done: its bindings, its last result,
     /// and any block it is halfway through typing.
     ///
@@ -995,6 +1127,13 @@ impl Repl {
         self.definitions.clear();
         self.multiline_buffer.clear();
         self.in_multiline = false;
+        // The transcript with them: an export of a session that had forgotten the
+        // lines it ran would claim a session that no longer exists ran them.
+        self.transcript.clear();
+        // The loaded file with them: a session that has forgotten everything
+        // else has no file left for a bare `:reload` to name, and the path of a
+        // file this session no longer holds is not one it should act on.
+        self.last_file = None;
         println!("REPL state reset.");
     }
 
@@ -1064,9 +1203,37 @@ impl Repl {
         }
     }
 
+    /// Runs what was typed at the prompt, and writes down what the formatter
+    /// would have written instead.
+    ///
+    /// The two texts are the same program — [`Repl::format_on_enter`] only hands
+    /// back a rewrite [`Repl::same_tokens`] has proved is the same program — and
+    /// they are not interchangeable, because only one of them carries a span the
+    /// user can check. Every span a session reports is computed from the text that
+    /// is handed to [`Repl::execute_code_from`]: the diagnostic
+    /// [`render_error`] draws, the line [`Repl::record_definitions`] files a name
+    /// under, and the source the debugger shows at a stop. `:history` prints the
+    /// lines that were *typed*, so a span computed from the normalised program
+    /// names a line of the formatter's output that is in no document the user has:
+    /// `if 1 is 1 then say undefined_name end`, typed as the session's only line,
+    /// was reported at `<session>:2` against a source line
+    /// `    say undefined_name` — the history line of whatever the user typed
+    /// next, quoting a line they never wrote.
+    ///
+    /// So what *runs* is what was typed, spans and all, and what the transcript
+    /// *records* — the thing `.export` writes and a reader is meant to read as
+    /// the session's source — is the normalised form. That is the whole of
+    /// format-on-enter: it is a change to what a session writes down, and the
+    /// span invariant it would otherwise break is preserved by not letting it near
+    /// what a session runs.
     fn execute_code(&mut self, code: &str) {
         let offset = self.current_line_number().saturating_sub(1);
-        self.execute_code_from(introspect::SESSION_FILE, offset, code);
+        self.execute_code_from(
+            introspect::SESSION_FILE,
+            offset,
+            code,
+            &Self::format_on_enter(code),
+        );
     }
 
     /// The number `:history` prints beside the line being run, which is the line
@@ -1080,13 +1247,24 @@ impl Repl {
     }
 
     /// Runs `code` as the program at `file`, whose first line is `line_offset`
-    /// plus one.
+    /// plus one, and records `recorded` in the transcript as what it ran.
     ///
     /// The offset is what makes one definition format serve two callers: a line
     /// the user typed has no line of its own but has a place in the history, and
     /// a file's line *is* its line.
-    fn execute_code_from(&mut self, file: &str, line_offset: usize, code: &str) {
+    ///
+    /// `code` and `recorded` are the same program and are the same string
+    /// everywhere except the prompt — see [`Repl::execute_code`], which is where
+    /// the two come apart and why the spans are read off `code`.
+    fn execute_code_from(&mut self, file: &str, line_offset: usize, code: &str, recorded: &str) {
+        // A line that fails to parse never reaches the VM, so the output of the
+        // line before it has to be out of the way before the next line starts.
+        self.last_output.clear();
         let result = self.run_code(code);
+        // What the program said, whatever path it left by. Taken before the
+        // `= value` line is added, so the transcript records the program's own
+        // output and the session's echo of it separately, as it prints them.
+        let mut output = std::mem::take(&mut self.last_output);
 
         match result {
             Ok(value) => {
@@ -1095,12 +1273,22 @@ impl Repl {
                     let line = format!("= {}", value);
                     println!("{}", self.style.paint(Paint::Result, &line));
                     self.variables.insert("_".to_string(), value);
+                    output.push(line);
                 }
             }
             Err(e) => {
-                println!("Error: {}", render_error(&self.style, code, file, &e));
+                let rendered = format!("Error: {}", render_error(&self.style, code, file, &e));
+                println!("{}", rendered);
+                output.push(rendered);
             }
         }
+        // Recorded as plain text: what the session painted for a reader is not
+        // what a document should carry, so the escape sequences are taken off
+        // here rather than at the far end of the export.
+        self.transcript.record(
+            recorded.to_string(),
+            output.iter().map(|line| strip_escapes(line)).collect(),
+        );
     }
 
     /// Notes where `code` bound each name, for `.type` and `.which`.
@@ -1264,8 +1452,16 @@ impl Repl {
         self.arm_debugger(source);
         self.vm.take_output();
         let result = self.vm.run(program);
+        // What the program said, kept for the transcript `.export` writes. On the
+        // error path these are the lines the program printed before it failed,
+        // which are printed here rather than by [`Vm::run`] — the VM gives up
+        // before its print loop — and on the success path `Vm::run` has already
+        // printed them and left the buffer, so this is the same lines read once
+        // more. Drained either way: an export that re-printed them would be the
+        // bug this is here to prevent, one line later.
+        self.last_output = self.vm.take_output();
         if result.is_err() {
-            for line in self.vm.take_output() {
+            for line in &self.last_output {
                 println!("{}", line);
             }
         }
@@ -1402,15 +1598,155 @@ impl Repl {
         let source = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(e) => {
-                println!("Could not load file: {}", e);
+                // The path in the failure, as every other path a REPL command
+                // touches reports it: "No such file or directory" alone does not
+                // say which of the paths on the line was at fault, and `.reload`
+                // reports this same failure for a path the user did not type.
+                println!("Could not load '{}': {}", path, e);
                 return;
             }
         };
 
         println!("Loaded {} bytes from '{}'.", source.len(), path);
+        // The path `.reload` and `.format` act on from here on, so a bare one of
+        // them is about this file rather than about a guess.
+        self.last_file = Some(path.to_string());
         // The path, not `<session>`: a name this file binds is reported by
-        // `.which` as `path:line`, which is a place the user can open.
-        self.execute_code_from(path, 0, &source);
+        // `.which` as `path:line`, which is a place the user can open. The file's
+        // own lines are the ones the file has, so it is recorded as it was read.
+        self.execute_code_from(path, 0, &source, &source);
+    }
+
+    /// The file a command given no path acts on, or the complaint to print.
+    ///
+    /// The complaint is the answer rather than a default path: a session that has
+    /// loaded nothing has no file, and reporting "No such file or directory"
+    /// against an invented one would name a path the user never mentioned.
+    fn path_or_last_file(&self, command: &str, path: Option<&str>) -> Result<String, String> {
+        match path {
+            Some(path) => Ok(path.to_string()),
+            None => self.last_file.clone().ok_or_else(|| {
+                format!(
+                    "{command}: this session has loaded no file. Give a path, or \
+                     `:load` one first."
+                )
+            }),
+        }
+    }
+
+    /// Runs a file again in this session — the half of the loop that made
+    /// `.format` worth having.
+    ///
+    /// `:load` already runs a file into the session's own bindings; what it had no
+    /// way to express was doing that a *second* time without retyping a path, so
+    /// a file edited on disk could not be picked up from the prompt that had
+    /// loaded it. Naming no file reloads the one this session last loaded, and
+    /// naming one loads it and runs it the same way, so the session keeps what it
+    /// bound — which is the difference from `:run`.
+    ///
+    /// A failure names the path it happened at, which is [`Repl::load_file`]'s
+    /// message rather than one of its own: the complaint a bare `.reload` makes
+    /// has no path in it *because there is no path*, and inventing a second shape
+    /// of message for the same failure is how the two drift apart.
+    fn reload_file(&mut self, path: Option<&str>) {
+        let path = match self.path_or_last_file(":reload", path) {
+            Ok(path) => path,
+            Err(complaint) => {
+                println!("{}", complaint);
+                return;
+            }
+        };
+        self.load_file(&path);
+    }
+
+    /// Formats a file and writes it back.
+    ///
+    /// `rb format <file>` prints the formatted source and leaves the file as it
+    /// was, so nothing in the language ever *wrote* a formatted file: closing the
+    /// loop meant copying a terminal's output back over the source by hand. The
+    /// write is conditional — a file that is already formatted is reported as
+    /// unchanged and not rewritten, because a command that rewrites a source file
+    /// on every invocation is one nobody trusts twice — and every failure names
+    /// the path it happened at, because "Is a directory" alone does not say which
+    /// of the paths on the line was at fault.
+    ///
+    /// The write is all or nothing ([`Repl::write_source_atomically`]): this is
+    /// the one command in the language that overwrites a source file, so a
+    /// failure has to leave the source whole rather than truncated, and the
+    /// message says so because "It is unchanged" is a claim the caller is
+    /// entitled to check.
+    fn format_file(&mut self, path: Option<&str>) {
+        let path = match self.path_or_last_file(":format", path) {
+            Ok(path) => path,
+            Err(complaint) => {
+                println!("{}", complaint);
+                return;
+            }
+        };
+
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(e) => {
+                println!("Could not read '{}' to format it: {}", path, e);
+                return;
+            }
+        };
+        let formatted = match crate::formatter::format(&source) {
+            Ok(formatted) => formatted,
+            Err(e) => {
+                println!("Could not format '{}': {}", path, e);
+                return;
+            }
+        };
+        // A file this session has just handled is the one `.reload` should act
+        // on, whether or not it needed rewriting: a bare `:reload` that named
+        // nothing after `:format already-formatted.rb` is re-running the file the
+        // user was just looking at, and an empty session must not claim it has
+        // loaded no file after the user named one. Recorded before the
+        // `needs_reformat` early return, because that return is a success — the
+        // file was read, checked and found to be in the shape the formatter
+        // writes — and it is the one path on which the field used to be left
+        // saying what it said before the user named the file.
+        self.last_file = Some(path.clone());
+
+        if !crate::formatter::needs_reformat(&source, &formatted) {
+            println!("'{}' is already formatted.", path);
+            return;
+        }
+
+        if let Err(e) = Self::write_source_atomically(Path::new(&path), &formatted) {
+            println!("Could not format '{}': {}. It is unchanged.", path, e);
+            return;
+        }
+        println!("Formatted '{}'.", path);
+    }
+
+    /// Puts `contents` over `path`, or leaves `path` exactly as it was.
+    ///
+    /// `std::fs::write` is `File::create` — which opens `O_TRUNC` — followed by
+    /// a write. A short write (ENOSPC, EIO, a quota) therefore leaves the user's
+    /// source truncated or half-written, and the message names the path but not
+    /// the damage. `.format` is the first thing in the language that overwrites a
+    /// source file, and `.format` of a file that needs it *always* takes this
+    /// path, so the bytes go to a sibling temporary file in the same directory —
+    /// same directory, because a rename across a filesystem is a copy, and a copy
+    /// is the truncation this is here to avoid — and that file is renamed over the
+    /// target. The target is then one of exactly two things: the source as it
+    /// was, or the source as the formatter writes it. There is no third state in
+    /// which a user's program has been destroyed and reported as a failure.
+    ///
+    /// A rename that fails leaves the temporary behind unless it is taken out of
+    /// the directory, so it is: a failed `.format` does not litter the user's
+    /// folder with a file they never asked for, and the error the caller prints
+    /// can honestly say the original is unchanged.
+    fn write_source_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+        let temporary = path.with_extension("rb.tmp");
+        std::fs::write(&temporary, contents)?;
+        if let Err(e) = std::fs::rename(&temporary, path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Writes the session's history to `path`, one entry per line, in the
@@ -1424,6 +1760,34 @@ impl Repl {
                 self.history.len()
             ),
             Err(e) => println!("Could not save session: {}", e),
+        }
+    }
+
+    /// Writes the session as Markdown — to `path`, or to stdout when given
+    /// nothing — and says where it went.
+    ///
+    /// The other half of `:save`, and a different document. `:save` writes the
+    /// lines the session *typed*, one per line, so a session can be restored; this
+    /// writes what the session *ran* and what it said, so a reader who was not at
+    /// the terminal can read it. Neither is the other: a transcript of inputs and
+    /// no outputs is a log, and the scrollback it replaces carried the prompts and
+    /// the colour codes as well.
+    ///
+    /// The destination is part of what the command means, so the message names it
+    /// and a failure names the path that failed — "No such file or directory"
+    /// alone does not say which of the paths in the command was at fault.
+    fn export_session(&self, path: Option<&str>) {
+        let document = self.transcript.markdown();
+        match path {
+            None => println!("{}", document.trim_end()),
+            Some(path) => match std::fs::write(path, &document) {
+                Ok(()) => println!(
+                    "Exported {} exchange(s) to '{}'.",
+                    self.transcript.len(),
+                    path
+                ),
+                Err(e) => println!("Could not export session to '{}': {}", path, e),
+            },
         }
     }
 
@@ -1496,6 +1860,21 @@ impl Repl {
         (replayed, skipped)
     }
 
+    /// Runs a file in a VM of its own, printing what it says and keeping nothing.
+    ///
+    /// That last part is why this does **not** set [`Repl::last_file`], even
+    /// though it names a path and reads it: `:run` builds a VM, runs, and drops
+    /// the bindings, so the session's own state is exactly as it was before the
+    /// command. A bare `:reload` after a `:run` re-runs the file *into the
+    /// session's bindings* — a different outcome, chosen with one command instead
+    /// of the other — and silently turning a `:run` into a future `:reload`
+    /// would make the two commands differ from each other on the second press.
+    /// So `:load` (keeps the bindings) and `:format` (touches the file the user
+    /// is editing) name the file a bare `.reload` will use, and `:run` does not.
+    ///
+    /// It holds `&self` for the same reason it is not recorded in the
+    /// transcript — see F5 in `phases/phase-060/FINDINGS.md` — so a future change
+    /// that moves either of those is changing this answer too.
     fn run_file(&self, path: &str) {
         match crate::run_file(path) {
             Ok(_) => println!("File '{}' executed successfully.", path),
@@ -3253,6 +3632,107 @@ mod tests {
                 !source.contains("{{") && !source.contains("}}"),
                 "the {:?} example does not promise an interpolation `say` does not do",
                 caption
+            );
+        }
+    }
+
+    /// Format-on-enter is the phase's headline behaviour and the guard on it is
+    /// two lines of comparison, so both are pinned here directly rather than only
+    /// through a session that happens to type the right thing. Each of these is a
+    /// way the guard can be *wrong* with the suite still green: return `code`
+    /// always and the phase's feature is dead; drop the newline handling and
+    /// every unfolded block is rejected; compare only `kind` and `as`/`to` and
+    /// `give`/`back` become the same program.
+    mod format_on_enter {
+        use super::Repl;
+        use crate::lexer::Lexer;
+
+        /// A block typed on one line is the shape the feature exists for, and it
+        /// is unfolded. Nothing else about it is touched: the words are the words
+        /// that were typed.
+        #[test]
+        fn edge_a_one_line_block_is_unfolded() {
+            assert_eq!(
+                Repl::format_on_enter("if x is 3 then say \"a\" end"),
+                "if x is 3 then\n    say \"a\"\nend\n",
+                "a block typed on one line comes back in the shape the formatter \
+                 writes, which is the whole of format-on-enter"
+            );
+        }
+
+        /// The **reject** path, and the reason the guard exists at all. The
+        /// formatter rewrites `import … as x` to `import … to x`: both spellings
+        /// parse and mean the same thing, and it is still a *word* the user did
+        /// not type. A session that rewrote it would export a program the user
+        /// never wrote and — because the transcript is what is exported — a
+        /// reader comparing the two documents would find a difference in an
+        /// `import` that no amount of formatting explains.
+        #[test]
+        fn edge_an_import_the_formatter_would_rewrite_is_returned_byte_identical() {
+            let typed = "import files, network as net";
+            assert_eq!(
+                crate::formatter::format(typed).expect("the formatter accepts it"),
+                "import files, network to net\n",
+                "the premise of this test: the formatter really does rewrite the \
+                 word, so the guard is doing something"
+            );
+            assert_eq!(
+                Repl::format_on_enter(typed),
+                typed,
+                "a rewrite beyond layout is not made: the program is handed back \
+                 exactly as it was typed"
+            );
+        }
+
+        /// The other way the guard says no: a program that cannot be lexed has no
+        /// token stream to compare, so the rewrite is unproven and does not
+        /// happen. `same_tokens` returns `false` for either side that will not
+        /// lex, and `format_on_enter` falls back to the typed text.
+        #[test]
+        fn edge_a_program_that_cannot_lex_is_returned_unchanged() {
+            let typed = "say \"unterminated";
+            assert!(
+                Lexer::tokenize(typed).is_err(),
+                "the premise of this test: the lexer really does refuse it"
+            );
+            assert_eq!(
+                Repl::format_on_enter(typed),
+                typed,
+                "an unproven rewrite is not made, so an unlexable program is \
+                 handed back byte for byte and reports the lexer error it would \
+                 have reported anyway"
+            );
+        }
+
+        /// `kind` on its own is not enough, and `give`/`back` is the pair that shows
+        /// it: the lexer gives both the same [`crate::lexer::TokenKind::GiveBack`]
+        /// and records the word separately for exactly this reason, so a
+        /// comparison reading only the kind would call `give x` and `back x` the
+        /// same program and rewrite one into the other. (`might`/`fail` and
+        /// `mod`/`%` are the other pairs.)
+        ///
+        /// The alias pair is deliberately *not* used here: `as` and `to` are
+        /// different kinds (`TokenKind::As` and `TokenKind::To`), so the guard on
+        /// the `import` above is carried by the kind comparison and this test
+        /// would not notice the word comparison going away. This one does.
+        #[test]
+        fn edge_same_tokens_reads_the_word_and_not_only_the_kind() {
+            assert_eq!(
+                Lexer::tokenize("give x").expect("the premise: it lexes")[0].kind,
+                Lexer::tokenize("back x").expect("the premise: it lexes")[0].kind,
+                "the premise of this test: `give` and `back` really are one kind"
+            );
+            assert!(
+                !Repl::same_tokens("give x", "back x"),
+                "one kind and two words, so only the words say which word was \
+                 written — and reading just the kind would call these the same \
+                 program"
+            );
+            assert!(
+                Repl::same_tokens("set x to 1", "set x to 1\n"),
+                "a line break is the one difference that is not a difference: \
+                 dropping `TokenKind::Newline` is what lets an unfolded block \
+                 match the line it was typed on"
             );
         }
     }

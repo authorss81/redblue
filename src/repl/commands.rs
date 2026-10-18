@@ -20,6 +20,31 @@ pub enum ReplCommand {
     /// The other half of `:save`, which had no half: a saved file could not be
     /// loaded by any REPL path, so the round trip existed only in unit tests.
     Restore(String),
+    /// Writes the session — every line it ran, what each line said, and what
+    /// failed — as Markdown, to `path` or to stdout when given nothing.
+    ///
+    /// `Option` for the same reason [`ReplCommand::Prompt`] is: `.export` with no
+    /// path is not a command missing its argument, it is a command writing to the
+    /// terminal, which is the one destination that needs no name.
+    Export(Option<String>),
+    /// Re-runs a file in *this* session: to `path`, or to the file the session
+    /// last loaded when given nothing.
+    ///
+    /// The command that closes the file loop. `:load` runs a file and its
+    /// bindings become the session's own, but re-running it meant retyping its
+    /// path, so an edit made on disk could not be picked up from the prompt that
+    /// had loaded it. `Option` for the same reason [`ReplCommand::Export`] is:
+    /// `.reload` with no path is not a command missing its argument, it is a
+    /// command naming the file this session is already working on.
+    Reload(Option<String>),
+    /// Formats a file in place: to `path`, or to the file the session last
+    /// loaded when given nothing.
+    ///
+    /// `rb format <file>` prints the formatted source and leaves the file
+    /// exactly as it was, so there was no command in the language that ever
+    /// *wrote* a formatted file — closing the loop meant copying a terminal's
+    /// output back over the source by hand.
+    Format(Option<String>),
     Reset,
     Run(String),
     Debug,
@@ -136,6 +161,15 @@ pub const ALT_SIGIL: char = '.';
 /// the commands inside them, so a typo loaded a file or ended the session.
 pub const SIGILS: [char; 2] = [':', ALT_SIGIL];
 
+/// The placeholder every command whose argument is a file path declares.
+///
+/// It is the whole of what says a command takes a path: `:load`, `:save`,
+/// `:restore`, `:run` and `.export` declare it, `:break <line>` and `:inspect
+/// <name>` declare theirs, and [`ReplCommand::takes_a_file_path`] — which is what
+/// decides where TAB offers a path — asks the table rather than keeping a second
+/// list of five words to fall out of date.
+const FILE_USAGE: &str = "<filename>";
+
 /// Every command, in the order `:help` lists them.
 static COMMAND_TABLE: &[CommandSpec] = &[
     CommandSpec {
@@ -189,7 +223,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     CommandSpec {
         names: &["load", "l"],
         description: "Load and run a file",
-        usage: Some("<filename>"),
+        usage: Some(FILE_USAGE),
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Load(argument.unwrap_or_default()),
@@ -197,7 +231,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     CommandSpec {
         names: &["save", "s"],
         description: "Save current session",
-        usage: Some("<filename>"),
+        usage: Some(FILE_USAGE),
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Save(argument.unwrap_or_default()),
@@ -205,7 +239,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     CommandSpec {
         names: &["restore", "r"],
         description: "Restore a saved session",
-        usage: Some("<filename>"),
+        usage: Some(FILE_USAGE),
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Restore(argument.unwrap_or_default()),
@@ -219,9 +253,33 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |_| ReplCommand::Reset,
     },
     CommandSpec {
+        names: &["export"],
+        description: "Write the session as Markdown; no filename writes it here",
+        usage: Some(FILE_USAGE),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Export(argument),
+    },
+    CommandSpec {
+        names: &["reload"],
+        description: "Run a file again in this session; no filename reloads the last one",
+        usage: Some(FILE_USAGE),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Reload(argument),
+    },
+    CommandSpec {
+        names: &["format", "fmt"],
+        description: "Format a file in place; no filename formats the last one",
+        usage: Some(FILE_USAGE),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Format(argument),
+    },
+    CommandSpec {
         names: &["run"],
         description: "Run a Redblue file",
-        usage: Some("<filename>"),
+        usage: Some(FILE_USAGE),
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Run(argument.unwrap_or_default()),
@@ -525,6 +583,27 @@ impl ReplCommand {
         }
     }
 
+    /// A path with one matching pair of quotes around it, and without them.
+    ///
+    /// TAB quotes a filename that holds a space — see
+    /// [`super::completer::complete_path_in`] — so this is the other half of that:
+    /// without it the completer offers `"my file.rb"`, accepting it puts those quotes
+    /// in the command, and the command then tries to open a file whose name really
+    /// does start and end with a `"` character.
+    ///
+    /// Only a *matching* pair, only around the whole argument, and only for the
+    /// commands whose argument is a path. `:prompt "rb> "` is display text and its
+    /// quotes are part of it, which is the whole reason this is not in
+    /// [`ReplCommand::argument`].
+    fn unquote_path(path: &str) -> String {
+        let quoted = path.len() >= 2 && path.starts_with('"') && path.ends_with('"');
+        if quoted {
+            path[1..path.len() - 1].to_string()
+        } else {
+            path.to_string()
+        }
+    }
+
     pub fn parse(input: &str) -> Self {
         let input = input.trim_start();
 
@@ -540,7 +619,14 @@ impl ReplCommand {
                 } else {
                     input.trim_end()
                 }) {
-                    Some(value) => (spec.build)(Some(value)),
+                    Some(value) => {
+                        let value = if spec.usage == Some(FILE_USAGE) {
+                            Self::unquote_path(&value)
+                        } else {
+                            value
+                        };
+                        (spec.build)(Some(value))
+                    }
                     // An argument the command does not insist on is the command's
                     // own business, not a missing-argument report: `:prompt` reads
                     // "no format given" as "put the default back".
@@ -553,6 +639,26 @@ impl ReplCommand {
             },
             None => ReplCommand::Unknown(command_word(input).to_string()),
         }
+    }
+
+    /// Whether the argument this command carries is a file path.
+    ///
+    /// Asked by the completer before it offers the filesystem: TAB completes a
+    /// path in the argument of a command that takes one, and nowhere else, so
+    /// `say "` is not answered with a directory listing.
+    ///
+    /// Read out of the table by its `<filename>` placeholder rather than kept as a
+    /// list here, for the reason the whole table exists: a second copy of the
+    /// answer is a second answer.
+    ///
+    /// A sigil is required, and by the same first step [`ReplCommand::parse`]
+    /// takes: `load x` with no sigil is not a command at all, it is Redblue source
+    /// calling a function called `load`, and offering it a filesystem would be
+    /// offering paths to a line that cannot take one.
+    pub fn takes_a_file_path(input: &str) -> bool {
+        let input = input.trim_start();
+        input.starts_with(SIGILS)
+            && spec_for(input).is_some_and(|spec| spec.usage == Some(FILE_USAGE))
     }
 
     /// Whether `input` names a command whose argument keeps the whitespace at its
@@ -591,7 +697,10 @@ impl ReplCommand {
             | ReplCommand::Bytecode(value)
             | ReplCommand::Asm(value)
             | ReplCommand::Break(value)
-            | ReplCommand::Delete(value) => Some(value.as_str()),
+            | ReplCommand::Delete(value)
+            | ReplCommand::Export(Some(value))
+            | ReplCommand::Reload(Some(value))
+            | ReplCommand::Format(Some(value)) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
             _ => None,
         }
@@ -634,10 +743,33 @@ mod tests {
             (":f", "Functions", ""),
             (":load some.rb", "Load", "some.rb"),
             (":l some.rb", "Load", "some.rb"),
+            // A quoted path is the form TAB offers for a name holding a space, so
+            // it is the form the command has to open. `:prompt "rb> "` is not a
+            // path and keeps its quotes: they are part of what a prompt is.
+            (":load \"my file.rb\"", "Load", "my file.rb"),
+            (":prompt \"rb> \"", "Prompt", "\"rb> \""),
             (":save out.txt", "Save", "out.txt"),
             (":s out.txt", "Save", "out.txt"),
             (":restore out.txt", "Restore", "out.txt"),
             (":r out.txt", "Restore", "out.txt"),
+            // `.export` is the one command that takes a path and may be given
+            // none: with no argument it writes the session to the terminal, which
+            // is a thing a user asks for rather than a command typed
+            // incompletely. Both shapes are here, and the variant tells them
+            // apart — `Export(None)` is the document on stdout and
+            // `Export(Some(..))` is one written to a file.
+            (":export", "Export", ""),
+            (":export   ", "Export", ""),
+            (":export session.md", "Export", "session.md"),
+            // The two halves of the file loop, each of which may be given no path
+            // and names the file the session last loaded when it is not.
+            (":reload", "Reload", ""),
+            (":reload   ", "Reload", ""),
+            (":reload prog.rb", "Reload", "prog.rb"),
+            (":reload \"my file.rb\"", "Reload", "my file.rb"),
+            (":format", "Format", ""),
+            (":fmt prog.rb", "Format", "prog.rb"),
+            (":format prog.rb", "Format", "prog.rb"),
             (":reset", "Reset", ""),
             (":run prog.rb", "Run", "prog.rb"),
             (":debug", "Debug", ""),
@@ -697,6 +829,14 @@ mod tests {
                 // to the empty argument below, `Prompt(Some(..))` is one that was
                 // given a format and carries it verbatim.
                 ReplCommand::Prompt(Some(value)) => value.as_str(),
+                // `.export` with a path carries it the same way; with none it
+                // carries nothing, which is the empty argument above.
+                ReplCommand::Export(Some(value)) => value.as_str(),
+                // The two path commands of the file loop carry their path the
+                // same way; with none they carry nothing.
+                ReplCommand::Reload(Some(value)) | ReplCommand::Format(Some(value)) => {
+                    value.as_str()
+                }
                 _ => "",
             };
             assert_eq!(
@@ -1144,6 +1284,96 @@ mod tests {
                 "{name:?} is in the table more than once, so two commands answer to it"
             );
             seen.push(name);
+        }
+    }
+    /// `.export` is a command, and it is the one whose argument may be left out.
+    ///
+    /// There was no way to write a session down at all: `.export` was reported as
+    /// the unknown word `export`, so sharing a session meant copy-pasting terminal
+    /// scrollback — prompts, colour and banner included — which is not a thing
+    /// that can be pasted into an issue and read.
+    ///
+    /// Both shapes matter and the variant is what tells them apart: `.export` with
+    /// a path writes a file, `.export` with none writes to the terminal. A command
+    /// that reported the second as a missing argument would push every user to a
+    /// temporary file for the one case that needs none.
+    #[test]
+    fn edge_export_is_a_command_whose_path_may_be_left_out() {
+        assert_eq!(
+            ReplCommand::parse(".export session.md"),
+            ReplCommand::Export(Some("session.md".to_string())),
+            "`.export` with a path is a document written to that path"
+        );
+        assert_eq!(
+            ReplCommand::parse(":export"),
+            ReplCommand::Export(None),
+            "and with no path it is a document written to the terminal, which is \
+             why the argument may be left out"
+        );
+        assert_eq!(
+            ReplCommand::parse(".export   "),
+            ReplCommand::Export(None),
+            "whitespace after the command word is not a path"
+        );
+        assert!(
+            ReplCommand::names().contains(&":export".to_string()),
+            "and it is offered by the completer, which offers the parser's table"
+        );
+    }
+
+    /// The commands whose argument is a path, and only those.
+    ///
+    /// This is the gate on where TAB offers the filesystem. It is read out of the
+    /// table by its filename placeholder, so a sixth command that takes a path
+    /// says so by declaring the same thing — and a command that takes something
+    /// else cannot be completed as though it took a path.
+    #[test]
+    fn edge_only_the_commands_that_take_a_path_take_a_path() {
+        let taking: Vec<String> = ReplCommand::bare_names()
+            .into_iter()
+            .filter(|name| ReplCommand::takes_a_file_path(&format!(":{name}")))
+            .collect();
+
+        assert_eq!(
+            taking,
+            vec![
+                "export".to_string(),
+                "fmt".to_string(),
+                "format".to_string(),
+                "l".to_string(),
+                "load".to_string(),
+                "r".to_string(),
+                "reload".to_string(),
+                "restore".to_string(),
+                "run".to_string(),
+                "s".to_string(),
+                "save".to_string(),
+            ],
+            "the seven commands that take a filename, aliases included, and \
+             nothing else: a command taking a line number or an expression is not \
+             one whose argument can be completed as a path"
+        );
+
+        for (command, takes) in [
+            (":load x", true),
+            (".save x", true),
+            (":run x", true),
+            (":restore x", true),
+            (":export x", true),
+            (":reload x", true),
+            (":format x", true),
+            (":break 3", false),
+            (":inspect x", false),
+            (":ast 1 + 1", false),
+            (":prompt rb> ", false),
+            ("say \"x", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                ReplCommand::takes_a_file_path(command),
+                takes,
+                "{command:?} is or is not a command whose argument is a path"
+            );
         }
     }
 }
