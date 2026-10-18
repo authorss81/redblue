@@ -4,22 +4,28 @@
 //! particular is the kind of statement a future change to reference handling
 //! would falsify, and nothing else would notice.
 //!
-//! Everything here uses `Arc::strong_count` rather than a global drop counter,
+//! Everything here reads a strong count rather than a global drop counter,
 //! deliberately: cargo runs tests on parallel threads, so a shared atomic is a
-//! flake waiting to happen. Strong counts are per-value and thread-safe.
+//! flake waiting to happen. Strong counts are per-value.
+//!
+//! The counts on a [`Value`] use `Arc`, because `Shared<T>` *is* `std::sync::Arc<T>`
+//! (`src/value.rs`) and MEMORY.md pins that. The counts on the toy cycle below
+//! use `Rc`: `Node` is this test's own scaffolding, never crosses a thread, and
+//! `Rc` counts the same strong references with the same numbers.
 
 use redblue::Value;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A node that can point at another node — the shape a Redblue list-of-lists
 /// would take if the language had reference types.
 struct Node {
-    peer: RefCell<Option<Arc<Node>>>,
+    peer: RefCell<Option<Rc<Node>>>,
 }
 
-fn node() -> Arc<Node> {
-    Arc::new(Node {
+fn node() -> Rc<Node> {
+    Rc::new(Node {
         peer: RefCell::new(None),
     })
 }
@@ -48,11 +54,11 @@ fn a_reference_cycle_never_reaches_zero() {
     // Exactly the shape MEMORY.md says leaks.
     let a = node();
     let b = node();
-    *a.peer.borrow_mut() = Some(Arc::clone(&b));
-    *b.peer.borrow_mut() = Some(Arc::clone(&a));
+    *a.peer.borrow_mut() = Some(Rc::clone(&b));
+    *b.peer.borrow_mut() = Some(Rc::clone(&a));
 
-    assert_eq!(Arc::strong_count(&a), 2, "held by the test and by b");
-    assert_eq!(Arc::strong_count(&b), 2);
+    assert_eq!(Rc::strong_count(&a), 2, "held by the test and by b");
+    assert_eq!(Rc::strong_count(&b), 2);
 
     drop(a);
     drop(b);
@@ -72,11 +78,11 @@ fn a_weak_handle_is_what_would_be_required_and_redblue_has_none() {
     // Demonstrates the standard remedy exists in Rust and is absent here.
     let a = node();
     let b = node();
-    *a.peer.borrow_mut() = Some(Arc::clone(&b));
-    *b.peer.borrow_mut() = Some(Arc::clone(&a));
+    *a.peer.borrow_mut() = Some(Rc::clone(&b));
+    *b.peer.borrow_mut() = Some(Rc::clone(&a));
 
-    let weak_a = Arc::downgrade(&a);
-    let weak_b = Arc::downgrade(&b);
+    let weak_a = Rc::downgrade(&a);
+    let weak_b = Rc::downgrade(&b);
     drop(a);
     drop(b);
 

@@ -476,6 +476,60 @@ fn edge_a_comparison_after_a_worded_index_is_the_same_program_on_both_engines() 
     assert!(run.succeeded, "stage 2 refused the program: {}", run.stderr);
 }
 
+/// **`this` is the operand of a worded index and of a worded length on both
+/// compilers, and both write the same file.**
+///
+/// `is_operand_start` (`bootstrap/compiler.rb`) did not list `this`, and neither
+/// did `Parser::kind_starts_operand` (`src/parser.rs`), so both engines made the
+/// same mistake and every byte-identity test here stayed green: `length of this`
+/// was refused by both, and `this.xs at this` was split into two statements by
+/// both. A test comparing two wrong answers cannot see it — the operand table
+/// itself has to be pinned, which `tests/this_operand_test.rs` does by reading
+/// both tables as text. This is the other half: the bytes.
+///
+/// Every program below was written to fail on the pre-fix stage 2. The first two
+/// were refused by it; the last three are the controls, which never consult the
+/// table and were byte-identical before the fix and must stay so.
+#[test]
+fn edge_this_is_a_worded_operand_on_both_compilers() {
+    // The worded length: stage 1 refused `length of this` with `Expected
+    // something to measure after 'length of'`, and stage 2 refused it too.
+    assert_identical(
+        "edge_this_as_a_worded_length_operand",
+        "object B\n    has xs default [10, 20, 30]\n    to can size()\n        say length of this\n    end\nend\nsay B.size()\n",
+    );
+
+    // The worded index: pre-fix this was `give back` + `this.xs` + `at` + `this`,
+    // four statements where the writer wrote one, and stage 1's analyzer reported
+    // `Unknown variable 'at'; did you mean 'as'?`.
+    assert_identical(
+        "edge_this_as_a_worded_index_operand",
+        "object B\n    has xs default [10, 20, 30]\n    to can pick()\n        say this.xs at this\n    end\nend\nsay B.pick()\n",
+    );
+
+    // Control: the same operand behind a `give back`, which is the spelling
+    // SPEC.md documents for a method. Byte-identical before the fix — the value
+    // is what the *body* parses to, and the split was behind it either way.
+    assert_identical(
+        "edge_this_as_a_give_back_value",
+        "object B\n    has xs default [10, 20, 30]\n    to can first()\n        give back this.xs at 0\n    end\nend\nsay B.first()\n",
+    );
+
+    // Control: `this.xs at 0`, the numeric operand. If this ever differs, the
+    // change reached something wider than the operand table.
+    assert_identical(
+        "edge_this_xs_at_a_number_still_compiles_the_same",
+        "object B\n    has xs default [10, 20, 30]\n    to can first()\n        say this.xs at 0\n    end\nend\nsay B.first()\n",
+    );
+
+    // Control: `this` free of any worded form, which is what every object program
+    // already did and what the corpus objects family is made of.
+    assert_identical(
+        "edge_this_as_an_ordinary_primary",
+        "object B\n    has xs default [10, 20, 30]\nend\nsay B.xs at 0\nsay length(B.xs)\n",
+    );
+}
+
 /// **A construct stage 2 cannot compile is refused, never silently mistranslated.
 ///
 /// `might fail <call>` is compiled by stage 1 and refused by stage 2 — a
