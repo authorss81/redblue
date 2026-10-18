@@ -1,5 +1,54 @@
-// Minimal replacement for an invalid placeholder that introduced a syntax error
-// TODO: replace with real assertions that exercise the intended behavior.
+//! Audit: every commit in this repository's `HEAD` history whose subject marks
+//! unreviewed work is on a written acknowledgement list, with a reason.
+//!
+//! # Why this file exists, and what it corrects
+//!
+//! `tests/checkpoint_ancestry_test.rs` (phase-078) already audits the
+//! `rbops: phase-NNN checkpoint` commits on `main`. It selects that one subject
+//! shape. The pipeline also writes `resume phase-NNN: adopt preserved work`,
+//! and that shape reached `main` **fifteen** times carrying work the reviewer
+//! never saw. Nothing measured it, so the count could only grow silently.
+//! That is the gap this file measures.
+//!
+//! # The supersession phase-083 attempted, and why it is wrong
+//!
+//! Phase-083 claimed that phase-078's finding was false: that
+//! `git log --oneline main | grep -c checkpoint` prints `0` and that none of
+//! `7fdea15`, `074c95e`, `563a351`, `286fccd`, `e97983a`, `d664d3c`,
+//! `2179034`, `255816e` is an ancestor of `main`.
+//!
+//! **Both claims are artefacts of a shallow clone.** Every one of them is
+//! measured against a history that had not been completed:
+//!
+//! | measurement | shallow clone | complete history |
+//! |---|---|---|
+//! | `git log --oneline main \| grep -c checkpoint` | `1` | `7` |
+//! | `git merge-base --is-ancestor <any of the eight> HEAD` | false | **true** |
+//! | `git log --format=%s main \| grep -ci 'resume phase-'` | `11` | `15` |
+//!
+//! So phase-078's finding reproduces exactly, on all eight commits, once the
+//! history is whole — and phase-083's premise for superseding it was false.
+//! [`edge_phase_078_commits_are_ancestors_of_head_not_absent`] pins the
+//! measured truth in the only direction that can be true, and
+//! [`ensure_full_history`] is why: a shallow clone is completed before
+//! anything here is measured, never measured short. A truncated log reads as a
+//! clean one, and this is the second time that has cost this repository an
+//! audit.
+//!
+//! # The tolerance
+//!
+//! Published history is deliberately **not** rewritten. No rebase, no
+//! filter-branch, no reset, no amend, no force-push — AGENTS.md §1.6 forbids
+//! it, and erasing the evidence would make this audit green by destroying the
+//! thing it exists to record. Every entry in [`ACKNOWLEDGED`] says, in its own
+//! words, that the commit carries unreviewed code and was deliberately kept.
+//!
+//! # What makes the list data rather than a comment
+//!
+//! [`validate_acknowledgements`] rejects an entry with no full lowercase object
+//! id, with an empty reason, or duplicated. [`scan`] additionally reports
+//! entries that name a commit this history does not contain, so a list of SHAs
+//! that satisfy nothing cannot pass by looking thorough.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -42,7 +91,8 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("977218301bd20726a43a15d7fa64344939ee097f", "resume phase-058: adopt preserved work. Carries unreviewed code (+612/-30, 6 files, +507 lines under src/ - the REPL compiler-view commands `.bytecode`/`.asm`: src/repl/bytecode_view.rs is new, plus the compact disassembler `disasm::render_compact` exported from src/bytecode/mod.rs, the two command rows in src/repl/commands.rs, the dispatch and printers in src/repl/mod.rs, and this phase's tests). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("96beaa93fb2193239f4e8409189720002b3e94bc", "resume phase-087: adopt WIP checkpoint. Carries unreviewed code (+546/-104, 23 files, +30/-28 under src/ - `length` over text counts characters instead of UTF-8 bytes at src/runtime.rs, and the unreachable second `length` arm is deleted from src/stdlib.rs, along with the corpus and test expectations that recorded the byte count). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("bf9ffc3370e97436d193f146102e8c4d69d1fade", "resume phase-089: adopt WIP checkpoint. Carries unreviewed code (+1068/-15, 11 files, +381/-15 under src/ - the typed failure value and `catch error of <Type>`: src/failure.rs is new (`FailureKind`, the closed list, `value_of`), plus the `of <Type>` parse and `catch_kind` in src/parser.rs, the decline path and the bound failure record in both src/interpreter.rs and src/bytecode/vm.rs, the kind in the catch block's parameter list in src/bytecode/codegen.rs, and `catch error of <Kind> <name>` in src/formatter.rs). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
-    ("99037af1ca1a26d1bfa398797487e7dded92d689", "resume phase-110: adopt preserved work. Carries unreviewed code (+1091/-0, 7 files, +12 under src/parser.rs - `TokenKind::This` added to the worded-operand table in `Parser::kind_starts_operand` so `this` is an operand of `at` and `of`; the same one-token addition in `is_operand_start` at bootstrap/compiler.rb so the stage-2 compiler agrees; plus this phase's 17 tests in tests/this_operand_test.rs and tests/bootstrap_selfhost_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The abandoned attempt it replaces (8a5587da638eb103bfd5a5a8f04a6498002dec28) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
+    ("19f3f2829d17037683cb09bbf34ea7d79e3f2a9e", "resume phase-110: adopt WIP checkpoint. Carries unreviewed code (+1611/-13, 8 files, +12 under src/parser.rs - `TokenKind::This` added to the worded-operand table in `Parser::kind_starts_operand` so `this` is an operand of `at` and `of`; the same one-token addition in `is_operand_start` at bootstrap/compiler.rb so the stage-2 compiler agrees; plus 17 tests in tests/this_operand_test.rs and tests/bootstrap_selfhost_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. It also restores the real body of tests/unreviewed_work_ack_test.rs, which commit 222aa83 had replaced with a one-line placeholder."),
+    ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries unreviewed code (+1/-1, 1 file, all under tests/ - one data row added to the acknowledgement list below). Deliberately not rewritten; kept so HEAD's ancestry stays intact. Selected only because the selector is a case-insensitive substring test on `resume phase-` and the subject is *about* resume commits."),
     ("b48189aa679e0f4df60f5cd5d10a4894d77bc3f7", "resume phase-059: adopt preserved work. Carries unreviewed code (+1321/-85, 22 files, +897/-61 under src/ - REPL failures are now drawn through `Error::render` against the session buffer: `render_error`, `paint_diagnostic` and `is_caret_line` in src/repl/mod.rs, the cell-accurate drawing (`char_cells`, `display_width`, `render_single`, `render_range`) and its two bounds (`MAX_DRAWN_CELLS`, `MAX_DRAWN_LINES`) in src/error.rs, `Expr::Variable(String, Span)` in src/parser.rs and `name_position` in src/analyzer.rs so the caret lands on the name rather than the statement, plus 16 tests and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The earlier phase-059 resume it replaces (8389c5a) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
@@ -429,6 +479,451 @@ fn audit_head() -> Result<(Scan, String), String> {
 /// Every unreviewed-work commit in HEAD's ancestry is acknowledged, with a
 /// reason, and the list names nothing this history does not contain.
 #[test]
-fn unreviewed_work_ack() {
-    assert!(true, "placeholder test should be replaced with real assertions");
+fn unreviewed_work_in_head_history_is_acknowledged() {
+    let (scan, log) = audit_head().expect("HEAD's history must be readable and acknowledged");
+    println!("{}", describe(&scan, ACKNOWLEDGED));
+
+    assert!(
+        scan.unreviewed.is_empty(),
+        "{} commit(s) in HEAD's history carry unreviewed work and are not on the \
+         acknowledgement list in this file: {}. Add each one with a reason saying what \
+         it carries and that it was deliberately not rewritten.",
+        scan.unreviewed.len(),
+        scan.unreviewed.join(" | ")
+    );
+
+    assert!(
+        scan.stale.is_empty(),
+        "{} entry/entries name a commit HEAD's history does not contain: {}. An entry \
+         pointing at nothing is how the list decays into a comment — a typo, an \
+         abbreviated sha, or a rewrite that AGENTS.md forbids would all parse and \
+         satisfy nothing.",
+        scan.stale.len(),
+        scan.stale.join(", ")
+    );
+
+    for (sha, subject) in MEASURED {
+        let sha: &str = sha;
+        assert!(
+            log.lines()
+                .any(|line| line.starts_with(&format!("{sha}\t"))),
+            "{sha} ({subject}) was measured on this history but `git log HEAD` does not \
+             report it; re-measure before trusting this file"
+        );
+        let entry = ACKNOWLEDGED
+            .iter()
+            .find(|entry| entry.0 == sha)
+            .unwrap_or_else(|| panic!("{sha} is in HEAD's history but is not acknowledged"));
+        assert!(
+            !entry.1.trim().is_empty(),
+            "{sha} is acknowledged without saying why"
+        );
+    }
+}
+
+/// Phase-078's eight commits are **ancestors** of HEAD, not absent.
+///
+/// Phase-083's evidence asserted the opposite and proposed superseding
+/// phase-078 on that basis. The assertion was measured on a shallow clone, where
+/// `git log` cannot see far enough back and `merge-base --is-ancestor` answers
+/// `false` for a commit it has not been given. On a complete history all eight
+/// are ancestors, so phase-078's finding stands and this file extends it rather
+/// than replacing it. Asserting the truth here is what stops the stale claim
+/// from being re-derived a third time.
+#[test]
+fn edge_phase_078_commits_are_ancestors_of_head_not_absent() {
+    ensure_full_history().expect("this history must be complete before it is measured");
+
+    let eight = [
+        (
+            "7fdea15f13a0cc2021c5cc69a65a126879e2d554",
+            "rbops: phase-019 checkpoint",
+        ),
+        (
+            "074c95e24fbf8b1101219bc1f10c520d8b7acd24",
+            "rbops: phase-019 checkpoint",
+        ),
+        (
+            "563a3513c7fba2d2a39e759632415fef4bb60eb5",
+            "rbops: phase-018 checkpoint",
+        ),
+        (
+            "286fccd537d963cb9ad1bcbb051bce45d537a683",
+            "rbops: phase-016 checkpoint",
+        ),
+        ("e97983a", "resume-path merge"),
+        ("d664d3c", "resume-path merge"),
+        ("2179034", "resume-path merge"),
+        ("255816e", "resume-path merge"),
+    ];
+
+    for (sha, what) in eight {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_root())
+            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+            .output()
+            .expect("`git merge-base` must run");
+        assert!(
+            out.status.success(),
+            "{sha} ({what}) is NOT an ancestor of HEAD on a complete history. Phase-083 \
+             claimed this for all eight of phase-078's commits and wanted to supersede \
+             phase-078 on it; if this has genuinely become true the history was rewritten, \
+             which AGENTS.md forbids — find out what happened before updating this test."
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The selector and the refusals, on fixtures.
+// ---------------------------------------------------------------------------
+
+const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SHA_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+/// An `edge_*` case: a log with no unreviewed commits at all.
+///
+/// An empty log and a one-reviewed-commit log both select nothing. Every
+/// acknowledgement the file carries is stale against a log that contains none of
+/// them — which is the point of pairing the two halves: a list cannot be shown
+/// to be doing work by a log that has none.
+#[test]
+fn edge_empty_log_selects_nothing() {
+    let result = scan("", ACKNOWLEDGED).expect("an empty log is well formed");
+    assert_eq!(result.selected, 0);
+    assert_eq!(result.unreviewed, Vec::<String>::new());
+    assert_eq!(result.stale.len(), ACKNOWLEDGED.len());
+    assert!(
+        result
+            .stale
+            .iter()
+            .all(|sha| ACKNOWLEDGED.iter().any(|(entry, _)| entry == sha)),
+        "against an empty log every entry is stale, and none of them is anything else"
+    );
+
+    // Singleton: one reviewed commit and nothing else.
+    let one = format!("{SHA_A}\tci: add cargo fmt --check\n");
+    let result = scan(&one, ACKNOWLEDGED).expect("a one-commit log is well formed");
+    assert_eq!(result.selected, 0);
+    assert!(result.unreviewed.is_empty());
+    assert_eq!(result.stale.len(), ACKNOWLEDGED.len());
+
+    // Boundary: the last line of a log with no trailing newline is still read.
+    let no_newline = format!("{SHA_A}\tci: add cargo fmt --check");
+    assert_eq!(
+        scan(&no_newline, ACKNOWLEDGED)
+            .expect("a log without a trailing newline is well formed")
+            .selected,
+        0
+    );
+    let no_newline_unreviewed = SHA_C.to_string() + "\tresume phase-083: adopt preserved work";
+    assert_eq!(
+        scan(&no_newline_unreviewed, ACKNOWLEDGED)
+            .expect("a log without a trailing newline is well formed")
+            .selected,
+        1,
+        "the final line must not be dropped for want of a newline"
+    );
+}
+
+/// An `edge_*` case: the only unreviewed commit is acknowledged.
+#[test]
+fn edge_a_fully_acknowledged_log_is_clean() {
+    let ack = [(
+        SHA_A,
+        "resume phase-020: carries unreviewed code, deliberately not rewritten",
+    )];
+    let log = format!(
+        "{SHA_A}\tresume phase-020: adopt preserved work\n\
+         {SHA_B}\tci: add cargo fmt --check\n\
+         {SHA_C}\trbops: phase-016 checkpoint 1791156132\n"
+    );
+    let result = scan(&log, &ack).expect("a well-formed fixture log");
+
+    assert_eq!(result.selected, 2, "both unreviewed subjects are selected");
+    assert_eq!(
+        result.unreviewed,
+        vec![format!("{SHA_C}\trbops: phase-016 checkpoint 1791156132")],
+        "the checkpoint commit has no entry, so it is the one reported"
+    );
+    assert_eq!(result.stale, Vec::<String>::new());
+}
+
+/// An `edge_*` case: exactly one unacknowledged commit is reported by name.
+#[test]
+fn edge_exactly_one_unacknowledged_commit_is_reported() {
+    let ack = [(
+        SHA_A,
+        "acknowledged, carries unreviewed code, deliberately not rewritten",
+    )];
+    let log = format!(
+        "{SHA_A}\tresume phase-021: adopt preserved work\n\
+         {SHA_B}\tresume phase-022: adopt preserved work\n\
+         {SHA_C}\tci: add cargo fmt --check\n"
+    );
+    let result = scan(&log, &ack).expect("a well-formed fixture log");
+
+    assert_eq!(result.selected, 2);
+    assert_eq!(
+        result.unreviewed,
+        vec![format!("{SHA_B}\tresume phase-022: adopt preserved work")],
+        "exactly the one unacknowledged commit, with its subject, nothing more"
+    );
+    assert!(
+        describe(&result, &ack).contains(SHA_B),
+        "the summary must name the offending sha so the failure is actionable"
+    );
+}
+
+/// An `edge_*` case: a subject that merely *contains* `checkpoint` inside a
+/// longer phrase is still unreviewed work.
+///
+/// An exact-prefix selector would wave this through, and phase-078's own audit
+/// commit — `rbops: phase-078 audit the checkpoint ancestry of main instead of
+/// commenting on it` — is a real one in this history.
+#[test]
+fn edge_a_longer_phrase_containing_checkpoint_is_still_selected() {
+    assert!(is_unreviewed_subject(
+        "rbops: phase-078 audit the checkpoint ancestry of main instead of commenting on it"
+    ));
+    assert!(is_unreviewed_subject(
+        "ci: allow the checkpoint job to finish before merge"
+    ));
+    assert!(is_unreviewed_subject(
+        "RESUME PHASE-083: adopt preserved work"
+    ));
+    assert!(is_unreviewed_subject(
+        "resume phase-083: adopt preserved work"
+    ));
+
+    for no in [
+        "ci: add cargo fmt --check",
+        "rbops: phase-081 (2026-10-14T09:16:08Z)",
+        "resume phase: adopt preserved work",
+        "resumephase-083: adopt preserved work",
+        "",
+    ] {
+        assert!(!is_unreviewed_subject(no), "should not select: {no:?}");
+    }
+}
+
+/// An `edge_*` case: a two-tab-delimited line is malformed, not a commit.
+///
+/// `split_once` would read it as `<sha>` plus a subject with a tab in it, and
+/// `--format=%H%x09%s` never produces that. It is rejected so a subject cannot
+/// be laundered out of the selector's view.
+#[test]
+fn edge_a_two_tab_delimited_log_line_is_malformed() {
+    let log = format!("{SHA_A}\tresume phase-083: adopt preserved work\textra\n");
+    let err = scan(&log, ACKNOWLEDGED).expect_err("a three-field line is not a log line");
+    assert!(err.contains("log line 1"), "got: {err}");
+    assert!(err.contains("3 tab-separated field"), "got: {err}");
+
+    // The neighbouring well-formed forms still parse.
+    assert!(parse_log_line(&format!("{SHA_A}\tsubject"), 1).is_ok());
+    assert!(parse_log_line(&format!("{SHA_A}\tsubject with \"quotes\" and |pipes|"), 1).is_ok());
+}
+
+/// An `edge_*` case: blank, tab-only, truncated and non-hex lines are refused
+/// rather than skipped.
+#[test]
+fn edge_malformed_log_lines_are_refused_rather_than_skipped() {
+    // An empty log is a log with zero commits, not a malformed one. It is
+    // distinct from a blank line *between* commits, which is refused.
+    assert!(
+        scan("", ACKNOWLEDGED)
+            .expect("an empty log is well formed")
+            .selected
+            == 0
+    );
+
+    for (line, needle) in [
+        ("   \n", "blank"),
+        (
+            &format!("{SHA_A}\tci: ok\n   \n{SHA_B}\tci: ok\n"),
+            "log line 2 is blank",
+        ),
+        ("\tno-sha-here", "not a full lowercase object id"),
+        (&format!("{SHA_A}no-tab"), "expected exactly 2"),
+        (
+            "7fdea15f13a0cc2021c5cc69a65a126879e2d55\tsubject",
+            "not a full lowercase object id",
+        ),
+        (
+            "7FDEA15F13A0CC2021C5CC69A65A126879E2D554\tsubject",
+            "not a full lowercase object id",
+        ),
+        (
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\tsubject",
+            "not a full lowercase object id",
+        ),
+        (&format!("{SHA_A}\t"), "empty subject"),
+    ] {
+        let err =
+            scan(line, ACKNOWLEDGED).expect_err("a malformed line must be refused, not skipped");
+        assert!(
+            err.contains(needle),
+            "for {line:?} expected an error mentioning {needle:?}, got: {err}"
+        );
+    }
+}
+
+/// Unicode, escapes and control characters in a subject.
+#[test]
+fn edge_unicode_and_escaped_subjects_are_handled_deterministically() {
+    // Non-ASCII in a subject, including RTL and combining marks, changes nothing
+    // about whether it is selected.
+    for subject in [
+        "resume phase-083: adopt preserved work \u{1F680}",
+        "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627} resume phase-083",
+        "e\u{0301}l\u{0301}ve checkpoint",
+        "resume phase-083: adopt \u{0631}\"quotes\" and \\\\backslash",
+    ] {
+        let log = format!("{SHA_A}\t{subject}\n");
+        let result = scan(&log, ACKNOWLEDGED).expect("a well-formed fixture log");
+        assert_eq!(
+            result.selected, 1,
+            "should select exactly once and not panic: {subject:?}"
+        );
+        assert_eq!(result.unreviewed.len(), 1, "subject: {subject:?}");
+        assert!(
+            result.unreviewed[0].contains(subject),
+            "the subject must survive the round trip: {subject:?}"
+        );
+    }
+
+    // Case folding does not have to be ASCII-only to be right here, and must not
+    // be locale-dependent when it is not.
+    assert!(is_unreviewed_subject("CHECKPOINT"));
+    assert!(is_unreviewed_subject("ReSuMe PhAsE-083"));
+    assert!(!is_unreviewed_subject("check point"));
+}
+
+/// The acknowledgement list is data: ids, reasons and uniqueness.
+#[test]
+fn edge_an_acknowledgement_list_must_be_data() {
+    assert!(
+        validate_acknowledgements(&[(SHA_A, "carries unreviewed code, not rewritten")]).is_ok(),
+        "premise: a full lowercase sha with a reason is accepted"
+    );
+
+    for (entry, needle) in [
+        (("7fdea15", "reason"), "not a full lowercase object id"),
+        (
+            (SHA_A.to_uppercase().as_str(), "reason"),
+            "not a full lowercase object id",
+        ),
+        ((SHA_A, "   "), "records no reason"),
+        ((SHA_A, ""), "records no reason"),
+    ] {
+        let err = validate_acknowledgements(&[entry])
+            .expect_err("an acknowledgement that is not data must be refused");
+        assert!(
+            err.contains(needle),
+            "for {entry:?} expected {needle:?}, got: {err}"
+        );
+    }
+
+    let duplicated = validate_acknowledgements(&[(SHA_A, "first"), (SHA_A, "second")])
+        .expect_err("the same commit twice is ambiguous");
+    assert!(duplicated.contains("twice"), "got: {duplicated}");
+}
+
+/// An acknowledgement that names a commit the log does not contain is reported.
+#[test]
+fn edge_an_acknowledgement_that_points_at_nothing_is_stale() {
+    let ack = [
+        (SHA_A, "carries unreviewed code, deliberately not rewritten"),
+        (SHA_C, "carries unreviewed code, deliberately not rewritten"),
+    ];
+    let log = format!("{SHA_A}\tresume phase-083: adopt preserved work\n");
+    let result =
+        scan(&log, &ack).expect("well-formed data pointing at the wrong commit is the problem");
+
+    assert!(
+        result.unreviewed.is_empty(),
+        "premise: every commit here is acknowledged"
+    );
+    assert_eq!(
+        result.stale,
+        vec![SHA_C.to_string()],
+        "an entry naming a commit this history does not contain is stale, not harmless"
+    );
+}
+
+/// A shallow history is refused, never audited short.
+#[test]
+fn edge_a_shallow_history_is_refused_rather_than_audited_clean() {
+    // The depth-1 log: one commit, no unreviewed work, and a selector that
+    // reports a spotless history. This is the false pass the refusal exists for.
+    let truncated = format!("{SHA_A}\tci: add cargo fmt --check\n");
+    let laundered = scan(&truncated, ACKNOWLEDGED).expect("a short log still parses");
+    assert!(
+        laundered.unreviewed.is_empty() && laundered.selected == 0,
+        "premise: measured as-is, a depth-1 log audits as a clean history"
+    );
+
+    let err = check_history(true, Ok(truncated))
+        .expect_err("a shallow history must be refused, not audited");
+    assert!(
+        err.contains("shallow"),
+        "the refusal must say why, got: {err}"
+    );
+    assert!(
+        err.contains("truncated"),
+        "and what refusing protects against, got: {err}"
+    );
+
+    // A complete history is passed through untouched.
+    let complete = format!("{SHA_A}\tci: add cargo fmt --check\n");
+    let passed =
+        check_history(false, Ok(complete.clone())).expect("a complete history is auditable");
+    assert_eq!(passed, complete);
+
+    // And an unreadable history is still an error, not an empty log.
+    let err = check_history(false, Err("not a git repository".into()))
+        .expect_err("an unreadable history is not an empty one");
+    assert!(err.contains("not a git repository"), "got: {err}");
+}
+
+/// The measured list covers every commit this phase's finding named, and the two
+/// a complete history revealed that a shallow one could not see.
+#[test]
+fn edge_measured_list_names_every_audit_measured_commit() {
+    let named_by_phase_083 = [
+        "09dd1020443e166a765991815c75c024a5ccd45b",
+        "985e4456ce8d526d292e5157a449542bcdba5259",
+        "96c3c17955d3b5233806c311110646ebe088fbd7",
+        "89104562f7a2f5390906f565e4c6124c7eb09d4b",
+        "1ee5aba2f2474d2e929710d3c4acd0c7855f8432",
+        "b6d633b79417a55dce37869f7aef19d3171f904c",
+        "dff04f67c8f2ed0b7bab3039ceb38df384fd739d",
+        "4c45731b08b8f347beac5f46506456065aebc33e",
+        "11b9fe2fc7d790068459f9554affa26f15af6a45",
+        "2804ab87720c5c54811429664682e2f3f5d761f3",
+        "861080d981d668aefa02f9d82641b2a8058fe6f6",
+        "25e9b68d7529459ac0638f208d3e153681f80e32",
+        "825193a4a06afdc22a8d73644961defa33d4d630",
+    ];
+    let visible_only_on_a_complete_history = [
+        "10f97506426673e83119b6e0ec21f6754bddf75c",
+        "e26659d49097210a2d1ab8abecc97d61698afebe",
+    ];
+
+    for sha in named_by_phase_083
+        .iter()
+        .chain(visible_only_on_a_complete_history.iter())
+    {
+        assert!(
+            ACKNOWLEDGED.iter().any(|(entry, _)| entry == sha),
+            "{sha} carries unreviewed work in HEAD's history and must be acknowledged here"
+        );
+    }
+
+    validate_acknowledgements(ACKNOWLEDGED).expect("the checked-in list must be data");
+    assert!(
+        !ACKNOWLEDGED.is_empty(),
+        "an empty list acknowledges nothing and would let every one of these pass silently"
+    );
 }
