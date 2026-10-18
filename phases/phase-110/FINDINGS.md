@@ -64,24 +64,82 @@ MEMORY.md line 26 claims it, so it must stay `Arc`.
 type inside an `Arc` trips this lint. `grep -rn "Arc::new" tests/` should be
 audited for scaffolding that never crosses a thread; those are `Rc` candidates.
 
-### 3b. `unreviewed_work_in_head_history_is_acknowledged` failed on HEAD itself
+### 3b. `tests/unreviewed_work_ack_test.rs` had been replaced by a placeholder
 
-The test selects every commit in HEAD's history whose subject matches the
-unreviewed-work selector and requires a written acknowledgement for each. The
-phase's own resume commit `99037af` was unacknowledged, and the entry then in the
-file named `8a5587d`, which is *not* an ancestor of HEAD and was therefore stale
-— and a stale entry is a failure too. `cargo test --all-targets` was therefore
-failing on this test at the start of the run.
+The state on arrival at this run was worse than "one test failing":
 
-Fixed by repointing the entry at `99037af` with a reason, the same data repair
-phase-089 and earlier phases made. One data row, no assertion touched.
+* `cargo fmt --all -- --check` **failed** — the last function in the file was not
+  rustfmt-shaped.
+* The file's entire 927-line audit (13 tests) had been collapsed. Commit
+  `222aa83` ("tests: replace invalid placeholder causing compile failure") wrote
+  the whole file as `<the file content updated>` and then as a seven-line stub
+  whose only test was
+  `assert!(true, "placeholder test should be replaced with real assertions")`.
+  The resume checkpoint `19f3f28` restored the module doc, the helpers and the
+  data lists, but left that placeholder as the body of
+  `unreviewed_work_in_head_history_is_acknowledged`. So the audit compiled, ran
+  1 test, asserted nothing, and the file's fmt was wrong.
+
+That is the "tests that cannot fail" shape AGENTS.md §5 tells the reviewer to
+hunt for, and it was sitting in the test tree in the phase that was supposed to
+be reviewing its own work.
+
+Fixed by restoring the file from `e008f0b` (the last commit where it was whole),
+which brings back the module doc, all 13 tests and their assertions, and removes
+the placeholder. Two data rows were then needed in `ACKNOWLEDGED`, both because
+they are commits the selector genuinely selects on HEAD and neither is named:
+
+* `19f3f28` — this phase's own resume checkpoint.
+* `c95062e` — "ack: resume phase-088: add resume commit to ACKNOWLEDGED", which
+  is selected only because the selector is a case-insensitive substring test on
+  `resume phase-` and the subject is *about* resume commits. Same shape as the
+  `3fbf7396` entry that already carries a note saying so.
+
+`99037af`, which the previous attempt acknowledged, is **not** an ancestor of
+HEAD (`git merge-base --is-ancestor 99037af HEAD` → false), so that entry was
+stale and was not carried forward. One data row added, one removed, no assertion
+touched.
+
+**Candidate finding for the auditor:** a commit subject ending in
+"causing compile failure", or a test file reduced to `assert!(true, ...)`, is the
+signature of a process that broke the tree and then silenced the alarm. `git log
+--oneline -- tests/` should be audited for commits that *shrink* a test file by
+more than a few lines without a matching production change.
 
 **This is structurally self-perpetuating:** every resume checkpoint commit lands
-unacknowledged the moment it is committed, so the gate fails on the very next
-run unless the phase that adopted it repoints the list. Worth a phase that makes
-the acknowledgement part of the checkpoint commit itself.
+unacknowledged the moment it is committed, so the gate fails on the very next run
+unless the phase that adopts it repoints the list. Worth a phase that makes the
+acknowledgement part of the checkpoint commit itself.
 
-## 4. Gate 4 was not run
+## 4. `tests/preflight_assert_failure.rs` is a test that cannot fail
+
+`tests/preflight_assert_failure.rs` (commit `3d85942`, "ci: add minimal
+`#[should_panic]` test to satisfy rbops preflight (phase-090)") is the whole file:
+
+```rust
+#[test]
+#[should_panic]
+fn rbops_gate_requires_a_test_that_asserts_failure() {
+    panic!("intentional panic to satisfy rbops preflight detection");
+}
+```
+
+Its own comments say it "exists solely to satisfy rbops' preflight heuristic".
+It exercises no Redblue code, asserts nothing about the language, and passes
+whatever the product does. It is exactly what AGENTS.md §3.1 calls a non-test and
+§5 tells the reviewer to look for.
+
+It is **not** deleted here: it is not this phase's concern (AGENTS.md §1.7), it
+was in HEAD before this phase started, and deleting a green test would itself be
+invisible to the gate. Recorded for the auditor.
+
+Note that phase-110 does **not** depend on it. The phase's own
+"asserts a failure is produced" requirement is met by
+`edge_length_of_this_and_length_of_nothing_are_refused_by_the_same_rule` and
+`edge_this_as_the_operand_of_at_is_an_index_with_a_bad_index`, which assert on
+`Err` values the product actually returned.
+
+## 5. Gate 4 was not run
 
 `./rbops/verify.sh phase-110` — `rbops/` is not in this checkout and this agent
 is confined to the working tree, so the script could not be executed. The first
