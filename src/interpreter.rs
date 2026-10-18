@@ -1060,6 +1060,18 @@ impl Vm {
         self.qualified_members.contains(name)
     }
 
+    /// Binds `name` to `value` in the globals a program reads, for a caller that
+    /// owns the session rather than the program.
+    ///
+    /// The REPL's `$_` is the one name a program reads that no line of source
+    /// declares: the session binds it after a line returns something, and the
+    /// next line reaches it as any other global. It goes into [`Vm::globals`]
+    /// rather than into a side table consulted on a miss, so a read costs what
+    /// every other read costs and a miss is still a miss.
+    pub fn seed_binding(&mut self, name: &str, value: Value) {
+        self.globals.insert(name.to_string(), value);
+    }
+
     /// The value bound to `name`, wherever this VM keeps it.
     ///
     /// What a REPL's `:inspect` and `:vars` read, and neither of them could

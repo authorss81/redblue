@@ -20,6 +20,16 @@ pub enum ReplCommand {
     /// The other half of `:save`, which had no half: a saved file could not be
     /// loaded by any REPL path, so the round trip existed only in unit tests.
     Restore(String),
+    /// The name this session is to be known by, or the name it already has.
+    ///
+    /// `Option` for the same reason [`ReplCommand::Prompt`] is: `:session` on
+    /// its own is not a command missing its argument, it is the one that says
+    /// what this session is called.
+    Session(Option<String>),
+    /// Lists the names sessions have been given this week.
+    Sessions,
+    /// Prints the value of the last line that returned one — what `$_` reads.
+    Last,
     Reset,
     Run(String),
     Debug,
@@ -209,6 +219,30 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Restore(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["session"],
+        description: "Name this session, or report the name it has",
+        usage: Some("<name>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Session(argument),
+    },
+    CommandSpec {
+        names: &["sessions"],
+        description: "List the names sessions have been given this week",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Sessions,
+    },
+    CommandSpec {
+        names: &["last"],
+        description: "Print the value of the last line that returned one",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Last,
     },
     CommandSpec {
         names: &["reset"],
@@ -593,6 +627,7 @@ impl ReplCommand {
             | ReplCommand::Break(value)
             | ReplCommand::Delete(value) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
+            ReplCommand::Session(Some(value)) => Some(value.as_str()),
             _ => None,
         }
     }
@@ -742,6 +777,43 @@ mod tests {
                 Some(argument),
                 "{:?} carries what was asked about",
                 input
+            );
+        }
+    }
+
+    /// `:session <name>`, `:sessions` and `:last`: the two words that name a
+    /// session and the one that prints the last value.
+    ///
+    /// In this table rather than in the alias table above because what matters
+    /// is not that `:sessions` reaches a command — it shares a prefix with
+    /// `:session`, and a parser that matched prefixes would take `:sessio` for
+    /// either of them — but that the name after `:session` arrives whole, a
+    /// sigil and spaces included, because a session name is not a file path and
+    /// is not parsed as one.
+    #[test]
+    fn parse_reads_a_session_name_whole_and_tells_it_from_a_listing() {
+        for (input, expected, argument) in [
+            (
+                ":session chasing a null pointer",
+                "Session",
+                Some("chasing a null pointer"),
+            ),
+            (":session :quit", "Session", Some(":quit")),
+            (":session", "Session", None),
+            (":sessions", "Sessions", None),
+            (":last", "Last", None),
+        ] {
+            let parsed = ReplCommand::parse(input);
+            let variant = format!("{:?}", parsed);
+            let variant = variant.split(['(', ' ']).next().unwrap_or_default();
+            assert_eq!(
+                variant, expected,
+                "parsing {input:?} should give {expected}"
+            );
+            assert_eq!(
+                parsed.argument_text(),
+                argument,
+                "parsing {input:?} should carry {argument:?}"
             );
         }
     }
