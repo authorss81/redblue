@@ -1555,3 +1555,171 @@ fn edge_export_of_a_session_that_has_run_nothing_says_so() {
         "and the document says why it is empty:\n{document}"
     );
 }
+
+/// A document is somewhere else — an issue, another machine, a renderer that is
+/// not this terminal — so text that only this terminal renders is exactly the
+/// text that must survive being written down.
+///
+/// Four kinds, because they fail in different ways: an emoji outside the BMP
+/// (four bytes in UTF-8, one `char`), a combining acute accent (a `char` that
+/// renders onto the one before it and cannot be matched alone), right-to-left
+/// Arabic, and CJK. Stripping escapes walks characters rather than bytes, so a
+/// byte-indexed strip would leave a mangled character behind; this is the test
+/// that says it does not.
+#[test]
+fn edge_a_session_of_unicode_exports_and_reads_back_unchanged() {
+    // `e` + U+0301 is not `é`: one is two characters, the other one. If the
+    // export rebuilt either of them, the two would stop comparing equal.
+    let cases: Vec<(String, String)> = vec![
+        (
+            "say \"h\u{1F389} world\"".to_string(),
+            "h\u{1F389} world".to_string(),
+        ),
+        // `e` + U+0301 is two characters, not the one character `é` is: an
+        // export that rebuilt either of them would stop comparing equal to this.
+        ("say \"e\u{301}llo\"".to_string(), "e\u{301}llo".to_string()),
+        (
+            "say \"\u{645}\u{631}\u{62D}\u{628}\u{627}\"".to_string(),
+            "\u{645}\u{631}\u{62D}\u{628}\u{627}".to_string(),
+        ),
+        (
+            "say \"\u{8A66}\u{9A57}\"".to_string(),
+            "\u{8A66}\u{9A57}".to_string(),
+        ),
+    ];
+
+    let script = cases
+        .iter()
+        .map(|(input, _)| format!("{input}\n"))
+        .collect::<String>();
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n{script}.export\n:quit\n"
+    ));
+
+    s.assert_exited_ok();
+    let document = exported_document(&s.stdout);
+
+    assert_eq!(
+        document.matches(EXPORT_FENCE).count(),
+        cases.len(),
+        "one fence per line, whatever the lines contain:\n{document}"
+    );
+    for (input, said) in &cases {
+        assert!(
+            document.contains(&format!("{EXPORT_FENCE}\n{input}\n```")),
+            "the input is in the document exactly as it was typed:\n{document}"
+        );
+        // A newline is added because the session prints the document with its last
+        // line unterminated (`trim_end` before `println!`), and the *last* output
+        // is the one case a trailing-newline assertion would otherwise miss.
+        let padded = format!("{document}\n");
+        assert!(
+            padded.contains(&format!("\n{said}\n")),
+            "and what it said survives it unchanged, bytes and all:\n{document}"
+        );
+    }
+
+    // And the fences read back as the lines that were typed: a stripped byte or a
+    // dropped combining mark would still have produced a document, just a wrong one.
+    let blocks = fenced_blocks(&plain(&document));
+    let inputs: Vec<&str> = blocks
+        .iter()
+        .filter(|(language, _)| language == "redblue")
+        .map(|(_, body)| body.as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        cases
+            .iter()
+            .map(|(input, _)| input.as_str())
+            .collect::<Vec<_>>(),
+        "every line reads back as itself:\n{document}"
+    );
+}
+
+/// Exporting twice to one path leaves one session in the file, not two.
+///
+/// The file is a document, not a log: a reader who opens it should see the
+/// session that was exported, whole. `fs::write` replaces, which is what makes a
+/// re-export of a longer session correct rather than a document with two headings
+/// and two of everything.
+#[test]
+fn edge_export_to_the_same_path_twice_replaces_the_document() {
+    let path = scratch_path("exported-twice", "md");
+
+    let first = session(&format!(
+        "say \"first\"\n.export {}\n:quit\n",
+        path.display()
+    ));
+    first
+        .assert_exited_ok()
+        .assert_stdout_contains("Exported 1 exchange(s)");
+    let after_first = std::fs::read_to_string(&path).expect("the first export is readable");
+
+    let second = session(&format!(
+        "say \"second\"\nsay \"third\"\n.export {}\n:quit\n",
+        path.display()
+    ));
+    second
+        .assert_exited_ok()
+        .assert_stdout_contains("Exported 2 exchange(s)");
+    let after_second = std::fs::read_to_string(&path).expect("the second export is readable");
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        !after_second.contains("first"),
+        "the second export replaced the first rather than being appended to it \
+         (the first wrote {after_first:?})"
+    );
+    assert_eq!(
+        after_second.matches(EXPORT_FENCE).count(),
+        2,
+        "the file holds the two exchanges of the second session and no more:\n{after_second}"
+    );
+    for said in ["second", "third"] {
+        assert!(
+            after_second.contains(said),
+            "{said:?} is in the second session:\n{after_second}"
+        );
+    }
+}
+
+/// A file typed on Windows arrives with CRLF, and the export must not carry the
+/// carriage returns into a document that reads them back.
+///
+/// The line a session runs is recorded verbatim, so the `\r` is in the input until
+/// something removes it — and a document whose every line ends `\r\n` renders as
+/// one long line in half the Markdown viewers, and reads back as source with
+/// stray characters no lexer would accept.
+#[test]
+fn edge_a_session_that_ran_a_crlf_file_exports_and_reads_back() {
+    let path = scratch_path("crlf-program", "rb");
+    std::fs::write(&path, "say \"one\"\r\nsay \"two\"\r\n").expect("the crlf program is writable");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:load {}\n.export\n:quit\n",
+        path.display()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("one")
+        .assert_stdout_contains("two");
+    let document = exported_document(&s.stdout);
+
+    assert!(
+        !document.contains('\r'),
+        "no carriage return reaches the document, so it renders as the lines it is \
+         and not as one line:\n{document:?}"
+    );
+    let blocks = fenced_blocks(&plain(&document));
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|(language, _)| language == "redblue")
+            .map(|(_, body)| body.as_str())
+            .collect::<Vec<_>>(),
+        vec!["say \"one\"\nsay \"two\""],
+        "the file is one block however its lines were terminated:\n{document}"
+    );
+}

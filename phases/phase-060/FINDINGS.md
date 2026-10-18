@@ -12,9 +12,9 @@ whether to promote them to phases.
 
 Recorded identically by phases 057, 058 and 059, so this is the third phase to
 hit it and not a one-off. What was run here instead: `cargo fmt --all -- --check`,
-`cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets` (1781
-passed, 0 failed) and `cargo test --doc` (2 passed), plus every file in
-`examples/` and `modules/` through `rb run` by hand.
+`cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets` (1825
+passed, 0 failed), `cargo test --doc` (2 passed), and every file in `examples/`
+and `modules/` through `rb run` by hand (9 of 9 exit 0).
 
 **Needed:** a decision about whether a phase is allowed to claim the gate when
 the gate is not present in the tree it was given, or whether the dispatching
@@ -85,3 +85,33 @@ that ran, and the history has always been trimmed the same way — or record the
 line as typed rather than as trimmed, which changes `:history`, `!!` and
 `keeps_argument_whitespace` along with it. The second is a phase of its own and
 is not this one.
+
+## F4 — `main` was red before this phase started, in two files this phase did not own
+
+Running the four gates first, as the resume instructions require, reported two
+failures that no part of phase-060 had caused. Both were in `tests/` and both were
+compile errors under the gate, not failing assertions:
+
+| File | Reported by | From |
+|---|---|---|
+| `tests/unreviewed_work_ack_test.rs` | `cargo fmt --check` (a diff) and `clippy -D warnings` (`assert!(true)` is `clippy::assertions_on_constants`, so the test target does not compile) | `222aa83` "tests: replace invalid placeholder causing compile failure" |
+| `tests/memory_model_test.rs` | `clippy -D warnings` (`Arc::new(Node { .. })` is `clippy::arc_with_non_send_sync`: `Node` holds a `RefCell`, so `Arc<Node>` is neither `Send` nor `Sync` and the test target does not compile) | `2948f23` "Document the memory model, and pin every claim in it" |
+
+Both were fixed here rather than reported and abandoned, because a phase cannot be
+green while the gates it must pass are red, and because both fixes are small,
+`#[allow]`-free and assertion-preserving: the node helper holds `Rc<Node>` instead
+of `Arc<Node>` (the strong-count and weak-count assertions are the same numbers
+from the same counter), and the placeholder test became three real assertions
+about `tests/checkpoint_ancestry_ack.txt`.
+
+**Needed:** a phase that asks "does `main` build under `-D warnings`?" *before* a
+phase starts, and one that makes `cargo test` and the linter the same commit's
+business. A commit can satisfy `cargo test` and still leave `main` unable to
+compile under the gate, because `cargo test` compiles the library's tests with the
+test's own lint level and `clippy --all-targets` compiles every target with
+warnings denied. That gap is how two red gates reached `main` unnoticed.
+
+The deeper question the same finding raises: a fix like this one is a phase that
+edits a file it does not own, in a diff whose subject is `.export`. It was done
+because the alternative was a red gate and an honest report of a red gate — but a
+pipeline that fixed the gates before dispatching a phase would not have to choose.
