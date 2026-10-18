@@ -232,6 +232,12 @@ impl Completer for SessionCompleter {
         let Some((start, word)) = Self::word_at(line, pos) else {
             return Ok((0, Vec::new()));
         };
+        // A filename first, where the line is the argument of a command that
+        // takes one: the vocabulary has no business answering `:load sr`, and
+        // this is the only place the filesystem is read at all.
+        if let Some((path_start, candidates)) = self.completer.complete_path(line, pos) {
+            return Ok((path_start, candidates));
+        }
         Ok((
             start,
             self.completer.complete_with(word, &self.names.borrow()),
@@ -868,5 +874,73 @@ mod tests {
             6,
             "a class added without a theme colour would be a class nobody can draw"
         );
+    }
+
+    /// TAB in the argument of a command that takes a path offers paths, not the
+    /// language's vocabulary.
+    ///
+    /// `:load` and its three siblings are the only arguments that are filenames, and
+    /// this is the only place TAB offers one. Before this the completer read the word
+    /// under the cursor and matched it against keywords, builtins, commands and the
+    /// session's names — so `:load sr` was completed against `:save` and `say` and
+    /// `skip`, and every filename in the argument had to be typed whole and blind.
+    #[test]
+    fn edge_tab_after_a_command_that_takes_a_path_offers_paths() {
+        let source = editor(live_names(&[]), None);
+
+        // The three prefixes of the DoD: nothing typed, one letter, and one that
+        // narrows. All three are answered from the directory this checkout has,
+        // which is why the assertion is `contains` rather than an exact list: the
+        // point is that a *directory* is in the answer at all.
+        for line in [":load ", ":load s", ":load sr"] {
+            let offered = source.complete(line, line.len());
+            assert!(
+                offered.contains(&"src/".to_string()),
+                "{line:?} offers the directory this checkout has, offered \
+                 {offered:?} instead"
+            );
+        }
+        assert!(
+            source
+                .complete(":load ", 6)
+                .contains(&"Cargo.toml".to_string()),
+            "and an empty fragment offers the files as well as the directories, \
+             which is what the whole of the directory means"
+        );
+        assert!(
+            source.complete(":load sr", 8).len() < 20,
+            "narrowing to `sr` narrows the answer rather than re-offering the \
+             whole vocabulary: {:?}",
+            source.complete(":load sr", 8)
+        );
+
+        let offered = source.complete(":load s", 7);
+        assert!(
+            offered.contains(&"src/".to_string()),
+            "a directory is offered with the separator that means it is one: {offered:?}"
+        );
+        assert!(
+            !offered.contains(&"say".to_string()) && !offered.contains(&":save".to_string()),
+            "and the language's vocabulary is not offered in a filename argument, \
+         which is what it used to offer: {offered:?}"
+        );
+    }
+
+    /// The gate the other side of: a path is offered in a command that takes one and
+    /// nowhere else. `say "a` is a string, and a reader typing a word into one is not
+    /// asking for a directory listing — the failure mode of a completer that offered
+    /// paths everywhere.
+    #[test]
+    fn edge_tab_outside_a_file_argument_offers_no_path() {
+        let source = editor(live_names(&[]), None);
+
+        for line in ["say \"a", "set x to \"s", "sr", "say \"src/"] {
+            assert_eq!(
+                source.complete(line, line.len()),
+                Vec::<String>::new(),
+                "{line:?} is not the argument of a command that takes a path, so \
+             nothing is offered for it"
+            );
+        }
     }
 }
