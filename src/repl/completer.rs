@@ -221,7 +221,9 @@ impl Default for ReplCompleter {
 /// completer that offered paths anywhere would answer `say "` with a directory
 /// listing, so the question is asked of the *command* first and answered by
 /// [`commands::ReplCommand::takes_a_file_path`], which is the parser's own table
-/// rather than a list of the four commands that happen to take a path today.
+/// rather than a list of the commands that happen to take a path today. The two
+/// path commands of the file loop, `.reload` and `.format`, are offered paths
+/// because they declare the same `<filename>` placeholder. Nothing else is.
 ///
 /// A cursor the caller put inside a character is `None` rather than a panic:
 /// `line.get(..pos)` is what says so.

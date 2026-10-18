@@ -36,7 +36,7 @@ there is a short list of those in the tree, all verified on this tree:
 - `import MathUtils` names a *module*, not a path, and the parser rejects a
   quoted one: `printf 'import "modules/MathUtils"\n' > t.rb && rb run t.rb`
   answers `ParserError: Expected module name`. The module then resolves through
-  `module_search_paths` (`src/interpreter.rs:516`) — `modules/<name>.rb`,
+  `module_search_paths` (`src/interpreter.rs:517`) — `modules/<name>.rb`,
   `./modules/<name>`, `<name>` — so what a user types is a *name*, and the names
   that resolve are the `.rb` files in `modules/` (2 in this checkout:
   `MathUtils.rb`, `SuiteKit.rb`). TAB could offer those; it cannot do it today,
@@ -56,7 +56,7 @@ second predicate over expressions and over the module table would reuse it.
 ## F3 — An exported block has no indentation, because the line that ran had none
 
 The read loop trims each line before running it: `let input = line.trim();` at
-`src/repl/mod.rs:667`, and `execute_line(&expanded)` is handed that trimmed
+`src/repl/mod.rs:679`, and `execute_line(&expanded)` is handed that trimmed
 text. So a block typed with indentation
 
 ```
@@ -66,7 +66,7 @@ end
 ```
 
 is recorded — in the transcript *and* in the history, which takes `line.trim_start()`
-at `:676` — as
+at `:688` — as
 
 ```
 repeat 2 times
@@ -118,9 +118,9 @@ pipeline that fixed the gates before dispatching a phase would not have to choos
 
 ## F5 — `:run` is not in the export, and `:load` is
 
-`src/repl/mod.rs:1452` — `load_file(&mut self, …)` calls `execute_code_from`, which
+`src/repl/mod.rs:1584` — `load_file(&mut self, …)` calls `execute_code_from`, which
 records the exchange, so `:load notes.rb` appears in `.export` with what it said.
-`src/repl/mod.rs:1578` — `run_file(&self, …)` does not: it builds a VM of its own,
+`src/repl/mod.rs:1816` — `run_file(&self, …)` does not: it builds a VM of its own,
 runs the file in it, prints, and drops the bindings. There is nowhere for the
 transcript to go, because the method holds `&self` and `Transcript::record` needs
 `&mut self`.
@@ -160,3 +160,44 @@ matching, and keep the quotes in the replacement.
 It was not done here because the phase's diff was already a fix to the round trip,
 and a second behaviour change in the same file is how a bug-fix phase turns into a
 refactor.
+
+## F7 — The formatter rewrites words, not only layout — and `rb format` never writes
+
+Found while implementing format-on-enter, both verified on this tree:
+
+```
+$ printf 'import files, network as net\n' > i.rb && rb format i.rb
+import files, network to net
+```
+
+The formatter normalises `import … as x` to `… to x`. Both spellings parse
+(`src/parser.rs:654` accepts `TokenKind::As | TokenKind::To`), so the rewrite is
+meaning-preserving — but it is a *word* change, and it is the reason
+`Repl::format_on_enter` refuses any rewrite whose token stream differs
+(`src/repl/mod.rs`). `Repl::same_tokens` is the guard, and this phase added it
+along with format-on-enter; `repl::tests::format_on_enter::
+edge_an_import_the_formatter_would_rewrite_is_returned_byte_identical` is what
+fails if it goes. (Note that `as` and `to` are *different* kinds — `TokenKind::As`
+and `TokenKind::To` — so this particular rewrite is caught by the kind
+comparison. The `word` comparison beside it is carried by the pairs that share
+one kind: `give`/`back`, `might`/`fail`, `mod`/`%`.)
+
+It is also a documentation question: `docs/GRAMMAR.md` should say which spelling
+the formatter emits, because a `.rb` file that comes back from `.format` is not
+the file that went in.
+
+**Needed:** a docs line, not code. The parser and formatter agree; only the spec
+is silent.
+
+## F8 — `rb format <file>` still prints and does not write
+
+This phase added `:format`, which writes. `rb format <file>` (src/lib.rs:248) was
+left exactly as it was: it prints the formatted source to stdout and leaves the
+file alone. That is the correct Unix behaviour for a filter and the wrong
+behaviour for the one command whose name is the file's name, but changing it
+would be a breaking CLI change and this phase owns the REPL.
+
+**Needed:** a decision — `rb format -w <file>` beside the existing form, or a
+documented note that `rb format` is a filter and `:format` is the one that
+writes. Recorded rather than changed: a CLI break smuggled into a REPL phase is
+the kind of diff a reviewer has to unpick.

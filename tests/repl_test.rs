@@ -5,6 +5,7 @@
 //! `src/repl/mod.rs` rather than by running it. These tests pipe a session into
 //! the real binary and assert on what it printed and on how it exited.
 
+use redblue::repl::ReplCompleter;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -426,7 +427,11 @@ fn edge_load_of_a_missing_path_reports_the_failure() {
     let s = session(&format!(":load {}\n:quit\n", missing.display()));
 
     s.assert_exited_ok()
-        .assert_stdout_contains("Could not load file:")
+        // The path as well as the OS error: "No such file or directory" alone does
+        // not say which of the paths on the line was at fault. (Weaker than it
+        // looks: this used to assert the pathless `Could not load file:`, and
+        // `load_file` grew the path when `.reload` needed one too.)
+        .assert_stdout_contains(&format!("Could not load '{}'", missing.display()))
         // The OS half of the message differs by platform ("No such file ..."
         // vs "The system cannot find ..."), but both carry the os-error tag.
         // Assert that tag, not Unix phrasing.
@@ -1708,5 +1713,666 @@ fn edge_a_session_that_ran_a_crlf_file_exports_and_reads_back() {
             .collect::<Vec<_>>(),
         vec!["say \"one\"\nsay \"two\""],
         "the file is one block however its lines were terminated:\n{document}"
+    );
+}
+
+// --- The file loop: format a file, reload it, run what is in it ------------
+//
+// `rb format <file>` prints the formatted source to stdout and leaves the file
+// exactly as it was, and the REPL had no `.reload` and no `.format` at all, so
+// there was no way to close the loop from a session: you formatted a file by
+// hand, retyped its path to `:load` it, and could not re-run what you had just
+// written without going back to the same line again.
+
+/// A REPL session that reads, rewrites and re-reads one file, driving the whole
+/// loop from inside the session so nothing depends on timing between the child
+/// process and the test.
+fn file_loop_session(path: &Path, body: &str) -> Session {
+    let quoted = path.display();
+    session(&format!(
+        ":prompt {EXPORT_PROMPT}\nfiles.write(\"{quoted}\", \"say \\\"before\\\"\")\n\
+         :load {quoted}\nfiles.write(\"{quoted}\", \"say \\\"after\\\"\")\n{body}:quit\n"
+    ))
+}
+
+/// `.format` writes the file it was given. Before it existed `rb format` printed
+/// the formatted source and left the file on disk byte-for-byte as it was, so
+/// the only way to get a formatted file was to copy the output out of a terminal
+/// and paste it back over the original.
+#[test]
+fn edge_format_rewrites_the_file_it_was_given() {
+    let path = scratch_file(
+        "format-writes",
+        "if 1 is greater than 0 then\nsay \"a\"\nend\n",
+    );
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:quit\n",
+        path.display()
+    ));
+
+    s.assert_exited_ok().assert_stdout_contains("Formatted");
+    let on_disk = std::fs::read_to_string(&path).expect("the formatted file should be readable");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        on_disk, "if 1 > 0 then\n    say \"a\"\nend\n",
+        "the file on disk is the formatter's output, not what it was before: \
+         `rb format` printed exactly this and left the file alone"
+    );
+}
+
+/// `.reload` re-runs the file the session last loaded, so an edit on disk is
+/// picked up without retyping a path. The bindings the earlier load made are
+/// still the session's own, which is what makes it a reload rather than a
+/// second `:run`.
+#[test]
+fn edge_reload_reruns_the_file_the_session_last_loaded() {
+    let path = scratch_path("reload-last", "rb");
+    let _ = std::fs::remove_file(&path);
+
+    let s = file_loop_session(&path, ":reload\n");
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("before")
+        .assert_stdout_contains("after")
+        .assert_stdout_lacks("Unknown command");
+}
+
+/// A file that was already formatted is left alone and said so. The command that
+/// rewrites a source file on every Enter is one nobody trusts twice, so "nothing
+/// changed" has to be visible rather than inferred from an absent error.
+#[test]
+fn edge_format_of_an_already_formatted_file_says_it_changed_nothing() {
+    let path = scratch_file("format-noop", "say \"a\"\n");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:format {}\n:quit\n",
+        path.display(),
+        path.display()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("already formatted")
+        .assert_stdout_lacks("Formatted '");
+}
+
+/// **A failure is asserted.** `.format` to a path that names a directory fails on
+/// the *read* — a directory is not a file to be read either — and the message
+/// says which of the two it was. The session carries on and the next line runs.
+#[test]
+fn edge_format_of_a_path_that_cannot_be_read_names_the_path_and_the_session_survives() {
+    let path = scratch_dir().join("format-against-a-directory");
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("the directory should be creatable");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\nsay \"after the failure\"\n:quit\n",
+        path.display()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains(&format!("Could not read '{}'", path.display()))
+        .assert_stdout_contains("after the failure");
+    assert!(
+        !s.stdout.contains("Formatted '"),
+        "nothing was written where the write could not succeed:\n{}",
+        s.stdout
+    );
+}
+
+/// **A failure is asserted.** The *write* is the other arm, and a directory never
+/// reaches it: `read_to_string` fails first. `.format` writes through a
+/// temporary file beside the target and renames it over the top
+/// ([`Repl::write_source_atomically`]), so what has to be unwritable is the
+/// *directory* the pair lives in — a `0444` file on its own is not in the way,
+/// because a rename asks the directory and not the file, which is the same
+/// answer every editor that saves atomically gives. So the file below is
+/// readable and well-formed and sits in a mode-`0555` directory of its own,
+/// which is the one failure a reader of `.format` still meets: the path is
+/// named, the file is left exactly as it was, and the session carries on.
+///
+/// Which branch runs is decided by trying the same thing in this process, not by
+/// asking who we are: uid 0 bypasses the permission bits entirely, so the
+/// failure assertion would be meaningless there rather than flaky.
+#[test]
+fn edge_format_of_a_file_that_cannot_be_written_names_the_path_and_leaves_it_alone() {
+    let directory = scratch_dir().join("format-read-only-dir");
+    // A directory a previous run left read-only cannot be removed, so it is made
+    // removable first rather than being written into.
+    if directory.exists() {
+        set_writable(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+    std::fs::create_dir_all(&directory).expect("the directory should be creatable");
+    let path = directory.join("prog.rb");
+    let source = "if 1 is greater than 0 then\nsay \"a\"\nend\n";
+    std::fs::write(&path, source).expect("the program should be writable");
+    let before = std::fs::read_to_string(&path).expect("the program is readable");
+
+    set_read_only(&directory);
+    let blocked = std::fs::write(directory.join("format-write-probe"), "").is_err();
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\nsay \"after the failure\"\n:quit\n",
+        path.display()
+    ));
+
+    let after = std::fs::read_to_string(&path).expect("the file is still readable");
+    set_writable(&directory);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    if blocked {
+        s.assert_exited_ok()
+            .assert_stdout_contains(&format!("Could not format '{}'", path.display()))
+            .assert_stdout_contains("It is unchanged")
+            .assert_stdout_contains("after the failure");
+        assert_eq!(
+            before, after,
+            "a file the session could not write is byte-for-byte as it was"
+        );
+        assert!(
+            !s.stdout.contains("Formatted '"),
+            "a file that could not be written was not written:\n{}",
+            s.stdout
+        );
+    } else {
+        // uid 0: the write is permitted, and the honest assertion is that
+        // `.format` does the work it was asked to do rather than inventing a
+        // failure it did not meet.
+        s.assert_exited_ok()
+            .assert_stdout_contains(&format!("Formatted '{}'", path.display()))
+            .assert_stdout_contains("after the failure");
+        assert_ne!(
+            before, after,
+            "a file that did need formatting was formatted: {before:?} -> {after:?}"
+        );
+    }
+}
+
+/// Makes `path` readable by its owner and writable by nobody. A directory is
+/// given `0555` rather than `0444` because the execute bit is what lets anything
+/// read its entries, and a directory that cannot be listed cannot be cleaned up
+/// afterwards. A no-op where the host has no mode bits to set, which the caller
+/// finds out by trying the write.
+fn set_read_only(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if path.is_dir() { 0o555 } else { 0o444 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("permissions should be settable");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Undoes [`set_read_only`], so the file or directory under test can be cleaned
+/// up — a directory needs its execute bit back, not just its write bit.
+fn set_writable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if path.is_dir() { 0o755 } else { 0o644 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("permissions should be settable");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// **A failure is asserted.** `:reload` with no path and nothing loaded has no
+/// file to run, and says so naming the command rather than reporting a
+/// `No such file or directory` for a path it invented.
+#[test]
+fn edge_reload_with_nothing_loaded_reports_rather_than_inventing_a_path() {
+    let s = session(&format!(":prompt {EXPORT_PROMPT}\n:reload\n:quit\n"));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("this session has loaded no file")
+        .assert_stdout_lacks("No such file");
+}
+
+/// The same complaint from `.format`, which is the other command that acts on
+/// the last loaded file: an empty session has nothing to format, and saying
+/// "already formatted" there would claim a file had been checked.
+#[test]
+fn edge_format_with_nothing_loaded_reports_rather_than_inventing_a_path() {
+    let s = session(&format!(":prompt {EXPORT_PROMPT}\n:format\n:quit\n"));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("this session has loaded no file")
+        .assert_stdout_lacks("already formatted");
+}
+
+/// **A failure is asserted, on both of `.reload`'s two ways of naming a file it
+/// cannot run.** The message says which path failed, because "No such file or
+/// directory" alone does not say which of the paths on the line was at fault —
+/// and `.reload` is the command that most needs it, naming a path on a bare
+/// `.reload` that the user did not type this session.
+#[test]
+fn edge_reload_of_a_path_it_cannot_read_names_the_path_it_failed_at() {
+    let missing = scratch_path("reload-missing", "rb");
+    let _ = std::fs::remove_file(&missing);
+    let directory = scratch_dir().join("reload-a-directory");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the directory should be creatable");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:reload {}\n:reload {}\n:quit\n",
+        missing.display(),
+        directory.display()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains(&format!("Could not load '{}'", missing.display()))
+        .assert_stdout_contains(&format!("Could not load '{}'", directory.display()))
+        // The OS half differs by platform; the tag is the part both carry.
+        .assert_stdout_contains("(os error")
+        .assert_stdout_lacks("loaded no file");
+    assert!(
+        !s.stdout.contains("is already formatted"),
+        "a `.reload` that cannot read its file did not format anything:\n{}",
+        s.stdout
+    );
+}
+
+/// **A boundary.** `.format` and `.reload` agree about which file the session is
+/// working on, whichever file needed rewriting. They did not: the field
+/// recording it was written on the success path of `.format` but not on the
+/// `already formatted` one, so `:format A.rb`, `:format B.rb`, `:reload` re-ran
+/// `A.rb` — the file named *first*, the wrong one of the two below — and
+/// `:format B.rb`, `:reload` in a session that had loaded nothing answered
+/// `this session has loaded no file` about a file the user had just named.
+#[test]
+fn edge_format_then_reload_agree_about_which_file_the_session_is_working_on() {
+    let rewritten = scratch_file(
+        "format-then-reload-rewritten",
+        "if 1 is greater than 0 then\nsay \"from rewritten\"\nend\n",
+    );
+    let already = scratch_file("format-then-reload-already", "say \"from already\"\n");
+
+    // The file named *last* is the one that is already formatted, so this
+    // sequence walks the write path first and the `already formatted` early
+    // return second — the return that used to leave the session pointing at the
+    // file named before it.
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:format {}\n:reload\n:quit\n",
+        rewritten.display(),
+        already.display()
+    ));
+    let _ = std::fs::remove_file(&rewritten);
+    let _ = std::fs::remove_file(&already);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("already formatted")
+        .assert_stdout_contains("from already")
+        .assert_stdout_lacks("from rewritten")
+        .assert_stdout_lacks("loaded no file");
+    assert!(
+        s.stdout
+            .contains(&format!("bytes from '{}'", already.display()))
+            && !s
+                .stdout
+                .contains(&format!("bytes from '{}'", rewritten.display())),
+        "the file `.reload` ran is the one `.format` named *last*, not the one it \
+         named first:\n{}",
+        s.stdout
+    );
+}
+
+/// **A boundary.** The other direction: naming a file with `.format` is enough
+/// for a bare `.reload` to find it, even when nothing was rewritten, and even in
+/// a session that has never loaded a file.
+#[test]
+fn edge_format_of_an_already_formatted_file_is_enough_for_a_bare_reload() {
+    let path = scratch_file("format-then-reload-alone", "say \"named by format\"\n");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:reload\n:quit\n",
+        path.display()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("already formatted")
+        .assert_stdout_contains("named by format")
+        .assert_stdout_lacks("loaded no file");
+}
+
+/// **A failure is asserted.** A path that names nothing at all is reported with
+/// the path in the message — the OS error alone does not say which of the paths
+/// on the line was at fault.
+#[test]
+fn edge_format_of_a_file_that_does_not_exist_names_the_path() {
+    let path = scratch_path("format-missing", "rb");
+    let _ = std::fs::remove_file(&path);
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:quit\n",
+        path.display()
+    ));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains(&path.display().to_string())
+        .assert_stdout_lacks("Formatted '");
+}
+
+/// `.reload <path>` is the other half: the file to run may always be named, and
+/// the session keeps what it bound — which is the difference from `:run`.
+#[test]
+fn reload_of_a_named_path_keeps_the_bindings_it_made() {
+    let path = scratch_file("reload-named", "set reloaded to 41\n");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:reload {}\nsay reloaded\n:quit\n",
+        path.display()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok().assert_stdout_contains("41");
+}
+
+/// Format-on-enter: a whole program typed on one line is normalised by the
+/// formatter before the session writes it down. The transcript is what makes it
+/// observable — `.export` writes the source the session recorded, so the
+/// exported document is the normalised program.
+#[test]
+fn format_on_enter_records_the_normalised_program_in_the_transcript() {
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\nset x to 3\nif x is 3 then say \"a\" end\n.export\n:quit\n"
+    ));
+
+    s.assert_exited_ok().assert_stdout_contains("a");
+    let document = plain(&exported_document(&s.stdout));
+    assert!(
+        document.contains("if x is 3 then\n    say \"a\"\nend"),
+        "what the session wrote down is the formatter's shape, not the line that \
+         was typed:\n{document}"
+    );
+}
+
+/// **Format-on-enter must not move a span.** `:history` prints the lines that
+/// were typed, and every span a session reports — a diagnostic's line and
+/// column, the line `.which` files a name under, the source the debugger shows
+/// at a stop — has to be a line of that document. Normalising the program
+/// *before* it ran broke exactly that: `if 1 is 1 then say undefined_name end`,
+/// typed as the session's only line, was reported at `<session>:2` against a
+/// source line `    say undefined_name`, which is the history line of whatever
+/// the user typed next, quoting a line they never wrote.
+///
+/// One typed line, one program, one line number: `1`.
+#[test]
+fn edge_a_one_line_block_reports_the_line_that_was_typed() {
+    let typed = "if 1 is 1 then say undefined_name end";
+    let s = session(&format!("{typed}\n:quit\n"));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Unknown variable 'undefined_name'")
+        .assert_stdout_contains("<session>:1:")
+        // The source line quoted is the line that was typed, not a line of the
+        // formatter's output: the whole program is on one line and it is one line.
+        .assert_stdout_contains(typed)
+        .assert_stdout_lacks("say undefined_name\n")
+        .assert_stdout_lacks("<session>:2");
+}
+
+/// The same invariant on the other path: `.which` names the line the `set` was
+/// written on, and quotes it as it was written. A one-line block bound `q` on the
+/// line it was typed as history line 1, and was reported as line 2 — which is
+/// where the *next* line the user typed is recorded.
+#[test]
+fn edge_which_names_the_line_a_one_line_block_was_typed_on() {
+    let typed = "if 1 is 1 then set q to 7 end";
+    let s = session(&format!("{typed}\n:which q\n:history\n:quit\n"));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("bound at  <session>:1")
+        .assert_stdout_contains(&format!("written as  {typed}"))
+        .assert_stdout_lacks("<session>:2");
+    assert!(
+        s.stdout.contains(&format!("     1  {typed}")),
+        "the line `.which` names is a line `:history` prints:\n{}",
+        s.stdout
+    );
+}
+
+/// TAB offers the filesystem in the argument of the two new path commands,
+/// because they declare the same `<filename>` placeholder every other path
+/// command does — and only there. `:format` with no space after it is a command
+/// whose argument has not been started, so nothing is offered.
+#[test]
+fn edge_tab_after_the_file_loop_commands_offers_paths_and_nowhere_else() {
+    let completer = ReplCompleter::new();
+    let offered = |line: &str| {
+        completer
+            .complete_path(line, line.len())
+            .map(|(_, candidates)| candidates)
+            .unwrap_or_default()
+    };
+
+    let reload = offered(":reload target/tmp/");
+    assert!(
+        reload.iter().any(|c| c.contains("repl")),
+        ":reload is a command that takes a path, so TAB offers one: {reload:?}"
+    );
+    let format = offered(":format target/tmp/");
+    assert!(
+        format.iter().any(|c| c.contains("repl")),
+        ":format is a command that takes a path, so TAB offers one: {format:?}"
+    );
+
+    // The gate this table exists for: the path logic fires in a file argument and
+    // nowhere else. `say "` is not one, and neither is a command word with no
+    // argument started.
+    assert!(
+        offered(":format").is_empty(),
+        "the argument has not been started, so there is nothing to complete"
+    );
+    assert!(
+        offered(r#"say "target/tmp/"#).is_empty(),
+        "a string in Redblue source is not a path argument"
+    );
+}
+
+/// A filename with a space in it is offered quoted, never split into two
+/// candidates that would each name a file that does not exist.
+#[test]
+fn edge_format_of_a_filename_holding_a_space_is_quoted_not_split() {
+    let path = scratch_dir().join("a file with spaces.rb");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, "if 1 is greater than 0 then\nsay \"a\"\nend\n")
+        .expect("the program is writable");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format \"{}\"\n:quit\n",
+        path.display()
+    ));
+
+    s.assert_exited_ok().assert_stdout_contains("Formatted");
+    let on_disk = std::fs::read_to_string(&path).expect("the formatted file should be readable");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        on_disk, "if 1 > 0 then\n    say \"a\"\nend\n",
+        "the quotes were part of the command's spelling and were opened, not left \
+         in the path it opened"
+    );
+}
+
+/// A file that is empty is a file the formatter accepts and rewrites to the same
+/// empty thing: a session that reported "Could not format" on an empty file would
+/// be refusing a file `rb format` is happy with.
+#[test]
+fn edge_format_of_an_empty_file_says_it_changed_nothing() {
+    let path = scratch_path("format-empty", "rb");
+    std::fs::write(&path, "").expect("the empty file is writable");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:quit\n",
+        path.display()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("already formatted")
+        .assert_stdout_lacks("Could not");
+}
+
+/// `.format` on a file the parser refuses reports the file and the reason, and
+/// writes nothing — a formatter that half-wrote a file it could not read would
+/// destroy the source it was asked to tidy.
+#[test]
+fn edge_format_of_a_file_that_does_not_parse_leaves_it_alone() {
+    let path = scratch_file("format-unparseable", "if 1 is greater than\nsay \"a\"\n");
+    let before = std::fs::read_to_string(&path).expect("the program is readable");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:quit\n",
+        path.display()
+    ));
+    let after = std::fs::read_to_string(&path).expect("the program is still readable");
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Could not format");
+    assert_eq!(
+        before, after,
+        "a file the formatter refused is byte-for-byte as it was"
+    );
+}
+
+/// **A write that is all or nothing.** `.format` is the first command in the
+/// language that overwrites a source file, and it does so by writing a
+/// temporary file beside the target and renaming that over it. The observable
+/// difference from `std::fs::write` — which is `File::create`, so `O_TRUNC`,
+/// followed by a write — is a mode-`0444` source: the old write cannot open it
+/// at all, and the new one replaces it, because a rename asks the *directory*
+/// and not the file. So a source a user has protected is tidied rather than
+/// refused, and, more to the point, it is never truncated first.
+///
+/// The temporary must not survive either, on the path that worked or the one
+/// that was refused, or `.format` litters the directory the user is working in.
+#[test]
+fn edge_format_replaces_the_source_rather_than_truncating_it() {
+    let guarded = scratch_file(
+        "format-atomic-guarded",
+        "if 1 is greater than 0 then\nsay \"a\"\nend\n",
+    );
+    let refused = scratch_file("format-atomic-refused", "if 1 is greater than\nsay \"a\"\n");
+    let before = std::fs::read_to_string(&guarded).expect("the program is readable");
+    set_read_only(&guarded);
+    // The same question the old write asked, in this process: if opening the
+    // target for writing is permitted here (uid 0), the guard proves nothing.
+    let truncate_blocked = std::fs::write(&guarded, &before).is_err();
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:format {}\n:format {}\n:quit\n",
+        guarded.display(),
+        refused.display()
+    ));
+    let after = std::fs::read_to_string(&guarded).expect("the source is still readable");
+    set_writable(&guarded);
+    let _ = std::fs::remove_file(&guarded);
+    let _ = std::fs::remove_file(&refused);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains(&format!("Formatted '{}'", guarded.display()))
+        .assert_stdout_contains("Could not format");
+    if truncate_blocked {
+        assert_ne!(
+            before, after,
+            "a source the session may not open for writing is still formatted, \
+             because the bytes go to a temporary that is renamed over it rather \
+             than into the target: {before:?} -> {after:?}"
+        );
+    }
+    for leftover in [
+        guarded.with_extension("rb.tmp"),
+        refused.with_extension("rb.tmp"),
+    ] {
+        assert!(
+            !leftover.exists(),
+            "the temporary the write goes through is renamed over the target, not \
+             left beside it, on either arm: {}",
+            leftover.display()
+        );
+    }
+}
+
+/// **A boundary on `last_file`.** `:reset` forgets the bindings, the recorded
+/// definitions, the buffer and the transcript — and the loaded file with them,
+/// because a session that has forgotten everything else has no file left for a
+/// bare `:reload` to name. The one thing a reset keeps is the *history*, which
+/// is the record of what was typed and not part of what a reset forgets.
+///
+/// The behaviour was right and nothing held it: `reset_session` is one line of
+/// assignment, and deleting that line leaves this file — and the whole suite —
+/// green, which is how a session ends up claiming to hold a file it has
+/// forgotten. So it is pinned from the outside, through the binary, by the only
+/// thing a user can see: what a bare `:reload` does next.
+#[test]
+fn edge_reset_forgets_the_file_a_bare_reload_would_act_on() {
+    let path = scratch_file("reset-forgets-the-file", "say \"before the reset\"\n");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:load {}\n:reset\n:reload\n:quit\n",
+        path.display()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Loaded")
+        .assert_stdout_contains("REPL state reset.")
+        .assert_stdout_contains("this session has loaded no file");
+    // Only what came *after* the reset counts: the `:load` above legitimately
+    // printed the bytes it read.
+    let after_reset = s
+        .stdout
+        .split_once("REPL state reset.")
+        .map(|(_, tail)| tail)
+        .unwrap_or("");
+    assert!(
+        !after_reset.contains("bytes from"),
+        "a reset session no longer holds the file it loaded, so a bare `:reload` \
+         did not re-run it:\n{}",
+        after_reset
+    );
+}
+
+/// **A boundary on `last_file`, the other side of the line.** `:run` names a file
+/// and reads it, and deliberately does *not* become the file a bare `:reload`
+/// acts on: `:run` builds a VM of its own and drops what the file bound, so
+/// re-running it into the session's bindings — which is what `:reload` does —
+/// is a different outcome from the one the user just chose.
+///
+/// This was the doc's claim (`the file this session last *named* or loaded`)
+/// rather than the code's, and the difference matters: under the doc's wording a
+/// session that only ever `:run`s would have a bare `:reload` silently do
+/// something other than what the line before it did.
+#[test]
+fn edge_run_does_not_make_the_file_a_bare_reload_act_on() {
+    let path = scratch_file("run-then-reload", "say \"ran on its own\"\n");
+
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\n:run {}\n:reload\n:quit\n",
+        path.display()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("executed successfully")
+        .assert_stdout_contains("this session has loaded no file");
+    assert!(
+        !s.stdout.contains("bytes from"),
+        "`:run` keeps nothing, so it did not leave a file for `:reload` to \
+         re-run into the session:\n{}",
+        s.stdout
     );
 }

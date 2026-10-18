@@ -27,6 +27,24 @@ pub enum ReplCommand {
     /// path is not a command missing its argument, it is a command writing to the
     /// terminal, which is the one destination that needs no name.
     Export(Option<String>),
+    /// Re-runs a file in *this* session: to `path`, or to the file the session
+    /// last loaded when given nothing.
+    ///
+    /// The command that closes the file loop. `:load` runs a file and its
+    /// bindings become the session's own, but re-running it meant retyping its
+    /// path, so an edit made on disk could not be picked up from the prompt that
+    /// had loaded it. `Option` for the same reason [`ReplCommand::Export`] is:
+    /// `.reload` with no path is not a command missing its argument, it is a
+    /// command naming the file this session is already working on.
+    Reload(Option<String>),
+    /// Formats a file in place: to `path`, or to the file the session last
+    /// loaded when given nothing.
+    ///
+    /// `rb format <file>` prints the formatted source and leaves the file
+    /// exactly as it was, so there was no command in the language that ever
+    /// *wrote* a formatted file — closing the loop meant copying a terminal's
+    /// output back over the source by hand.
+    Format(Option<String>),
     Reset,
     Run(String),
     Debug,
@@ -241,6 +259,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: true,
         verbatim_argument: false,
         build: |argument| ReplCommand::Export(argument),
+    },
+    CommandSpec {
+        names: &["reload"],
+        description: "Run a file again in this session; no filename reloads the last one",
+        usage: Some(FILE_USAGE),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Reload(argument),
+    },
+    CommandSpec {
+        names: &["format", "fmt"],
+        description: "Format a file in place; no filename formats the last one",
+        usage: Some(FILE_USAGE),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Format(argument),
     },
     CommandSpec {
         names: &["run"],
@@ -664,7 +698,9 @@ impl ReplCommand {
             | ReplCommand::Asm(value)
             | ReplCommand::Break(value)
             | ReplCommand::Delete(value)
-            | ReplCommand::Export(Some(value)) => Some(value.as_str()),
+            | ReplCommand::Export(Some(value))
+            | ReplCommand::Reload(Some(value))
+            | ReplCommand::Format(Some(value)) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
             _ => None,
         }
@@ -725,6 +761,15 @@ mod tests {
             (":export", "Export", ""),
             (":export   ", "Export", ""),
             (":export session.md", "Export", "session.md"),
+            // The two halves of the file loop, each of which may be given no path
+            // and names the file the session last loaded when it is not.
+            (":reload", "Reload", ""),
+            (":reload   ", "Reload", ""),
+            (":reload prog.rb", "Reload", "prog.rb"),
+            (":reload \"my file.rb\"", "Reload", "my file.rb"),
+            (":format", "Format", ""),
+            (":fmt prog.rb", "Format", "prog.rb"),
+            (":format prog.rb", "Format", "prog.rb"),
             (":reset", "Reset", ""),
             (":run prog.rb", "Run", "prog.rb"),
             (":debug", "Debug", ""),
@@ -787,6 +832,11 @@ mod tests {
                 // `.export` with a path carries it the same way; with none it
                 // carries nothing, which is the empty argument above.
                 ReplCommand::Export(Some(value)) => value.as_str(),
+                // The two path commands of the file loop carry their path the
+                // same way; with none they carry nothing.
+                ReplCommand::Reload(Some(value)) | ReplCommand::Format(Some(value)) => {
+                    value.as_str()
+                }
                 _ => "",
             };
             assert_eq!(
@@ -1288,15 +1338,18 @@ mod tests {
             taking,
             vec![
                 "export".to_string(),
+                "fmt".to_string(),
+                "format".to_string(),
                 "l".to_string(),
                 "load".to_string(),
                 "r".to_string(),
+                "reload".to_string(),
                 "restore".to_string(),
                 "run".to_string(),
                 "s".to_string(),
                 "save".to_string(),
             ],
-            "the five commands that take a filename, aliases included, and \
+            "the seven commands that take a filename, aliases included, and \
              nothing else: a command taking a line number or an expression is not \
              one whose argument can be completed as a path"
         );
@@ -1307,6 +1360,8 @@ mod tests {
             (":run x", true),
             (":restore x", true),
             (":export x", true),
+            (":reload x", true),
+            (":format x", true),
             (":break 3", false),
             (":inspect x", false),
             (":ast 1 + 1", false),
