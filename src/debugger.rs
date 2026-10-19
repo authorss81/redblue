@@ -85,6 +85,30 @@ pub struct DebugEvent<'a> {
     /// The `Module_member` names a module's functions are published under — the
     /// interior of `MathUtils.circle_area`, which no line of Redblue can write.
     pub module_members: &'a HashSet<String>,
+    /// The user functions on the call stack at this statement, outermost first.
+    ///
+    /// What the debug sub-REPL's `.stack` reads: the frame list of the last step
+    /// taken, as names the program itself wrote. Builtin calls are not frames —
+    /// `uppercase(x)` executes no Redblue body and the user is not inside
+    /// anything when it runs.
+    pub call_stack: &'a [String],
+    /// Where in `scopes` the innermost frame's own scopes begin.
+    ///
+    /// The scopes below it are the captured ones a call dragged onto the stack
+    /// for its body to read — the caller's world, not the frame's bindings — so
+    /// `.locals` starts here rather than at index 0. `0` at the top level,
+    /// where every live scope belongs to the program itself.
+    pub scope_base: usize,
+    /// The globals the innermost frame has written since it was entered, or
+    /// `None` at the top level.
+    ///
+    /// A `set` inside a function body lands in the *globals* when no live scope
+    /// holds the name, which is the same place a top-level `set` lands and
+    /// would otherwise make a frame's own locals indistinguishable from the
+    /// program's. Tracking the writes a frame makes is what tells them apart:
+    /// `.locals` inside the frame shows them, and its caller's do not belong to
+    /// it.
+    pub frame_writes: Option<&'a HashSet<String>>,
 }
 
 impl DebugEvent<'_> {
@@ -92,6 +116,59 @@ impl DebugEvent<'_> {
     /// the VM was born holding.
     fn is_program_name(&self, name: &str) -> bool {
         !self.builtins.contains(name) && !self.module_members.contains(name)
+    }
+
+    /// The bindings of the frame this statement is running in, sorted by name.
+    ///
+    /// The frame's own scopes — parameters and locals — taken from
+    /// [`DebugEvent::scope_base`] inward, innermost scope first so a name two
+    /// scopes hold resolves the way a read would resolve it. Past the scopes,
+    /// two different frames are two different questions: at the top level every
+    /// program global is visible and is listed, while inside a frame only the
+    /// globals *that frame wrote* are its own — its caller's globals are not
+    /// bindings of it, even though its body can read them.
+    ///
+    /// This is what the debug sub-REPL's `.locals` prints. [`Frame::capture`] is
+    /// the same question asked wider — *everything* visible at a stop, for
+    /// `:frame` — and the two answer differently on purpose.
+    pub fn frame_locals(&self) -> Vec<(String, Value)> {
+        let mut bindings: Vec<(String, Value)> = Vec::new();
+        {
+            // The innermost scope that holds a name is the one a read would
+            // find, so the walk runs from the inside out and the first sighting
+            // of a name wins.
+            let mut hold = |name: &str, value: Value| {
+                if !bindings.iter().any(|(held, _)| held == name) {
+                    bindings.push((name.to_string(), value));
+                }
+            };
+            let scopes = self.scopes.get(self.scope_base..).unwrap_or(self.scopes);
+            for scope in scopes.iter().rev() {
+                for (name, value) in scope.iter() {
+                    hold(name, value.clone());
+                }
+            }
+            match self.frame_writes {
+                None => {
+                    for (name, value) in self.globals {
+                        if self.is_program_name(name) {
+                            hold(name, value.clone());
+                        }
+                    }
+                }
+                Some(writes) => {
+                    let mut written: Vec<&String> = writes.iter().collect();
+                    written.sort();
+                    for name in written {
+                        if let Some(value) = self.globals.get(name) {
+                            hold(name, value.clone());
+                        }
+                    }
+                }
+            }
+        }
+        bindings.sort_by(|left, right| left.0.cmp(&right.0));
+        bindings
     }
 }
 

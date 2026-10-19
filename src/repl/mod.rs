@@ -2,6 +2,7 @@ pub mod banner;
 pub mod bytecode_view;
 pub mod commands;
 pub mod completer;
+pub mod debug_repl;
 pub mod editor;
 pub mod highlight;
 pub mod history;
@@ -613,6 +614,13 @@ pub struct Repl {
     /// the last program stopped in. Shared with the hook the VM calls, so a
     /// `:frame` typed after the program has run reads the frame that stop left.
     debug: SharedDebugSession,
+    /// The debug sub-REPL, while one is open — see [`debug_repl`].
+    ///
+    /// `Some` from the `.debug` that opened it until the `.back` (or the end of
+    /// input) that closed it. While it is, every typed line belongs to the
+    /// sub-REPL: it is dispatched by [`Repl::debug_line`] and reaches neither
+    /// this session's history, nor its transcript, nor its bindings.
+    debug_repl: Option<debug_repl::DebugRepl>,
     /// How output is coloured. Detected once at startup, and `forced` in
     /// tests so a colour assertion can run without a TTY.
     style: Style,
@@ -670,6 +678,7 @@ impl Repl {
             multiline_buffer: Vec::new(),
             in_multiline: false,
             debug: DebugSession::shared(),
+            debug_repl: None,
             style: Style::detect(),
             prompt_format: DEFAULT_PROMPT.to_string(),
             definitions: HashMap::new(),
@@ -696,6 +705,12 @@ impl Repl {
     fn session_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.variables.keys().cloned().collect();
         names.extend(self.vm.user_names());
+        // Inside the sub-REPL, completion and every other reader of this list
+        // are the sub-REPL's: the names a line may be analysed against are
+        // there plus what has already been bound on either side of `.back`.
+        if let Some(debug) = &self.debug_repl {
+            names.extend(debug.session_names());
+        }
         names.sort();
         names.dedup();
         names
@@ -788,6 +803,13 @@ impl Repl {
                 // Ctrl-C throws away the line being written, not the session.
                 Ok(Line::Interrupted) => continue,
                 Ok(Line::Eof) => {
+                    // A block the sub-REPL was holding is the sub-REPL's to
+                    // report: the parent's buffer never saw it.
+                    if let Some(debug) = self.debug_repl.as_mut() {
+                        for answer in debug.report_unclosed_block() {
+                            println!("{}", answer);
+                        }
+                    }
                     self.report_unclosed_block();
                     return SessionEnd::Eof;
                 }
@@ -807,6 +829,19 @@ impl Repl {
 
             let input = line.trim();
             if input.is_empty() {
+                continue;
+            }
+
+            // Inside the debug sub-REPL every line — command or code, buffered
+            // or run whole — belongs to the sub-session and is dispatched by
+            // it. It is taken before the history push below for exactly that
+            // reason: what was typed at a `debug>` prompt was typed into the
+            // sub-REPL, and a `:history` on the far side of `.back` listing it
+            // would be claiming the parent session ran lines it never saw.
+            if self.debug_repl.is_some() {
+                for answer in self.debug_line(input) {
+                    println!("{}", answer);
+                }
                 continue;
             }
 
@@ -869,6 +904,12 @@ impl Repl {
     /// prompt: the primary one does, and a continuation that ran into the digits
     /// without a gap put the first character a user types against them.
     fn prompt_for_next_line(&self) -> String {
+        // The sub-REPL's prompt, while one is open: the block numbering is its
+        // own, because the block is its own — `..  2` inside a sub-REPL says
+        // line 2 of the block being typed there, not of any parent buffer.
+        if let Some(debug) = &self.debug_repl {
+            return debug.prompt();
+        }
         if self.in_multiline {
             return format!("..  {} ", self.multiline_buffer.len() + 1);
         }
@@ -1001,8 +1042,17 @@ impl Repl {
                 self.run_file(&path);
                 true
             }
-            ReplCommand::Debug => {
-                self.debug_mode();
+            ReplCommand::Debug(argument) => {
+                for answer in self.enter_debug(&argument) {
+                    println!("{}", answer);
+                }
+                true
+            }
+            ReplCommand::Watch(_)
+            | ReplCommand::Stack
+            | ReplCommand::Locals
+            | ReplCommand::Back => {
+                println!("{}", debug_repl::NO_DEBUG_SESSION);
                 true
             }
             ReplCommand::Break(line) => {
@@ -1807,19 +1857,6 @@ impl Repl {
         match crate::run_file(path) {
             Ok(_) => println!("File '{}' executed successfully.", path),
             Err(e) => println!("Error running file: {}", e),
-        }
-    }
-
-    fn debug_mode(&self) {
-        let session = lock(&self.debug);
-        let lines = session.breakpoints();
-        println!(
-            "Debugger: {} breakpoint(s) set. `:break <line>` sets one, `:next` steps \
-             over a call, `:step` steps into it, `:continue` runs on.",
-            lines.len()
-        );
-        for line in lines {
-            println!("  line {}", line);
         }
     }
 
@@ -2918,6 +2955,400 @@ mod tests {
             farewell(SessionEnd::InputError),
             "Goodbye!",
             "even a terminal that goes away is a session that ends, not a panic"
+        );
+    }
+
+    /// The sub-REPL is a session *inside* the session, and what `.back` owes
+    /// the user is the session that was left: every piece of parent-owned state
+    /// byte-identical, and one parent line typed after `.back` running in the
+    /// parent rather than in the sub-REPL.
+    ///
+    /// This drives the real read loop through a sub-REPL that binds a name,
+    /// registers a watch, opens and closes a block, inspects frames and
+    /// returns — then checks the history (which lines the parent believes were
+    /// typed at its prompt — and it is every sub-REPL line that must *not* be
+    /// there), the transcript, the definitions, the VM's bindings, and the
+    /// line buffer the `repeat` block could have leaked into.
+    #[test]
+    fn a_debug_sub_repl_leaves_the_parent_session_untouched() {
+        let mut repl = Repl::new();
+        repl.execute_line("set parent_value to 42");
+        let transcript_before = repl.transcript.markdown();
+
+        let mut source = ScriptedSource::new(vec![
+            Ok(Line::Text(".debug".to_string())),
+            Ok(Line::Text("set scratch_value to 99".to_string())),
+            Ok(Line::Text(".watch parent_value".to_string())),
+            Ok(Line::Text(".stack".to_string())),
+            Ok(Line::Text(".locals".to_string())),
+            Ok(Line::Text("repeat 2 times".to_string())),
+            Ok(Line::Text(
+                "set scratch_value to scratch_value + 1".to_string(),
+            )),
+            Ok(Line::Text("end".to_string())),
+            Ok(Line::Text("99 + 2".to_string())),
+            Ok(Line::Text(".back".to_string())),
+            Ok(Line::Text("set resumed to 1".to_string())),
+            Ok(Line::Eof),
+        ]);
+        drive(&mut repl, &mut source);
+
+        let history: Vec<String> = (0..repl.history.len())
+            .filter_map(|index| repl.history.get(index).cloned())
+            .collect();
+        assert_eq!(
+            history,
+            [".debug".to_string(), "set resumed to 1".to_string()],
+            "the parent's history is the lines typed at the parent prompt, and \
+             none of the sub-REPL's"
+        );
+
+        let transcript = repl.transcript.markdown();
+        assert!(
+            transcript.starts_with(&transcript_before),
+            "everything the parent's transcript held before the sub-REPL opened \
+             is still there, first and unchanged"
+        );
+        assert!(
+            !transcript.contains("scratch_value")
+                && !transcript.contains(".watch")
+                && !transcript.contains("repeat 2 times"),
+            "nothing the sub-REPL ran or was asked belongs in the parent's \
+             transcript"
+        );
+        assert!(
+            transcript.contains("set resumed to 1"),
+            "and the line typed after .back is recorded as the parent's own"
+        );
+
+        assert!(
+            !repl.definitions.contains_key("scratch_value")
+                && repl.definitions.contains_key("resumed"),
+            "the parent records what the parent bound: resumed yes, the \
+             sub-REPL's scratch_value never"
+        );
+        assert_eq!(
+            repl.vm.user_value("parent_value").map(ToString::to_string),
+            Some("42".to_string()),
+            "the binding the parent session had is still there, unchanged"
+        );
+        assert_eq!(
+            repl.vm.user_value("scratch_value"),
+            None,
+            "and the names the sub-REPL bound are not in the parent's VM"
+        );
+        assert_eq!(
+            repl.vm.user_value("resumed").map(ToString::to_string),
+            Some("1".to_string()),
+            "the line typed after .back ran in the parent's VM"
+        );
+
+        assert!(
+            repl.debug_repl.is_none(),
+            ".back closed the sub-REPL: the resumed line reached the parent"
+        );
+        assert!(
+            repl.multiline_buffer.is_empty() && !repl.in_multiline,
+            "the block typed inside the sub-REPL never touched the parent's \
+             line buffer"
+        );
+        assert!(
+            !repl.variables.contains_key("_"),
+            "the sub-REPL's last result — 99 + 2 answered 101 there — never \
+             became the parent's _"
+        );
+        assert!(
+            source.prompts().iter().any(|prompt| prompt == "debug> "),
+            "the sub-REPL's lines were read at the sub-REPL's prompt, which is \
+             what put them outside the parent to begin with"
+        );
+    }
+
+    use super::debug_repl::{BANNER, NO_DEBUG_SESSION};
+
+    /// The three-deep chain a `.stack` inside the sub-REPL must name, outermost
+    /// frame first. The last statement the program steps in is `set deep to 7`,
+    /// deep inside `inner`, which is the step the stack is read at.
+    #[test]
+    fn debug_stack_names_a_three_deep_call_chain() {
+        let mut repl = Repl::new();
+        feed(
+            &mut repl,
+            &[
+                "to inner()",
+                "set deep to 7",
+                "end",
+                "to middle()",
+                "inner()",
+                "end",
+                "to outer()",
+                "middle()",
+                "end",
+            ],
+        );
+
+        let answers = repl.debug_session(&[".debug outer()", ".stack", ".back"]);
+
+        let expected = ["Call stack (3 frames):", "  outer", "  middle", "  inner"];
+        let named = answers.windows(expected.len()).any(|window| {
+            window
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        });
+        assert!(
+            named,
+            ".stack should name all three frames in call order; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// `.watch` reporting exactly the steps where its value changed, and no
+    /// others — across a loop, typed block by block the way a sub-REPL holds it.
+    ///
+    /// Four statements run once the watch is set — the `repeat`, then the body
+    /// it runs three times — and `x` changes on three of them. The `repeat`
+    /// sees the value the watch took as its baseline and must say nothing;
+    /// every other step must speak.
+    #[test]
+    fn debug_watch_reports_only_the_steps_where_the_value_changed() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[
+            ".debug",
+            "set x to 0",
+            ".watch x",
+            "repeat 3 times",
+            "set x to x + 1",
+            "end",
+            ".back",
+        ]);
+
+        let reports: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("watch x = "))
+            .collect();
+        assert_eq!(
+            reports,
+            ["watch x = 1", "watch x = 2", "watch x = 3"],
+            "a watch reports each changed step once and the unchanged ones never; \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "Watching x."),
+            "registering a watch says so; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// `.locals` answering about the frame the program stepped in — its own
+    /// bindings, sorted — and about nothing that belongs to the frames above
+    /// it: the caller's local and a global the caller overwrote must both be
+    /// absent while the callee runs, even though the callee could see the
+    /// global through Redblue's own scoping.
+    ///
+    /// The step read at is the *last* one the program takes, deep inside
+    /// `inner`: `set stopped to inner_var` fires before it runs, so `stopped`
+    /// itself is not yet bound — locals are what the frame held *at* the stop,
+    /// which is the whole point of reading them there.
+    #[test]
+    fn debug_locals_shows_the_stepped_frame_and_not_the_callers() {
+        let mut repl = Repl::new();
+        feed(
+            &mut repl,
+            &[
+                "set shared to 1",
+                "to inner(param)",
+                "set inner_var to param + 1",
+                "set stopped to inner_var",
+                "end",
+                "to outer()",
+                "set outer_var to 9",
+                "set shared to 2",
+                "inner(10)",
+                "end",
+            ],
+        );
+
+        let answers = repl.debug_session(&[".debug outer()", ".locals", ".back"]);
+
+        assert!(
+            answers.iter().any(|line| line == "  param = 10"),
+            "the frame's parameter should be listed; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "  inner_var = 11"),
+            "the frame's own local should be listed; it answered:\n{}",
+            answers.join("\n")
+        );
+        let leaked: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("  outer_var") || line.starts_with("  shared"))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            ".locals should not show the caller's local or its global writes; \
+             it also answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// `.debug` with no argument at all: the session opens, runs nothing, and
+    /// says what it is — the empty program is not an error and not a prompt
+    /// that goes unanswered, and `.back` from it returns like any other.
+    #[test]
+    fn edge_a_bare_debug_opens_a_session_and_runs_nothing() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[".debug", ".back", ".stack"]);
+
+        assert_eq!(
+            answers.first().map(String::as_str),
+            Some(BANNER),
+            "a bare .debug opens with the banner; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert_eq!(
+            answers.get(1),
+            Some(&NO_DEBUG_SESSION.to_string()),
+            "and .back from it returned: the next line answered outside any \
+             sub-REPL; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// An expression that does not parse cannot be watched — registration is
+    /// where that is found, before any run would be asked to observe it — and
+    /// finding it must not cost the session. The sub-REPL stays open, `.stack`
+    /// still answers for a session that has stepped nowhere, and `.back`
+    /// returns.
+    #[test]
+    fn edge_a_watch_that_cannot_parse_fails_and_the_session_goes_on() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[".debug", ".watch 1 +", ".stack", ".back"]);
+
+        assert!(
+            answers
+                .iter()
+                .any(|line| line.starts_with("Error: ") && line.contains("1 +")),
+            "an unparseable watch is a reported failure, not a watch; it \
+             answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            crate::repl::parse_only("1 +").is_err(),
+            "the whole behaviour rests on this: `1 +` is not an expression, so \
+             there is nothing a run could ever evaluate to watch it"
+        );
+        assert!(
+            answers.iter().any(|line| line == "No live frames."),
+            "and the session that refused the watch is still a session: .stack \
+             answers about it — it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            !answers.contains(&NO_DEBUG_SESSION.to_string()),
+            "the refused watch never closed the sub-REPL; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A watch on a name nobody bound is one report per step it fails on and
+    /// then another at the end of the run — never an error *in* the run. The
+    /// program still finishes, the reports still print, and the session takes
+    /// the next command it is given.
+    #[test]
+    fn edge_a_watch_on_an_unbound_name_reports_per_step_and_the_run_still_finishes() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[
+            ".debug",
+            "set y to 0",
+            ".watch nosuchname",
+            "repeat 2 times",
+            "set y to y + 1",
+            "end",
+            ".debug 1 + 1",
+        ]);
+
+        let failures: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("watch nosuchname:"))
+            .collect();
+        // The loop's run reports four: the `repeat`, its body twice, and the
+        // end-of-run pass. The `1 + 1` typed afterwards reports two: its one
+        // statement, and its own end-of-run pass — the watch is still
+        // registered, and a surviving session is a session still watching.
+        assert_eq!(
+            failures.len(),
+            6,
+            "a failing watch reports once per step — it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            failures
+                .iter()
+                .all(|line| line.contains("Unknown variable 'nosuchname'")),
+            "and each report names what it could not find; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "= 2"),
+            "the program ran to its result despite the watch — it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// `.debug nope.rb` at the parent prompt: the read fails with the file it
+    /// wanted, and the session opens regardless — the error is about that run,
+    /// not about having somewhere to run it.
+    #[test]
+    fn edge_a_debug_of_a_file_that_cannot_be_read_says_so_and_still_opens() {
+        let mut repl = Repl::new();
+
+        let answers =
+            repl.debug_session(&[".debug definitely_missing_phase062.rb", ".stack", ".back"]);
+
+        assert!(
+            answers.iter().any(|line| line
+                .starts_with("Error: cannot read 'definitely_missing_phase062.rb'")),
+            "the failed read is reported with the file it wanted; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "No live frames."),
+            "the sub-REPL opened anyway and .stack answered inside it — \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// Every sub-REPL command typed with no sub-REPL open answers the same one
+    /// way: how to open one. The commands are not session commands that happen
+    /// to need a debug session — they have no meaning outside one, and the
+    /// sentence is what tells the user where they belong.
+    #[test]
+    fn edge_sub_repl_commands_outside_a_session_say_how_to_open_one() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[".stack", ".locals", ".watch x", ".back"]);
+
+        assert_eq!(
+            answers,
+            vec![
+                NO_DEBUG_SESSION.to_string(),
+                NO_DEBUG_SESSION.to_string(),
+                NO_DEBUG_SESSION.to_string(),
+                NO_DEBUG_SESSION.to_string(),
+            ],
+            "all four answered with how to open a session; they answered:\n{}",
+            answers.join("\n")
         );
     }
 

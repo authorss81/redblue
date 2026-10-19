@@ -427,6 +427,20 @@ pub struct Vm {
     /// nothing else.
     debug_hook: Option<DebugHook>,
     call_depth: usize,
+    /// The user functions currently executing, outermost first — the frame list
+    /// [`Vm::debug_before`] hands a hook as [`DebugEvent::call_stack`].
+    ///
+    /// Pushed with the frame itself in [`Vm::call_user_function`] and popped
+    /// with it on every path out, so a frame is on this stack exactly while its
+    /// body is running.
+    call_stack: Vec<String>,
+    /// Where in [`Vm::locals`] the innermost frame's own scopes begin — see
+    /// [`DebugEvent::scope_base`]. Zero at the top level.
+    frame_scope_base: usize,
+    /// The globals each live frame has written, innermost frame last — see
+    /// [`DebugEvent::frame_writes`]. One entry per live frame, pushed and popped
+    /// with [`Vm::call_stack`].
+    frame_writes: Vec<HashSet<String>>,
     max_call_depth: usize,
     /// Statements executed so far, against [`Vm::max_steps`]. Monotonic for the
     /// life of the VM and never restored by `try`, so a caught error cannot buy
@@ -638,6 +652,9 @@ impl Vm {
             statement_depth: 0,
             debug_hook: None,
             call_depth: 0,
+            call_stack: Vec::new(),
+            frame_scope_base: 0,
+            frame_writes: Vec::new(),
             max_call_depth: resolve_max_call_depth(),
             steps: 0,
             max_steps: resolve_max_steps(),
@@ -684,6 +701,39 @@ impl Vm {
         forked.qualified_members = self.qualified_members.clone();
         forked.objects = self.objects.clone();
         forked
+    }
+
+    /// Re-points this VM at the bindings the observed step was running with, so
+    /// an expression evaluated now reads the program's variables as they are
+    /// *at that step* rather than as they were at some earlier one.
+    ///
+    /// The debug sub-REPL's `.watch` uses this on a scratch VM the hook owns:
+    /// each observed step overwrites the bindings wholesale, so nothing
+    /// accumulates between steps and nothing the watched expression itself does
+    /// — a `set` it contains, an output it triggers — survives to the next one.
+    /// The output buffer is drained with the bindings for the same reason, and
+    /// the statement nesting restarts at zero because this VM is between
+    /// statements, not inside one.
+    ///
+    /// Everything else about the VM is left alone: the scratch's hook (there is
+    /// none — a watcher is not itself watched), its question flag, and its
+    /// budgets.
+    pub fn observe_bindings(&mut self, scopes: &[CapturedScope], globals: &HashMap<String, Value>) {
+        self.locals = scopes.to_vec();
+        self.globals = globals.clone();
+        self.statement_depth = 0;
+        let _ = self.take_output();
+    }
+
+    /// The bindings this VM currently holds: the scope stack and the globals,
+    /// borrowed.
+    ///
+    /// The debug sub-REPL's watches need them after a run finishes — the value
+    /// a program's last statement produced is first visible *there*, at the end,
+    /// rather than at any statement stop — and this hands them over without a
+    /// clone. The caller may not write through them.
+    pub fn current_bindings(&self) -> (&[CapturedScope], &HashMap<String, Value>) {
+        (&self.locals, &self.globals)
     }
 
     /// Declares that this VM is answering a question about a value rather than
@@ -1513,6 +1563,14 @@ impl Vm {
             return Ok(());
         }
         self.refuse_constant_rebind(name)?;
+        // A write that reaches a global from inside a call belongs to the frame
+        // that made it as far as `.locals` is concerned — see
+        // [`DebugEvent::frame_writes`]. At the top level there is no frame to
+        // own it and nothing is recorded, which is why this is a `last` and not
+        // an unconditional insert.
+        if let Some(writes) = self.frame_writes.last_mut() {
+            writes.insert(name.to_string());
+        }
         self.globals.insert(name.to_string(), value);
         Ok(())
     }
@@ -1570,6 +1628,9 @@ impl Vm {
             globals: &self.globals,
             builtins: &self.builtin_names,
             module_members: &self.qualified_members,
+            call_stack: &self.call_stack,
+            scope_base: self.frame_scope_base,
+            frame_writes: self.frame_writes.last(),
         };
         if let Some(hook) = self.debug_hook.as_mut() {
             let _ = hook(event);
@@ -2556,12 +2617,23 @@ impl Vm {
         for scope in function.captured.iter() {
             self.locals.push(scope.clone());
         }
+        // Where this frame's own scopes begin: above the captured ones it
+        // dragged in, so `.locals` inside the frame lists the frame's bindings
+        // and not its caller's world. Saved and restored with the frame.
+        let caller_scope_base = self.frame_scope_base;
+        self.frame_scope_base = self.locals.len();
         self.push_scope();
         for (index, param) in function.params.iter().enumerate() {
             let value = args.get(index).cloned().unwrap_or(Value::Nothing);
             self.declare(param);
             self.set_var(param, value)?;
         }
+        // The frame is on the stack while its body runs and only then: every
+        // statement the body evaluates sees it, and the caller's statements
+        // before the call and after the return do not. Both lists pop on every
+        // path out of the call, including the failing one.
+        self.call_stack.push(name.to_string());
+        self.frame_writes.push(HashSet::new());
         self.call_depth += 1;
         // A function body is not lexically inside the caller's loop, so a
         // `break` written there has no loop of its own and must be refused
@@ -2583,6 +2655,9 @@ impl Vm {
             self.loop_depth = caller_loop_depth;
             self.loop_control = caller_loop_control;
             self.locals.truncate(caller_depth);
+            self.frame_scope_base = caller_scope_base;
+            self.frame_writes.pop();
+            self.call_stack.pop();
             return Err(Error::Runtime(
                 format!(
                     "'{}' has a compiled body, which only `rb vm` can run",
@@ -2598,6 +2673,9 @@ impl Vm {
         // Truncated rather than popped one at a time, so the stack is balanced
         // even when the body failed part way through and left a scope behind.
         self.locals.truncate(caller_depth);
+        self.frame_scope_base = caller_scope_base;
+        self.frame_writes.pop();
+        self.call_stack.pop();
 
         result
     }
