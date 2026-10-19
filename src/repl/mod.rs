@@ -13,7 +13,7 @@ pub mod transcript;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,14 @@ const MAX_BLOCK_BYTES: usize = 64 * 1024;
 /// gives up. The rest are counted and reported, so the report itself cannot be
 /// the thing that floods a terminal.
 const BLOCK_REPORT_LINES: usize = 20;
+
+/// How many names a `.edit` will try for its own directory under the temporary
+/// one, before it reports that it could not have one.
+///
+/// One is the number that would be right if nobody else were sharing the
+/// directory. This is the number that is right if somebody is: a name that is
+/// taken is somebody else's or an earlier edit's, and the next one is not.
+const SCRATCH_DIR_ATTEMPTS: usize = 64;
 
 /// The prompt a program stopped by the debugger waits at.
 ///
@@ -472,12 +480,20 @@ fn tutorial_lines(style: &Style) -> Vec<String> {
 /// was not in a tour said nothing at all, which reads as a command that does
 /// nothing rather than a command with nothing to say.
 fn hint_lines(step: Option<usize>, style: &Style) -> Vec<String> {
-    match step.and_then(|index| TUTORIAL.get(index)) {
-        Some(step) => vec![format!(
-            "Hint for step {} of {}: {}",
-            step_index(step) + 1,
-            TUTORIAL.len(),
-            step.hint
+    // The index is the number the message needs and the borrow is the step it is
+    // about, so both come out of the one lookup. Recovering the index from the
+    // step afterwards would be a search that can fail — and whose failure has to
+    // be answered with something, which is how a step that is not in the table
+    // ends up announced as step one.
+    match step.and_then(|index| TUTORIAL.get(index).map(|listed| (index, listed))) {
+        Some((index, step)) => vec![style.paint(
+            Paint::Heading,
+            &format!(
+                "Hint for step {} of {}: {}",
+                index + 1,
+                TUTORIAL.len(),
+                step.hint
+            ),
         )],
         None => vec![style.paint(
             Paint::Heading,
@@ -485,18 +501,6 @@ fn hint_lines(step: Option<usize>, style: &Style) -> Vec<String> {
              and :examples for a catalogue of what Redblue can do.",
         )],
     }
-}
-
-/// Where a step sits in [`TUTORIAL`], for a message that has to name it.
-///
-/// A step is searched for rather than carried around: the tour is one table, and
-/// a second copy of "which step is this" is a second answer to a question the
-/// table already gives.
-fn step_index(step: &TutorialStep) -> usize {
-    TUTORIAL
-        .iter()
-        .position(|listed| std::ptr::eq(listed, step))
-        .unwrap_or(0)
 }
 
 /// Why a session's read loop stopped.
@@ -646,6 +650,13 @@ pub struct Repl {
     /// tour has to say so, and an index cannot tell "on step one" from "not in
     /// the tour".
     tutorial_step: Option<usize>,
+    /// What this session has run since it entered that step, so a step whose
+    /// snippet is several programs can still be recognised as it is typed.
+    ///
+    /// `set name to "World"` and `say name` are each a whole program, and a
+    /// session runs each as it is typed — so neither of them is step one of the
+    /// tour, and the two of them together are.
+    tutorial_typed: Vec<String>,
 }
 
 impl Repl {
@@ -665,6 +676,7 @@ impl Repl {
             transcript: Transcript::new(),
             last_output: Vec::new(),
             tutorial_step: None,
+            tutorial_typed: Vec::new(),
         }
     }
 
@@ -1118,7 +1130,7 @@ impl Repl {
     fn execute_line(&mut self, input: &str) {
         self.multiline_buffer.push(input.to_string());
         let buffered = self.multiline_buffer.join("\n");
-        if Self::exceeds_block_limits(&self.multiline_buffer, buffered.len()) {
+        if Self::exceeds_block_limits(self.multiline_buffer.len(), buffered.len()) {
             self.report_buffered_block_too_large();
             return;
         }
@@ -1129,7 +1141,10 @@ impl Repl {
 
         let code = std::mem::take(&mut self.multiline_buffer).join("\n");
         self.in_multiline = false;
-        self.execute_code(&code);
+        // A failure was reported in full by the run itself, with the line that
+        // failed and a caret under it; a line the user typed has nothing to add
+        // to that and nowhere else to put it.
+        let _ = self.execute_code(&code);
     }
 
     /// Forgets everything the session has done: its bindings, its last result,
@@ -1153,12 +1168,22 @@ impl Repl {
     ///
     /// The history is left alone: it is the record of what was typed, and a reset
     /// is not a new session in the sense that the earlier lines were never typed.
+    ///
+    /// So is the tour, though, and that is the newer half of the same question. A
+    /// step is taken by running its snippet and a snippet needs the bindings the
+    /// step before it bound, so a session that has been reset mid-tour is a
+    /// session holding a hint for a step of a program it no longer has: `set name
+    /// to "World"`, `:reset`, and `:hint` answers as though `name` were about to
+    /// be asked for. A reset forgets what it was, and where in the tour it was is
+    /// part of what it was.
     fn reset_session(&mut self) {
         self.vm = Vm::new();
         self.variables.clear();
         self.definitions.clear();
         self.multiline_buffer.clear();
         self.in_multiline = false;
+        self.tutorial_step = None;
+        self.tutorial_typed.clear();
         // The transcript with them: an export of a session that had forgotten the
         // lines it ran would claim a session that no longer exists ran them.
         self.transcript.clear();
@@ -1170,8 +1195,11 @@ impl Repl {
     ///
     /// Both limits, because either alone leaves a hole: a block of a thousand
     /// blank lines is small in bytes, and one line of a megabyte is one line.
-    fn exceeds_block_limits(lines: &[String], bytes: usize) -> bool {
-        lines.len() > MAX_BLOCK_LINES || bytes > MAX_BLOCK_BYTES
+    ///
+    /// A count rather than the lines themselves, because `.edit` has a block too
+    /// and holds it as the one string an editor wrote.
+    fn exceeds_block_limits(lines: usize, bytes: usize) -> bool {
+        lines > MAX_BLOCK_LINES || bytes > MAX_BLOCK_BYTES
     }
 
     /// Gives up on a block that has outgrown what a session will hold, saying so
@@ -1231,9 +1259,14 @@ impl Repl {
         }
     }
 
-    fn execute_code(&mut self, code: &str) {
+    /// Runs `code` as the session's own line, and what it answered.
+    ///
+    /// The `Err` carries the failure already reported in full — with its `-->`,
+    /// its offending line and its caret — so a caller that needs to know whether
+    /// the run worked has it without a second rendering of the same error.
+    fn execute_code(&mut self, code: &str) -> Result<Value, String> {
         let offset = self.current_line_number().saturating_sub(1);
-        self.execute_code_from(introspect::SESSION_FILE, offset, code);
+        self.execute_code_from(introspect::SESSION_FILE, offset, code)
     }
 
     /// The number `:history` prints beside the line being run, which is the line
@@ -1247,12 +1280,17 @@ impl Repl {
     }
 
     /// Runs `code` as the program at `file`, whose first line is `line_offset`
-    /// plus one.
+    /// plus one, and hands back what it answered or what it failed with.
     ///
     /// The offset is what makes one definition format serve two callers: a line
     /// the user typed has no line of its own but has a place in the history, and
     /// a file's line *is* its line.
-    fn execute_code_from(&mut self, file: &str, line_offset: usize, code: &str) {
+    fn execute_code_from(
+        &mut self,
+        file: &str,
+        line_offset: usize,
+        code: &str,
+    ) -> Result<Value, String> {
         // A line that fails to parse never reaches the VM, so the output of the
         // line before it has to be out of the way before the next line starts.
         self.last_output.clear();
@@ -1262,21 +1300,28 @@ impl Repl {
         // output and the session's echo of it separately, as it prints them.
         let mut output = std::mem::take(&mut self.last_output);
 
-        match result {
+        let outcome = match result {
             Ok(value) => {
                 self.record_definitions(file, line_offset, code);
                 if !matches!(value, Value::Nothing) {
                     let line = format!("= {}", value);
                     println!("{}", self.style.paint(Paint::Result, &line));
-                    self.variables.insert("_".to_string(), value);
+                    self.variables.insert("_".to_string(), value.clone());
                     output.push(line);
                 }
+                Ok(value)
             }
             Err(e) => {
                 let rendered = format!("Error: {}", render_error(&self.style, code, file, &e));
-                println!("{}", rendered);
-                output.push(rendered);
+                println!("{rendered}");
+                output.push(rendered.clone());
+                Err(rendered)
             }
+        };
+        // A step of the tour is taken by running it, so this is where the tour
+        // moves — and only here, where the run is known to have worked.
+        if outcome.is_ok() {
+            self.advance_tutorial_step(code);
         }
         // Recorded as plain text: what the session painted for a reader is not
         // what a document should carry, so the escape sequences are taken off
@@ -1285,6 +1330,46 @@ impl Repl {
             code.to_string(),
             output.iter().map(|line| strip_escapes(line)).collect(),
         );
+        outcome
+    }
+
+    /// Moves a session in a tour on to the step after the one it just ran.
+    ///
+    /// A step is taken by running its snippet and by nothing else, and a snippet
+    /// arrives one run at a time rather than in one piece: `set name to "World"`
+    /// is a whole program and so is `say name`, so a reader who types step one
+    /// exactly as printed runs two programs and neither of them is the step. What
+    /// has been run since the step began is therefore accumulated, and the step is
+    /// taken when the accumulation *is* the snippet: a prefix of it means the
+    /// reader is part-way through and is still on this step, and anything else
+    /// means this was something of their own, so the next attempt at the snippet
+    /// starts from the beginning.
+    ///
+    /// Only runs that worked get here — the caller asks after a successful one —
+    /// so a step the reader typed with a typo in it is a step they have not taken,
+    /// and its hint is the one they get.
+    ///
+    /// The last step leaves no step behind it, so a finished tour is over rather
+    /// than parked on its final hint.
+    fn advance_tutorial_step(&mut self, code: &str) {
+        let Some(index) = self.tutorial_step else {
+            return;
+        };
+        let Some(step) = TUTORIAL.get(index) else {
+            self.tutorial_step = None;
+            return;
+        };
+
+        let snippet = step.snippet.trim();
+        self.tutorial_typed.push(code.trim().to_string());
+        let typed = self.tutorial_typed.join("\n");
+
+        if typed == snippet {
+            self.tutorial_step = index.checked_add(1).filter(|next| *next < TUTORIAL.len());
+            self.tutorial_typed.clear();
+        } else if !snippet.starts_with(&typed) {
+            self.tutorial_typed.clear();
+        }
     }
 
     /// Notes where `code` bound each name, for `.type` and `.which`.
@@ -1601,8 +1686,10 @@ impl Repl {
 
         println!("Loaded {} bytes from '{}'.", source.len(), path);
         // The path, not `<session>`: a name this file binds is reported by
-        // `.which` as `path:line`, which is a place the user can open.
-        self.execute_code_from(path, 0, &source);
+        // `.which` as `path:line`, which is a place the user can open. A file
+        // that failed to run has said so already, in the same rendered error a
+        // typed line would have produced.
+        let _ = self.execute_code_from(path, 0, &source);
     }
 
     /// Writes the session's history to `path`, one entry per line, in the
@@ -2325,11 +2412,15 @@ impl Repl {
 
     /// Prints [`TUTORIAL`], the guided tour a newcomer is walked through, and
     /// leaves the session on its first step so `.hint` has a step to answer for.
+    ///
+    /// From the first step again, wherever the reader had got to: a tour is a
+    /// list of six things to try, and asking for it is asking for the list.
     fn show_tutorial(&mut self) {
         for line in tutorial_lines(&self.style) {
             println!("{line}");
         }
         self.tutorial_step = Some(0);
+        self.tutorial_typed.clear();
     }
 
     /// Prints the hint for the step the session is on, or says how to start one.
@@ -2375,13 +2466,16 @@ impl Repl {
         let mut command = std::process::Command::new(program);
         command.args(parts);
 
-        let scratch = scratch_dir.join(format!("redblue-edit-{}.rb", std::process::id()));
-        std::fs::create_dir_all(scratch_dir).map_err(|error| {
-            format!("could not make a scratch file in {scratch_dir:?}: {error}")
-        })?;
-        std::fs::write(&scratch, self.multiline_buffer.join("\n"))
-            .map_err(|error| format!("could not write {}: {error}", scratch.display()))?;
+        let scratch_dir = self.private_scratch_dir(scratch_dir)?;
+        let scratch = scratch_dir.path().join("redblue-edit.rb");
+        self.write_scratch_file(&scratch)?;
 
+        // From here the scratch file holds the session's own block, and
+        // `scratch_dir` goes out of scope on every way out of this function — a
+        // return, a `?`, a panic. An edit that failed three times in a row must
+        // not leave three copies of what the reader was writing in the temp
+        // directory, and a removal written at the end of each path is one of
+        // those paths getting it wrong.
         let status = command
             .arg(&scratch)
             .status()
@@ -2392,17 +2486,182 @@ impl Repl {
             ));
         }
 
-        let edited = std::fs::read_to_string(&scratch).map_err(|error| {
-            format!(
-                "could not read back what `{program}` saved to {}: {error}",
-                scratch.display()
-            )
-        })?;
-        let _ = std::fs::remove_file(&scratch);
+        let edited = self.read_edited_block(&scratch, program)?;
         if edited.trim().is_empty() {
             return Err("the editor left the file empty, so there is nothing to run".to_string());
         }
         Ok(edited)
+    }
+
+    /// What `$EDITOR` saved, under the same limit a typed block is held to.
+    ///
+    /// `.edit` is a second way into the session and the block a session holds was
+    /// never a rule about the keyboard: a runaway editor — a macro that filled a
+    /// buffer, a `>` where a `s` was meant — wrote a file that no typed block
+    /// could have produced, and it was read whole and parsed.
+    ///
+    /// The read is capped rather than the answer: `take` stops one byte past the
+    /// limit, so a file of any size is a read of at most [`MAX_BLOCK_BYTES`] + 1
+    /// bytes and the rest is never in memory. That byte over is what says "there
+    /// was more than the limit", so a block exactly at it is still a block the
+    /// session runs — the same boundary the typed path draws at `>`.
+    fn read_edited_block(&self, path: &Path, program: &str) -> Result<String, String> {
+        use std::io::Read;
+
+        let unreadable = |error: std::io::Error| -> String {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                format!("what `{program}` saved to {} is not text", path.display())
+            } else {
+                format!(
+                    "could not read back what `{program}` saved to {}: {error}",
+                    path.display()
+                )
+            }
+        };
+        let mut block = String::new();
+        std::fs::File::open(path)
+            .map_err(unreadable)?
+            .take(MAX_BLOCK_BYTES as u64 + 1)
+            .read_to_string(&mut block)
+            .map_err(unreadable)?;
+
+        if Self::exceeds_block_limits(block.lines().count(), block.len()) {
+            return Err(format!(
+                "the block `{program}` saved is past what a session holds for one \
+                 block — at most {MAX_BLOCK_LINES} lines or {MAX_BLOCK_BYTES} bytes — \
+                 so nothing was read back from it"
+            ));
+        }
+        Ok(block)
+    }
+
+    /// A directory under `parent` that only this user can reach, and the one the
+    /// editor is opened over.
+    ///
+    /// `/tmp` is a world-writable directory that every local user shares, so a
+    /// file written straight into it as `redblue-edit-<pid>.rb` is a name another
+    /// user can predict — the process id is a small number — and pre-create as a
+    /// symlink. `std::fs::write` follows such a link and truncates what it points
+    /// at, so the buffer would have been written through it into a file the
+    /// reader can write, and that path handed to `$EDITOR`.
+    ///
+    /// A name that is taken is a name this session does not write into, and a
+    /// name that is free is not reused either — it is taken, not borrowed.
+    /// `create_dir` is `mkdir`, not `mkdir -p`, so a directory planted under a
+    /// serial with someone else's permissions is reported as taken and the search
+    /// moves on; and because it was never entered, nothing of the session's was
+    /// ever written inside it. The search runs [`SCRATCH_DIR_ATTEMPTS`] serials
+    /// before it reports that it could not have a directory of its own, and what
+    /// it reports then is the whole range it tried, not a generic failure.
+    ///
+    /// Nothing inside a directory it did make is reachable by anyone else, so
+    /// nothing inside it can have been planted by anyone else either.
+    fn private_scratch_dir(&self, parent: &Path) -> Result<ScratchDir, String> {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("could not make a scratch directory in {parent:?}: {error}")
+        })?;
+        for serial in 0..SCRATCH_DIR_ATTEMPTS {
+            let dir = parent.join(format!("redblue-edit-{}-{serial}", std::process::id()));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {
+                    // Owned from here, and before it is locked down: a
+                    // `chmod` that failed is a failure this session made the
+                    // directory for, so the directory goes with it.
+                    let owned = ScratchDir::new(dir);
+                    Self::lock_down_dir(owned.path())?;
+                    return Ok(owned);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "could not make {} for an edit: {error}",
+                        dir.display()
+                    ))
+                }
+            }
+        }
+        Err(format!(
+            "could not make a directory of its own for an edit under {parent:?}: \
+             every name from redblue-edit-{}-0 to redblue-edit-{}-{} was taken",
+            std::process::id(),
+            std::process::id(),
+            SCRATCH_DIR_ATTEMPTS - 1
+        ))
+    }
+
+    /// Takes away everyone else's access to `dir`, whatever the umask left of it.
+    ///
+    /// `create_dir` asks the kernel for `0o777 & ~umask`, so a directory made in a
+    /// shared `/tmp` is normally `0755` — listable by every local user for as
+    /// long as the editor is open. The file inside it is `0600` regardless, so
+    /// what is private is the buffer; the directory is closed as well so that
+    /// what a reader is working on is not announced by a name they did not choose.
+    #[cfg(unix)]
+    fn lock_down_dir(dir: &Path) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("could not make {} private: {error}", dir.display()))
+    }
+
+    #[cfg(not(unix))]
+    fn lock_down_dir(_dir: &Path) -> Result<(), String> {
+        // No mode to set here. What the file inside it was created with is still
+        // this platform's own answer to who may read it.
+        Ok(())
+    }
+
+    /// Writes the session's block to `path`, for an editor to open.
+    ///
+    /// `create_new` rather than `write`: the file is created by this call or not
+    /// at all, so a symlink sitting at that path is a failure rather than
+    /// something the buffer is written through. And `0o600` rather than whatever
+    /// the umask leaves behind — the block is the reader's own, and for as long
+    /// as the editor is open it does not need to be readable by anyone else.
+    fn write_scratch_file(&self, path: &Path) -> Result<(), String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(path)
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+        std::io::Write::write_all(&mut file, self.multiline_buffer.join("\n").as_bytes())
+            .map_err(|error| format!("could not write {}: {error}", path.display()))
+    }
+
+    /// `.edit` over the block this session is holding, with the editor and the
+    /// directory given rather than read from the process.
+    ///
+    /// This is the entry point the command uses and the one a test drives, so
+    /// what is asserted afterwards — the buffer that survived a failed edit, the
+    /// block that came back and ran — is asserted about the session's own state
+    /// and not about a scratch file's leftovers.
+    fn edit_with(&mut self, editor: Option<&str>, scratch_dir: &Path) -> Result<(), String> {
+        let edited = self.edit_in(editor, scratch_dir)?;
+        self.multiline_buffer.clear();
+        self.in_multiline = false;
+        match self.execute_code(&edited) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                // The editor's block is the only copy of it there is, and the
+                // buffer was cleared before the run on purpose — a block that ran
+                // must not be left to be run again by the next line typed. A
+                // block that did not run is the other case: clearing it first
+                // threw away a typo at the end of a long program with no way back
+                // into it, and `.edit` is the only route into the session for
+                // anything longer than a line.
+                self.multiline_buffer = edited.lines().map(str::to_string).collect();
+                self.in_multiline = Self::needs_continuation(&edited);
+                Err(
+                    "nothing was run: the block the editor saved is back in the \
+                     buffer — `.edit` to try again, or keep typing"
+                        .to_string(),
+                )
+            }
+        }
     }
 
     /// Opens `$EDITOR` over the block this session is holding, runs what comes
@@ -2410,18 +2669,11 @@ impl Repl {
     fn edit_buffer(&mut self) {
         let editor = Self::editor_program();
         let scratch = std::env::temp_dir();
-        match self.edit_in(editor.as_deref(), &scratch) {
-            Ok(edited) => {
-                self.multiline_buffer.clear();
-                self.in_multiline = false;
-                self.execute_code(&edited);
-            }
-            Err(message) => {
-                println!(
-                    "{}",
-                    self.style.paint(Paint::Error, &format!("Error: {message}"))
-                );
-            }
+        if let Err(message) = self.edit_with(editor.as_deref(), &scratch) {
+            println!(
+                "{}",
+                self.style.paint(Paint::Error, &format!("Error: {message}"))
+            );
         }
     }
 
@@ -2436,10 +2688,45 @@ impl Repl {
         for (caption, source) in EXAMPLES {
             println!("  {}", caption);
             for line in source.lines() {
-                println!("  {}", line);
+                println!("    {}", line);
             }
             println!();
         }
+    }
+}
+
+/// A directory this session made for one `.edit`, and the thing that takes it
+/// away again.
+///
+/// The removal is in `drop`, not at the end of the edit, because an edit has
+/// more ways out than the one it succeeds by: the editor is not there, it exits
+/// badly, its save cannot be read back, the block it saved is past what a
+/// session holds. A removal written on each of those is a list to keep in step
+/// with the paths above it, and a list is exactly what grows a new path and
+/// forgets it. Owned rather than borrowed, so holding this is what makes the
+/// directory exist: nobody can reach the file inside without going through it.
+#[derive(Debug)]
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    /// Makes `path` a directory this session owns.
+    fn new(path: PathBuf) -> Self {
+        ScratchDir(path)
+    }
+
+    /// The directory the editor is opened over.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        // Whether this succeeds is not something to report over an edit that
+        // already failed: the block the user was writing is in the session, and
+        // this is the temporary directory, which the operating system reclaims
+        // anyway.
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -2776,7 +3063,8 @@ mod tests {
     #[test]
     fn complete_offers_the_names_the_session_has_bound() {
         let mut repl = Repl::new();
-        repl.execute_code("set total to 3");
+        repl.execute_code("set total to 3")
+            .expect("a `set` of a number is a line that runs");
 
         let matches = repl.complete("to");
         assert!(
@@ -2804,7 +3092,8 @@ mod tests {
     #[test]
     fn edge_completion_after_reset_forgets_the_sessions_names() {
         let mut repl = Repl::new();
-        repl.execute_code("set counter to 3");
+        repl.execute_code("set counter to 3")
+            .expect("a `set` of a number is a line that runs");
         assert!(repl.complete("count").contains(&"counter".to_string()));
 
         repl.handle_command(":reset");
@@ -5865,7 +6154,11 @@ mod tests {
 
         use super::{feed, Repl};
         use crate::repl::style::{Paint, Style};
-        use crate::repl::{hint_lines, tutorial_lines, TUTORIAL};
+        use crate::repl::{
+            hint_lines, tutorial_lines, MAX_BLOCK_BYTES, MAX_BLOCK_LINES, SCRATCH_DIR_ATTEMPTS,
+            TUTORIAL,
+        };
+        use crate::value::Value;
 
         /// A scratch directory under the checkout, unique per test so two running
         /// in parallel cannot collide.
@@ -5895,6 +6188,41 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
                 .expect("the editor script is made executable");
             path.to_string_lossy().to_string()
+        }
+
+        /// What an edit left in `dir`, other than the editor script itself.
+        ///
+        /// The editor script is the test's own and outlives every edit it drives, so it
+        /// is not a thing an edit left behind.
+        fn left_behind(dir: &Path) -> Vec<String> {
+            fs::read_dir(dir)
+                .unwrap_or_else(|error| {
+                    panic!("{} should still be readable: {error}", dir.display())
+                })
+                .map(|entry| {
+                    entry
+                        .expect("a scratch entry should be readable")
+                        .file_name()
+                })
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| name != "fake-editor.sh")
+                .collect()
+        }
+
+        /// That an edit left nothing of the reader's block in `dir`, whatever
+        /// shape the edit left by.
+        ///
+        /// The whole directory rather than one file name, because the file lives
+        /// in a directory of the session's own and the directory is the thing
+        /// that has to go: a name that is left behind is a name the next edit,
+        /// or the next session, finds.
+        fn assert_no_scratch_left(dir: &Path) {
+            let left = left_behind(dir);
+            assert!(
+                left.is_empty(),
+                "no copy of the block is left in {}: {left:?}",
+                dir.display()
+            );
         }
 
         /// The tour is a numbered set of steps, and its last step is the way to
@@ -6032,8 +6360,17 @@ mod tests {
             );
         }
 
-        /// `.hint` in the tour answers about the step the session is on, and
-        /// `:tutorial` is what puts it there.
+        /// `.hint` in the tour answers about the step the session is on, `:tutorial` is
+        /// what puts it there, and running that step's snippet is what moves it on.
+        ///
+        /// The second half is the half that was missing: the step was set once and
+        /// nothing ever read it again, so `:hint` answered "step 1 of 6" for a
+        /// reader who had already done step 1 — and the other five steps' hints
+        /// could not be reached at all.
+        ///
+        /// Fed a line at a time, as a reader types it: `set name to "World"` is
+        /// a whole program and so is `say name`, so neither run on its own is the
+        /// step and only the two of them together are.
         #[test]
         fn a_hint_in_the_tour_names_the_step_it_is_for() {
             let mut repl = Repl::new();
@@ -6053,10 +6390,180 @@ mod tests {
                 "and with colour off it is plain text: {:?}",
                 hint[0]
             );
+
+            feed(&mut repl, &["set name to \"World\""]);
+            assert_eq!(
+                repl.tutorial_step,
+                Some(0),
+                "half a step is still on the step it belongs to"
+            );
+
+            feed(&mut repl, &["say name"]);
+            assert_eq!(
+                repl.tutorial_step,
+                Some(1),
+                "and doing step one leaves the reader on step two"
+            );
+            let hint = hint_lines(repl.tutorial_step, &Style::forced(false));
+            assert!(
+                hint[0].contains("2") && hint[0].contains(TUTORIAL[1].hint),
+                "so the hint now answers about step two: {:?}",
+                hint[0]
+            );
+        }
+
+        /// Every step of the tour can be walked, in order, by typing it — the
+        /// whole point of a step being its own snippet.
+        ///
+        /// Line by line, so the accumulation that recognises a snippet of several
+        /// programs is exercised on a step that is one (`repeat 3 times`, its
+        /// body, its `end`) as well as on one that is several.
+        #[test]
+        fn edge_every_step_of_the_tour_can_be_walked_by_typing_it() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[":tutorial"]);
+
+            for (index, step) in TUTORIAL.iter().enumerate() {
+                assert_eq!(
+                    repl.tutorial_step,
+                    Some(index),
+                    "the reader is on step {} before typing it: {:?}",
+                    index + 1,
+                    step.title
+                );
+                let lines: Vec<&str> = step.snippet.lines().collect();
+                feed(&mut repl, &lines);
+            }
+
+            assert_eq!(
+                repl.tutorial_step, None,
+                "and a tour walked to its end is over"
+            );
+        }
+
+        /// The tour ends where it says it ends: the last step's hint is the last
+        /// thing a reader is on, and once it has been taken there is no step left
+        /// to be on — which is what `:hint` then says.
+        #[test]
+        fn edge_the_last_step_taken_is_the_end_of_the_tour() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[":tutorial"]);
+            repl.tutorial_step = Some(TUTORIAL.len() - 1);
+
+            let lines: Vec<&str> = TUTORIAL[TUTORIAL.len() - 1].snippet.lines().collect();
+            feed(&mut repl, &lines);
+
+            assert_eq!(
+                repl.tutorial_step, None,
+                "a finished tour is over, not parked on its last hint"
+            );
+            let hint = hint_lines(repl.tutorial_step, &Style::forced(false));
+            assert!(
+                hint[0].contains(":examples"),
+                "and the answer a reader then gets points at the catalogue the \
+                 last step names: {:?}",
+                hint[0]
+            );
+        }
+
+        /// Only running the step moves the tour. Code that is not the step's own
+        /// snippet is a reader trying something of their own, and a step they
+        /// have not taken yet is a step they still need the hint for.
+        #[test]
+        fn edge_only_the_step_its_own_snippet_moves_the_tour_on() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[":tutorial"]);
+
+            feed(&mut repl, &["set something_else to 1"]);
+            assert_eq!(
+                repl.tutorial_step,
+                Some(0),
+                "and leaves the reader on the step they were on"
+            );
+
+            feed(&mut repl, &["set name to \"World\""]);
+            assert_eq!(
+                repl.tutorial_step,
+                Some(0),
+                "and so does a snippet begun and then given up on"
+            );
+            feed(&mut repl, &["say \"something else\""]);
+            assert_eq!(
+                repl.tutorial_step,
+                Some(0),
+                "even after the reader strays: the tour does not skip a step"
+            );
+
+            feed(&mut repl, &["set name to \"World\"", "say nosuchvariable"]);
+            assert_eq!(
+                repl.tutorial_step,
+                Some(0),
+                "and a step that failed to run is a step that has not been taken"
+            );
+        }
+
+        /// A reset is a session that has forgotten what it was, and where in the tour
+        /// it had got to is part of that.
+        ///
+        /// A step is taken by running its snippet and a snippet needs the
+        /// bindings the steps before it bound, so a session reset half-way
+        /// through the tour with the tour still on the old step is a session
+        /// answering `:hint` about a program it no longer holds. Half a step is
+        /// the interesting half: the accumulation that recognises a step of two
+        /// programs outlived the bindings it was accumulated from.
+        #[test]
+        fn edge_a_reset_forgets_the_tour_it_was_walked_through() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[":tutorial"]);
+            feed(&mut repl, &["set name to \"World\""]);
+
+            assert_eq!(repl.tutorial_step, Some(0), "mid-step, before the reset");
+            assert!(
+                !repl.tutorial_typed.is_empty(),
+                "with half of the step's snippet accumulated: {:?}",
+                repl.tutorial_typed
+            );
+
+            feed(&mut repl, &[":reset"]);
+
+            assert_eq!(
+                repl.tutorial_step, None,
+                "a reset session is not part-way through a tour"
+            );
+            assert!(
+                repl.tutorial_typed.is_empty(),
+                "and the half of the snippet it had is gone with it: {:?}",
+                repl.tutorial_typed
+            );
+            let hint = hint_lines(repl.tutorial_step, &Style::forced(false));
+            assert!(
+                hint[0].contains(":tutorial"),
+                "so the hint asks for a tour rather than answering about a step \
+                 whose bindings are gone: {:?}",
+                hint[0]
+            );
+
+            // Which is what makes the next tour start clean rather than
+            // half-way through the one before it.
+            feed(&mut repl, &[":tutorial"]);
+            assert_eq!(
+                repl.tutorial_step,
+                Some(0),
+                "and a new tour starts at step one"
+            );
+            assert!(
+                repl.tutorial_typed.is_empty(),
+                "with nothing of the last one still half-typed: {:?}",
+                repl.tutorial_typed
+            );
         }
 
         /// The round trip: the block the session is holding goes out to the
         /// editor, and what the editor wrote comes back as a program that ran.
+        ///
+        /// Driven through [`Repl::edit_with`], the entry point the command uses,
+        /// so what is asserted is the session's own state afterwards and not what
+        /// a scratch file happens to hold.
         #[cfg(unix)]
         #[test]
         fn edit_runs_what_the_editor_left_behind() {
@@ -6067,27 +6574,140 @@ mod tests {
 
             assert!(repl.in_multiline, "the block is open before the edit");
 
-            let edited = repl
-                .edit_in(Some(&editor), &dir)
+            repl.edit_with(Some(&editor), &dir)
                 .expect("an editor that saves the file is an editor that worked");
 
-            assert_eq!(
-                edited, "set edited to 42\n",
-                "what came back is what the editor wrote"
-            );
-            assert!(
-                !dir.join(format!("redblue-edit-{}.rb", std::process::id()))
-                    .exists(),
-                "and the scratch file is not left behind"
-            );
-
-            repl.multiline_buffer.clear();
-            repl.in_multiline = false;
-            repl.execute_code(&edited);
             assert!(
                 repl.vm.user_names().contains(&"edited".to_string()),
                 "what the editor wrote is a program the session ran: {:?}",
                 repl.vm.user_names()
+            );
+            assert!(
+                repl.multiline_buffer.is_empty() && !repl.in_multiline,
+                "and a block that ran is not left to be run again by the next line"
+            );
+            assert_no_scratch_left(&dir);
+        }
+
+        /// What the reader was writing is theirs: while the editor is open, the
+        /// file it was handed is readable by its owner and nobody else, and it
+        /// sits in a directory of its own rather than in a world-writable one
+        /// where a name this session would pick could be planted beforehand.
+        ///
+        /// Linux, not `cfg(unix)`: the editor reports the modes with
+        /// `stat -c '%a'`, which is GNU. BSD and macOS spell that `-f '%Lp'`, so
+        /// on those hosts the script would write two empty strings and the block
+        /// would not be the program this asserts on. The property is pinned where
+        /// the command that reads it back exists.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn edge_the_scratch_file_is_readable_by_its_owner_and_nobody_else() {
+            let dir = scratch_dir("edit-private-scratch");
+            // The editor reports back what it was given: the modes of the file it
+            // opened and of the directory it is in, as a program that runs.
+            let editor = script_editor(
+                &dir,
+                "printf 'set file_mode to %s\\nset dir_mode to %s\\n' \
+                 \"$(stat -c '%a' \"$1\")\" \"$(stat -c '%a' \"$(dirname \"$1\")\")\" > \"$1\"",
+            );
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times"]);
+
+            repl.edit_with(Some(&editor), &dir)
+                .expect("an editor that only reports the modes still edits");
+
+            assert_eq!(
+                repl.lookup("file_mode"),
+                Some(&Value::Number(600.0)),
+                "the file holding the block is not readable by anyone else"
+            );
+            assert_eq!(
+                repl.lookup("dir_mode"),
+                Some(&Value::Number(700.0)),
+                "and it is not in a directory another user can list"
+            );
+            assert_no_scratch_left(&dir);
+        }
+
+        /// The scratch file is created, and never opened at a name somebody else
+        /// could have got there first: a name that is taken is a name the session
+        /// does not write into.
+        ///
+        /// The name the session would pick is `redblue-edit-<pid>-<serial>`, so
+        /// that is the name planted here — planting the pid alone would test a
+        /// path nothing ever opens.
+        #[cfg(unix)]
+        #[test]
+        fn edge_a_scratch_path_already_taken_is_refused_rather_than_followed() {
+            let dir = scratch_dir("edit-symlink-scratch");
+            let planted = dir.join(format!("redblue-edit-{}-0", std::process::id()));
+            fs::create_dir(&planted).expect("the planted directory should be creatable");
+            fs::write(planted.join("decoy.rb"), "set planted to 1\n")
+                .expect("the planted directory should be writable");
+
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times"]);
+            let editor = script_editor(&dir, "printf 'set edited to 1\\n' > \"$1\"");
+
+            // The name is taken, so the session takes the next serial rather than
+            // writing into a directory it did not make.
+            repl.edit_with(Some(&editor), &dir)
+                .expect("the next serial is a directory of its own, so the edit works");
+            assert!(
+                !repl.lookup("planted").is_some(),
+                "and nothing of the session's ran out of the planted directory"
+            );
+            assert!(
+                repl.vm.user_names().contains(&"edited".to_string()),
+                "while the editor's own block ran: {:?}",
+                repl.vm.user_names()
+            );
+            assert_eq!(
+                left_behind(&dir),
+                vec![format!("redblue-edit-{}-0", std::process::id())],
+                "and the serial the session made is gone while the planted one is \
+                 not its to remove"
+            );
+            assert_eq!(
+                fs::read_dir(&planted)
+                    .expect("the planted directory should still be readable")
+                    .count(),
+                1,
+                "with nothing of the session's written inside it"
+            );
+        }
+
+        /// A name is not reused, it is skipped — and when every name this session
+        /// would try is taken, it says which range it tried rather than reporting
+        /// a generic failure.
+        ///
+        /// `/tmp` is shared, so "the name is free" is not a thing a session can
+        /// assume; the honest answer is to search, and to report the search when
+        /// it runs out. Sixty-four serials of `redblue-edit-<pid>-<serial>`.
+        #[test]
+        fn edge_every_scratch_name_taken_is_reported_as_the_range_it_tried() {
+            let dir = scratch_dir("edit-no-free-serial");
+            for serial in 0..SCRATCH_DIR_ATTEMPTS {
+                fs::create_dir(dir.join(format!("redblue-edit-{}-{serial}", std::process::id())))
+                    .expect("a planted directory should be creatable");
+            }
+            let repl = Repl::new();
+
+            let error = repl
+                .private_scratch_dir(&dir)
+                .expect_err("no free name is not a directory of its own");
+
+            let last = SCRATCH_DIR_ATTEMPTS - 1;
+            assert!(
+                error.contains(&format!("redblue-edit-{}-0", std::process::id()))
+                    && error.contains(&format!("redblue-edit-{}-{last}", std::process::id())),
+                "and the message names both ends of the search: {error}"
+            );
+            assert_eq!(
+                left_behind(&dir).len(),
+                SCRATCH_DIR_ATTEMPTS,
+                "and the directories it found taken are the ones the test planted: \
+                 none of them was written into"
             );
         }
 
@@ -6100,7 +6720,7 @@ mod tests {
             feed(&mut repl, &["repeat 2 times", "    say \"hi\""]);
 
             let error = repl
-                .edit_in(None, &dir)
+                .edit_with(None, &dir)
                 .expect_err("no editor named is not an edit");
 
             assert!(
@@ -6120,6 +6740,10 @@ mod tests {
 
         /// An editor that cannot be run, one that fails, and one that empties the
         /// file are three different failures and none of them runs anything.
+        ///
+        /// Driven through [`Repl::edit_with`] rather than through the file round
+        /// trip beneath it: the buffer is this session's own state, so a claim
+        /// about it means nothing over a `&self` that cannot have touched it.
         #[test]
         fn edge_an_editor_that_cannot_be_used_is_reported_rather_than_run() {
             let dir = scratch_dir("edit-bad-editor");
@@ -6128,7 +6752,7 @@ mod tests {
             feed(&mut repl, &["repeat 2 times"]);
 
             let error = repl
-                .edit_in(Some(&dir.join("no-such-editor").to_string_lossy()), &dir)
+                .edit_with(Some(&dir.join("no-such-editor").to_string_lossy()), &dir)
                 .expect_err("a program that is not there cannot edit anything");
             assert!(
                 error.contains("no-such-editor"),
@@ -6144,7 +6768,7 @@ mod tests {
             {
                 let failing = script_editor(&dir, "exit 3");
                 let error = repl
-                    .edit_in(Some(&failing), &dir)
+                    .edit_with(Some(&failing), &dir)
                     .expect_err("an editor that exits badly has not saved anything");
                 assert!(
                     error.contains("exited"),
@@ -6153,7 +6777,7 @@ mod tests {
 
                 let emptying = script_editor(&dir, ": > \"$1\"");
                 let error = repl
-                    .edit_in(Some(&emptying), &dir)
+                    .edit_with(Some(&emptying), &dir)
                     .expect_err("an empty file is not a program");
                 assert!(
                     error.contains("nothing to run"),
@@ -6165,6 +6789,275 @@ mod tests {
                     "every one of them left the block the session was holding"
                 );
             }
+        }
+
+        /// A block the editor wrote that does not run is the only copy of itself
+        /// there is, and clearing the buffer before the run threw it away with no
+        /// way back into it.
+        ///
+        /// `.edit` is the only route into the session for anything longer than a
+        /// line, so a typo at the end of a program the reader had just written was
+        /// a program lost. It comes back into the buffer here, and the buffer is
+        /// the state a test can hold.
+        #[cfg(unix)]
+        #[test]
+        fn edge_an_edit_that_does_not_run_gives_the_block_back() {
+            let dir = scratch_dir("edit-broken-program");
+            let editor = script_editor(&dir, "printf 'set kept to 1\\nrepeat 2 times\\n' > \"$1\"");
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times"]);
+
+            let error = repl
+                .edit_with(Some(&editor), &dir)
+                .expect_err("a block that never balances is not a program");
+
+            assert!(
+                error.contains("buffer"),
+                "and the message says where the block went: {error}"
+            );
+            assert_eq!(
+                repl.multiline_buffer,
+                vec!["set kept to 1".to_string(), "repeat 2 times".to_string()],
+                "the block the editor saved is back in the buffer, in full"
+            );
+            assert!(
+                repl.in_multiline,
+                "and it is still an open block, so `end` finishes it rather than \
+                 than being appended to something else"
+            );
+
+            // Which is the point of putting it back: the block is editable again.
+            feed(&mut repl, &["end"]);
+            assert!(
+                repl.vm.user_names().contains(&"kept".to_string()),
+                "and finishing it by hand is a program the session runs: {:?}",
+                repl.vm.user_names()
+            );
+        }
+
+        /// The scratch file is the session's own buffer, written out so an editor
+        /// has something to open — and the edit paths that failed left it there.
+        ///
+        /// The success path removed it and nothing else did, so an editor that
+        /// could not be run, or that exited badly, or whose save could not be
+        /// read back, each left a copy of what the reader was writing in the
+        /// temp directory. Three failed edits is three copies.
+        #[cfg(unix)]
+        #[test]
+        fn edge_a_failed_edit_leaves_no_copy_of_the_buffer_behind() {
+            let dir = scratch_dir("edit-no-scratch-left");
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times"]);
+
+            let missing = dir.join("no-such-editor").to_string_lossy().into_owned();
+            assert!(
+                repl.edit_with(Some(&missing), &dir).is_err(),
+                "an editor that is not there cannot edit anything"
+            );
+            assert_no_scratch_left(&dir);
+
+            let failing = script_editor(&dir, "exit 3");
+            assert!(
+                repl.edit_with(Some(&failing), &dir).is_err(),
+                "an editor that exits badly has saved nothing"
+            );
+            assert_no_scratch_left(&dir);
+        }
+
+        /// The directory the editor was opened over is taken with it however the
+        /// edit ended — including on the paths that end before the editor runs.
+        ///
+        /// The removal was once written at the end of the successful path and at
+        /// the end of the failing one, and the two paths between them — a lock
+        /// that failed, a buffer that could not be written — returned before
+        /// either, so they left the directory in the temp directory holding the
+        /// block. The removal is now in `Drop`, which every path out of the edit
+        /// goes through whatever its shape.
+        ///
+        /// A real `chmod` or write failure cannot be forced without a second user
+        /// or a full disk, so the guard is driven where it can be: an owned
+        /// directory, given up on part-way through the work, is gone. The second
+        /// half is a genuine I/O failure, reached end to end.
+        #[test]
+        fn edge_a_scratch_directory_is_taken_with_it_however_the_edit_ended() {
+            let dir = scratch_dir("edit-scratch-dir-guard");
+            let repl = Repl::new();
+
+            let owned = repl
+                .private_scratch_dir(&dir)
+                .expect("a free serial makes a directory of its own");
+            let block = owned.path().join("redblue-edit.rb");
+            repl.write_scratch_file(&block)
+                .expect("the block should be writable inside a directory of its own");
+            drop(owned);
+            assert!(
+                !block.exists(),
+                "giving the directory up part-way through is how `?` leaves it"
+            );
+            assert_no_scratch_left(&dir);
+
+            #[cfg(unix)]
+            {
+                // A real failure inside the edit: the editor saves a directory
+                // where the file was, so the read back cannot answer.
+                let mut repl = Repl::new();
+                feed(&mut repl, &["repeat 2 times"]);
+                let replacing = script_editor(&dir, "rm -f \"$1\" && mkdir \"$1\"");
+                let error = repl
+                    .edit_with(Some(&replacing), &dir)
+                    .expect_err("a directory where the save was is not a program");
+                assert!(
+                    error.contains("could not read back"),
+                    "and it is the read back that is reported: {error}"
+                );
+                assert_no_scratch_left(&dir);
+                assert_eq!(
+                    repl.multiline_buffer,
+                    vec!["repeat 2 times".to_string()],
+                    "with the block the session was holding still in the buffer"
+                );
+            }
+        }
+
+        /// A block past what a session holds is a block the session refuses to
+        /// read, at the line limit and at the byte limit, and a block exactly at
+        /// either one is still a block it runs.
+        ///
+        /// `.edit` is the other way into the session and the limit was not on
+        /// the keyboard: whatever an editor wrote was read whole and parsed, so
+        /// a runaway `>` could hand the session a block that no typed line could
+        /// have made. Both sides of both limits, because a limit drawn one byte
+        /// or one line too early is a limit that refuses a block it should run.
+        #[cfg(unix)]
+        #[test]
+        fn edge_a_block_the_editor_saved_past_the_session_limit_is_refused() {
+            let dir = scratch_dir("edit-too-large");
+            let lines = |count: usize| -> String {
+                format!(
+                    "i=0; while [ $i -lt {count} ]; do echo \"set v to $i\"; \
+                     i=$((i+1)); done > \"$1\""
+                )
+            };
+            // `set big to "` and the closing quote and the newline, so a payload
+            // of this many bytes is a file of exactly the limit.
+            let overhead = "set big to \"".len() + 2;
+            let payload = |bytes: usize| -> String {
+                format!(
+                    "printf 'set big to \"%s\"\\n' \
+                     \"$(head -c {bytes} /dev/zero | tr '\\000' 'x')\" > \"$1\""
+                )
+            };
+
+            let mut repl = Repl::new();
+
+            let at_line_limit = script_editor(&dir, &lines(MAX_BLOCK_LINES));
+            feed(&mut repl, &["repeat 2 times"]);
+            repl.edit_with(Some(&at_line_limit), &dir)
+                .expect("a block exactly at the line limit is one the session holds");
+            assert_eq!(
+                repl.lookup("v"),
+                Some(&Value::Number((MAX_BLOCK_LINES - 1) as f64)),
+                "and it ran: the last of its lines was the one that set it"
+            );
+
+            let over_line_limit = script_editor(&dir, &lines(MAX_BLOCK_LINES + 1));
+            feed(&mut repl, &["repeat 2 times"]);
+            let error = repl
+                .edit_with(Some(&over_line_limit), &dir)
+                .expect_err("one line past the limit is past it");
+            assert!(
+                error.contains("nothing was read back from it"),
+                "and it says the block was not read rather than that it did not run: \
+                 {error}"
+            );
+            assert_eq!(
+                repl.multiline_buffer,
+                vec!["repeat 2 times".to_string()],
+                "with the block the session was holding untouched"
+            );
+
+            let at_byte_limit = script_editor(&dir, &payload(MAX_BLOCK_BYTES - overhead));
+            feed(&mut repl, &["repeat 2 times"]);
+            repl.edit_with(Some(&at_byte_limit), &dir)
+                .expect("a block exactly at the byte limit is one the session holds");
+            assert!(
+                repl.lookup("big").is_some(),
+                "and it ran: the string it set is bound"
+            );
+
+            let over_byte_limit = script_editor(&dir, &payload(MAX_BLOCK_BYTES - overhead + 1));
+            feed(&mut repl, &["repeat 2 times"]);
+            let error = repl
+                .edit_with(Some(&over_byte_limit), &dir)
+                .expect_err("one byte past the limit is past it");
+            assert!(
+                error.contains("nothing was read back from it"),
+                "and it is refused before it is read: {error}"
+            );
+            assert_eq!(
+                repl.multiline_buffer,
+                vec!["repeat 2 times".to_string()],
+                "with the block the session was holding untouched"
+            );
+            assert_no_scratch_left(&dir);
+        }
+
+        /// A save that is not text is not a program, and saying so is not the same as
+        /// saying it failed to read.
+        ///
+        /// The read is bounded by the session's block limit, but the bytes inside
+        /// that bound are still decoded as UTF-8, so an editor that wrote a
+        /// binary file — a stray `dd`, an editor handed the wrong path — is
+        /// reported as what it is rather than as an I/O failure the reader cannot
+        /// act on.
+        #[cfg(unix)]
+        #[test]
+        fn edge_a_save_that_is_not_text_is_refused_rather_than_parsed() {
+            let dir = scratch_dir("edit-not-text");
+            let binary = script_editor(&dir, "printf 'set x to \"\\377\"' > \"$1\"");
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times"]);
+
+            let error = repl
+                .edit_with(Some(&binary), &dir)
+                .expect_err("a byte that is not text is not a program");
+
+            assert!(
+                error.contains("is not text"),
+                "and the message says what was saved rather than blaming the read: \
+                 {error}"
+            );
+            assert_eq!(
+                repl.multiline_buffer,
+                vec!["repeat 2 times".to_string()],
+                "with the block the session was holding untouched"
+            );
+            assert_no_scratch_left(&dir);
+        }
+
+        /// An `$EDITOR` that names nothing at all is a different mistake from one
+        /// that names a program that is not there, and it is refused by name
+        /// rather than spawned.
+        ///
+        /// `editor_program` cannot hand this over — it filters the empty and the
+        /// blank away before `.edit` sees them — so `edit_in` is driven directly
+        /// with what `$EDITOR` can actually hold. Nothing is written either way:
+        /// the name is refused before there is a directory to write it into.
+        #[test]
+        fn edge_an_editor_that_names_nothing_is_refused_rather_than_spawned() {
+            let dir = scratch_dir("edit-blank-editor");
+            let repl = Repl::new();
+
+            for blank in ["", "   ", "\t "] {
+                let error = repl
+                    .edit_in(Some(blank), &dir)
+                    .expect_err("a name with no program in it is not an editor");
+                assert!(
+                    error.contains("is not a program that can be run"),
+                    "and the message says the name is not a program: {error}"
+                );
+            }
+            assert_no_scratch_left(&dir);
         }
 
         /// The commands are commands: they parse, they are completable, and
@@ -6209,30 +7102,38 @@ mod tests {
 
         /// A hint is painted whole, so the reader can tell it from the source and
         /// the text itself survives the painting.
+        ///
+        /// Both of `.hint`'s answers, because they used to disagree: the "no tour"
+        /// one was painted and the one a reader actually gets mid-tour was not,
+        /// so the single answer `:hint` gives in a tour was the only one of the
+        /// two that looked like everything else the session prints.
         #[test]
         fn edge_a_painted_hint_keeps_the_hint_readable() {
             let on = Style::forced(true);
-            let painted = hint_lines(None, &on);
+            let off = Style::forced(false);
 
-            assert!(
-                painted[0].starts_with("\u{1b}"),
-                "with colour on the hint is painted, so it begins with an escape: \
-                 {:?}",
-                painted[0].escape_debug()
-            );
-            assert!(
-                painted[0].contains(":tutorial"),
-                "and what it says survives the painting: {:?}",
-                painted[0].escape_debug()
-            );
-            assert_eq!(
-                painted[0],
-                on.paint(
-                    Paint::Heading,
-                    hint_lines(None, &Style::forced(false))[0].as_str()
-                ),
-                "the painted hint is the plain hint painted, and nothing else"
-            );
+            for step in [None, Some(0)] {
+                let painted = hint_lines(step, &on);
+
+                assert!(
+                    painted[0].starts_with("\u{1b}"),
+                    "with colour on the hint is painted, so it begins with an \
+                     escape: {:?}",
+                    painted[0].escape_debug()
+                );
+                assert_eq!(
+                    painted[0],
+                    on.paint(Paint::Heading, hint_lines(step, &off)[0].as_str()),
+                    "the painted hint is the plain hint painted, and nothing else \
+                     (step {step:?})"
+                );
+                assert_eq!(
+                    crate::repl::style::strip_escapes(&painted[0]),
+                    hint_lines(step, &off)[0],
+                    "and what it says survives the painting (step {step:?}): {:?}",
+                    painted[0].escape_debug()
+                );
+            }
         }
     }
 }

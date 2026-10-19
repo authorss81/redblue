@@ -851,7 +851,49 @@ mod tests {
         assert_eq!(
             source.signature_hint("say split(", 5),
             None,
-            "a cursor past the end of the line is not a position to hint at"
+            "a cursor inside the name is not a cursor after the bracket, whatever \
+             the line holds"
+        );
+        assert_eq!(
+            source.signature_hint("say split(", 999),
+            None,
+            "a cursor past the end of the line is refused by `line.get(..pos)` \
+             rather than panicking on a slice"
+        );
+        assert_eq!(
+            source.signature_hint("say split(", 11),
+            None,
+            "one byte past the end of the line is still past it"
+        );
+        let at_the_end = source.signature_hint("say split(", 10);
+        assert!(
+            at_the_end.is_some(),
+            "the end of the line *is* after the bracket, which is the position the \
+             hint is wanted at: {at_the_end:?}"
+        );
+        assert_eq!(
+            source.signature_hint("say é(", 5),
+            None,
+            "a cursor left inside a two-byte character is not a position to slice \
+             at, and the whole line is refused rather than half of it"
+        );
+        assert_eq!(
+            source.signature_hint("say é(", 6),
+            None,
+            "and a cursor immediately before the bracket is not after it either, \
+             whichever side of the wide character it sits on"
+        );
+        assert_eq!(
+            source.signature_hint("say é(", 7),
+            None,
+            "while a cursor at the end of that line *is* after the `(` — so what \
+             is refused there is the name: `é` is not a builtin, and a name the \
+             language does not have has no shape however wide the character is"
+        );
+        assert_eq!(
+            source.signature_hint("say ", 4),
+            None,
+            "and a line that is not a call at all is not one either"
         );
     }
 
@@ -885,12 +927,17 @@ mod tests {
             "and the answer really is the filesystem's: {offered:?}"
         );
 
+        // Sorted here as the answer is: the completer sorts what it offers, so
+        // comparing against the declaration order of `MODULES` would pass only
+        // while that unrelated table happened to be alphabetical.
+        let mut modules: Vec<String> = crate::stdlib::MODULES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        modules.sort();
         assert_eq!(
             source.complete(".", 1),
-            crate::stdlib::MODULES
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect::<Vec<_>>(),
+            modules,
             "a bare dot is the start of a dotted call, so it offers the receivers"
         );
     }
