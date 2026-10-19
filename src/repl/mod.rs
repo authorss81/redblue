@@ -4754,6 +4754,77 @@ mod tests {
             );
         }
 
+        /// The two places that answer "is that a module, and what is in it" must
+        /// answer it about the same names.
+        ///
+        /// `.doc <name>` (phase-056) lists a module's members and the completer
+        /// (phase-061) offers them on `<name>.`, and both read the language's own
+        /// table — which is what stops them drifting. That is worth pinning rather
+        /// than asserting twice: a name the completer offers members for while
+        /// `.doc` refuses it would leave a reader able to type something no
+        /// listing will explain, and a module `.doc` documents that TAB never
+        /// reaches would leave the finding half-fixed.
+        #[test]
+        fn edge_doc_and_completion_agree_about_which_names_are_modules() {
+            let repl = Repl::new();
+            let completer = crate::repl::completer::ReplCompleter::new();
+
+            for module in stdlib::MODULES {
+                let documented = repl
+                    .module_doc_answer(module)
+                    .unwrap_or_else(|error| panic!(".{module} is a module: {error}"));
+                let offered = completer.complete(&format!("{module}."));
+                assert!(
+                    !offered.is_empty(),
+                    "`{module}.` offers nothing, so the module {} .doc lists {} \
+                     cannot be reached from the keyboard",
+                    documented.first().map(String::as_str).unwrap_or(""),
+                    offered.len()
+                );
+                for member in &offered {
+                    let spelled = member
+                        .strip_prefix(&format!("{module}."))
+                        .unwrap_or_else(|| panic!("{member} is offered as a member of {module}"));
+                    assert!(
+                        documented.iter().any(|line| line.contains(spelled)),
+                        "{member} is offered on TAB but {module}'s .doc listing does \
+                         not mention it: {documented:?}"
+                    );
+                }
+            }
+
+            // And the refusal direction: a name that is not a module is refused by
+            // `.doc` and offers no members, rather than one of them answering for
+            // a name the other does not know.
+            for not_a_module in ["nosuchmodule", "JSON", "json_parse"] {
+                assert!(
+                    repl.module_doc_answer(not_a_module).is_err(),
+                    "`.doc {not_a_module}` should have been refused"
+                );
+                assert!(
+                    completer.complete(&format!("{not_a_module}.")).is_empty(),
+                    "`{not_a_module}.` offered members for a name that is not a module"
+                );
+            }
+
+            // The empty name is the same refusal on the other side: `.doc` has no
+            // module called nothing, and a bare `.` is not a member listing at all
+            // — it is the reader asking which receivers exist.
+            assert!(repl.module_doc_answer("").is_err());
+            assert!(
+                !completer.complete(".").is_empty(),
+                "a bare dot offers the receivers, which is a different question"
+            );
+            assert!(
+                completer
+                    .complete(".")
+                    .iter()
+                    .all(|name| !name.contains('.')),
+                "and every one of them is a bare name: {:?}",
+                completer.complete(".")
+            );
+        }
+
         /// `.sighelp` reads the shape table, and every builtin on it answers.
         #[test]
         fn sighelp_answers_for_every_registered_builtin() {

@@ -173,6 +173,58 @@ fn io_error(error: ReadlineError) -> io::Error {
     }
 }
 
+/// Where the cursor is, in the three kinds of place a line has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineContext {
+    /// Redblue. A call here is a call being made.
+    Code,
+    /// Inside a `"` literal, still open. Text here is being written, not run.
+    Text,
+    /// After a `//` and to the end of the line. Never run, so never completed.
+    Comment,
+}
+
+/// What the part of `line` before the cursor *is*, which is the question both
+/// hooks have to answer before they answer anything else.
+///
+/// The scan mirrors [`crate::lexer`] rather than inventing a second dialect: a
+/// `"` opens and the next unescaped `"` closes, `\` takes the character after it
+/// so `\"` is a quote inside the text and `\\` is not, and `//` outside a literal
+/// is a comment to the end of the line. That is what makes `"http://x"` a string
+/// that closed rather than a string followed by a comment.
+///
+/// It is a scan and not a parse because the line is a *half-typed* one: `say
+/// "split(` is exactly the line a reader is looking at when they should be
+/// looking at a hint, and the lexer refuses it as an unterminated string. The
+/// half-typed line is the case this exists for, so a scan that could not read it
+/// would answer none of them.
+fn context_at(head: &str) -> LineContext {
+    let mut in_text = false;
+    let mut chars = head.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_text {
+            match ch {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => in_text = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_text = true,
+            '/' if chars.peek() == Some(&'/') => return LineContext::Comment,
+            _ => {}
+        }
+    }
+    if in_text {
+        LineContext::Text
+    } else {
+        LineContext::Code
+    }
+}
+
 /// Turns what the line editor reports into what the session means.
 fn line_from(result: Result<String, ReadlineError>) -> io::Result<Line> {
     match result {
@@ -209,6 +261,12 @@ impl SessionCompleter {
     /// stepping one byte past it would split the character after it in half.
     fn word_at(line: &str, pos: usize) -> Option<(usize, &str)> {
         let head = line.get(..pos)?;
+        // A word inside a text literal or a comment is a word being written, and
+        // replacing it would edit the reader's prose: TAB on `say 1 // json.`
+        // must leave the comment alone rather than answer it.
+        if context_at(head) != LineContext::Code {
+            return None;
+        }
         let start = head
             .char_indices()
             .rev()
@@ -229,6 +287,12 @@ impl SessionCompleter {
     /// string at the cursor for no reason.
     fn signature_hint(&self, line: &str, pos: usize) -> Option<String> {
         let head = line.get(..pos)?;
+        // The same question `word_at` asks, for the same reason: `say "split(`
+        // has a `(` and a name before it, and is a reader writing a string.
+        // Without this the hint is drawn in the middle of their own text.
+        if context_at(head) != LineContext::Code {
+            return None;
+        }
         let opened = head.strip_suffix('(')?;
         let name = opened
             .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '.'))
@@ -939,6 +1003,102 @@ mod tests {
             source.complete(".", 1),
             modules,
             "a bare dot is the start of a dotted call, so it offers the receivers"
+        );
+    }
+
+    /// Text the reader is *writing* is not a call they are making.
+    ///
+    /// Both hooks answered the whole line and neither asked where the cursor was:
+    /// `signature_hint` only looked backwards for a `(` and a name, and `word_at`
+    /// only looked for the last space. So `say "split(` — a reader typing a string
+    /// that happens to end in a call's name and a bracket — was shown a signature
+    /// in the middle of their own string, and `say 1 // json.` plus TAB replaced
+    /// the word in their comment with `json.parse`.
+    ///
+    /// The suppression is what makes the answer mean "the call you are writing"
+    /// rather than "the text `(` happened to follow", and the case that must not
+    /// over-reach is the last one: a string that has *closed* puts the rest of the
+    /// line back in code, so a real call after one is still answered.
+    #[test]
+    fn edge_a_call_written_as_text_is_not_a_call_being_made() {
+        let source = editor(live_names(&[]), None);
+
+        assert_eq!(
+            source.signature_hint("say \"split(", 11),
+            None,
+            "a `(` inside a text literal opens nothing, so nothing is being asked \
+             about the name before it"
+        );
+        assert_eq!(
+            source.signature_hint("say \"json.parse(", 16),
+            None,
+            "and a member inside a text literal is text too, not a call"
+        );
+        assert_eq!(
+            source.signature_hint("say 1 // split(", 15),
+            None,
+            "a comment is not code, so a bracket in one opens nothing either"
+        );
+
+        assert!(
+            source.complete("say 1 // json.", 15).is_empty(),
+            "TAB in a comment must offer nothing rather than eating the word"
+        );
+        assert!(
+            source.complete("say \"json.", 10).is_empty(),
+            "and the same inside a text literal"
+        );
+        assert_eq!(
+            source.complete_start("say 1 // json.", 15),
+            0,
+            "with no candidates there is nothing to replace, so the replacement \
+             start is the line's own"
+        );
+
+        // Over-reach would be worse than the defect: a string that closed puts the
+        // rest of the line back in code, and so does a comment that was itself
+        // inside one.
+        assert_eq!(
+            source
+                .signature_hint("say \"a split(\" + split(", 23)
+                .as_deref(),
+            Some("split(text, separator) -> list of text; an empty separator has no answer"),
+            "the string closed before this bracket, so this really is a call"
+        );
+        assert_eq!(
+            source.complete("say \"a\" + json.", 15),
+            vec!["json.parse".to_string(), "json.stringify".to_string()],
+            "and a member after a closed string is completed as one"
+        );
+    }
+
+    /// The two ways out of a text literal are not the same character.
+    ///
+    /// A `"` closes it and an escaped `\"` does not, and a `//` inside one is the
+    /// text `//` rather than a comment — which is why a URL in a string is a
+    /// string that has not ended, not a string followed by a comment. Reading the
+    /// line any other way answers the wrong half of it.
+    #[test]
+    fn edge_an_escaped_quote_does_not_close_a_text_and_a_slash_slash_inside_one_is_text() {
+        let source = editor(live_names(&[]), None);
+
+        assert_eq!(
+            source.signature_hint("say \"a \\\" split(", 16),
+            None,
+            "the escaped quote left the literal open, so this bracket is in text"
+        );
+        assert_eq!(
+            source
+                .signature_hint("say \"http://x\" + split(", 23)
+                .as_deref(),
+            Some("split(text, separator) -> list of text; an empty separator has no answer"),
+            "the `//` in a URL is text, so the literal closed at the second quote \
+             and the call after it is a call"
+        );
+        assert_eq!(
+            source.signature_hint("say \"a \\\\ split(", 16),
+            None,
+            "an escaped backslash is not an escape of the quote that follows it"
         );
     }
 

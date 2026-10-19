@@ -9,22 +9,30 @@ use std::sync::Mutex;
 
 use redblue::repl::style::{Paint, Style};
 
-/// Serialises the two tests that pin `COLUMNS`.
+/// Serialises every test in this file that touches the process environment.
 ///
-/// The banner reads the terminal width out of the process environment, and
-/// cargo runs the tests in one binary on parallel threads sharing it. Whichever
-/// of the two ran `remove_var` in between the other's calls decided what the
-/// other saw: `edge_banner_is_stable_across_calls` compared a banner centred at
-/// 80 columns with one centred at none, and failed under the full suite while
-/// passing every time it was run alone. Taking this lock is the fix — the
-/// environment is still what the production code reads, and no assertion is
+/// The banner and the colour style both read the environment (`COLUMNS`,
+/// `REDBLUE_ASCII`, `REDBLUE_COLOR`, `NO_COLOR`, `TERM`), and cargo runs the
+/// tests in one binary on parallel threads sharing it. Whichever test ran
+/// `set_var`/`remove_var` in between another's calls decided what the other
+/// saw, and every symptom was a test that passes alone and fails in the suite:
+///
+/// | raced pair | what the victim saw |
+/// |---|---|
+/// | `edge_banner_is_stable_across_calls` vs `edge_a_narrow_terminal_centres_without_panicking` | a banner centred at 80 columns compared with one centred at none |
+/// | `the_banner_is_ascii_when_asked_and_unicode_otherwise` vs either of those | `COLUMNS=10` wrapping the wordmark, so its two renderings had different line counts |
+/// | `forced_is_the_only_way_tests_control_colour` vs `detection_precedence_is_explicit_then_no_color_then_tty` | `Style::detect()` under a temporarily-set `REDBLUE_COLOR=always` |
+///
+/// Locking only the writers was not enough, because a reader races a writer
+/// just as surely as two writers race each other. Taking this lock is the fix —
+/// the environment is still what the production code reads, and no assertion is
 /// weakened by not letting two tests write to it at once.
-static COLUMNS_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// The lock, taken even if a test that held it panicked, so one failure does not
-/// cascade into every later COLUMNS test.
-fn pin_columns() -> std::sync::MutexGuard<'static, ()> {
-    COLUMNS_LOCK
+/// cascade into every later environment test.
+fn pin_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -130,6 +138,7 @@ fn paint_never_mutates_its_input() {
 /// ordering deterministic rather than racing other tests in the binary.
 #[test]
 fn detection_precedence_is_explicit_then_no_color_then_tty() {
+    let _pinned = pin_env();
     // REDBLUE_COLOR wins over everything.
     std::env::set_var("REDBLUE_COLOR", "always");
     std::env::remove_var("NO_COLOR");
@@ -160,6 +169,7 @@ fn detection_precedence_is_explicit_then_no_color_then_tty() {
 
 #[test]
 fn edge_empty_no_color_value_still_disables() {
+    let _pinned = pin_env();
     // NO_COLOR says "any value", including the empty string. A user exporting
     // NO_COLOR= should get what they asked for.
     std::env::remove_var("REDBLUE_COLOR");
@@ -181,7 +191,9 @@ fn forced_is_the_only_way_tests_control_colour() {
     assert!(Style::forced(true).enabled());
     assert!(!Style::forced(false).enabled());
     // detect() under a test runner has no TTY, so it is off; forced() is what
-    // lets a test exercise the coloured path at all.
+    // lets a test exercise the coloured path at all. The lock keeps a sibling's
+    // temporary REDBLUE_COLOR from making this one read the environment instead.
+    let _pinned = pin_env();
     assert!(!Style::detect().enabled());
 }
 
@@ -197,6 +209,7 @@ fn style_is_copy_and_comparable_so_it_can_live_in_a_struct() {
 
 #[test]
 fn edge_banner_with_colour_off_is_plain_text_with_no_escapes() {
+    let _pinned = pin_env();
     let text = redblue::repl::banner::banner_text(&Style::forced(false));
     assert!(
         !text.contains('\u{1b}'),
@@ -211,6 +224,7 @@ fn edge_banner_with_colour_off_is_plain_text_with_no_escapes() {
 
 #[test]
 fn a_coloured_banner_paints_both_halves_and_plain_text_still_reads() {
+    let _pinned = pin_env();
     let text = redblue::repl::banner::banner_text(&Style::forced(true));
     assert!(text.contains('\u{1b}'), "enabled banner must colour");
     // Stripping escapes must leave exactly the plain banner - colour is the only
@@ -224,6 +238,7 @@ fn a_coloured_banner_paints_both_halves_and_plain_text_still_reads() {
 
 #[test]
 fn the_wordmark_uses_a_gradient_across_its_lines() {
+    let _pinned = pin_env();
     let on = Style::forced(true);
     let text = redblue::repl::banner::banner_text(&on);
     // All three gradient steps must actually appear, or the banner reads as two
@@ -250,6 +265,11 @@ fn the_wordmark_uses_a_gradient_across_its_lines() {
 fn the_banner_is_ascii_when_asked_and_unicode_otherwise() {
     // REDBLUE_ASCII exists because font coverage cannot be detected from inside
     // the process. Both renderings must be complete, not one being a stub.
+    // The lock is load-bearing: without it this test raced the two that pin
+    // COLUMNS, and a banner centred at ten columns wraps, so the two renderings
+    // came out with different line counts and the shape assertion below failed
+    // under the full suite while passing every time it was run alone.
+    let _pinned = pin_env();
     std::env::set_var("REDBLUE_ASCII", "1");
     let ascii = redblue::repl::banner::banner_text(&Style::forced(false));
     assert!(redblue::repl::banner::ascii_in_use());
@@ -293,7 +313,7 @@ fn edge_banner_is_stable_across_calls() {
     // COLUMNS races this one: the first run saw the banner centred and the second
     // did not, because the width changed in between. A test that depends on
     // ambient environment is a flake, not a test.
-    let _pinned = pin_columns();
+    let _pinned = pin_env();
     std::env::set_var("COLUMNS", "80");
     let s = Style::forced(true);
     let first = redblue::repl::banner::banner_text(&s);
@@ -311,7 +331,7 @@ fn edge_banner_is_stable_across_calls() {
 
 #[test]
 fn edge_a_narrow_terminal_centres_without_panicking() {
-    let _pinned = pin_columns();
+    let _pinned = pin_env();
     std::env::set_var("COLUMNS", "10");
     let text = redblue::repl::banner::banner_text(&Style::forced(false));
     std::env::remove_var("COLUMNS");
