@@ -1,4 +1,26 @@
+use std::path::{Path, PathBuf};
+
 use super::commands;
+
+/// The separator offered after a directory, so it is visibly a directory and the
+/// next TAB walks into it.
+///
+/// `/` rather than [`std::path::MAIN_SEPARATOR`]: this is the text that goes into
+/// a command line, and `:load src/main.rs` reads the same on every platform.
+/// Both separators are *accepted* when one is being completed (see
+/// [`split_fragment`]), so offering this one on Windows is cosmetic rather than
+/// wrong.
+const DIRECTORY_SEPARATOR: &str = "/";
+
+/// How many entries one directory offers before the list is cut short.
+///
+/// A completion list is read by eye, and a directory of ten thousand entries is
+/// not a list any reader can use: it is the answer to "did I mean this
+/// directory?", not a catalogue. The list simply stops at this many, which reads
+/// as "type more to see less" — an entry saying how many were left out would be
+/// one more thing in a column of filenames, and accepting it would type a name
+/// that is not there.
+pub const MAX_PATH_CANDIDATES: usize = 200;
 
 /// The module names a program can write as a receiver of a dotted call, read
 /// from the one table the analyzer reads them from.
@@ -192,9 +214,156 @@ impl Default for ReplCompleter {
     }
 }
 
+/// Where the cursor is, when it is in the path argument of a command that takes
+/// one: the offset that argument starts at, and the fragment typed so far.
+///
+/// `None` for everything else — and that is the property this exists for. A
+/// completer that offered paths anywhere would answer `say "` with a directory
+/// listing, so the question is asked of the *command* first and answered by
+/// [`commands::ReplCommand::takes_a_file_path`], which is the parser's own table
+/// rather than a list of the four commands that happen to take a path today.
+///
+/// A cursor the caller put inside a character is `None` rather than a panic:
+/// `line.get(..pos)` is what says so.
+pub fn path_argument(line: &str, pos: usize) -> Option<(usize, &str)> {
+    let head = line.get(..pos)?;
+    let command_end = head.find(char::is_whitespace)?;
+    if !commands::ReplCommand::takes_a_file_path(&head[..command_end]) {
+        return None;
+    }
+    let rest = &head[command_end..];
+    let start = command_end + rest.len() - rest.trim_start().len();
+    Some((start, &head[start..]))
+}
+
+/// The directory part of `fragment` and the name being typed in it, as the user
+/// wrote them.
+///
+/// Both halves are text rather than a [`Path`], because the completion is offered
+/// back to be typed: `:load ./sr` is completed to `./src/lib.rs`, not to the
+/// normalised `src/lib.rs` the filesystem would answer to. Both `/` and the
+/// platform's own separator end the directory, so a path typed on either is
+/// walked into.
+fn split_fragment(fragment: &str) -> (&str, &str) {
+    let separator = |c: char| c == '/' || (std::path::is_separator(c) && c != '/');
+    match fragment.rfind(separator) {
+        Some(at) => fragment.split_at(at + 1),
+        None => ("", fragment),
+    }
+}
+
+/// Completes `fragment` against what is in `dir`, offering directories with a
+/// trailing separator.
+///
+/// `dir` is named rather than read from the process, so a caller can complete
+/// against a directory it chose and a test can complete against a scratch one
+/// instead of whatever the checkout happens to hold.
+///
+/// Three things about the answer, each of them a decision rather than an
+/// accident:
+///
+/// - **Directories are offered with `/` after them.** A completion that reads
+///   `src` and `src.rs` as two answers leaves the reader to guess which is a
+///   directory; a trailing separator says so, and lets the next TAB walk in.
+/// - **A name with a space in it is quoted.** The argument is everything after
+///   the command word, so an unquoted `my file.rb` would reach the command as
+///   two arguments — one path and one stray word.
+/// - **Dot-entries are not offered.** A directory listing a user did not ask for
+///   is noise, and `.git` in it is noise twice over; a hidden file is still
+///   reachable by typing its name.
+///
+/// A directory that cannot be read — missing, unreadable, not a directory, a
+/// name that is not valid UTF-8 on this platform — offers nothing rather than
+/// failing: a TAB that reports nothing is better than a TAB that prints.
+pub fn complete_path_in(dir: &Path, fragment: &str) -> Vec<String> {
+    let is_quoted = fragment.starts_with('"');
+    let unquoted = fragment.trim_matches('"');
+    let (directory, name) = split_fragment(unquoted);
+    let listing = dir.join(directory);
+    let prefix = name.to_lowercase();
+    let Ok(entries) = std::fs::read_dir(&listing) else {
+        return Vec::new();
+    };
+
+    let mut candidates: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let Some(entry_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if entry_name.starts_with('.') || !entry_name.to_lowercase().starts_with(&prefix) {
+            continue;
+        }
+        let sep = if is_directory(&entry.path()) {
+            DIRECTORY_SEPARATOR
+        } else {
+            ""
+        };
+        let joined = format!("{directory}{entry_name}{sep}");
+        let candidate = if is_quoted || joined.contains(char::is_whitespace) {
+            format!("\"{joined}\"")
+        } else {
+            joined
+        };
+        candidates.push(candidate);
+    }
+
+    // Sorted before it is cut short, because a filesystem does not hand entries
+    // back in an order this can promise: a list that depended on readdir would be
+    // a different list on a different day, and a test could not pin it. That is
+    // also why the directory is read whole and the *list* is capped — a list
+    // sorted from a partial reading is a list of whichever entries the filesystem
+    // returned first, which is not a promise anyone can keep.
+    candidates.sort_by_key(|candidate| sort_key(candidate));
+    candidates.truncate(MAX_PATH_CANDIDATES);
+    candidates
+}
+
+/// The case-insensitive order a reader expects of a file list, with the exact
+/// spelling as the tiebreak so two names differing only in case have one order.
+fn sort_key(candidate: &str) -> (String, String) {
+    (candidate.to_lowercase(), candidate.to_string())
+}
+
+/// Whether `path` is a directory, following a symlink to one.
+///
+/// `metadata` rather than `file_type`, which reports the link itself: a symlink
+/// into a directory is a thing you can walk into, and offering it without the
+/// separator would send the next TAB to the parent instead. A path whose type
+/// cannot be read is offered as a file, which is the reading that does least.
+fn is_directory(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+}
+
+impl ReplCompleter {
+    /// What TAB offers when the cursor is in the path argument of a command that
+    /// takes one, and `None` when it is anywhere else.
+    ///
+    /// The completion rather than the candidates alone, because the offset is half
+    /// of the answer: rustyline replaces from there, so a candidate that did not
+    /// come with the place it starts would replace the command word too.
+    pub fn complete_path(&self, line: &str, pos: usize) -> Option<(usize, Vec<String>)> {
+        let (start, fragment) = path_argument(line, pos)?;
+        Some((start, complete_path_in(&current_dir(), fragment)))
+    }
+}
+
+/// The directory a session completes paths against.
+///
+/// A function so that the answer is one place: the process's working directory,
+/// which is where a user typing `:load ` means "here".
+fn current_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ReplCompleter;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{complete_path_in, path_argument, ReplCompleter, MAX_PATH_CANDIDATES};
     use crate::repl::commands::{self, ReplCommand};
 
     /// The names a session would offer: a variable it bound, a function it
@@ -502,5 +671,291 @@ mod tests {
                 .contains(&"MathUtils".to_string()),
             "the original spelling of the name is what is offered"
         );
+    }
+    /// A scratch directory for the path tests, named so no other test in this
+    /// binary can be looking at it, and emptied before use so what a test finds
+    /// does not depend on what ran before it.
+    fn scratch_dir(name: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let serial = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/tmp/repl-completer")
+            .join(format!("{name}-{serial}"));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).expect("a leftover scratch directory should be removable");
+        }
+        fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+        dir
+    }
+
+    /// A file in `dir`, written empty so it exists to be listed.
+    fn file_in(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, "").expect("the scratch file should be writable");
+        path
+    }
+
+    fn dir_in(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::create_dir_all(&path).expect("the scratch directory should be creatable");
+        path
+    }
+
+    /// The finding, both halves of it: the file commands complete paths, and
+    /// every other word completes vocabulary.
+    ///
+    /// `:load sr` is the case that matters. It used to be completed against the
+    /// command table and the keyword table — `:save`, `say`, `skip`, `split` —
+    /// so the one place a user has to name a file on disk was the one place with
+    /// no knowledge of the disk.
+    #[test]
+    fn a_file_command_completes_the_paths_it_could_load() {
+        let dir = scratch_dir("load");
+        dir_in(&dir, "src");
+        file_in(&dir, "notes.txt");
+
+        assert_eq!(
+            complete_path_in(&dir, "sr"),
+            vec!["src/".to_string()],
+            "a directory is offered with the separator that says it is one"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "no"),
+            vec!["notes.txt".to_string()],
+            "a file is offered whole"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "src/"),
+            Vec::<String>::new(),
+            "a directory with nothing in it offers nothing of its contents"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "src/n"),
+            Vec::<String>::new(),
+            "and a path walked into is completed against what is really there"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "zzz"),
+            Vec::<String>::new(),
+            "a prefix nothing starts with completes to nothing, as everywhere else"
+        );
+    }
+
+    /// An empty fragment offers the directory the user is in, and the cursor's
+    /// offset is the whole argument — so `:load ` followed by TAB replaces the
+    /// empty argument and leaves the command word alone.
+    #[test]
+    fn an_empty_fragment_offers_the_directory_and_replaces_only_the_argument() {
+        let dir = scratch_dir("empty-fragment");
+        file_in(&dir, "a.rb");
+        file_in(&dir, "b.md");
+
+        assert_eq!(
+            complete_path_in(&dir, ""),
+            vec!["a.rb".to_string(), "b.md".to_string()],
+            "an empty fragment is every entry, in order"
+        );
+
+        assert_eq!(
+            path_argument(":load ", 6),
+            Some((6, "")),
+            "the argument starts after the command word and its space"
+        );
+        assert_eq!(
+            path_argument(":load src/li", 12),
+            Some((6, "src/li")),
+            "and the fragment is everything from there to the cursor, so the \\
+             completion replaces the path and not the command"
+        );
+        assert_eq!(
+            path_argument(".save out.txt", 13),
+            Some((6, "out.txt")),
+            "the second sigil is the same command and completes the same way"
+        );
+    }
+
+    /// A name with a space in it is offered quoted, so that accepting it does not
+    /// hand the command two arguments.
+    ///
+    /// `ReplCommand::argument` is everything after the command word, so an
+    /// unquoted `my file.rb` reaches `:load` as `my file.rb` — which happens to
+    /// be the whole of it — but a quoted one reaches it *with* the quotes, and
+    /// neither is a path that opens. Quoting is the form that says which one is
+    /// the name.
+    #[test]
+    fn edge_a_filename_with_a_space_in_it_is_offered_quoted() {
+        let dir = scratch_dir("spaced");
+        file_in(&dir, "my file.rb");
+        file_in(&dir, "plain.rb");
+        let sub = dir.join("my dir");
+        std::fs::create_dir_all(&sub).expect("create dir");
+        file_in(&sub, "nested.rb");
+
+        let offered = complete_path_in(&dir, "my");
+
+        assert_eq!(
+            offered,
+            vec!["\"my dir/\"".to_string(), "\"my file.rb\"".to_string()],
+            "quoted, because an unquoted name with a space in it is two words"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "\"my dir/"),
+            vec!["\"my dir/nested.rb\"".to_string()],
+            "and walking into a quoted directory completes entries inside it"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "\"my dir/\""),
+            vec!["\"my dir/nested.rb\"".to_string()],
+            "whether closed with a quote or left open"
+        );
+        assert_eq!(
+            complete_path_in(&dir, "pl"),
+            vec!["plain.rb".to_string()],
+            "and a name nobody needed quoting is not given any"
+        );
+    }
+
+    /// The three shapes of nothing, all of which a TAB can meet and none of which
+    /// may be an error: a directory with nothing in it, a prefix nothing starts
+    /// with, and a path into a directory that is not there.
+    #[test]
+    fn edge_nothing_to_offer_is_no_candidates_rather_than_a_failure() {
+        let empty = scratch_dir("empty");
+
+        assert!(
+            complete_path_in(&empty, "").is_empty(),
+            "an empty directory has nothing to offer, which is not a failure"
+        );
+        assert!(
+            complete_path_in(&empty, "anything").is_empty(),
+            "and nothing there starts with the prefix either"
+        );
+        assert!(
+            complete_path_in(&empty.join("no-such-directory"), "x").is_empty(),
+            "a directory that cannot be read offers nothing rather than panicking"
+        );
+        assert!(
+            complete_path_in(&file_in(&empty, "a-file"), "x").is_empty(),
+            "and a path that is a file rather than a directory is the same answer"
+        );
+        assert_eq!(
+            path_argument(":load ", 1000),
+            None,
+            "a cursor past the end of the line is not a position to complete at"
+        );
+        assert_eq!(
+            path_argument(":load \u{1F600}", 7),
+            None,
+            "and a cursor inside a character is not one either"
+        );
+        assert_eq!(path_argument(":load \u{1F600}", 8), None);
+        assert_eq!(path_argument(":load \u{1F600}", 9), None);
+    }
+
+    /// A dot-entry is not offered, which is what keeps `.git` and `.env` out of a
+    /// listing — and it is a decision rather than an accident, so it is pinned:
+    /// the hidden file is still reachable by typing it.
+    #[test]
+    fn edge_a_dot_entry_is_not_offered() {
+        let dir = scratch_dir("hidden");
+        file_in(&dir, ".hidden");
+        file_in(&dir, "shown.rb");
+
+        assert_eq!(
+            complete_path_in(&dir, ""),
+            vec!["shown.rb".to_string()],
+            "a dot-entry is a thing the user did not mean to name"
+        );
+        assert_eq!(
+            complete_path_in(&dir, ".hid"),
+            Vec::<String>::new(),
+            "and it is not reachable by prefixing it either"
+        );
+        assert!(
+            dir.join(".hidden").exists(),
+            "which is only about what is offered: the file is still there to be \\
+             typed, and nothing here touched it"
+        );
+    }
+
+    /// A long list is cut short, and it is cut in an order the filesystem does not
+    /// choose — a second run over the same directory answers the same way.
+    #[test]
+    fn edge_a_long_listing_is_capped_and_the_order_does_not_depend_on_the_disk() {
+        let dir = scratch_dir("capped");
+        for index in 0..MAX_PATH_CANDIDATES + 10 {
+            file_in(&dir, &format!("{index:04}.rb"));
+        }
+
+        let offered = complete_path_in(&dir, "");
+
+        assert_eq!(
+            offered.len(),
+            MAX_PATH_CANDIDATES,
+            "a list longer than a reader can use is cut short"
+        );
+        assert_eq!(
+            offered,
+            complete_path_in(&dir, ""),
+            "and the same directory answers the same way twice: the list is \\
+             sorted before it is cut, because readdir does not promise an order"
+        );
+        assert_eq!(
+            offered.first().map(String::as_str),
+            Some("0000.rb"),
+            "so the cut is the first of the sorted list, not whichever entries the \\
+             filesystem happened to return first"
+        );
+    }
+
+    /// A symlink to a directory is walked into, because it is a thing you can walk
+    /// into — and offering it as a file would send the next TAB to its parent.
+    #[test]
+    fn a_symlink_to_a_directory_is_offered_as_a_directory() {
+        let dir = scratch_dir("symlink");
+        dir_in(&dir, "real");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).expect("a symlink");
+
+        let offered = complete_path_in(&dir, "l");
+
+        #[cfg(unix)]
+        assert_eq!(
+            offered,
+            vec!["link/".to_string()],
+            "the link is followed, so it is offered with the separator"
+        );
+        #[cfg(not(unix))]
+        assert!(
+            offered.is_empty(),
+            "no symlink was made, so nothing is offered"
+        );
+    }
+
+    /// The filesystem is read for a path argument and nowhere else, at every
+    /// position in the line.
+    #[test]
+    fn a_path_is_offered_only_in_the_argument_of_a_command_that_takes_one() {
+        for (line, pos, expected) in [
+            (":load s", 7, Some(6)),
+            (".save sr", 7, Some(6)),
+            (":run s", 6, Some(5)),
+            (":restore s", 10, Some(9)),
+            (":l s", 4, Some(3)),
+            (":load", 5, None),
+            (":loadx s", 8, None),
+            ("::load s", 8, None),
+            ("load s", 6, None),
+            ("say s", 5, None),
+            ("say \"s", 6, None),
+            ("", 0, None),
+        ] {
+            assert_eq!(
+                path_argument(line, pos).map(|(start, _)| start),
+                expected,
+                "{line:?} at {pos} is {} a path argument",
+                if expected.is_some() { "in" } else { "not in" }
+            );
+        }
     }
 }
