@@ -1716,6 +1716,111 @@ fn edge_a_session_that_ran_a_crlf_file_exports_and_reads_back() {
     );
 }
 
+/// A line the session *said* is not a line the session ran, even when what it
+/// said opens a fence.
+///
+/// `say "```redblue"` prints ``` ```redblue ```, and written bare that output line
+/// *is* an input block to anything reading the document back: the file above holds
+/// three `redblue` fences for a two-line session, and a fresh session reading them
+/// runs the output as if the user had typed it. Asserted through the library's own
+/// reader — the one a round trip actually goes through — rather than through the
+/// line-counting helper, because the count is what hid the bug.
+#[test]
+fn edge_an_export_whose_output_prints_a_fence_reads_back_as_the_session() {
+    let s = session(&format!(
+        ":prompt {EXPORT_PROMPT}\nsay \"```redblue\"\nsay \"two\"\n.export\n:quit\n"
+    ));
+
+    s.assert_exited_ok();
+    let document = exported_document(&s.stdout);
+
+    assert_eq!(
+        redblue::repl::Transcript::read_markdown(&document),
+        vec!["say \"```redblue\"".to_string(), "say \"two\"".to_string()],
+        "the two lines the session ran, and not the fence the first one printed:\n\
+         {document}"
+    );
+
+    // And the forging output is still *there*, fenced rather than dropped: an
+    // export that hid what a line said would be losing the session, not fixing it.
+    assert!(
+        document.contains("```redblue\n````"),
+        "the output is in the document, inside a fence the reader steps over:\n{document}"
+    );
+}
+
+/// A filename with a space in it is completed quoted, so accepting it does not
+/// hand the command two arguments.
+///
+/// The four commands that take a path are the only arguments that are filenames,
+/// and `:load` is the one a reader types a filename into most: an unquoted
+/// `my file.rb` would arrive as a path and a stray word, which is a path that
+/// does not open. Pinned on a scratch directory rather than on the checkout, so
+/// what the answer says does not depend on what this repository happens to hold.
+#[test]
+fn edge_tab_offers_a_spaced_filename_quoted_and_never_split() {
+    let dir = scratch_dir().join(format!("spaced-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the scratch directory should be creatable");
+    std::fs::write(dir.join("my file.rb"), "").expect("the spaced file should be creatable");
+    std::fs::create_dir_all(dir.join("my dir")).expect("the spaced directory should be creatable");
+
+    let offered = redblue::repl::completer::complete_path_in(&dir, "my");
+
+    assert_eq!(
+        offered,
+        vec!["\"my dir/\"".to_string(), "\"my file.rb\"".to_string()],
+        "both the spaced names are offered, quoted, because an unquoted name with \
+         a space in it reaches the command as two arguments"
+    );
+    assert!(
+        offered
+            .iter()
+            .all(|candidate| candidate.matches('"').count() == 2),
+        "no candidate is half-quoted: {offered:?}"
+    );
+    assert!(
+        redblue::repl::completer::complete_path_in(&dir, "my f") == vec!["\"my file.rb\""],
+        "and a fragment typed inside the quotes narrows rather than offering the \
+         sibling"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cursor the caller put inside a character is not a position this can answer
+/// for, and slicing at it would split the character after it in half.
+///
+/// The failure channel here is `None` — a TAB with nothing to offer — rather than
+/// an error, because a TAB that offers nothing is what a TAB with no candidates
+/// does. What it must never be is a panic.
+#[test]
+fn edge_a_cursor_inside_a_character_is_refused_rather_than_sliced() {
+    // `say "é"` — the `é` is two bytes at 5..7, so offset 6 is inside it.
+    let line = "say \"é\"";
+    assert!(
+        !line.is_char_boundary(6),
+        "the fixture is wrong: offset 6 is a character boundary, so this test is \
+         not testing what it says it is"
+    );
+
+    assert_eq!(
+        redblue::repl::completer::path_argument(line, 6),
+        None,
+        "a cursor inside a character is refused rather than answered"
+    );
+    assert_eq!(
+        redblue::repl::completer::path_argument(":load é", 7),
+        None,
+        "and the same holds where a path would otherwise be completed"
+    );
+    // The boundary either side of it still answers, which is the point of
+    // refusing the middle rather than the whole line.
+    assert_eq!(
+        redblue::repl::completer::path_argument(":load é", 8),
+        Some((6, "é")),
+        "a cursor on a character boundary is answered"
+    );
+}
+
 // --- The file loop: format a file, reload it, run what is in it ------------
 //
 // `rb format <file>` prints the formatted source to stdout and leaves the file

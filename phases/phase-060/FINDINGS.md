@@ -201,3 +201,63 @@ would be a breaking CLI change and this phase owns the REPL.
 documented note that `rb format` is a filter and `:format` is the one that
 writes. Recorded rather than changed: a CLI break smuggled into a REPL phase is
 the kind of diff a reviewer has to unpick.
+
+## F9 — Two TAB tests read the real checkout, and one bound is only true today
+
+`src/repl/editor.rs` — `edge_tab_after_a_command_that_takes_a_path_offers_paths`
+completes `:load `, `:load s` and `:load sr` against
+`completer::current_dir()`, which is `std::env::current_dir()`. It asserts
+`Cargo.toml` is offered and that `src/` is offered for `sr`, and that
+`complete(":load sr", 8).len() < 20`. All three are statements about *this
+checkout*, not about the completer:
+
+- they hold because `cargo test` runs integration tests with the package root as
+  the working directory, and would not hold from any other one;
+- the `< 20` bound is a claim about how many entries in a repository root start
+  with `sr`. Nothing enforces it. A checkout with 20 such files turns the test
+  red for a reason that has nothing to do with the code.
+
+`a_file_command_completes_the_paths_it_could_load`
+(`src/repl/completer.rs:714`) does the same claim properly: it builds a scratch
+directory and asserts against what it put there. The editor test does not, because
+`ReplCompleter::complete_path` takes its directory from the process and the test
+cannot hand it one.
+
+**Needed:** give the editor's completer the same seam `complete_path_in` already
+has — a directory parameter, or a cwd override for the test — so the two levels
+test the same thing against a directory they own. It is a test-only change and a
+one-parameter signature; it is not in this phase because this phase's diff is a
+behaviour fix and re-shaping a test seam under it would make the diff harder to
+read than the fix it contains.
+
+## F10 — Nothing reads an exported document back
+
+Recorded by the phase-060 round-1 review. `Transcript::read_markdown`
+(`src/repl/transcript.rs`) is the reading half of the export's round trip and has
+no caller under `src/` at all: the only callers in the tree are this module's own
+tests and `tests/repl_test.rs`, which reaches it as
+`redblue::repl::Transcript::read_markdown`.
+
+```
+$ grep -rn 'read_markdown' src/ --include='*.rs' | grep -v 'transcript.rs'
+(no output)
+```
+
+`.export` (`src/repl/mod.rs`, `export_session`) writes a document and stops. `:load`
+and `:restore` replay a `:save` *history* file, which is one line per input with
+no outputs and no fences — a different format, not a subset of this one. So the
+property this phase spent its diff on, "a document this writer wrote reads back as
+the session that wrote it", is asserted against a reader that no user can reach:
+the round trip is pinned, but nothing in the product performs it.
+
+The obvious consumer is a command that runs an exported document back into a
+session, and it is not small — it needs a second history load, a decision about
+whether `:load` should accept a Markdown document at all or whether that wants its
+own name, and the escaping rules that a hand-edited document brings with it. That
+is a phase, not a line in this one.
+
+**Needed:** a phase that adds a reader command (or extends `:load`) and makes
+`read_markdown`'s rules the contract between `.export` and it. Until then the
+honest statement is the one now in the module doc and in the report: the writer is
+the part a session reaches, and the reader is what this file's two halves are
+written against.

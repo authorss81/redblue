@@ -12,8 +12,12 @@
 //!   [`Transcript::markdown`] strips escapes from it again on the way out, so a line the
 //!   session printed in colour and a line it printed plain export identically.
 //! - **It reads back.** [`Transcript::read_markdown`] is the other half of
-//!   [`Transcript::markdown`], and
-//!   an exported session that cannot be read back is a picture of one.
+//!   [`Transcript::markdown`] — the reader the writer is written against, and the
+//!   definition of which of its lines is an input and which is only what it said —
+//!   and an exported session that cannot be read back is a picture of one. Nothing
+//!   in the REPL reads a document back yet; the reader is what pins the round trip
+//!   and what makes `text` and `redblue` mean something, so this file states both
+//!   halves against it rather than leaving the writer to guess what a reader sees.
 
 /// The language the input of each exchange is fenced as.
 ///
@@ -27,6 +31,13 @@ pub const HEADER: &str = "# Redblue session";
 
 /// What a document with nothing in it says instead of holding a fence.
 pub const EMPTY: &str = "_Nothing has been run in this session yet._";
+
+/// The language an exchange's output is fenced as, and only when it has to be.
+///
+/// Not decoration: [`Transcript::read_markdown`] reads every `redblue` block as a line
+/// the session ran, so an output line that opens one is not output to the reader it
+/// is about to meet. A `text` fence is the one shape a reader does not read as input.
+pub const OUTPUT_LANGUAGE: &str = "text";
 
 /// How many exchanges a session keeps.
 ///
@@ -111,6 +122,21 @@ impl Transcript {
     /// that prints three backticks would otherwise close the block it is written
     /// inside and export the rest of the session as prose, so the fence is as
     /// long as the longest run of backticks in the input plus one.
+    ///
+    /// That run is counted in the text that is *written*, escapes already off, and
+    /// for the same reason the output is asked about in its rendered form: taking
+    /// an escape out can join two backtick runs that were separated by one — two
+    /// backticks, an `ESC [ 0 m`, and one more is a run of three once the escape is
+    /// gone — so a fence measured against the painted input is exactly as wide as
+    /// the line written inside it, and the line closes it.
+    ///
+    /// The output is written bare, and stays bare except in one case: a line of
+    /// output that would open a block for [`Transcript::read_markdown`] —
+    /// `say "```redblue"` prints exactly that — is written inside an
+    /// [`OUTPUT_LANGUAGE`] fence instead. Bare output is what a reader wants and
+    /// what every ordinary session gets; an output that could be read back as a
+    /// line the session ran is not output any more, and the round trip this
+    /// writer's reader exists for is worth one extra fence in that one case.
     pub fn markdown(&self) -> String {
         let mut out = String::new();
         out.push_str(HEADER);
@@ -122,19 +148,32 @@ impl Transcript {
         }
 
         for exchange in &self.exchanges {
-            let fence = "`".repeat(fence_width(&exchange.input));
+            let input = crate::repl::style::strip_escapes(&exchange.input);
+            let fence = "`".repeat(fence_width(&input));
             out.push_str(&fence);
             out.push_str(FENCE_LANGUAGE);
             out.push('\n');
-            for line in crate::repl::style::strip_escapes(&exchange.input).lines() {
+            for line in input.lines() {
                 out.push_str(line);
                 out.push('\n');
             }
             out.push_str(&fence);
             out.push('\n');
-            for line in &exchange.output {
-                for rendered in crate::repl::style::strip_escapes(line).lines() {
-                    out.push_str(rendered);
+            let output = rendered_output(&exchange.output);
+            if forges_an_input_block(&output) {
+                let fence = "`".repeat(fence_width(&output.join("\n")));
+                out.push_str(&fence);
+                out.push_str(OUTPUT_LANGUAGE);
+                out.push('\n');
+                for line in &output {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(&fence);
+                out.push('\n');
+            } else {
+                for line in &output {
+                    out.push_str(line);
                     out.push('\n');
                 }
             }
@@ -145,49 +184,64 @@ impl Transcript {
 
     /// The inputs of every `redblue` block in an exported document.
     ///
-    /// The other half of [`Transcript::markdown`]: what a fresh session is run to
-    /// reproduce a session, and what a test pins a round trip on. A document that
+    /// The reading half of [`Transcript::markdown`]: the lines a session would be
+    /// run again to reproduce the one that wrote the document, and what every test
+    /// of this module's round trip is asserted against. No command calls it yet —
+    /// `:load` replays a history file and `.export` only writes — so it earns its
+    /// place by being what makes `redblue` and `text` mean one thing between this
+    /// file's two halves: the writer widens and fences against exactly what this
+    /// reader does.
+    ///
+    /// A document that
     /// is not one this wrote is read anyway — a fence of any width, a language
     /// that is not `redblue` is not a block of input — because a reader that
     /// refuses a document it did not write is a reader that cannot read a
     /// hand-edited one.
+    ///
+    /// A block in *another* language is skipped whole rather than line by line.
+    /// Its opening line is not input and its contents are no more input, and a
+    /// reader that walked into a `text` block looking for a `redblue` fence would
+    /// find — and report as a line the session ran — whatever the output happened
+    /// to contain. A bare ``` with no language is not one: it opens nothing, and
+    /// a session that printed three backticks is a session whose output is three
+    /// backticks.
     pub fn read_markdown(document: &str) -> Vec<String> {
         let mut blocks: Vec<String> = Vec::new();
         let mut line_counts: Vec<usize> = Vec::new();
         let mut inside: Option<usize> = None;
         let mut fence = String::new();
+        let mut other: Option<String> = None;
         for line in document.lines() {
             let trimmed = line.trim();
-            if !trimmed.starts_with("```") {
-                if let Some(index) = inside {
-                    if line_counts[index] > 0 {
-                        blocks[index].push('\n');
-                    }
-                    blocks[index].push_str(line);
-                    line_counts[index] += 1;
-                }
-                continue;
-            }
-            match inside {
+            let run = opening_fence(trimmed);
+            if let Some(index) = inside {
                 // Only the fence this block was opened with closes it. A shorter
                 // run inside a widened block is content — which is why the writer
                 // widens, and why reading it back needs no separate rule.
-                Some(_) if trimmed == fence => inside = None,
-                Some(index) => {
-                    if line_counts[index] > 0 {
-                        blocks[index].push('\n');
-                    }
-                    blocks[index].push_str(line);
-                    line_counts[index] += 1;
+                if run.as_deref() == Some(fence.as_str()) {
+                    inside = None;
+                    continue;
                 }
-                None => {
-                    if fence_language(trimmed) == Some(FENCE_LANGUAGE) {
-                        fence = trimmed.chars().take_while(|c| *c == '`').collect();
-                        inside = Some(blocks.len());
-                        blocks.push(String::new());
-                        line_counts.push(0);
-                    }
+                push_line(&mut blocks[index], &mut line_counts[index], line);
+                continue;
+            }
+            if let Some(open) = &other {
+                if run.as_deref() == Some(open.as_str()) {
+                    other = None;
                 }
+                continue;
+            }
+            let Some(run) = run else { continue };
+            match fence_language(trimmed) {
+                Some(FENCE_LANGUAGE) => {
+                    fence = run;
+                    inside = Some(blocks.len());
+                    blocks.push(String::new());
+                    line_counts.push(0);
+                }
+                Some(language) if !language.is_empty() => other = Some(run),
+                Some(_) => {}
+                None => {}
             }
         }
         // A block the document never closed is a truncated export, not a line of
@@ -198,6 +252,61 @@ impl Transcript {
         }
         blocks
     }
+}
+
+/// Appends `line` to the block at `index`, joining with newlines only between
+/// lines — a leading blank line in a block is part of the block.
+fn push_line(block: &mut String, line_count: &mut usize, line: &str) {
+    if *line_count > 0 {
+        block.push('\n');
+    }
+    block.push_str(line);
+    *line_count += 1;
+}
+
+/// The output of an exchange as it is written: escapes off, split into lines.
+///
+/// One place because the two questions asked of it — what it is, and whether
+/// writing it bare would forge an input block — have to be asked of the same
+/// text. Asking the painted form would answer about colour rather than about
+/// the document.
+fn rendered_output(output: &[String]) -> Vec<String> {
+    output
+        .iter()
+        .flat_map(|line| {
+            crate::repl::style::strip_escapes(line)
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Whether writing `output` bare would put a block in the document that
+/// [`Transcript::read_markdown`] would follow.
+///
+/// Two ways to do that, and both are the same way round: a line that opens a
+/// `redblue` fence is read as a line the session *ran*, and a line that opens a
+/// fence in any other named language is read as a block whose contents are
+/// skipped — so the rest of the document goes with it. A bare ``` with no
+/// language opens nothing and is neither, which is why an output that is three
+/// backticks is still written bare.
+///
+/// Tested exactly as the reader tests it, on the trimmed line: the forge is a
+/// property of the document, not of the string the session handed over.
+fn forges_an_input_block(output: &[String]) -> bool {
+    output
+        .iter()
+        .any(|line| fence_language(line.trim()).is_some_and(|language| !language.is_empty()))
+}
+
+/// The run of backticks `line` opens a fence with, or `None` if it opens none.
+///
+/// `None` for anything shorter than three, as Markdown requires, and for a line
+/// that does not begin with backticks at all — which is most lines.
+fn opening_fence(line: &str) -> Option<String> {
+    let run: String = line.chars().take_while(|c| *c == '`').collect();
+    (run.len() >= 3).then_some(run)
 }
 
 /// The language of the fence `line` opens, or `None` for a line that is not one.
@@ -233,7 +342,10 @@ fn fence_width(input: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{fence_width, Exchange, Transcript, EMPTY, FENCE_LANGUAGE, HEADER, LIMIT};
+    use super::{
+        fence_language, fence_width, Exchange, Transcript, EMPTY, FENCE_LANGUAGE, HEADER, LIMIT,
+        OUTPUT_LANGUAGE,
+    };
 
     /// The lines of a fenced block, with `(language, body)` pairs in order.
     fn blocks(document: &str) -> Vec<(String, String)> {
@@ -375,6 +487,44 @@ mod tests {
         );
     }
 
+    /// The fence is measured against the text that is *written*, not the text that
+    /// was typed.
+    ///
+    /// [`crate::repl::style::strip_escapes`] removes a whole CSI sequence, which
+    /// can join two backtick runs that were separated by one: `` `` `` ESC `[0m`
+    /// `` ` `` is a longest run of two and is a run of three once the escape is
+    /// gone. A fence counted on the painted input is then exactly as wide as the
+    /// line inside it, the line closes the block it is written in, and the export
+    /// reads back as the session that wrote it plus an empty one.
+    ///
+    /// Both halves on one input, because the defect is the disagreement between
+    /// them: a document that is merely wide enough to look right is the failure.
+    #[test]
+    fn edge_backticks_joined_by_an_escape_are_measured_after_the_escape_is_off() {
+        let mut transcript = Transcript::new();
+        transcript.record("``\u{1b}[0m`".to_string(), Vec::new());
+
+        let document = transcript.markdown();
+
+        assert_eq!(
+            fence_width(&crate::repl::style::strip_escapes("``\u{1b}[0m`")),
+            4,
+            "the fixture is wrong: the stripped input's longest run is three, so this \
+             test is not testing what it says it is"
+        );
+        assert!(
+            document.starts_with(&format!("{HEADER}\n\n````{FENCE_LANGUAGE}\n")),
+            "the fence is one backtick longer than the run the written line holds, not \
+             than the run the painted line holds:\n{document}"
+        );
+        assert_eq!(
+            Transcript::read_markdown(&document),
+            vec!["```".to_string()],
+            "and the block reads back as the one line the session ran, escapes off:\n\
+             {document}"
+        );
+    }
+
     /// A session that has run nothing exports a document that says so, rather
     /// than a heading followed by a blank file.
     #[test]
@@ -426,6 +576,104 @@ mod tests {
             document.matches("```redblue").count(),
             LIMIT,
             "and the document is bounded with it"
+        );
+    }
+
+    /// Output that reads back as an input block is not output any more.
+    ///
+    /// `say "```redblue"` prints ``` ```redblue ```, and written bare that line *is*
+    /// an input block as far as [`Transcript::read_markdown`] is concerned: the document
+    /// then holds three `redblue` fences for a two-line session, and reading it back
+    /// hands a fresh session a line that was never typed. The input the session had
+    /// already been fenced, so the forge is a property of the *output* — which is why
+    /// the output is what gets fenced, as `text`, and why it is only fenced when it has
+    /// to be: a document whose output cannot be read back as input is unchanged.
+    #[test]
+    fn edge_output_that_prints_an_input_fence_is_not_read_back_as_one() {
+        let mut transcript = Transcript::new();
+        transcript.record(
+            "say \"```redblue\"".to_string(),
+            vec!["```redblue".to_string()],
+        );
+        transcript.record("say \"two\"".to_string(), vec!["two".to_string()]);
+
+        let document = transcript.markdown();
+
+        assert_eq!(
+            Transcript::read_markdown(&document),
+            vec!["say \"```redblue\"".to_string(), "say \"two\"".to_string()],
+            "a line the session *said* is not a line the session ran, so reading the \
+             document back gives the two lines it ran and not the output between \
+             them:\n{document}"
+        );
+        assert_eq!(
+            document
+                .lines()
+                .filter(|line| fence_language(line.trim()) == Some(OUTPUT_LANGUAGE))
+                .count(),
+            1,
+            "the output that could be mistaken for an input is fenced as text, and \
+             only that output is:\n{document}"
+        );
+        assert!(
+            document.contains("say \"two\"\n```\ntwo\n"),
+            "an output that cannot forge an input is still written bare, so the \
+             common document is unchanged:\n{document}"
+        );
+    }
+
+    /// The fence around a fenced output has to be long enough to survive the output
+    /// it holds, for the same reason the input's fence is.
+    #[test]
+    fn edge_output_fencing_a_line_that_closes_the_fence_holds() {
+        let mut transcript = Transcript::new();
+        transcript.record(
+            "say \"```redblue\"".to_string(),
+            vec!["```redblue\n````".to_string()],
+        );
+
+        let document = transcript.markdown();
+
+        assert_eq!(
+            Transcript::read_markdown(&document),
+            vec!["say \"```redblue\"".to_string()],
+            "an output holding the fence that closes it is still output:\n{document}"
+        );
+    }
+
+    /// A block in another language that *contains* a `redblue` fence is still not
+    /// input.
+    ///
+    /// The case the writer's `text` fences create, and the case a hand-edited
+    /// document creates: somebody pastes an example of a Redblue session into a
+    /// document about one. A reader that walked into the foreign block looking for
+    /// a fence would find that example and report it as a line the session ran.
+    #[test]
+    fn edge_a_redblue_fence_inside_a_block_in_another_language_is_not_input() {
+        let document = "\
+# A session
+
+```redblue
+say \"one\"
+```
+one
+```text
+```redblue
+say \"not this one\"
+```
+```
+
+```redblue
+say \"two\"
+```
+two
+";
+
+        assert_eq!(
+            Transcript::read_markdown(document),
+            vec!["say \"one\"".to_string(), "say \"two\"".to_string()],
+            "the two blocks the document really has, and not the one the `text` block \
+         shows"
         );
     }
 
