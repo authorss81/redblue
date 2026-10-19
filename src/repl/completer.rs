@@ -37,6 +37,81 @@ fn module_names() -> Vec<String> {
         .collect()
 }
 
+/// The member names TAB offers after `receiver` and a dot, narrowed to those
+/// starting with `prefix`.
+///
+/// Read from [`crate::stdlib::MODULE_MEMBERS`] — the same table the analyzer
+/// refuses a dotted call against and `.doc` lists from. Three lists would be
+/// three chances to be wrong; one means a member added to the registry is
+/// completed here and a member dropped is dropped here, without a second place
+/// to remember to change.
+///
+/// **An empty `receiver` offers the module names.** That is what a bare `.` asks
+/// — there is no receiver yet, and the question is which modules there are.
+///
+/// **An unknown receiver offers nothing rather than falling back.** `js.` is not
+/// `json.`: a receiver that matches no module is a name the analyzer will refuse,
+/// and offering `json`'s members for it would be the completer agreeing with a
+/// program that does not run. Returning nothing is also why this cannot shadow
+/// the command sigil — see [`member_fragment`], which is what decides *whether*
+/// to ask.
+pub fn complete_members(receiver: &str, prefix: &str) -> Vec<String> {
+    if receiver.is_empty() {
+        return module_names();
+    }
+    if !crate::stdlib::is_module(receiver) {
+        return Vec::new();
+    }
+
+    let prefix = prefix.to_lowercase();
+    let members = crate::stdlib::MODULE_MEMBERS
+        .iter()
+        .find(|(module, _)| *module == receiver)
+        .map(|(_, members)| *members)
+        .unwrap_or(&[]);
+
+    members
+        .iter()
+        .map(|member| (*member).to_string())
+        .filter(|member| member.to_lowercase().starts_with(&prefix))
+        .collect()
+}
+
+/// The receiver and member prefix when the cursor is in the member position of a
+/// dotted name — `json.p|` — and `None` when it is not.
+///
+/// Three returns: where the *member* begins (rustyline replaces from there, so
+/// the receiver and the dot are left alone), the receiver, and the member prefix
+/// typed so far.
+///
+/// **`None` for a sigil with a command word after it.** `.q` is the command
+/// `:q`, and a rule that read every dot as a receiver would answer the eleven
+/// commands beginning with `q`… with nothing, because no module is named `""`.
+/// So a leading dot with nothing typed after it is a module question and a
+/// leading dot with something typed after it is a command; the two never
+/// compete, and a bare `.` — which is both — is answered as the module question
+/// the phase asks about.
+///
+/// The word is walked by character rather than by byte, so a cursor sitting
+/// inside a multi-byte character is a `None` rather than a slice that panics.
+pub fn member_fragment(line: &str, pos: usize) -> Option<(usize, &str, &str)> {
+    let head = line.get(..pos)?;
+    let word_start = head
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map_or(0, |(offset, ch)| offset + ch.len_utf8());
+    let word = &head[word_start..];
+    let dot = word.rfind('.')?;
+    let receiver = &word[..dot];
+    let prefix = &word[dot + 1..];
+
+    if receiver.is_empty() && !prefix.is_empty() {
+        return None;
+    }
+    Some((word_start + dot + 1, receiver, prefix))
+}
+
 #[derive(Clone)]
 pub struct ReplCompleter {
     keywords: Vec<String>,
@@ -347,6 +422,41 @@ impl ReplCompleter {
         let (start, fragment) = path_argument(line, pos)?;
         Some((start, complete_path_in(&current_dir(), fragment)))
     }
+
+    /// What TAB offers when the cursor is at `pos` in `line`: the candidates and
+    /// the offset they replace from.
+    ///
+    /// Three contexts, asked in this order because they are nested rather than
+    /// competing, and each is gated on its own condition — the defect this
+    /// replaces was a completer that asked "is this a path?" about every line and
+    /// a word completer with no idea a dot had been typed.
+    ///
+    /// - **A path argument**, when the line is a command that takes one. Asked
+    ///   first because `:load j` is a filename and nothing else, and a completer
+    ///   that offered `:json` there would be answering a different question.
+    /// - **A module member**, when the cursor is after a dot whose receiver names
+    ///   a module the language has. `js.` is not one, and falls through to the
+    ///   word below rather than claiming `json`'s members.
+    /// - **The word**, against the whole vocabulary plus the session's names.
+    pub fn complete_at(&self, line: &str, pos: usize, names: &[String]) -> (usize, Vec<String>) {
+        if let Some((start, candidates)) = self.complete_path(line, pos) {
+            return (start, candidates);
+        }
+        if let Some((start, receiver, prefix)) = member_fragment(line, pos) {
+            return (start, complete_members(receiver, prefix));
+        }
+        let start = line
+            .get(..pos)
+            .map(|head| {
+                head.char_indices()
+                    .rev()
+                    .find(|(_, ch)| ch.is_whitespace())
+                    .map_or(0, |(offset, ch)| offset + ch.len_utf8())
+            })
+            .unwrap_or(0);
+        let word = line.get(start..pos).unwrap_or("");
+        (start, self.complete_with(word, names))
+    }
 }
 
 /// The directory a session completes paths against.
@@ -363,7 +473,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{complete_path_in, path_argument, ReplCompleter, MAX_PATH_CANDIDATES};
+    use super::{complete_members, complete_path_in, path_argument, ReplCompleter, MAX_PATH_CANDIDATES};
     use crate::repl::commands::{self, ReplCommand};
 
     /// The names a session would offer: a variable it bound, a function it
@@ -535,6 +645,55 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(matches, sorted, "results come back sorted and deduplicated");
+    }
+
+    /// The member names of a module, read from the table the analyzer reads them
+    /// from rather than written out here.
+    ///
+    /// The expectation is derived from [`crate::stdlib::MODULE_MEMBERS`] rather
+    /// than spelled `["parse", "stringify"]`, because a completion list is a
+    /// claim about the registry: a member added to the registry must appear here
+    /// and one removed must disappear, and a hand-written list is a place for
+    /// those two to happen without either being noticed.
+    #[test]
+    fn a_module_dot_offers_exactly_the_members_the_registry_holds() {
+        let offered = complete_members("json", "");
+
+        let expected = crate::stdlib::MODULE_MEMBERS
+            .iter()
+            .find(|(module, _)| *module == "json")
+            .map(|(_, members)| members.to_vec())
+            .expect("json is a module the registry holds members for");
+        assert_eq!(offered, expected, "every member of json, in the table's order");
+        assert_eq!(
+            offered,
+            vec!["parse".to_string(), "stringify".to_string()],
+            "and the registry really does say those two, so this test is not vacuous"
+        );
+
+        assert_eq!(
+            complete_members("json", "st"),
+            vec!["stringify".to_string()],
+            "a member prefix narrows the list: `json.st`"
+        );
+    }
+
+    /// A receiver the language has no module for is not a misspelling the
+    /// completer should answer, and asking about one must not fail.
+    #[test]
+    fn edge_unknown_module_offers_nothing_and_does_not_error() {
+        assert!(
+            complete_members("nosuchmodule", "").is_empty(),
+            "a module that does not exist has no members to offer"
+        );
+        assert!(
+            complete_members("nosuchmodule", "pa").is_empty(),
+            "nor does a member prefix of one"
+        );
+        assert!(
+            complete_members("js", "").is_empty(),
+            "a *prefix* of a module name is not a module: `js.` is not `json.`"
+        );
     }
 
     #[test]
