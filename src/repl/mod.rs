@@ -13,6 +13,7 @@ pub mod transcript;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -378,6 +379,126 @@ const EXAMPLES: &[(&str, &str)] = &[
     ),
 ];
 
+/// One step of the guided tour `:tutorial` prints.
+///
+/// A step is a thing to try, the code to try it with, and the hint for the
+/// reader who does not know what to type next. The hint is what `.hint` prints,
+/// which is the difference between a tour and a wall of examples: a wall can
+/// only be read, a step can be taken.
+struct TutorialStep {
+    title: &'static str,
+    body: &'static str,
+    /// A whole program, not a fragment: the test at the bottom of this module
+    /// runs each of these through the session, so a step cannot show code the
+    /// interpreter would refuse.
+    snippet: &'static str,
+    hint: &'static str,
+}
+
+/// The tour itself, in order, and `:tutorial` prints every step.
+///
+/// The last step names [`ReplCommand::Example`], because `:examples` is where
+/// the longer catalogue lives and a tour that ends without saying so sends a
+/// newcomer away from the thing they were about to want.
+const TUTORIAL: &[TutorialStep] = &[
+    TutorialStep {
+        title: "A value, and a name for it",
+        body: "Redblue reads as English. `set x to 5` gives 5 the name x.",
+        snippet: "set name to \"World\"\nsay name",
+        hint: "Type `set name to \"World\"`, then `say name` — the name answers \
+               with the value it was given.",
+    },
+    TutorialStep {
+        title: "Arithmetic",
+        body: "Numbers do what numbers do. Parentheses group, as they always do.",
+        snippet: "set x to (10 + 5) * 2\nsay x",
+        hint: "Type `set x to (10 + 5) * 2` and then `say x`. It answers 30.",
+    },
+    TutorialStep {
+        title: "A condition",
+        body: "`if … then … else … end` chooses between two paths.",
+        snippet: "set age to 30\nif age is greater than 18 then\n    say \"Adult\"\nelse\n    say \"Minor\"\nend",
+        hint: "Change 30 to 12 and run it again — the other branch is taken.",
+    },
+    TutorialStep {
+        title: "A loop",
+        body: "Blocks end with `end`. Everything indented inside them runs once per turn.",
+        snippet: "repeat 3 times\n    say \"Hello!\"\nend",
+        hint: "Change 3 to 1. The block still needs its `end`, however short it is.",
+    },
+    TutorialStep {
+        title: "A function",
+        body: "`to name(args) … end` defines one. Its body is what the name does.",
+        snippet: "to greet(who)\n    say \"Hello, \" + who + \"!\"\nend\ngreet(\"World\")",
+        hint: "Call it again with a different name: `greet(\"friend\")`.",
+    },
+    TutorialStep {
+        title: "Where to go next",
+        body: "Type `json.` and press TAB: the REPL offers the members of a module. \
+               Type `(` after a name to see its shape. For more, `:examples`.",
+        snippet: "set record to json.parse(\"{\\\"a\\\": 1}\")\nsay record",
+        hint: "`:examples` shows a longer catalogue, and `:help` lists every \
+               command. Both are one word away.",
+    },
+];
+
+/// The lines `:tutorial` prints: a heading and one numbered step each.
+///
+/// A function of a [`Style`] rather than a `println!` in the middle of the
+/// command dispatch, so what a reader is shown is something a test can hold —
+/// including with colour forced on, which is the half that is easy to get wrong:
+/// the numbering has to survive being painted.
+fn tutorial_lines(style: &Style) -> Vec<String> {
+    let mut lines = vec![style.paint(
+        Paint::Heading,
+        "Redblue tutorial — type each snippet, or ask for a hint with :hint",
+    )];
+    lines.push(String::new());
+    for (index, step) in TUTORIAL.iter().enumerate() {
+        lines.push(format!("  {}. {}", index + 1, step.title));
+        lines.push(format!("     {}", step.body));
+        for snippet in step.snippet.lines() {
+            lines.push(format!("     > {snippet}"));
+        }
+        lines.push(String::new());
+    }
+    lines.push("  Stuck on a step? Type :hint for the step you are on.".to_string());
+    lines
+}
+
+/// What `.hint` prints: the step the session is on, or how to start one.
+///
+/// The second answer is the one that used to be missing entirely — a session that
+/// was not in a tour said nothing at all, which reads as a command that does
+/// nothing rather than a command with nothing to say.
+fn hint_lines(step: Option<usize>, style: &Style) -> Vec<String> {
+    match step.and_then(|index| TUTORIAL.get(index)) {
+        Some(step) => vec![format!(
+            "Hint for step {} of {}: {}",
+            step_index(step) + 1,
+            TUTORIAL.len(),
+            step.hint
+        )],
+        None => vec![style.paint(
+            Paint::Heading,
+            "There is no tutorial step in progress — type :tutorial to start one, \
+             and :examples for a catalogue of what Redblue can do.",
+        )],
+    }
+}
+
+/// Where a step sits in [`TUTORIAL`], for a message that has to name it.
+///
+/// A step is searched for rather than carried around: the tour is one table, and
+/// a second copy of "which step is this" is a second answer to a question the
+/// table already gives.
+fn step_index(step: &TutorialStep) -> usize {
+    TUTORIAL
+        .iter()
+        .position(|listed| std::ptr::eq(listed, step))
+        .unwrap_or(0)
+}
+
 /// Why a session's read loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEnd {
@@ -518,6 +639,13 @@ pub struct Repl {
     /// lines as text. Cleared at the start of every line, so a line that failed to
     /// parse — and so never reached the VM — cannot inherit the last one's output.
     last_output: Vec<String>,
+    /// Which step of [`TUTORIAL`] this session is on, or `None` when it is not
+    /// in the tour at all.
+    ///
+    /// `Option` rather than an index that means "step one": `.hint` outside a
+    /// tour has to say so, and an index cannot tell "on step one" from "not in
+    /// the tour".
+    tutorial_step: Option<usize>,
 }
 
 impl Repl {
@@ -536,6 +664,7 @@ impl Repl {
             definitions: HashMap::new(),
             transcript: Transcript::new(),
             last_output: Vec::new(),
+            tutorial_step: None,
         }
     }
 
@@ -938,6 +1067,18 @@ impl Repl {
             }
             ReplCommand::Example => {
                 self.show_examples();
+                true
+            }
+            ReplCommand::Tutorial => {
+                self.show_tutorial();
+                true
+            }
+            ReplCommand::Hint => {
+                self.show_hint();
+                true
+            }
+            ReplCommand::Edit => {
+                self.edit_buffer();
                 true
             }
             ReplCommand::Prompt(argument) => {
@@ -2178,6 +2319,108 @@ impl Repl {
             }
             Err(message) => {
                 println!("{}", self.style.paint(Paint::Error, &message));
+            }
+        }
+    }
+
+    /// Prints [`TUTORIAL`], the guided tour a newcomer is walked through, and
+    /// leaves the session on its first step so `.hint` has a step to answer for.
+    fn show_tutorial(&mut self) {
+        for line in tutorial_lines(&self.style) {
+            println!("{line}");
+        }
+        self.tutorial_step = Some(0);
+    }
+
+    /// Prints the hint for the step the session is on, or says how to start one.
+    fn show_hint(&self) {
+        for line in hint_lines(self.tutorial_step, &self.style) {
+            println!("{line}");
+        }
+    }
+
+    /// The editor the user named, from `$EDITOR`.
+    ///
+    /// `None` when it is unset or empty. An empty `EDITOR=` is the same as no
+    /// editor at all, and spawning `""` would be a failure with a message about a
+    /// program that does not exist rather than one about the variable the reader
+    /// has to set.
+    fn editor_program() -> Option<String> {
+        std::env::var("EDITOR")
+            .ok()
+            .map(|editor| editor.trim().to_string())
+            .filter(|editor| !editor.is_empty())
+    }
+
+    /// The program `.edit` came back with, or the message saying why there is
+    /// none — and either way the session keeps whatever it was holding.
+    ///
+    /// `editor` is the program to run rather than the environment read here,
+    /// because the environment is process-wide and a test cannot own it: the
+    /// command passes [`Self::editor_program`], and a test passes a script it
+    /// wrote, so the round trip is pinned without a real terminal editor and
+    /// without one test's `$EDITOR` reaching another's.
+    fn edit_in(&self, editor: Option<&str>, scratch_dir: &Path) -> Result<String, String> {
+        let Some(editor) = editor else {
+            return Err(
+                ".edit has no editor to open: set EDITOR to the program you edit \
+                 with, for example `export EDITOR=vi`"
+                    .to_string(),
+            );
+        };
+        let mut parts = editor.split_whitespace();
+        let Some(program) = parts.next() else {
+            return Err(format!("`{editor}` is not a program that can be run"));
+        };
+        let mut command = std::process::Command::new(program);
+        command.args(parts);
+
+        let scratch = scratch_dir.join(format!("redblue-edit-{}.rb", std::process::id()));
+        std::fs::create_dir_all(scratch_dir).map_err(|error| {
+            format!("could not make a scratch file in {scratch_dir:?}: {error}")
+        })?;
+        std::fs::write(&scratch, self.multiline_buffer.join("\n"))
+            .map_err(|error| format!("could not write {}: {error}", scratch.display()))?;
+
+        let status = command
+            .arg(&scratch)
+            .status()
+            .map_err(|error| format!("could not run `{program}`: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "`{program}` exited with {status}; nothing was read back from it"
+            ));
+        }
+
+        let edited = std::fs::read_to_string(&scratch).map_err(|error| {
+            format!(
+                "could not read back what `{program}` saved to {}: {error}",
+                scratch.display()
+            )
+        })?;
+        let _ = std::fs::remove_file(&scratch);
+        if edited.trim().is_empty() {
+            return Err("the editor left the file empty, so there is nothing to run".to_string());
+        }
+        Ok(edited)
+    }
+
+    /// Opens `$EDITOR` over the block this session is holding, runs what comes
+    /// back, and keeps everything when the editor could not be opened at all.
+    fn edit_buffer(&mut self) {
+        let editor = Self::editor_program();
+        let scratch = std::env::temp_dir();
+        match self.edit_in(editor.as_deref(), &scratch) {
+            Ok(edited) => {
+                self.multiline_buffer.clear();
+                self.in_multiline = false;
+                self.execute_code(&edited);
+            }
+            Err(message) => {
+                println!(
+                    "{}",
+                    self.style.paint(Paint::Error, &format!("Error: {message}"))
+                );
             }
         }
     }
@@ -5609,6 +5852,386 @@ mod tests {
                 painted.contains(&on.paint(Paint::Error, "   |     ^~~~~~~~~~~~~~")),
                 "the underline of the range it does draw is still painted:\n{:?}",
                 painted
+            );
+        }
+    }
+
+    /// The guided tour, `.hint`, and `.edit`: the three commands a newcomer needs
+    /// and the REPL did not have.
+    mod onboarding {
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::{feed, Repl};
+        use crate::repl::style::{Paint, Style};
+        use crate::repl::{hint_lines, tutorial_lines, TUTORIAL};
+
+        /// A scratch directory under the checkout, unique per test so two running
+        /// in parallel cannot collide.
+        fn scratch_dir(name: &str) -> PathBuf {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let serial = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/tmp/repl-onboarding")
+                .join(format!("{name}-{serial}"));
+            if dir.exists() {
+                fs::remove_dir_all(&dir).expect("a leftover scratch directory should be removable");
+            }
+            fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+            dir
+        }
+
+        /// An editor that is a shell script writing `body` over the file it is
+        /// given — the pin for `.edit`, with no real terminal editor and no TTY
+        /// anywhere in the test.
+        #[cfg(unix)]
+        fn script_editor(dir: &Path, body: &str) -> String {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = dir.join("fake-editor.sh");
+            fs::write(&path, format!("#!/bin/sh\n{body}\n"))
+                .expect("the editor script is writable");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("the editor script is made executable");
+            path.to_string_lossy().to_string()
+        }
+
+        /// The tour is a numbered set of steps, and its last step is the way to
+        /// the catalogue. This is the finding: `:example` existed, so a newcomer
+        /// got a wall of code and no way in.
+        #[test]
+        fn a_tutorial_is_a_numbered_tour_that_ends_at_examples() {
+            let lines = tutorial_lines(&Style::forced(false));
+
+            for (index, step) in TUTORIAL.iter().enumerate() {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|line| line.trim_start().starts_with(&format!(
+                            "{}. {}",
+                            index + 1,
+                            step.title
+                        ))),
+                    "step {} is numbered and named: {:?}",
+                    index + 1,
+                    lines
+                );
+                assert!(
+                    step.body
+                        .lines()
+                        .all(|body| lines.iter().any(|line| line.contains(body))),
+                    "every step says what it is for, {:?}",
+                    step.title
+                );
+            }
+
+            let numbered = format!("{}. ", TUTORIAL.len());
+            let final_step = lines
+                .iter()
+                .position(|line| line.trim_start().starts_with(&numbered))
+                .unwrap_or_else(|| panic!("the tour numbers every step it has: {lines:?}"));
+            let last = lines[final_step..].join("\n");
+            assert!(
+                last.contains(":examples"),
+                "the last step is where a newcomer is sent to the catalogue, and \
+                 it says {last:?}"
+            );
+            assert!(
+                last.contains(":hint"),
+                "and the tour says how to ask for help mid-step: {last:?}"
+            );
+            assert!(
+                TUTORIAL.len() > 1,
+                "a tour of one step is a wall of code again"
+            );
+        }
+
+        /// Every snippet the tour shows is a program this session can run, which
+        /// is the same promise [`super::EXAMPLES`] makes and is what makes a tour
+        /// followable rather than aspirational.
+        #[test]
+        fn every_tutorial_snippet_is_a_program_the_session_runs() {
+            let mut repl = Repl::new();
+
+            for (index, step) in TUTORIAL.iter().enumerate() {
+                let outcome = repl.run_code(step.snippet);
+                assert!(
+                    outcome.is_ok(),
+                    "step {} ({}) shows {:?}, which the session refused: {:?}",
+                    index + 1,
+                    step.title,
+                    step.snippet,
+                    outcome.err()
+                );
+            }
+        }
+
+        /// Colour is drawn over the numbering, never instead of it: with colour
+        /// forced off the steps are still numbered and there is not one escape in
+        /// the output, and with it forced on the numbering is still readable in
+        /// the painted lines.
+        #[test]
+        fn edge_tutorial_with_colour_off_numbers_its_steps_and_emits_no_escapes() {
+            let off = Style::forced(false);
+            let lines = tutorial_lines(&off);
+
+            assert!(
+                lines.iter().all(|line| !line.contains('\u{1b}')),
+                "with colour off the tour is plain text: {lines:?}"
+            );
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| line.trim_start().starts_with("1. "))
+                    .count(),
+                1,
+                "step one is numbered once and once only: {lines:?}"
+            );
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| line.trim_start().starts_with("2. "))
+                    .count(),
+                1,
+                "and so is step two: {lines:?}"
+            );
+
+            let on = Style::forced(true);
+            let painted = tutorial_lines(&on);
+            assert_ne!(
+                painted, lines,
+                "with colour on the heading is painted, so the two differ at all"
+            );
+            for (plain, painted) in lines.iter().zip(&painted) {
+                let visible = crate::repl::style::strip_escapes(painted);
+                assert_eq!(
+                    &visible, plain,
+                    "stripping the escapes from a painted step gives the plain one: \
+                     {plain:?} vs {painted:?}"
+                );
+            }
+        }
+
+        /// `.hint` outside the tour used to be nothing at all, which reads as a
+        /// command that does nothing rather than one with nothing to say.
+        #[test]
+        fn a_hint_outside_the_tour_names_the_tour() {
+            let lines = hint_lines(None, &Style::forced(false));
+
+            assert_eq!(lines.len(), 1, "one answer, not none: {lines:?}");
+            assert!(
+                lines[0].contains(":tutorial"),
+                "it names the way to start one: {:?}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains(":examples"),
+                "and the catalogue it leads to: {:?}",
+                lines[0]
+            );
+        }
+
+        /// `.hint` in the tour answers about the step the session is on, and
+        /// `:tutorial` is what puts it there.
+        #[test]
+        fn a_hint_in_the_tour_names_the_step_it_is_for() {
+            let mut repl = Repl::new();
+            assert_eq!(repl.tutorial_step, None, "a fresh session is not in a tour");
+
+            feed(&mut repl, &[":tutorial"]);
+
+            assert_eq!(repl.tutorial_step, Some(0), ":tutorial starts at step one");
+            let hint = hint_lines(repl.tutorial_step, &Style::forced(false));
+            assert!(
+                hint[0].contains("1") && hint[0].contains(TUTORIAL[0].hint),
+                "the hint is the step's own: {:?}",
+                hint[0]
+            );
+            assert!(
+                !hint[0].contains('\u{1b}'),
+                "and with colour off it is plain text: {:?}",
+                hint[0]
+            );
+        }
+
+        /// The round trip: the block the session is holding goes out to the
+        /// editor, and what the editor wrote comes back as a program that ran.
+        #[cfg(unix)]
+        #[test]
+        fn edit_runs_what_the_editor_left_behind() {
+            let dir = scratch_dir("edit-round-trip");
+            let editor = script_editor(&dir, "printf 'set edited to 42\n' > \"$1\"");
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times"]);
+
+            assert!(repl.in_multiline, "the block is open before the edit");
+
+            let edited = repl
+                .edit_in(Some(&editor), &dir)
+                .expect("an editor that saves the file is an editor that worked");
+
+            assert_eq!(
+                edited, "set edited to 42\n",
+                "what came back is what the editor wrote"
+            );
+            assert!(
+                !dir.join(format!("redblue-edit-{}.rb", std::process::id()))
+                    .exists(),
+                "and the scratch file is not left behind"
+            );
+
+            repl.multiline_buffer.clear();
+            repl.in_multiline = false;
+            repl.execute_code(&edited);
+            assert!(
+                repl.vm.user_names().contains(&"edited".to_string()),
+                "what the editor wrote is a program the session ran: {:?}",
+                repl.vm.user_names()
+            );
+        }
+
+        /// No editor named is a clean error that says which variable to set, and
+        /// the block the session was holding survives it.
+        #[test]
+        fn edge_edit_without_an_editor_names_the_variable_and_keeps_the_buffer() {
+            let dir = scratch_dir("edit-no-editor");
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times", "    say \"hi\""]);
+
+            let error = repl
+                .edit_in(None, &dir)
+                .expect_err("no editor named is not an edit");
+
+            assert!(
+                error.contains("EDITOR"),
+                "the message names the variable the reader has to set: {error}"
+            );
+            assert!(
+                repl.in_multiline,
+                "and the session is still holding the block it was holding"
+            );
+            assert_eq!(
+                repl.multiline_buffer,
+                vec!["repeat 2 times".to_string(), "    say \"hi\"".to_string()],
+                "the buffer is preserved exactly, not truncated or cleared"
+            );
+        }
+
+        /// An editor that cannot be run, one that fails, and one that empties the
+        /// file are three different failures and none of them runs anything.
+        #[test]
+        fn edge_an_editor_that_cannot_be_used_is_reported_rather_than_run() {
+            let dir = scratch_dir("edit-bad-editor");
+
+            let mut repl = Repl::new();
+            feed(&mut repl, &["repeat 2 times"]);
+
+            let error = repl
+                .edit_in(Some(&dir.join("no-such-editor").to_string_lossy()), &dir)
+                .expect_err("a program that is not there cannot edit anything");
+            assert!(
+                error.contains("no-such-editor"),
+                "and it says which program failed: {error}"
+            );
+            assert_eq!(
+                repl.multiline_buffer,
+                vec!["repeat 2 times".to_string()],
+                "nothing was run and nothing was lost"
+            );
+
+            #[cfg(unix)]
+            {
+                let failing = script_editor(&dir, "exit 3");
+                let error = repl
+                    .edit_in(Some(&failing), &dir)
+                    .expect_err("an editor that exits badly has not saved anything");
+                assert!(
+                    error.contains("exited"),
+                    "a failing editor is reported as having failed: {error}"
+                );
+
+                let emptying = script_editor(&dir, ": > \"$1\"");
+                let error = repl
+                    .edit_in(Some(&emptying), &dir)
+                    .expect_err("an empty file is not a program");
+                assert!(
+                    error.contains("nothing to run"),
+                    "and an emptied file says so rather than running nothing: {error}"
+                );
+                assert_eq!(
+                    repl.multiline_buffer,
+                    vec!["repeat 2 times".to_string()],
+                    "every one of them left the block the session was holding"
+                );
+            }
+        }
+
+        /// The commands are commands: they parse, they are completable, and
+        /// `:help` names them.
+        ///
+        /// `.edit` is checked by parsing rather than by dispatching, on purpose:
+        /// dispatching it would read the *process's* `EDITOR` and open whatever
+        /// that is, which is a terminal editor in a machine that has one.
+        #[test]
+        fn edge_the_onboarding_commands_are_reachable_every_way() {
+            use crate::repl::commands::ReplCommand;
+
+            let mut repl = Repl::new();
+            for command in [":tutorial", ".tutorial", ":tour", ":hint", ".hint"] {
+                assert!(
+                    repl.complete(command).contains(&command.to_string()),
+                    "{command} is a command, so TAB offers it: {:?}",
+                    repl.complete(command)
+                );
+                feed(&mut repl, &[command]);
+            }
+
+            assert_eq!(
+                ReplCommand::parse(".edit"),
+                ReplCommand::Edit,
+                "and `.edit` parses as the command that opens an editor"
+            );
+            assert_eq!(
+                ReplCommand::parse(":edit"),
+                ReplCommand::Edit,
+                "in either sigil, like every other command"
+            );
+
+            let help = ReplCommand::help_lines();
+            assert!(
+                help.iter().any(|line| line.contains(":tutorial"))
+                    && help.iter().any(|line| line.contains(":hint"))
+                    && help.iter().any(|line| line.contains(":edit")),
+                "and :help names all three: {help:?}"
+            );
+        }
+
+        /// A hint is painted whole, so the reader can tell it from the source and
+        /// the text itself survives the painting.
+        #[test]
+        fn edge_a_painted_hint_keeps_the_hint_readable() {
+            let on = Style::forced(true);
+            let painted = hint_lines(None, &on);
+
+            assert!(
+                painted[0].starts_with("\u{1b}"),
+                "with colour on the hint is painted, so it begins with an escape: \
+                 {:?}",
+                painted[0].escape_debug()
+            );
+            assert!(
+                painted[0].contains(":tutorial"),
+                "and what it says survives the painting: {:?}",
+                painted[0].escape_debug()
+            );
+            assert_eq!(
+                painted[0],
+                on.paint(
+                    Paint::Heading,
+                    hint_lines(None, &Style::forced(false))[0].as_str()
+                ),
+                "the painted hint is the plain hint painted, and nothing else"
             );
         }
     }
