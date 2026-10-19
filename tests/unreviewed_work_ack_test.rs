@@ -71,6 +71,18 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // The pipeline's resume path. Every one of these landed on HEAD carrying work
     // that no reviewer saw. Line counts are `git show --numstat`, so they can be
     // re-derived rather than trusted.
+    //
+    // A commit is listed here only while it is IN this history. The list is
+    // checked against `git log HEAD` in both directions: a commit that is in the
+    // log and not listed is unreviewed work, and a listed commit that the log
+    // does not contain is stale. Both are failures. The pipeline creates the
+    // commit that carries a phase's work *after* the agent's run, so the SHA of
+    // that commit cannot be written here by the agent that produced the work --
+    // it can only be written by the run that finds it in HEAD's history. The
+    // parked deliveries of phase-084 named their own commit's SHA here
+    // (`48d5bf0`, `c1ebb59`), and both went stale the moment main moved past
+    // them; the entries are gone for that reason, and the commits themselves
+    // are still on their own branches, not on HEAD.
     ("25e9b68d7529459ac0638f208d3e153681f80e32", "resume phase-020: adopt preserved work. Carries unreviewed code (+333/-0, 1 file, all outside src/). Deliberately not rewritten: published history is immutable under AGENTS.md 1.6."),
     ("11b9fe2fc7d790068459f9554affa26f15af6a45", "resume phase-021: adopt preserved work. Carries unreviewed code (+3353/-1, 5 files, +223 lines under src/). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("4c45731b08b8f347beac5f46506456065aebc33e", "resume phase-021: adopt preserved work, the second of two. Carries unreviewed code (+690/-173, 6 files, +48 lines under src/). Deliberately not rewritten; a list keyed on phase number would silently tolerate this one, so it is keyed on the SHA."),
