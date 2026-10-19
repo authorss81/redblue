@@ -22,6 +22,10 @@ const DIRECTORY_SEPARATOR: &str = "/";
 /// that is not there.
 pub const MAX_PATH_CANDIDATES: usize = 200;
 
+/// A word of one dot and nothing else: the start of a dotted call, with no
+/// receiver typed yet.
+const ALT_DOT: &str = ".";
+
 /// The module names a program can write as a receiver of a dotted call, read
 /// from the one table the analyzer reads them from.
 ///
@@ -35,6 +39,16 @@ fn module_names() -> Vec<String> {
         .iter()
         .map(|name| (*name).to_string())
         .collect()
+}
+
+/// A dotted word split at its last `.` into a receiver and a member prefix.
+///
+/// `None` for a word with no dot in it. A word of one dot and no member is a
+/// bare dot, which has a receiver and an empty prefix rather than being a word
+/// without a dot.
+fn split_dotted(word: &str) -> Option<(&str, &str)> {
+    let (receiver, member) = word.rsplit_once('.')?;
+    Some((receiver, member))
 }
 
 #[derive(Clone)]
@@ -165,6 +179,10 @@ impl ReplCompleter {
     /// second one. With no sigil — or an empty word — the canonical `:` spelling
     /// is what every vocabulary is offered in.
     pub fn complete_with(&self, word: &str, names: &[String]) -> Vec<String> {
+        if let Some(members) = self.complete_dotted(word) {
+            return members;
+        }
+
         let mut matches = Vec::new();
         let sigil = word.chars().next().filter(|c| commands::SIGILS.contains(c));
         let (command_sigil, word_lower) = match sigil {
@@ -205,6 +223,44 @@ impl ReplCompleter {
         matches.dedup();
 
         matches
+    }
+
+    /// What TAB offers for a word holding a dot, and `None` for a word that is
+    /// none of this question's business.
+    ///
+    /// A dotted call is spelled `<module>.<member>`, and both halves are one word
+    /// to the line editor: the completion replaces the whole thing, so the answer
+    /// is the members spelled as a program spells them. Offering the bare member
+    /// would replace `json.` with `parse` and leave a name no program has.
+    ///
+    /// `None` — rather than an empty list — when the receiver is not one of the
+    /// [`crate::stdlib::MODULES`], so a word that merely contains a dot (`"a.b"`,
+    /// a session's own `MathUtils.`) is still offered the ordinary vocabulary.
+    ///
+    /// The members come from [`crate::stdlib::module_members`], which is the row
+    /// of the language's own table: `json.parse` is completable because the
+    /// analyzer would accept it, not because this file learned the name.
+    fn complete_dotted(&self, word: &str) -> Option<Vec<String>> {
+        if word == ALT_DOT {
+            // A bare dot is the start of a dotted call, so what it is asking for
+            // is a receiver. The `.` sigil also begins every command word, and a
+            // dot with nothing after it names no command yet — so the modules are
+            // the only thing it can sensibly offer.
+            let mut names = module_names();
+            names.sort();
+            return Some(names);
+        }
+        let (receiver, member) = split_dotted(word)?;
+        let members = crate::stdlib::module_members(receiver)?;
+        let prefix = member.to_lowercase();
+        let mut matches: Vec<String> = members
+            .iter()
+            .filter(|name| name.to_lowercase().starts_with(&prefix))
+            .map(|name| format!("{receiver}.{name}"))
+            .collect();
+        matches.sort();
+        matches.dedup();
+        Some(matches)
     }
 }
 
@@ -905,6 +961,77 @@ mod tests {
             Some("0000.rb"),
             "so the cut is the first of the sorted list, not whichever entries the \\
              filesystem happened to return first"
+        );
+    }
+
+    /// The finding: `json.` is a module and two functions, and TAB offered nothing
+    /// at all — the completer had no dot handling, so the module names it offers
+    /// as vocabulary were names a user could never reach a member of.
+    #[test]
+    fn json_dot_offers_the_members_the_registry_holds() {
+        let completer = ReplCompleter::new();
+
+        assert_eq!(
+            completer.complete("json."),
+            vec!["json.parse".to_string(), "json.stringify".to_string()],
+            "`json.` offers the members spelled the way a program writes them, \\
+             because the completion replaces the whole word"
+        );
+        assert_eq!(
+            completer.complete("json.s"),
+            vec!["json.stringify".to_string()],
+            "and a member prefix narrows to the members it completes"
+        );
+    }
+
+    /// The registry is the answer, so the registry is the expectation.
+    ///
+    /// Every module in [`crate::stdlib::MODULE_MEMBERS`] is offered exactly the
+    /// members `builtins()` binds behind them — qualified as `<module>_<member>`,
+    /// or flat through `module_member_name` for the two alias modules — checked in
+    /// both directions, so a member the registry holds cannot be unoffered and an
+    /// offered member cannot be a name no call reaches.
+    #[test]
+    fn edge_every_module_member_offered_is_bound_and_every_bound_one_is_offered() {
+        let completer = ReplCompleter::new();
+        let registry = crate::stdlib::builtins();
+
+        for (module, members) in crate::stdlib::MODULE_MEMBERS {
+            let offered = completer.complete(&format!("{module}."));
+            let qualified = |member: &str| format!("{module}_{member}");
+
+            for member in members.iter() {
+                let bound = registry.contains_key(&qualified(member))
+                    || crate::stdlib::module_member_name(&qualified(member))
+                        .is_some_and(|flat| registry.contains_key(flat));
+                assert_eq!(
+                    offered
+                        .iter()
+                        .any(|entry| entry == &format!("{module}.{member}")),
+                    bound,
+                    "{module}.{member} is offered iff the registry binds it behind \\
+                     that spelling, and it was not: offered {offered:?}"
+                );
+            }
+        }
+    }
+
+    /// A module nobody has heard of is not an error and not a vocabulary: it
+    /// offers nothing, exactly as a prefix nothing starts with does.
+    #[test]
+    fn edge_a_module_that_is_not_one_offers_nothing_and_does_not_error() {
+        let completer = ReplCompleter::new();
+
+        assert_eq!(
+            completer.complete("nosuchmodule."),
+            Vec::<String>::new(),
+            "a dot after a name the language does not have is nothing to offer, \\
+             not a failure and not the whole vocabulary"
+        );
+        assert_eq!(
+            completer.complete("json.nosuchmember."),
+            Vec::<String>::new(),
+            "and a member prefix nothing starts with is the same answer"
         );
     }
 
