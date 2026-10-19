@@ -263,6 +263,63 @@ fn run_without_a_sized_thread(
     }
 }
 
+/// The language context a program has built: the module files it has loaded,
+/// the aliases it named them by, the modules it declared, the members they
+/// published, and the objects it declared.
+///
+/// A dotted call resolves against this and against nothing else.
+/// `MathUtils.circle_area(5)` is a member of a module the program declared,
+/// `J.parse(..)` is a member of a module imported under an alias, and
+/// `counter.bump()` is a method of an object the program declared. An
+/// expression evaluated *for* a program — the debug sub-REPL's `.watch` — has
+/// to be given this as well as the program's bindings, or every one of those
+/// three is a "no such function" it cannot answer.
+///
+/// It is one value rather than five because it is one thing: what a program
+/// has *declared*, as opposed to what it has bound. The bindings are copied
+/// afresh at every step; this changes only when the program declares
+/// something, and a copy of it is cheap — the module programs are shared
+/// rather than cloned.
+#[derive(Clone, Default)]
+pub struct CallContext {
+    /// The module programs already run, by the name the `import` that loaded
+    /// them goes by. An entry is what makes a second import of the same module a
+    /// no-op rather than a second binding of the same names.
+    ///
+    /// The programs are shared rather than copied: nothing reads one back, and
+    /// a copy of the table would be a copy of every module's syntax tree.
+    pub(crate) modules: HashMap<String, Arc<Program>>,
+    /// Every module name an `import` has bound, to the module it names.
+    ///
+    /// An alias — `import json as J` — binds `J`, and `J.parse(...)` has to
+    /// reach the same function `json.parse(...)` does. That is what this table
+    /// is for: a call through a name it holds is a call through the module it
+    /// points at, so the alias is a name for the module rather than a second
+    /// copy of it.
+    pub(crate) module_aliases: HashMap<String, String>,
+    /// Every `module` declaration that has run, by module name.
+    ///
+    /// An entry is what a second declaration of the same name is refused
+    /// against, and what an `import` of the name finds in place of a file.
+    pub(crate) declared_modules: HashMap<String, DeclaredModule>,
+    /// The `module_member` names this VM has published for a module's own
+    /// members, which is where a call `MathUtils.circle_area(5)` resolves to.
+    ///
+    /// They are recorded rather than inferred from the name, because
+    /// `Module_member` is a naming convention and a program may bind a name with
+    /// an underscore in it: guessing would drop a name the program wrote.
+    /// [`Vm::user_names`] uses this to leave them out — they are the interior of
+    /// `MathUtils.circle_area`, so offering `MathUtils_circle_area` to
+    /// completion, `:vars`, `:funcs` and the analyzer's seed shows the program a
+    /// name it cannot write.
+    pub(crate) qualified_members: HashSet<String>,
+    /// Every `object` declaration, by type name. The table is the inheritance
+    /// model: an entry already holds its own fields and methods merged with
+    /// everything it inherits, nearest declaration first, so a lookup is a
+    /// single map read and cannot walk a cyclic parent chain.
+    pub(crate) objects: HashMap<String, ObjectType>,
+}
+
 pub struct Vm {
     globals: HashMap<String, Value>,
     /// The names bound by a `constant` declaration. The value lives in
@@ -303,10 +360,14 @@ pub struct Vm {
     /// How many `skip` statements have been evaluated, on the same terms as
     /// [`Vm::break_statements`].
     skip_statements: usize,
-    /// The module programs already run, by the name the `import` that loaded
-    /// them goes by. An entry is what makes a second import of the same module a
-    /// no-op rather than a second binding of the same names.
-    modules: HashMap<String, Program>,
+    /// What the program has *declared*: the modules it has imported, the
+    /// aliases it named them by, the modules it declared, the members they
+    /// published and the objects it declared — see [`CallContext`].
+    ///
+    /// One value rather than five fields, because a caller that evaluates an
+    /// expression for this program needs all five of them together: a watch
+    /// that cannot see the module a program imported cannot call it.
+    context: CallContext,
     /// The directory this program's imports are resolved against: where its
     /// `redblue.manifest` is, and what every path an `import` returns is read
     /// against.
@@ -325,39 +386,15 @@ pub struct Vm {
     /// second program in the same process — a REPL line, a harness running files
     /// one after another — is answered from its own manifest.
     pins: crate::manifest::Pins,
-    /// Every module name an `import` has bound, to the module it names.
-    ///
-    /// An alias — `import json as J` — binds `J`, and `J.parse(...)` has to
-    /// reach the same function `json.parse(...)` does. That is what this table
-    /// is for: a call through a name it holds is a call through the module it
-    /// points at, so the alias is a name for the module rather than a second
-    /// copy of it.
-    module_aliases: HashMap<String, String>,
     /// The modules whose bodies are running, innermost last. A module that
     /// reaches itself through an `import` is a circular import, and this is
     /// what says so instead of walking the cycle.
     importing: Vec<String>,
-    /// Every `module` declaration that has run, by module name.
-    ///
-    /// An entry is what a second declaration of the same name is refused
-    /// against, and what an `import` of the name finds in place of a file.
-    declared_modules: HashMap<String, DeclaredModule>,
     /// How many `module` bodies are running. Above zero a `set` writes into the
     /// module's own scope instead of becoming a global, which is what makes a
     /// module declaration a boundary rather than a sequence of top-level
     /// statements.
     module_depth: usize,
-    /// The `module_member` names this VM has published for a module's own
-    /// members, which is where a call `MathUtils.circle_area(5)` resolves to.
-    ///
-    /// They are recorded rather than inferred from the name, because
-    /// `Module_member` is a naming convention and a program may bind a name with
-    /// an underscore in it: guessing would drop a name the program wrote.
-    /// [`Vm::user_names`] uses this to leave them out — they are the interior of
-    /// `MathUtils.circle_area`, so offering `MathUtils_circle_area` to
-    /// completion, `:vars`, `:funcs` and the analyzer's seed shows the program a
-    /// name it cannot write.
-    qualified_members: HashSet<String>,
     /// The names every VM is born holding: the builtins
     /// [`stdlib::builtins`] provides, by name.
     ///
@@ -397,11 +434,6 @@ pub struct Vm {
     /// so a refusal cannot drift from the early one, because both ask the same
     /// question of the same name.
     asking_a_question: bool,
-    /// Every `object` declaration, by type name. The table is the inheritance
-    /// model: an entry already holds its own fields and methods merged with
-    /// everything it inherits, nearest declaration first, so a lookup is a
-    /// single map read and cannot walk a cyclic parent chain.
-    objects: HashMap<String, ObjectType>,
     expectation_failure: Option<crate::testing::assertions::TestAssertionError>,
     /// How many test assertions have failed on this run. The count of failures
     /// rather than whether one is recorded: `might fail` has to tell a failure of
@@ -476,7 +508,7 @@ enum LoopControl {
 ///
 /// The published names are the members the module's own namespace answers to,
 /// which is what an `export` decides. They are held here rather than in
-/// [`Vm::modules`] because a declared module is one the program itself
+/// [`CallContext::modules`] because a declared module is one the program itself
 /// declared, not one read out of a file.
 ///
 /// Shared with the bytecode VM, which records a declared module the same way —
@@ -499,17 +531,21 @@ pub(crate) fn qualified_member(module: &str, member: &str) -> String {
 }
 
 /// One `object` declaration, after its parent has been merged into it.
+///
+/// Crate-visible rather than private because it is one of the tables
+/// [`CallContext`] holds, and that struct is public: a public struct cannot
+/// hold a value of a type nobody outside the crate can name.
 #[derive(Debug, Clone)]
-struct ObjectType {
+pub(crate) struct ObjectType {
     /// The object this one extends, kept so that a child can be resolved
     /// against its own parent after a later declaration changes nothing.
-    parent: Option<String>,
+    pub(crate) parent: Option<String>,
     /// Declared fields, defaults included, in declaration order. A field the
     /// child declares keeps the child's position and the child's default, and
     /// a parent field that reaches the same name is not copied in.
-    fields: Fields,
+    pub(crate) fields: Fields,
     /// Methods the type answers to, nearest declaration first.
-    methods: Fields,
+    pub(crate) methods: Fields,
 }
 
 /// The paths `import <name>` looks for under `root`, in order: `pinned` — the
@@ -635,17 +671,13 @@ impl Vm {
             output_full: false,
             break_statements: 0,
             skip_statements: 0,
-            modules: HashMap::new(),
+            context: CallContext::default(),
             root: root.to_path_buf(),
             pins: crate::manifest::Pins::for_running(root),
-            module_aliases: HashMap::new(),
             importing: Vec::new(),
-            declared_modules: HashMap::new(),
             module_depth: 0,
-            qualified_members: HashSet::new(),
             builtin_names: stdlib::builtins().keys().cloned().collect(),
             asking_a_question: false,
-            objects: HashMap::new(),
             expectation_failure: None,
             assertions_failed: 0,
             current_span: Span::unknown(),
@@ -695,11 +727,7 @@ impl Vm {
         forked.globals = self.globals.clone();
         forked.constants = self.constants.clone();
         forked.locals = self.locals.clone();
-        forked.modules = self.modules.clone();
-        forked.module_aliases = self.module_aliases.clone();
-        forked.declared_modules = self.declared_modules.clone();
-        forked.qualified_members = self.qualified_members.clone();
-        forked.objects = self.objects.clone();
+        forked.context = self.context.clone();
         forked
     }
 
@@ -715,6 +743,14 @@ impl Vm {
     /// the statement nesting restarts at zero because this VM is between
     /// statements, not inside one.
     ///
+    /// The counters of a run restart with the bindings, because one evaluation
+    /// is one run: the steps already spent, the calls still open, the loop
+    /// still running and the failures already recorded are all of the
+    /// *previous* evaluation. A counter that carried over would make the second
+    /// watch of a step start where the first left off — and, with the step
+    /// budget, would eventually refuse every watch with a step-limit failure
+    /// that has nothing to do with the watch being watched.
+    ///
     /// Everything else about the VM is left alone: the scratch's hook (there is
     /// none — a watcher is not itself watched), its question flag, and its
     /// budgets.
@@ -722,7 +758,39 @@ impl Vm {
         self.locals = scopes.to_vec();
         self.globals = globals.clone();
         self.statement_depth = 0;
+        self.steps = 0;
+        self.call_depth = 0;
+        self.call_stack.clear();
+        self.frame_writes.clear();
+        self.loop_depth = 0;
+        self.loop_control = None;
+        self.assertions_failed = 0;
+        self.expectation_failure = None;
         let _ = self.take_output();
+    }
+
+    /// Re-points this VM at the language context the observed step was running
+    /// with: the modules the program has, the aliases it named them by, the
+    /// members they published and the objects it declared.
+    ///
+    /// The bindings alone are not enough to evaluate an expression *for* a
+    /// program. `MathUtils.circle_area(5)` is a member of a module the program
+    /// declared, `J.parse(..)` is a member of a module it imported under an
+    /// alias, and `counter.bump()` is a method of an object it declared — and
+    /// without this copy every one of the three is a "no such function" the
+    /// expression cannot answer. See [`CallContext`].
+    pub fn observe_context(&mut self, context: &CallContext) {
+        self.context = context.clone();
+    }
+
+    /// The language context this VM has built: the modules it has imported, the
+    /// aliases it named them by, the modules it declared, the members they
+    /// published and the objects it declared.
+    ///
+    /// Borrowed rather than copied, so a caller can hand it to a VM of its own
+    /// without paying for the copy twice.
+    pub fn call_context(&self) -> &CallContext {
+        &self.context
     }
 
     /// The bindings this VM currently holds: the scope stack and the globals,
@@ -779,7 +847,8 @@ impl Vm {
     /// it is the type's own name — so a caller reading a dotted call off an AST
     /// has both halves and needs them put back together.
     pub fn object_method(&self, object: &str, method: &str) -> Option<&Value> {
-        self.objects
+        self.context
+            .objects
             .get(object)
             .and_then(|declaration| declaration.methods.get(method))
     }
@@ -794,7 +863,8 @@ impl Vm {
     /// ([`Vm::declare_module`]), so the unaliased case is a hit rather than a
     /// miss.
     pub fn module_behind<'a>(&'a self, name: &'a str) -> &'a str {
-        self.module_aliases
+        self.context
+            .module_aliases
             .get(name)
             .map(String::as_str)
             .unwrap_or(name)
@@ -825,6 +895,18 @@ impl Vm {
         let mut vm = Self::new();
         vm.max_steps = resolve_max_steps_from(Some(max_steps));
         vm
+    }
+
+    /// Sets the step budget this VM enforces, ignoring the environment.
+    ///
+    /// A budget of zero is ignored, for the same reason as
+    /// [`Vm::with_max_steps`]. This is the setter for a VM that already
+    /// exists — the debug sub-REPL's watch scratch, which is built once and
+    /// then answers every watch.
+    pub fn set_max_steps(&mut self, max_steps: usize) {
+        if max_steps > 0 {
+            self.max_steps = max_steps;
+        }
     }
 
     /// Builds a VM with both limits set at once, ignoring the environment.
@@ -1063,7 +1145,7 @@ impl Vm {
     /// their iteration order is not a result.
     ///
     /// The `module_member` names a module's members are published under are left
-    /// out — see [`Vm::qualified_members`]. They are in `globals` because that is
+    /// out — see [`CallContext::qualified_members`]. They are in `globals` because that is
     /// where [`Vm::call_method`] looks for them, and a name the program never
     /// wrote is not one of its names: after `import MathUtils` this used to offer
     /// `MathUtils_circle_area` to completion and list it in `:vars`, which is a
@@ -1073,7 +1155,9 @@ impl Vm {
         let mut names: Vec<String> = self
             .globals
             .keys()
-            .filter(|name| !builtins.contains_key(*name) && !self.qualified_members.contains(*name))
+            .filter(|name| {
+                !builtins.contains_key(*name) && !self.context.qualified_members.contains(*name)
+            })
             .cloned()
             .collect();
         for scope in &self.locals {
@@ -1092,7 +1176,7 @@ impl Vm {
     /// are mangled names and which are a program's own.
     fn publish_member(&mut self, module: &str, member: &str, value: Value) {
         let name = qualified_member(module, member);
-        self.qualified_members.insert(name.clone());
+        self.context.qualified_members.insert(name.clone());
         self.globals.insert(name, value);
     }
 
@@ -1107,7 +1191,7 @@ impl Vm {
     /// module this session imported), and only the record of publication tells
     /// them apart.
     pub fn published_member(&self, name: &str) -> bool {
-        self.qualified_members.contains(name)
+        self.context.qualified_members.contains(name)
     }
 
     /// The value bound to `name`, wherever this VM keeps it.
@@ -1155,7 +1239,7 @@ impl Vm {
     /// time could fail after some of the bindings were already installed, which
     /// would leave the program with half a module in it.
     fn load_module(&mut self, path: &str, name: &str) -> Result<()> {
-        if self.modules.contains_key(name) {
+        if self.context.modules.contains_key(name) {
             return Ok(());
         }
 
@@ -1216,7 +1300,9 @@ impl Vm {
             return Err(error);
         }
 
-        self.modules.insert(name.to_string(), program);
+        self.context
+            .modules
+            .insert(name.to_string(), Arc::new(program));
         Ok(())
     }
 
@@ -1237,7 +1323,7 @@ impl Vm {
     /// evidence that the declaration ran is this. See
     /// [`crate::repl::Repl::record_definitions`].
     pub fn declares_module(&self, name: &str) -> bool {
-        self.modules.contains_key(name) || self.declared_modules.contains_key(name)
+        self.context.modules.contains_key(name) || self.context.declared_modules.contains_key(name)
     }
 
     /// The value of a name a module body declares, or `None` when it declares
@@ -1266,7 +1352,7 @@ impl Vm {
     /// body runs where it is written, which is what makes a `break` in it a
     /// `break` in the loop around the declaration.
     fn declare_module(&mut self, name: &str, body: &[Stmt]) -> Result<Value> {
-        if self.declared_modules.contains_key(name) {
+        if self.context.declared_modules.contains_key(name) {
             return Err(Error::Runtime(
                 format!("Module '{name}' is already declared"),
                 self.span(),
@@ -1301,7 +1387,8 @@ impl Vm {
         // Registered before the body runs, so an `import` of this module from
         // inside its own body is a circular import rather than a second
         // declaration or a miss.
-        self.declared_modules
+        self.context
+            .declared_modules
             .insert(name.to_string(), DeclaredModule::default());
         self.importing.push(name.to_string());
 
@@ -1355,7 +1442,7 @@ impl Vm {
         self.importing.pop();
 
         if let Some(error) = failure {
-            self.declared_modules.remove(name);
+            self.context.declared_modules.remove(name);
             return Err(error);
         }
         if self.loop_control.is_some() {
@@ -1364,13 +1451,15 @@ impl Vm {
             // declared` and a later `import` of it with a module that published
             // nothing. The bytecode VM drops it for the same reason on the way
             // out of an abrupt exit.
-            self.declared_modules.remove(name);
+            self.context.declared_modules.remove(name);
             return Ok(Value::Nothing);
         }
 
-        self.declared_modules
+        self.context
+            .declared_modules
             .insert(name.to_string(), DeclaredModule { members });
-        self.module_aliases
+        self.context
+            .module_aliases
             .entry(name.to_string())
             .or_insert_with(|| name.to_string());
         Ok(Value::Nothing)
@@ -1496,6 +1585,13 @@ impl Vm {
                 format!("Constant '{name}' is already declared"),
                 self.span(),
             ));
+        }
+        // A constant declared inside a call lands in the globals, exactly as a
+        // `set` that reaches a global does — and, exactly as that `set` does,
+        // it belongs to the frame that wrote it as far as `.locals` is
+        // concerned. See [`DebugEvent::frame_writes`].
+        if let Some(writes) = self.frame_writes.last_mut() {
+            writes.insert(name.to_string());
         }
         self.globals.insert(name.to_string(), value);
         Ok(())
@@ -1627,7 +1723,8 @@ impl Vm {
             scopes: &self.locals,
             globals: &self.globals,
             builtins: &self.builtin_names,
-            module_members: &self.qualified_members,
+            module_members: &self.context.qualified_members,
+            context: &self.context,
             call_stack: &self.call_stack,
             scope_base: self.frame_scope_base,
             frame_writes: self.frame_writes.last(),
@@ -1969,7 +2066,7 @@ impl Vm {
                         // Io error, not a miss, so it is reported rather than
                         // folded into the "cannot find" below.
                         self.load_module(&path, &item.name)?;
-                    } else if !self.declared_modules.contains_key(&item.name)
+                    } else if !self.context.declared_modules.contains_key(&item.name)
                         && !stdlib::is_module(&item.name)
                     {
                         return Err(Error::Runtime(
@@ -1981,20 +2078,22 @@ impl Vm {
                     let target_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
                     // The alias is a name for the module, so a call through it
                     // reaches the module it names.
-                    self.module_aliases
+                    self.context
+                        .module_aliases
                         .insert(target_name.clone(), item.name.clone());
                     // The module's own name names it too — `import json as J`
                     // leaves `json.parse` working — unless the program has bound
                     // that name already, which is the shadowing rule every
                     // declaration in the language follows.
-                    self.module_aliases
+                    self.context
+                        .module_aliases
                         .entry(item.name.clone())
                         .or_insert_with(|| item.name.clone());
 
                     // A module this program declared has no file to read, so
                     // its published members are copied to the alias's own
                     // `alias_member` names here rather than by the loader.
-                    if let Some(declared) = self.declared_modules.get(&item.name) {
+                    if let Some(declared) = self.context.declared_modules.get(&item.name) {
                         let members: Vec<(String, String, Value)> = declared.members.clone();
                         for (member, _, value) in members {
                             self.publish_member(&target_name, &member, value);
@@ -2398,7 +2497,7 @@ impl Vm {
             }
         };
 
-        let object = match self.objects.get(&name) {
+        let object = match self.context.objects.get(&name) {
             Some(object) => object.clone(),
             None => {
                 // A module function: the receiver names a module, so the
@@ -2407,6 +2506,7 @@ impl Vm {
                 // `J.parse(..)` reaches the same function `json.parse(..)`
                 // does.
                 let module = self
+                    .context
                     .module_aliases
                     .get(&name)
                     .cloned()
@@ -2503,7 +2603,7 @@ impl Vm {
         extends: Option<&String>,
         body: &[Stmt],
     ) -> Result<Value> {
-        if self.objects.contains_key(name) {
+        if self.context.objects.contains_key(name) {
             return Err(Error::Runtime(
                 format!("Object '{name}' is already declared"),
                 self.span(),
@@ -2551,7 +2651,7 @@ impl Vm {
                     self.span(),
                 ));
             }
-            let Some(object) = self.objects.get(&current).cloned() else {
+            let Some(object) = self.context.objects.get(&current).cloned() else {
                 return Err(Error::Runtime(
                     format!("Object '{name}' extends '{current}', which is not declared"),
                     self.span(),
@@ -2573,7 +2673,7 @@ impl Vm {
             }
         }
 
-        self.objects.insert(
+        self.context.objects.insert(
             name.to_string(),
             ObjectType {
                 parent: extends.cloned(),

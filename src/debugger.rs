@@ -85,6 +85,15 @@ pub struct DebugEvent<'a> {
     /// The `Module_member` names a module's functions are published under — the
     /// interior of `MathUtils.circle_area`, which no line of Redblue can write.
     pub module_members: &'a HashSet<String>,
+    /// What the program has *declared*: the modules it has imported, the
+    /// aliases it named them by, the modules it declared, the members they
+    /// published and the objects it declared.
+    ///
+    /// A dotted call resolves against this and against nothing else, so a
+    /// caller that evaluates an expression for this program — the debug
+    /// sub-REPL's `.watch` — has to be given it as well as the bindings. See
+    /// [`crate::interpreter::CallContext`].
+    pub context: &'a crate::interpreter::CallContext,
     /// The user functions on the call stack at this statement, outermost first.
     ///
     /// What the debug sub-REPL's `.stack` reads: the frame list of the last step

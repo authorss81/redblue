@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::analyzer;
 use crate::debugger::{DebugAction, DebugEvent};
-use crate::interpreter::Vm;
+use crate::interpreter::{CallContext, Vm};
 use crate::parser::Program;
 use crate::repl::commands::ReplCommand;
 use crate::repl::style::{Paint, Style};
@@ -37,24 +37,45 @@ pub(super) const NO_DEBUG_SESSION: &str =
 /// asked to enter it again with a bare `.debug`.
 const ALREADY_IN_SESSION: &str = "Already in a debug session; .back returns to the session.";
 
-/// The whole of `:help` inside the sub-REPL: five commands, not the session's
+/// The most watches one session holds.
+///
+/// Every watch is evaluated at every statement boundary, so the number of them
+/// is a multiplier on the work the program does: a hundred watches over a
+/// thousand statements is a hundred thousand evaluations. The cap is what keeps
+/// that arithmetic the user's to make deliberately rather than by accident, and
+/// a watch asked for past it is refused by name rather than added.
+const MAX_WATCHES: usize = 100;
+
+/// The step budget one watch evaluation gets.
+///
+/// A watch is a question about a value, not a program: it is evaluated again
+/// at every statement boundary, and each evaluation starts with the budget
+/// whole — so one heavy watch cannot spend the budget the next one needs.
+///
+/// The cap is what keeps a runaway watch from spending a program's worth of
+/// steps at every statement: a watch that needs more than this is reported as
+/// a failed watch, and the program it watches carries on.
+const WATCH_MAX_STEPS: usize = 100_000;
+
+/// The whole of `:help` inside the sub-REPL: six commands, not the session's
 /// table, because the session's commands cannot be answered here.
 const SUB_HELP: &str = "Debug sub-REPL commands: .watch <expression> reports a value \
                         when it changes, .stack shows the call stack, .locals shows \
-                        the frame last stepped in, .debug <expression|file> runs \
-                        more code here, .back returns to the session.";
+                        the frame last stepped in, .run <file> runs a file here, \
+                        .debug <expression|file> runs more code here, .back returns \
+                        to the session.";
 
 /// What a session command that belongs to the parent prompt is answered with
 /// inside the sub-REPL.
-const SUB_ONLY_MESSAGE: &str = "Only .watch, .stack, .locals, .debug and .back are \
+const SUB_ONLY_MESSAGE: &str = "Only .watch, .stack, .locals, .run, .debug and .back are \
                                 available in the debug sub-REPL; .back returns to \
                                 the session.";
 
 /// The line printed when a session opens, above whatever was asked to run on
 /// entry.
 pub(super) const BANNER: &str = "Debug sub-REPL: .watch <expression> reports changes, .stack \
-                      shows the call stack, .locals shows the current frame, .back \
-                      returns to the session.";
+                      shows the call stack, .locals shows the current frame, .run <file> \
+                      runs a file here, .back returns to the session.";
 
 /// One registered watch: what the user asked to watch, the program it parses
 /// to, and the value it last had — or `None` until it has had one.
@@ -112,6 +133,9 @@ impl DebugRepl {
         // was only being watched.
         let mut scratch = Vm::new();
         scratch.ask_questions(true);
+        // The budget is one evaluation's, not a program's: see
+        // [`WATCH_MAX_STEPS`].
+        scratch.set_max_steps(WATCH_MAX_STEPS);
         let state = Arc::new(Mutex::new(State {
             watches: Vec::new(),
             trace: Trace::default(),
@@ -119,10 +143,25 @@ impl DebugRepl {
         }));
         let hook_state = Arc::clone(&state);
         vm.set_debug_hook(Some(Box::new(move |event| {
-            let mut state = hook_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            observe(&mut state, &event);
+            // The hook runs inside the program being debugged, so a panic in
+            // it would take that program down with it. A watcher that panics
+            // is one failed watch — reported, not fatal — so the whole of the
+            // observation is caught here and the program carries on.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut state = hook_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                observe(&mut state, &event);
+            }));
+            if let Err(payload) = outcome {
+                let mut state = hook_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.trace.reports.push(format!(
+                    "watch: the watcher panicked: {}",
+                    panic_message(payload)
+                ));
+            }
             DebugAction::Run
         })));
         Self {
@@ -164,19 +203,52 @@ impl DebugRepl {
     /// it, and every later step where the value differs from the last one it
     /// had is a line of report. What *cannot* be watched is something that does
     /// not parse: no run would ever make it an expression.
+    ///
+    /// A watch asked for with no expression at all is a question about the
+    /// watches this session already holds, and is answered with them.
+    ///
+    /// A session holds at most [`MAX_WATCHES`] of them: every watch is
+    /// evaluated at every statement boundary, so the number of them is a
+    /// multiplier on the work the program does, and a cap is what keeps that
+    /// arithmetic the user's to make deliberately.
     pub(super) fn watch(&mut self, source: &str) -> Vec<String> {
+        if source.trim().is_empty() {
+            return self.watch_lines();
+        }
         let program = match parse_only(source) {
             Ok(program) => program,
             Err(error) => return vec![failure_line(&self.style, source, &error)],
         };
-        if let Ok(mut state) = self.state.lock() {
-            state.watches.push(Watch {
-                source: source.to_string(),
-                program,
-                last: None,
-            });
+        let mut state = lock(&self.state);
+        if state.watches.len() >= MAX_WATCHES {
+            return vec![format!(
+                "This session already holds {} watches, and a session holds at most {}.",
+                MAX_WATCHES, MAX_WATCHES
+            )];
         }
+        state.watches.push(Watch {
+            source: source.to_string(),
+            program,
+            last: None,
+        });
         vec![format!("Watching {}.", source)]
+    }
+
+    /// The watches this session holds, one per line.
+    ///
+    /// A session that holds none says so: "no watches" is an answer, and a
+    /// session that printed nothing at all would be read as a command that did
+    /// not work.
+    pub(super) fn watch_lines(&self) -> Vec<String> {
+        let state = lock(&self.state);
+        if state.watches.is_empty() {
+            return vec!["No watches.".to_string()];
+        }
+        let mut lines = vec![format!("Watching {} expression(s):", state.watches.len())];
+        for watch in &state.watches {
+            lines.push(format!("  {}", watch.source));
+        }
+        lines
     }
 
     /// The call stack of the last step taken, outermost frame first.
@@ -300,7 +372,7 @@ impl DebugRepl {
         {
             let mut state = lock(&self.state);
             let (scopes, globals) = self.vm.current_bindings();
-            evaluate_watches(&mut state, scopes, globals);
+            evaluate_watches_against(&mut state, scopes, globals, self.vm.call_context());
         }
         match result {
             Ok(value) => {
@@ -321,14 +393,57 @@ impl DebugRepl {
         lines
     }
 
+    /// Runs the file `path` names, in this sub-REPL, under observation.
+    ///
+    /// This is what makes a *file* watchable: a file run at `.debug` time is
+    /// run before there is a watch to see it, and the whole point of the
+    /// sub-REPL is watching something. So the file is run here instead, after
+    /// the watches are set, and the same report lines come out of it.
+    ///
+    /// A file that cannot be read is one error line: the run failed, and the
+    /// session that asked for it is still a session.
+    pub(super) fn run_file(&mut self, path: &str) -> Vec<String> {
+        match read_source(path) {
+            Ok(source) => self.run(&source, path),
+            Err(message) => vec![format!("Error: {}", message)],
+        }
+    }
+
     /// The watch reports the runs so far have generated, cleared: a report is
     /// printed once, on the answer to the line whose run produced it.
+    ///
+    /// Through the module's [`lock`], like every other read of the shared
+    /// state: a watch that panicked poisoned the mutex, and a poisoned mutex
+    /// still holds the reports the watches before the panic produced. Locking
+    /// it directly would drop them on the floor and answer an empty list, which
+    /// reads as "no watch reported anything" — the one answer that is wrong
+    /// exactly when it matters.
     fn take_reports(&self) -> Vec<String> {
-        self.state
-            .lock()
-            .map(|mut state| std::mem::take(&mut state.trace.reports))
-            .unwrap_or_default()
+        let mut state = lock(&self.state);
+        std::mem::take(&mut state.trace.reports)
     }
+}
+
+/// The source of the file `path` names, or the failure that says why it could
+/// not be read.
+///
+/// A `Result` rather than a printed line, so the caller decides what a failure
+/// looks like: the sub-REPL reports it and carries on, and a test that watches
+/// a file which is not there asserts the failure itself rather than the
+/// wording of a message.
+pub(super) fn read_source(path: &str) -> Result<String, String> {
+    read_file(path).map_err(|error| cannot_read(path, &error))
+}
+
+/// The source of the file `path` names, or the failure the filesystem gave.
+fn read_file(path: &str) -> Result<String, std::io::Error> {
+    std::fs::read_to_string(path)
+}
+
+/// How a file that could not be read is reported: the path the user named and
+/// the reason it could not be read.
+fn cannot_read(path: &str, error: &std::io::Error) -> String {
+    format!("cannot read '{}': {}", path, error)
 }
 
 /// Locks the shared state, ignoring a poisoned lock — the same contract
@@ -338,6 +453,39 @@ fn lock(state: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
     state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// What a panic carries, as the line of report it becomes.
+///
+/// The payload of a panic is whatever the panicking code put in it, so it is
+/// read as the two things a panic usually carries — a string or a `&str` — and
+/// anything else is reported as a panic without a message rather than as
+/// something that was never said.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else {
+        "the watcher panicked".to_string()
+    }
+}
+
+/// Runs `body`, turning a panic into the failure it was.
+///
+/// A watch is evaluated inside the program being debugged, so a panic in it
+/// would take that program down with it: a watch is a question, and a question
+/// that cannot be answered is a failed watch and not a dead program. The
+/// failure is the message the panic carried, so the report says what went
+/// wrong rather than only that something did.
+pub(super) fn catching_panics(
+    body: impl FnOnce() -> crate::error::Result<Value>,
+) -> Result<Value, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(payload) => Err(format!("the watcher panicked: {}", panic_message(payload))),
+    }
 }
 
 /// Records one statement-boundary event and evaluates every watch against it.
@@ -351,11 +499,16 @@ fn observe(state: &mut State, event: &DebugEvent<'_>) {
     state.trace.observed = true;
     state.trace.stack = event.call_stack.to_vec();
     state.trace.locals = event.frame_locals();
-    evaluate_watches(state, event.scopes, event.globals);
+    evaluate_watches(state, event);
 }
 
-/// Evaluates every registered watch against `scopes`/`globals` and appends a
-/// line of report for each one whose value moved.
+fn evaluate_watches(state: &mut State, event: &DebugEvent<'_>) {
+    evaluate_watches_against(state, event.scopes, event.globals, event.context);
+}
+
+/// Evaluates every registered watch against the bindings and the language
+/// context of an observed step, and appends a line of report for each one whose
+/// value moved.
 ///
 /// This is the whole watch contract, in one place — the statement stops call it
 /// with the step's bindings, and a finished run calls it once more with the
@@ -372,16 +525,34 @@ fn observe(state: &mut State, event: &DebugEvent<'_>) {
 ///   3 to observe it with.
 ///
 /// A watch that fails reports one line per evaluation and keeps its previous
-/// value: the failure is about this step, not about the value it last held.
-fn evaluate_watches(state: &mut State, scopes: &[CapturedScope], globals: &HashMap<String, Value>) {
+/// value: the failure is about this step, not about the value it last held. A
+/// watch that *panics* is one failed watch too — the panic is caught here, so
+/// that one watch cannot take the program it watches down with it, and the
+/// watches after it are still evaluated.
+fn evaluate_watches_against(
+    state: &mut State,
+    scopes: &[CapturedScope],
+    globals: &HashMap<String, Value>,
+    context: &CallContext,
+) {
     let State {
         watches,
         trace,
         scratch,
     } = state;
+    if watches.is_empty() {
+        return;
+    }
+    // The language context is copied once for the whole step: it is the same
+    // for every watch, and a copy per watch would multiply the work by the
+    // number of watches for nothing. Without it a watch cannot call what the
+    // program declared — `MathUtils.circle_area(5)`, `J.parse(..)`,
+    // `counter.bump()` — and every one of those is a "no such function" the
+    // watch cannot answer.
+    scratch.observe_context(context);
     for watch in watches.iter_mut() {
         scratch.observe_bindings(scopes, globals);
-        match scratch.run_quietly(&watch.program) {
+        match catching_panics(|| scratch.run_quietly(&watch.program)) {
             Ok(value) => {
                 let previous = watch.last.replace(value.clone());
                 if matches!(previous, Some(previous) if previous != value) {
@@ -390,17 +561,12 @@ fn evaluate_watches(state: &mut State, scopes: &[CapturedScope], globals: &HashM
                         .push(format!("watch {} = {}", watch.source, value));
                 }
             }
-            Err(error) => {
+            Err(failure) => {
                 // One line, for one step: the rendered failure would draw a
                 // caret over source the reader is not looking at, and a watch
                 // that fails on every statement of a loop should be one line
                 // per statement and not eight.
-                let first = error
-                    .to_string()
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
+                let first = failure.lines().next().unwrap_or_default().to_string();
                 trace
                     .reports
                     .push(format!("watch {}: {}", watch.source, first));
@@ -473,6 +639,7 @@ impl Repl {
             ReplCommand::Stack => debug.stack_lines(),
             ReplCommand::Locals => debug.locals_lines(),
             ReplCommand::Help => vec![SUB_HELP.to_string()],
+            ReplCommand::Run(path) => debug.run_file(&path),
             ReplCommand::Back => {
                 self.debug_repl = None;
                 Vec::new()
@@ -493,13 +660,10 @@ impl Repl {
     /// parent prompt both opens one and runs the file in it.
     fn run_debug_argument(&mut self, argument: &str) -> Vec<String> {
         let argument = argument.trim();
-        if argument.ends_with(".rb") {
-            match std::fs::read_to_string(argument) {
-                Ok(source) => self.run_in_debug(&source, argument),
-                Err(error) => vec![format!("Error: cannot read '{}': {}", argument, error)],
-            }
-        } else {
-            self.run_in_debug(argument, SESSION_FILE)
+        match read_argument(argument) {
+            Argument::File(source, name) => self.run_in_debug(&source, &name),
+            Argument::Unreadable(message) => vec![format!("Error: {}", message)],
+            Argument::Code => self.run_in_debug(argument, SESSION_FILE),
         }
     }
 
@@ -511,4 +675,65 @@ impl Repl {
             None => vec![NO_DEBUG_SESSION.to_string()],
         }
     }
+}
+
+/// What a `.debug` argument names: the source of a file to read, or code to
+/// run.
+enum Argument {
+    /// A file that was read: its source, and the name to report it under.
+    File(String, String),
+    /// A file that could not be read: the failure that says why.
+    Unreadable(String),
+    /// Code to run, exactly as it was typed.
+    Code,
+}
+
+/// What `argument` names: the file it reads, or the code it runs.
+///
+/// Two rules, and the first one is the fallback:
+///
+/// - **A path that can be read is a file**, whatever it is called. A file called
+///   `notes.txt` holds Redblue source as readily as one called `prog.rb`, and
+///   making the suffix the only way in would have meant the file could only be
+///   debugged if it had been named by the convention rather than by the user.
+/// - **A path ending in `.rb` is a file** even when it does not exist, because
+///   a file that is missing is still a file the user meant, and saying "cannot
+///   read" beats parsing `prog.rb` as an expression and failing on the dot.
+///
+/// Everything else is code, and is run as code.
+///
+/// The file is read *once*, here, and what was read is what runs. Asking the
+/// filesystem whether a path is a file and reading it afterwards asks it twice,
+/// and the two answers need not agree — the file can be gone by the time it is
+/// read, and the run would then read something that is not the file the
+/// decision was about. The same is true of asking it a second time *after* the
+/// read failed: the path can be created or deleted in between, and the answer
+/// would be about a world that is no longer the one the read was about. So the
+/// decision is made from the read itself: a path that could not be read
+/// because it is *not there* is code, and a path that could not be read
+/// because it is there and holds no readable source — a directory, a file this
+/// process may not open — is a file the user meant and cannot have, and says
+/// so rather than being run as code.
+fn read_argument(argument: &str) -> Argument {
+    match read_file(argument) {
+        Ok(source) => Argument::File(source, argument.to_string()),
+        Err(error) => {
+            if argument.ends_with(".rb") || is_there_but_not_readable(&error) {
+                Argument::Unreadable(cannot_read(argument, &error))
+            } else {
+                Argument::Code
+            }
+        }
+    }
+}
+
+/// Whether the failure says the path is there and cannot be read as text.
+///
+/// The two reasons a path can be there and unreadable: it is a directory, and
+/// it is a file this process may not open. Both are a file the user meant.
+fn is_there_but_not_readable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied
+    )
 }

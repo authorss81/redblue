@@ -301,7 +301,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         names: &["watch"],
         description: "Watch an expression at every step (debug sub-REPL)",
         usage: Some("<expression>"),
-        optional_argument: false,
+        optional_argument: true,
         verbatim_argument: false,
         build: |argument| ReplCommand::Watch(argument.unwrap_or_default()),
     },

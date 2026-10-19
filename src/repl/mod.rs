@@ -2808,6 +2808,33 @@ mod tests {
         path
     }
 
+    /// A path under `target/tmp/` that nothing has written to.
+    ///
+    /// For the file a call *would* have written if it were allowed to write
+    /// it: the assertion is that the file is not there afterwards, so the path
+    /// has to be one that is not there to begin with. The serial keeps two
+    /// tests running in parallel from sharing a path.
+    fn unwritten_path(name: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let serial = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/repl-debug-watch");
+        std::fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+        let path = dir.join(format!("{}-{}.txt", name, serial));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A directory under `target/tmp/` for a test that needs one, named after
+    /// the test so two running in parallel cannot collide.
+    fn scratch_dir(name: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let serial = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/repl-debug-dirs");
+        let dir = base.join(format!("{}-{}", name, serial));
+        std::fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+        dir
+    }
+
     /// Feeds `lines` to the session one at a time, as the read loop does: each line
     /// is recorded in the history before it is dispatched, because that is the
     /// order the loop keeps them in.
@@ -3064,7 +3091,227 @@ mod tests {
         );
     }
 
-    use super::debug_repl::{BANNER, NO_DEBUG_SESSION};
+    use super::debug_repl::{read_source, BANNER, NO_DEBUG_SESSION};
+
+    /// A file run *inside* the sub-REPL is watched like anything else — which
+    /// is the reason `.run` is a sub-REPL command and not only the session's.
+    ///
+    /// A file run at `.debug` time is run before there is a watch to see it, so
+    /// the only way to watch a file is to run it after the watches are set. The
+    /// file below adds one to `x` three times; the watch was set on the `x` the
+    /// parent session already held, so the first stop takes its baseline and
+    /// every later change is a report.
+    #[test]
+    fn debug_a_file_can_be_watched_while_it_runs() {
+        let mut repl = Repl::new();
+        repl.execute_line("set x to 0");
+        let path = scratch_file(
+            "watched",
+            "set x to x + 1\nset x to x + 1\nset x to x + 1\n",
+        );
+        let run = format!(".run {}", path.display());
+
+        let answers = repl.debug_session(&[".debug", ".watch x", &run, ".back"]);
+
+        let reports: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("watch x = "))
+            .collect();
+        assert_eq!(
+            reports,
+            ["watch x = 1", "watch x = 2", "watch x = 3"],
+            "every change the file made was reported, and nothing else was; \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A file the sub-REPL is asked to run and cannot read is one reported
+    /// failure — and the session that asked for it is still a session.
+    ///
+    /// The failure is asserted on the read itself and not only on the wording
+    /// of the message: the message is a report, the read is the failure.
+    #[test]
+    fn edge_a_run_of_a_file_that_cannot_be_read_reports_the_failure_and_the_session_goes_on() {
+        let mut repl = Repl::new();
+        let missing = "definitely_missing_phase062.rb";
+
+        let answers =
+            repl.debug_session(&[".debug", ".run definitely_missing_phase062.rb", ".stack"]);
+
+        assert!(
+            read_source(missing).is_err(),
+            "the file really is not there: everything above rests on the read \
+             failing rather than on the wording of a message"
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|line| line.starts_with("Error: cannot read 'definitely_missing_phase062.rb'")),
+            "the failed read is reported with the file it wanted; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "No live frames."),
+            "and the session is still a session: .stack answers inside it — \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A file whose source does not parse is a reported failure, and the
+    /// session that ran it is still a session.
+    ///
+    /// The file is malformed on purpose — `set x to` with nothing after it —
+    /// and the failure is asserted on the parse as well as on the message.
+    #[test]
+    fn edge_a_run_of_a_file_that_does_not_parse_reports_the_failure_and_the_session_goes_on() {
+        let mut repl = Repl::new();
+        let path = scratch_file("malformed", "set x to\n");
+        let run = format!(".run {}", path.display());
+
+        let answers = repl.debug_session(&[".debug", &run, ".stack"]);
+
+        assert!(
+            crate::repl::parse_only("set x to").is_err(),
+            "the file really is malformed: everything above rests on the parse \
+             failing rather than on the wording of a message"
+        );
+        assert!(
+            answers.iter().any(|line| line.starts_with("Error:")),
+            "the malformed file is reported as a failure; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "No live frames."),
+            "and the session that ran it is still a session: .stack answers \
+             inside it — it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A file is a file whatever it is called: the suffix is the fallback for a
+    /// path that is not there, not the only way in.
+    ///
+    /// The file here is called `.txt`, and holds Redblue source. Before the
+    /// suffix rule was the only rule, `.debug <this file>` was parsed as code
+    /// and failed on the dot.
+    #[test]
+    fn debug_a_file_whose_name_is_not_rb_is_read_when_it_exists() {
+        let mut repl = Repl::new();
+        let path = scratch_path("debug-source", "txt");
+        std::fs::write(&path, "set y to 41\ny + 1\n").expect("the scratch file should be writable");
+        let argument = path.display().to_string();
+
+        let answers = repl.debug_session(&[&format!(".debug {argument}"), ".back"]);
+
+        assert!(
+            answers.iter().any(|line| line == "= 42"),
+            "the file was read and run, not parsed as an expression; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// `.watch` with no expression is a question about the watches the session
+    /// holds, and is answered with them — a session that holds none says so.
+    ///
+    /// Three shapes are pinned here: a session with no watch at all, a session
+    /// with exactly one, and a session with the same expression watched twice.
+    /// The last is two watches, not one — each compares against the value it
+    /// last saw, and neither shares state with the other.
+    #[test]
+    fn debug_watch_with_no_argument_lists_the_watches_the_session_holds() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[
+            ".debug",
+            ".watch",
+            ".watch x",
+            ".watch",
+            ".watch x",
+            ".watch \"héllo\"",
+            ".watch",
+        ]);
+
+        assert!(
+            answers.iter().any(|line| line == "No watches."),
+            "a session that holds no watch says so rather than nothing; it \
+             answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|line| line == "Watching 1 expression(s):"),
+            "one watch is one watch; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|line| line == "Watching 3 expression(s):"),
+            "the same expression watched twice is two watches, and a third one \
+             is a third; it answered:\n{}",
+            answers.join("\n")
+        );
+        let final_listing = answers
+            .iter()
+            .rposition(|line| line == "Watching 3 expression(s):")
+            .map(|index| &answers[index + 1..])
+            .expect("the session listed the three watches it holds");
+        let x_rows = final_listing
+            .iter()
+            .filter(|line| line.as_str() == "  x")
+            .count();
+        assert_eq!(
+            x_rows,
+            2,
+            "the duplicate watch is listed twice, once per watch; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            final_listing
+                .iter()
+                .any(|line| line.as_str() == "  \"héllo\""),
+            "a watch on text is listed by the text it watches, whatever the \
+             text is; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A constant declared inside a frame is that frame's own binding, and
+    /// `.locals` shows it.
+    ///
+    /// A `constant` binds a global, exactly as a `set` that reaches one does —
+    /// and exactly as that `set` does, it belongs to the frame that wrote it.
+    /// Before the frame's writes were tracked for constants as well as for
+    /// `set`, the name was written and then never listed.
+    #[test]
+    fn debug_locals_shows_a_constant_the_frame_declared() {
+        let mut repl = Repl::new();
+        feed(
+            &mut repl,
+            &[
+                "to inner()",
+                "constant LIMIT to 5",
+                "say \"inside\"",
+                "end",
+                "to outer()",
+                "inner()",
+                "end",
+            ],
+        );
+
+        let answers = repl.debug_session(&[".debug outer()", ".locals", ".back"]);
+
+        assert!(
+            answers.iter().any(|line| line == "  LIMIT = 5"),
+            "the constant the frame declared is one of the frame's bindings; \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+    }
 
     /// The three-deep chain a `.stack` inside the sub-REPL must name, outermost
     /// frame first. The last statement the program steps in is `set deep to 7`,
@@ -3301,6 +3548,285 @@ mod tests {
         assert!(
             answers.iter().any(|line| line == "= 2"),
             "the program ran to its result despite the watch — it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A watch on something that would change the world is *refused*, not
+    /// performed — and the refusal is the whole answer, because a watch is an
+    /// expression that was only being watched.
+    ///
+    /// The scratch VM that evaluates a watch is told it is answering a
+    /// question ([`crate::interpreter::Vm::ask_questions`]), so a builtin that
+    /// leaves the process — `files.write` — is refused at the call, before the
+    /// write it would have made. A program that wrote a file because someone
+    /// typed `.watch files.write(…)` would be a debugger doing the thing it
+    /// was asked to look at.
+    ///
+    /// The module is imported under an alias on purpose. `import files as F`
+    /// binds `F` to the module `files`, and a call through the alias has to
+    /// resolve to the same builtin `files.write` reaches — which it can only do
+    /// if the watch is evaluated against the language context the program built
+    /// and not only against its bindings. A watch that cannot see the import
+    /// answers "Module 'F' has no function 'write'", which is a complaint
+    /// about the wrong thing: the write it would have made is the thing.
+    ///
+    /// Asserted on the file and not only on the wording of the message: "it
+    /// said no" and "the file is still not there" are different claims, and
+    /// only the second one is the point.
+    #[test]
+    fn edge_a_watch_that_would_change_the_world_is_refused_and_writes_nothing() {
+        let mut repl = Repl::new();
+        let path = unwritten_path("watched");
+        let quoted = path.display().to_string();
+
+        let answers = repl.debug_session(&[
+            ".debug",
+            "import files as F",
+            &format!(".watch F.write(\"{quoted}\", \"clobbered\")"),
+            "1 + 1",
+            ".back",
+        ]);
+
+        let refusals: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("watch F.write("))
+            .collect();
+        assert!(
+            !refusals.is_empty(),
+            "the watch reported the refusal rather than making the write; it \
+             answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            refusals.iter().all(|line| line.contains("files_write")),
+            "and the refusal names the builtin that would have done it: {:?}",
+            refusals
+        );
+        assert!(
+            !path.exists(),
+            "the watched expression wrote nothing: {} is not there",
+            path.display()
+        );
+        assert!(
+            answers.iter().any(|line| line == "= 2"),
+            "and the program it was watching still ran; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A watch can call what the program *declared* — a module's own member.
+    ///
+    /// The bindings a watch is evaluated against are not the whole of what a
+    /// program has: a module the program declared is a namespace with a member
+    /// in it, and a watch that cannot see the declaration answers "Module
+    /// 'Greeter' has no function 'greet'" for a member the program published.
+    ///
+    /// The report is the positive claim: the watch called the member and the
+    /// value it produced is the one the program would have produced. The
+    /// program changes the name the member is called with, so the value the
+    /// watch holds changes with it — which is what a watch reports.
+    #[test]
+    fn debug_a_watch_can_call_a_module_the_program_declared() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[
+            ".debug",
+            "module Greeter",
+            "    to greet(who)",
+            "        give back \"hello \" + who",
+            "    end",
+            "    export all",
+            "end",
+            "set who to \"world\"",
+            ".watch Greeter.greet(who)",
+            "set who to \"there\"",
+            ".back",
+        ]);
+
+        let reports: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("watch Greeter.greet("))
+            .collect();
+        assert!(
+            reports.contains(&"watch Greeter.greet(who) = hello there"),
+            "the watch called the module's member and reported what it \
+             answered; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            !reports.iter().any(|line| line.contains("has no function")),
+            "and it did not answer that the module has no such member: {:?}",
+            reports
+        );
+    }
+
+    /// A watch can call an *object's* method, for the same reason it can call a
+    /// module's member: the declaration is part of what the program has, and
+    /// not part of what it has bound.
+    ///
+    /// The receiver of an object's method is the type's own name — `Counter`,
+    /// not a variable holding one — so the watch is written the way the
+    /// language writes it.
+    #[test]
+    fn edge_a_watch_can_call_an_object_method_the_program_declared() {
+        let mut repl = Repl::new();
+
+        let answers = repl.debug_session(&[
+            ".debug",
+            "object Counter",
+            "    has count default 0",
+            "    to bump()",
+            "        set this.count to this.count + 1",
+            "        give back this.count",
+            "    end",
+            "end",
+            "set Counter.count to 5",
+            ".watch Counter.bump()",
+            "set Counter.count to 9",
+            ".back",
+        ]);
+
+        let reports: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("watch Counter.bump()"))
+            .collect();
+        assert!(
+            reports.contains(&"watch Counter.bump() = 10"),
+            "the watch called the object's method and reported what it \
+             answered; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            !reports.iter().any(|line| line.contains("has no function")),
+            "and it did not answer that there is no such method: {:?}",
+            reports
+        );
+    }
+
+    /// A session holds a bounded number of watches, and the one past the bound
+    /// is refused rather than added.
+    ///
+    /// Every watch is evaluated at every statement boundary, so the number of
+    /// them is a multiplier on the work the program does. A cap is what keeps
+    /// that arithmetic the user's to make deliberately.
+    #[test]
+    fn edge_a_session_refuses_a_watch_past_its_limit() {
+        let mut repl = Repl::new();
+        let mut lines: Vec<String> = vec![".debug".to_string()];
+        for index in 0..100 {
+            lines.push(format!(".watch watched{index}"));
+        }
+        lines.push(".watch one_too_many".to_string());
+        lines.push(".watch".to_string());
+        lines.push(".back".to_string());
+        let asked: Vec<&str> = lines.iter().map(String::as_str).collect();
+
+        let answers = repl.debug_session(&asked);
+
+        assert!(
+            answers
+                .iter()
+                .any(|line| line.contains("holds 100 watches")),
+            "the watch past the limit was refused by name; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            !answers
+                .iter()
+                .any(|line| line.contains("Watching one_too_many.")),
+            "and it was not registered either; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|line| line.starts_with("Watching 100 expression(s):")),
+            "and the session holds exactly the watches it may hold; it \
+             answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A path that is *not there* is code, and is run as code.
+    ///
+    /// The decision is made from the one read: a path that could not be read
+    /// because it does not exist is not a file the user meant, and a file the
+    /// user meant is reported as one that cannot be read. The two answers
+    /// cannot both be right about the same path, and the read is what settles
+    /// it.
+    #[test]
+    fn edge_a_debug_of_a_path_that_is_not_there_is_run_as_code() {
+        let mut repl = Repl::new();
+        let missing = "definitely_missing_phase062.txt";
+
+        let answers = repl.debug_session(&[&format!(".debug {missing}"), ".back"]);
+
+        assert!(
+            !answers
+                .iter()
+                .any(|line| line.starts_with("Error: cannot read")),
+            "a path that is not there is not reported as a file that cannot be \
+             read; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|line| line.contains("Unknown variable 'definitely_missing_phase062'")),
+            "it was run as code, and the code failed the way code fails; it \
+             answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A watch that *panics* is one failed watch, not a program that dies.
+    ///
+    /// The panic is caught where the watch is evaluated, so that one watch
+    /// cannot take the program it watches down with it — and it is reported as
+    /// the failure it is, rather than swallowed.
+    #[test]
+    fn edge_a_watch_that_panics_is_reported_rather_than_propagated() {
+        let outcome = super::debug_repl::catching_panics(|| panic!("the watcher fell over"));
+
+        let message = outcome.expect_err("a panic is a failure, not a value");
+        assert!(
+            message.contains("the watcher fell over"),
+            "the panic is reported with what it said; it said: {}",
+            message
+        );
+    }
+
+    /// A path that is there but holds no source to read is reported as what it
+    /// is, and the sub-REPL opens anyway.
+    ///
+    /// The `.debug` argument is read once and decided from what was read: a
+    /// directory is there, and there is no source in it. Saying "cannot read"
+    /// names the thing the user named; running the path as code would answer
+    /// with a name nobody bound, which is a complaint about the wrong thing.
+    #[test]
+    fn edge_a_debug_of_a_directory_says_it_cannot_be_read_and_still_opens() {
+        let mut repl = Repl::new();
+        let dir = scratch_dir("a-directory");
+
+        let answers =
+            repl.debug_session(&[&format!(".debug {}", dir.display()), ".stack", ".back"]);
+
+        assert!(
+            answers
+                .iter()
+                .any(|line| line.starts_with("Error: cannot read '")),
+            "the directory is reported as something that cannot be read; it \
+             answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "No live frames."),
+            "and the sub-REPL opened anyway: .stack answered inside it — it \
+             answered:\n{}",
             answers.join("\n")
         );
     }
