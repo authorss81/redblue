@@ -141,6 +141,20 @@ pub fn module_has_member(module: &str, member: &str) -> bool {
         .any(|(listed, members)| *listed == module && members.contains(&member))
 }
 
+/// The members of `module`, as a caller spells them, or `None` when `module` is
+/// not one of the [`MODULES`].
+///
+/// The row of [`MODULE_MEMBERS`] itself rather than a second list: the REPL
+/// offers what this returns, so a member added to the language is completable
+/// because the same table the analyzer enforces it against is what the completer
+/// reads.
+pub fn module_members(module: &str) -> Option<&'static [&'static str]> {
+    MODULE_MEMBERS
+        .iter()
+        .find(|(listed, _)| *listed == module)
+        .map(|(_, members)| *members)
+}
+
 /// Whether a dotted call on a receiver that is not an object reaches the function
 /// it names.
 ///

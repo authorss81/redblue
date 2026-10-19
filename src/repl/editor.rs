@@ -216,6 +216,31 @@ impl SessionCompleter {
             .map_or(0, |(offset, ch)| offset + ch.len_utf8());
         Some((start, &head[start..]))
     }
+
+    /// The shape of the call the user has just started typing, or `None`.
+    ///
+    /// Only the moment is the trigger: a `(` immediately before the cursor, and a
+    /// name immediately before that. Anything else is not a reader asking what a
+    /// function takes — it is a reader mid-argument, or mid-string, where a hint
+    /// would be text appearing in the middle of what they are writing.
+    ///
+    /// `None` rather than an empty hint: a caller that shows nothing is a caller
+    /// whose line has not moved, and one that shows `""` is drawing an empty
+    /// string at the cursor for no reason.
+    fn signature_hint(&self, line: &str, pos: usize) -> Option<String> {
+        let head = line.get(..pos)?;
+        let opened = head.strip_suffix('(')?;
+        let name = opened
+            .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '.'))
+            .next()?;
+        if name.is_empty() {
+            return None;
+        }
+        // A member is spelled `json.parse` and stored as `json_parse`, which is
+        // the whole of the difference between finding the shape and not.
+        let qualified = name.replace('.', "_");
+        crate::stdlib::builtin_signature(&qualified).map(str::to_string)
+    }
 }
 
 impl Completer for SessionCompleter {
@@ -246,13 +271,20 @@ impl Completer for SessionCompleter {
 }
 
 // The line editor is generic over a "helper", which is completion plus the three
-// hooks around it. Redblue has no inline hints and no per-line validation to
-// offer, so those two are the defaults rather than a second place to keep
-// state. Highlighting is the third: it is wired to Redblue's own lexer rather
-// than left out, because a REPL that shows you what you are typing in plain
-// black while it colours everything else around it reads as unfinished.
+// hooks around it. Inline hints and per-line validation are the two that used to
+// be the defaults; hints are no longer the default, because typing `(` after a
+// name is the moment a reader is asking what the call takes and the registry
+// already knows. Validation still is: there is no such thing as a line a session
+// must refuse before it has read it. Highlighting is the third: it is wired to
+// Redblue's own lexer rather than left out, because a REPL that shows you what
+// you are typing in plain black while it colours everything else around it reads
+// as unfinished.
 impl Hinter for SessionCompleter {
     type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        self.signature_hint(line, pos)
+    }
 }
 
 impl Highlighter for SessionCompleter {
@@ -370,6 +402,15 @@ impl EditSource {
     /// The offset within `line` at which its completions begin.
     pub fn complete_start(&self, line: &str, pos: usize) -> usize {
         self.completion(line, pos).0
+    }
+
+    /// What the editor would draw beside the cursor at `pos`, if anything.
+    ///
+    /// The same answer the [`Hinter`] hook gives the terminal, reached without
+    /// one — so what a reader is shown about a call is a thing a test can hold
+    /// rather than a thing only a terminal can see.
+    pub fn signature_hint(&self, line: &str, pos: usize) -> Option<String> {
+        self.completer.signature_hint(line, pos)
     }
 
     /// The line as this editor would draw it while it is being typed.
@@ -760,6 +801,97 @@ mod tests {
         assert!(
             line_from(Err(ReadlineError::Io(std::io::Error::other("no terminal")))).is_err(),
             "an I/O failure is a failure, not an empty line and not an interrupt"
+        );
+    }
+
+    /// Typing `(` after a callable shows its shape before the call runs — the row
+    /// of Ipp's own help table that used to exist only as a command to type.
+    ///
+    /// Asserted through the hook rather than a terminal: the editor's hint is a
+    /// function of a line and a cursor, so a test can hold what the user is shown
+    /// without a TTY being involved anywhere.
+    #[test]
+    fn typing_an_open_bracket_after_a_callable_surfaces_its_shape() {
+        let source = editor(live_names(&[]), None);
+
+        assert_eq!(
+            source.signature_hint("set parts to split(", 19).as_deref(),
+            Some("split(text, separator) -> list of text; an empty separator has no answer"),
+            "the separator form is the whole point: `split` has one and a reader \\
+             cannot tell it from `join` without being told"
+        );
+        assert_eq!(
+            source.signature_hint("say json.parse(", 15).as_deref(),
+            Some("json_parse(text) -> the record, list or value it holds"),
+            "a member is shown the way it is spelled, and found under the name the \
+             registry holds it at"
+        );
+    }
+
+    #[test]
+    fn edge_a_bracket_after_something_that_is_not_callable_shows_nothing() {
+        let source = editor(live_names(&[]), None);
+
+        assert_eq!(
+            source.signature_hint("say (", 5),
+            None,
+            "there is no name before the bracket, so there is no shape to show"
+        );
+        assert_eq!(
+            source.signature_hint("say nosuchfunction(", 19),
+            None,
+            "a name the language does not have has no shape rather than a \\
+             guessed one"
+        );
+        assert_eq!(
+            source.signature_hint("say split", 9),
+            None,
+            "and nothing is shown until the bracket is typed"
+        );
+        assert_eq!(
+            source.signature_hint("say split(", 5),
+            None,
+            "a cursor past the end of the line is not a position to hint at"
+        );
+    }
+
+    /// TAB after a command's path argument and TAB after a module's dot are two
+    /// different questions, and asking one must not answer the other.
+    #[test]
+    fn edge_members_and_paths_do_not_fight_over_one_tab() {
+        let source = editor(live_names(&[]), None);
+
+        let offered = source.complete("say json.", 9);
+        assert_eq!(
+            offered,
+            vec!["json.parse".to_string(), "json.stringify".to_string()],
+            "a dotted call is completed from the module's members"
+        );
+        assert_eq!(
+            source.complete_start("say json.", 9),
+            4,
+            "and the replacement starts at the word, not at the line"
+        );
+
+        let offered = source.complete(":load s", 7);
+        assert_eq!(
+            offered,
+            crate::repl::completer::complete_path_in(&std::env::current_dir().unwrap(), "s"),
+            "a path argument is answered by the filesystem and by nothing else, \
+             so the members a module offers here are not offered: {offered:?}"
+        );
+        assert!(
+            offered.contains(&"src/".to_string()),
+            "and the answer really is the filesystem's: {offered:?}"
+        );
+
+        assert_eq!(
+            source.complete(".", 1),
+            crate::stdlib::MODULES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>(),
+            "a bare dot is the start of a dotted call, so it offers the receivers"
         );
     }
 
