@@ -74,6 +74,23 @@ pub enum ReplCommand {
     /// The same chunk, annotated: constants table and a comment per instruction.
     Asm(String),
     Example,
+    /// The guided tour: a numbered set of steps, each with code to run.
+    ///
+    /// Separate from [`ReplCommand::Example`] because they answer different
+    /// questions — one is "what can I write", the other is "how do I start" — and
+    /// a newcomer given the catalogue alone gets a wall rather than a way in.
+    Tutorial,
+    /// The hint for the tutorial step this session is on.
+    ///
+    /// A command rather than nothing at all: a reader who has lost the thread of
+    /// the tour needs a way back into it that is not retyping it.
+    Hint,
+    /// Opens `$EDITOR` over the block this session is holding, and runs what
+    /// comes back.
+    ///
+    /// A block can be typed, but a fifty-line one has to be typed: without this
+    /// there was no way to *paste* one into a session at all.
+    Edit,
     /// Sets the prompt from a format string, or restores the default when given
     /// no argument.
     ///
@@ -417,6 +434,30 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: true,
         verbatim_argument: true,
         build: |argument| ReplCommand::Prompt(argument),
+    },
+    CommandSpec {
+        names: &["tutorial", "tour"],
+        description: "Walk through the guided tour, one numbered step at a time",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Tutorial,
+    },
+    CommandSpec {
+        names: &["hint"],
+        description: "Hint for the tutorial step this session is on",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Hint,
+    },
+    CommandSpec {
+        names: &["edit"],
+        description: "Edit the block being written in $EDITOR, and run what comes back",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Edit,
     },
 ];
 
