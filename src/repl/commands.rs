@@ -29,7 +29,27 @@ pub enum ReplCommand {
     Export(Option<String>),
     Reset,
     Run(String),
-    Debug,
+    /// Opens the debug sub-REPL on an expression or a file, or — with no
+    /// argument — on nothing at all, which is the empty session the sub-REPL
+    /// commands are then asked against.
+    ///
+    /// `String` rather than a unit variant for the same reason [`Run`] is: the
+    /// argument is the program that runs on entry, and `.debug 1 + 1` that
+    /// ignored its argument printed breakpoint status instead of running it.
+    /// Same shape as [`ReplCommand::Run`], which does not ignore it either.
+    Debug(String),
+    /// Registers an expression to be re-evaluated at every step of a program
+    /// running inside the debug sub-REPL, reporting it when it changes.
+    Watch(String),
+    /// Shows the call stack of the last step taken in the debug sub-REPL,
+    /// outermost frame first.
+    Stack,
+    /// Shows the bindings of the frame the debug sub-REPL last stepped in:
+    /// its parameters and its own locals, not its caller's.
+    Locals,
+    /// Leaves the debug sub-REPL, returning the session to its parent prompt
+    /// with the parent's state untouched.
+    Back,
     /// Sets a breakpoint on a line, or clears one that is already set there.
     Break(String),
     /// Lists the lines the session has breakpoints on.
@@ -129,10 +149,12 @@ struct CommandSpec {
     usage: Option<&'static str>,
     /// Whether the argument may be left out without that being an error.
     ///
-    /// True for one command: `:prompt` with nothing after it restores the default
-    /// prompt, which is a thing a user asks for rather than a command typed
-    /// incompletely. It still declares a `usage`, so `:help` names the format it
-    /// takes.
+    /// True for two commands: `:prompt` with nothing after it restores the
+    /// default prompt, and `.debug` with nothing after it opens the debug
+    /// sub-REPL on nothing yet — a session into which `.watch` and a later
+    /// `.debug <file>` are the way in. Each is a thing a user asks for rather
+    /// than a command typed incompletely. Both still declare a `usage`, so
+    /// `:help` names the format the argument takes.
     optional_argument: bool,
     /// Whether the argument is display text, whose trailing whitespace is part of
     /// it rather than a separator to be dropped.
@@ -269,11 +291,43 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["debug"],
-        description: "Debug mode",
+        description: "Open the debug sub-REPL on an expression or a file",
+        usage: Some("<expression|file>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Debug(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["watch"],
+        description: "Watch an expression at every step (debug sub-REPL)",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Watch(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["stack"],
+        description: "Show the call stack of the last step (debug sub-REPL)",
         usage: None,
         optional_argument: false,
         verbatim_argument: false,
-        build: |_| ReplCommand::Debug,
+        build: |_| ReplCommand::Stack,
+    },
+    CommandSpec {
+        names: &["locals"],
+        description: "Show the bindings of the frame last stepped in (debug sub-REPL)",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Locals,
+    },
+    CommandSpec {
+        names: &["back"],
+        description: "Return to the session from the debug sub-REPL",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Back,
     },
     CommandSpec {
         names: &["break", "b"],
@@ -705,6 +759,8 @@ impl ReplCommand {
             | ReplCommand::Asm(value)
             | ReplCommand::Break(value)
             | ReplCommand::Delete(value)
+            | ReplCommand::Debug(value)
+            | ReplCommand::Watch(value)
             | ReplCommand::Export(Some(value)) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
             _ => None,
@@ -769,6 +825,11 @@ mod tests {
             (":reset", "Reset", ""),
             (":run prog.rb", "Run", "prog.rb"),
             (":debug", "Debug", ""),
+            (".debug prog.rb", "Debug", "prog.rb"),
+            (".watch x", "Watch", "x"),
+            (".stack", "Stack", ""),
+            (".locals", "Locals", ""),
+            (".back", "Back", ""),
             (":break 3", "Break", "3"),
             (":b 3", "Break", "3"),
             (":breaks", "Breaks", ""),
@@ -819,6 +880,8 @@ mod tests {
                 | ReplCommand::Ast(value)
                 | ReplCommand::Tokens(value)
                 | ReplCommand::Break(value)
+                | ReplCommand::Debug(value)
+                | ReplCommand::Watch(value)
                 | ReplCommand::Delete(value) => value.as_str(),
                 // The two `Prompt` shapes are told apart by the variant itself:
                 // `Prompt(None)` is a command that restores the default and falls
@@ -936,6 +999,52 @@ mod tests {
             },
             "and an optional argument is not a licence for every command to have one"
         );
+    }
+
+    /// The debug sub-REPL's commands, as the words a user types them.
+    ///
+    /// The sub-REPL exists to answer `.debug <expr|file>` — `.watch`, `.stack`,
+    /// `.locals` and `.back` are the questions inside it, and none of them
+    /// reached a command before this: `.watch x` was the unknown word `watch`,
+    /// so the session that needed a watch had no way to set one. Asserted
+    /// through [`ReplCommand::parse`] like the alias table, because a word a
+    /// user types reaching nothing is the whole of the failure.
+    ///
+    /// `.debug` is listed in both of its shapes: bare, which opens the sub-REPL
+    /// with nothing run yet, and with the argument that runs on entry. The
+    /// argument is checked as text rather than as a variant so this test is the
+    /// same test before and after the sub-REPL exists.
+    #[test]
+    fn the_debug_sub_repl_commands_parse() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            (".debug", "Debug", ""),
+            (":debug", "Debug", ""),
+            (".debug prog.rb", "Debug", "prog.rb"),
+            (".debug 1 + 1", "Debug", "1 + 1"),
+            (".watch x", "Watch", "x"),
+            (":watch count + 1", "Watch", "count + 1"),
+            (".stack", "Stack", ""),
+            (".locals", "Locals", ""),
+            (".back", "Back", ""),
+            (":back", "Back", ""),
+        ];
+
+        for (input, expected, argument) in cases {
+            let parsed = ReplCommand::parse(input);
+            let rendered = format!("{:?}", parsed);
+            let variant = rendered.split(['(', ' ']).next().unwrap_or_default();
+            assert_eq!(
+                variant, expected,
+                "parsing {:?} should give {}",
+                input, expected
+            );
+            let carried = parsed.argument_text().unwrap_or_default();
+            assert_eq!(
+                carried, argument,
+                "parsing {:?} should carry the argument {:?}",
+                input, argument
+            );
+        }
     }
 
     /// Whether a line has to be recorded the way it was typed, which is a
