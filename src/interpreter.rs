@@ -1497,6 +1497,13 @@ impl Vm {
                 self.span(),
             ));
         }
+        // A constant declared inside a call lands in the globals, exactly as a
+        // `set` that reaches a global does — and, exactly as that `set` does,
+        // it belongs to the frame that wrote it as far as `.locals` is
+        // concerned. See [`DebugEvent::frame_writes`].
+        if let Some(writes) = self.frame_writes.last_mut() {
+            writes.insert(name.to_string());
+        }
         self.globals.insert(name.to_string(), value);
         Ok(())
     }

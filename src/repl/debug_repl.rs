@@ -37,24 +37,25 @@ pub(super) const NO_DEBUG_SESSION: &str =
 /// asked to enter it again with a bare `.debug`.
 const ALREADY_IN_SESSION: &str = "Already in a debug session; .back returns to the session.";
 
-/// The whole of `:help` inside the sub-REPL: five commands, not the session's
+/// The whole of `:help` inside the sub-REPL: six commands, not the session's
 /// table, because the session's commands cannot be answered here.
 const SUB_HELP: &str = "Debug sub-REPL commands: .watch <expression> reports a value \
                         when it changes, .stack shows the call stack, .locals shows \
-                        the frame last stepped in, .debug <expression|file> runs \
-                        more code here, .back returns to the session.";
+                        the frame last stepped in, .run <file> runs a file here, \
+                        .debug <expression|file> runs more code here, .back returns \
+                        to the session.";
 
 /// What a session command that belongs to the parent prompt is answered with
 /// inside the sub-REPL.
-const SUB_ONLY_MESSAGE: &str = "Only .watch, .stack, .locals, .debug and .back are \
+const SUB_ONLY_MESSAGE: &str = "Only .watch, .stack, .locals, .run, .debug and .back are \
                                 available in the debug sub-REPL; .back returns to \
                                 the session.";
 
 /// The line printed when a session opens, above whatever was asked to run on
 /// entry.
 pub(super) const BANNER: &str = "Debug sub-REPL: .watch <expression> reports changes, .stack \
-                      shows the call stack, .locals shows the current frame, .back \
-                      returns to the session.";
+                      shows the call stack, .locals shows the current frame, .run <file> \
+                      runs a file here, .back returns to the session.";
 
 /// One registered watch: what the user asked to watch, the program it parses
 /// to, and the value it last had — or `None` until it has had one.
@@ -164,7 +165,13 @@ impl DebugRepl {
     /// it, and every later step where the value differs from the last one it
     /// had is a line of report. What *cannot* be watched is something that does
     /// not parse: no run would ever make it an expression.
+    ///
+    /// A watch asked for with no expression at all is a question about the
+    /// watches this session already holds, and is answered with them.
     pub(super) fn watch(&mut self, source: &str) -> Vec<String> {
+        if source.trim().is_empty() {
+            return self.watch_lines();
+        }
         let program = match parse_only(source) {
             Ok(program) => program,
             Err(error) => return vec![failure_line(&self.style, source, &error)],
@@ -177,6 +184,23 @@ impl DebugRepl {
             });
         }
         vec![format!("Watching {}.", source)]
+    }
+
+    /// The watches this session holds, one per line.
+    ///
+    /// A session that holds none says so: "no watches" is an answer, and a
+    /// session that printed nothing at all would be read as a command that did
+    /// not work.
+    pub(super) fn watch_lines(&self) -> Vec<String> {
+        let state = lock(&self.state);
+        if state.watches.is_empty() {
+            return vec!["No watches.".to_string()];
+        }
+        let mut lines = vec![format!("Watching {} expression(s):", state.watches.len())];
+        for watch in &state.watches {
+            lines.push(format!("  {}", watch.source));
+        }
+        lines
     }
 
     /// The call stack of the last step taken, outermost frame first.
@@ -321,6 +345,22 @@ impl DebugRepl {
         lines
     }
 
+    /// Runs the file `path` names, in this sub-REPL, under observation.
+    ///
+    /// This is what makes a *file* watchable: a file run at `.debug` time is
+    /// run before there is a watch to see it, and the whole point of the
+    /// sub-REPL is watching something. So the file is run here instead, after
+    /// the watches are set, and the same report lines come out of it.
+    ///
+    /// A file that cannot be read is one error line: the run failed, and the
+    /// session that asked for it is still a session.
+    pub(super) fn run_file(&mut self, path: &str) -> Vec<String> {
+        match read_source(path) {
+            Ok(source) => self.run(&source, path),
+            Err(message) => vec![format!("Error: {}", message)],
+        }
+    }
+
     /// The watch reports the runs so far have generated, cleared: a report is
     /// printed once, on the answer to the line whose run produced it.
     fn take_reports(&self) -> Vec<String> {
@@ -329,6 +369,17 @@ impl DebugRepl {
             .map(|mut state| std::mem::take(&mut state.trace.reports))
             .unwrap_or_default()
     }
+}
+
+/// The source of the file `path` names, or the failure that says why it could
+/// not be read.
+///
+/// A `Result` rather than a printed line, so the caller decides what a failure
+/// looks like: the sub-REPL reports it and carries on, and a test that watches
+/// a file which is not there asserts the failure itself rather than the
+/// wording of a message.
+pub(super) fn read_source(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|error| format!("cannot read '{}': {}", path, error))
 }
 
 /// Locks the shared state, ignoring a poisoned lock — the same contract
@@ -473,6 +524,7 @@ impl Repl {
             ReplCommand::Stack => debug.stack_lines(),
             ReplCommand::Locals => debug.locals_lines(),
             ReplCommand::Help => vec![SUB_HELP.to_string()],
+            ReplCommand::Run(path) => debug.run_file(&path),
             ReplCommand::Back => {
                 self.debug_repl = None;
                 Vec::new()
@@ -493,13 +545,18 @@ impl Repl {
     /// parent prompt both opens one and runs the file in it.
     fn run_debug_argument(&mut self, argument: &str) -> Vec<String> {
         let argument = argument.trim();
-        if argument.ends_with(".rb") {
-            match std::fs::read_to_string(argument) {
-                Ok(source) => self.run_in_debug(&source, argument),
-                Err(error) => vec![format!("Error: cannot read '{}': {}", argument, error)],
-            }
+        if names_a_file(argument) {
+            self.run_debug_file(argument)
         } else {
             self.run_in_debug(argument, SESSION_FILE)
+        }
+    }
+
+    /// Runs the file `path` names, in the open sub-REPL, under observation.
+    fn run_debug_file(&mut self, path: &str) -> Vec<String> {
+        match self.debug_repl.as_mut() {
+            Some(debug) => debug.run_file(path),
+            None => vec![NO_DEBUG_SESSION.to_string()],
         }
     }
 
@@ -511,4 +568,21 @@ impl Repl {
             None => vec![NO_DEBUG_SESSION.to_string()],
         }
     }
+}
+
+/// Whether `argument` names a file to read rather than code to run.
+///
+/// Two rules, and the first one is the fallback:
+///
+/// - **A path that exists is a file**, whatever it is called. A file called
+///   `notes.txt` holds Redblue source as readily as one called `prog.rb`, and
+///   making the suffix the only way in would have meant the file could only be
+///   debugged if it had been named by the convention rather than by the user.
+/// - **A path ending in `.rb` is a file** even when it does not exist, because
+///   a file that is missing is still a file the user meant, and saying "cannot
+///   read" beats parsing `prog.rb` as an expression and failing on the dot.
+///
+/// Everything else is code, and is run as code.
+fn names_a_file(argument: &str) -> bool {
+    argument.ends_with(".rb") || std::path::Path::new(argument).is_file()
 }

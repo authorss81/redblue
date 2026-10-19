@@ -3064,7 +3064,190 @@ mod tests {
         );
     }
 
-    use super::debug_repl::{BANNER, NO_DEBUG_SESSION};
+    use super::debug_repl::{read_source, BANNER, NO_DEBUG_SESSION};
+
+    /// A file run *inside* the sub-REPL is watched like anything else — which
+    /// is the reason `.run` is a sub-REPL command and not only the session's.
+    ///
+    /// A file run at `.debug` time is run before there is a watch to see it, so
+    /// the only way to watch a file is to run it after the watches are set. The
+    /// file below adds one to `x` three times; the watch was set on the `x` the
+    /// parent session already held, so the first stop takes its baseline and
+    /// every later change is a report.
+    #[test]
+    fn debug_a_file_can_be_watched_while_it_runs() {
+        let mut repl = Repl::new();
+        repl.execute_line("set x to 0");
+        let path = scratch_file(
+            "watched",
+            "set x to x + 1\nset x to x + 1\nset x to x + 1\n",
+        );
+        let run = format!(".run {}", path.display());
+
+        let answers = repl.debug_session(&[".debug", ".watch x", &run, ".back"]);
+
+        let reports: Vec<&str> = answers
+            .iter()
+            .map(String::as_str)
+            .filter(|line| line.starts_with("watch x = "))
+            .collect();
+        assert_eq!(
+            reports,
+            ["watch x = 1", "watch x = 2", "watch x = 3"],
+            "every change the file made was reported, and nothing else was; \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A file the sub-REPL is asked to run and cannot read is one reported
+    /// failure — and the session that asked for it is still a session.
+    ///
+    /// The failure is asserted on the read itself and not only on the wording
+    /// of the message: the message is a report, the read is the failure.
+    #[test]
+    fn edge_a_run_of_a_file_that_cannot_be_read_reports_the_failure_and_the_session_goes_on() {
+        let mut repl = Repl::new();
+        let missing = "definitely_missing_phase062.rb";
+
+        let answers =
+            repl.debug_session(&[".debug", ".run definitely_missing_phase062.rb", ".stack"]);
+
+        assert!(
+            read_source(missing).is_err(),
+            "the file really is not there: everything above rests on the read \
+             failing rather than on the wording of a message"
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|line| line.starts_with("Error: cannot read 'definitely_missing_phase062.rb'")),
+            "the failed read is reported with the file it wanted; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "No live frames."),
+            "and the session is still a session: .stack answers inside it — \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A file whose source does not parse is a reported failure, and the
+    /// session that ran it is still a session.
+    ///
+    /// The file is malformed on purpose — `set x to` with nothing after it —
+    /// and the failure is asserted on the parse as well as on the message.
+    #[test]
+    fn edge_a_run_of_a_file_that_does_not_parse_reports_the_failure_and_the_session_goes_on() {
+        let mut repl = Repl::new();
+        let path = scratch_file("malformed", "set x to\n");
+        let run = format!(".run {}", path.display());
+
+        let answers = repl.debug_session(&[".debug", &run, ".stack"]);
+
+        assert!(
+            crate::repl::parse_only("set x to").is_err(),
+            "the file really is malformed: everything above rests on the parse \
+             failing rather than on the wording of a message"
+        );
+        assert!(
+            answers.iter().any(|line| line.starts_with("Error:")),
+            "the malformed file is reported as a failure; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "No live frames."),
+            "and the session that ran it is still a session: .stack answers \
+             inside it — it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A file is a file whatever it is called: the suffix is the fallback for a
+    /// path that is not there, not the only way in.
+    ///
+    /// The file here is called `.txt`, and holds Redblue source. Before the
+    /// suffix rule was the only rule, `.debug <this file>` was parsed as code
+    /// and failed on the dot.
+    #[test]
+    fn debug_a_file_whose_name_is_not_rb_is_read_when_it_exists() {
+        let mut repl = Repl::new();
+        let path = scratch_path("debug-source", "txt");
+        std::fs::write(&path, "set y to 41\ny + 1\n").expect("the scratch file should be writable");
+        let argument = path.display().to_string();
+
+        let answers = repl.debug_session(&[&format!(".debug {argument}"), ".back"]);
+
+        assert!(
+            answers.iter().any(|line| line == "= 42"),
+            "the file was read and run, not parsed as an expression; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// `.watch` with no expression is a question about the watches the session
+    /// holds, and is answered with them — a session that holds none says so.
+    #[test]
+    fn debug_watch_with_no_argument_lists_the_watches_the_session_holds() {
+        let mut repl = Repl::new();
+
+        let answers =
+            repl.debug_session(&[".debug", ".watch", ".watch x", ".watch y + 1", ".watch"]);
+
+        assert!(
+            answers.iter().any(|line| line == "No watches."),
+            "a session that holds no watch says so rather than nothing; it \
+             answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|line| line == "Watching 2 expression(s):"),
+            "and the watches it does hold are listed; it answered:\n{}",
+            answers.join("\n")
+        );
+        assert!(
+            answers.iter().any(|line| line == "  x")
+                && answers.iter().any(|line| line == "  y + 1"),
+            "each watch is listed by the expression it watches; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// A constant declared inside a frame is that frame's own binding, and
+    /// `.locals` shows it.
+    ///
+    /// A `constant` binds a global, exactly as a `set` that reaches one does —
+    /// and exactly as that `set` does, it belongs to the frame that wrote it.
+    /// Before the frame's writes were tracked for constants as well as for
+    /// `set`, the name was written and then never listed.
+    #[test]
+    fn debug_locals_shows_a_constant_the_frame_declared() {
+        let mut repl = Repl::new();
+        feed(
+            &mut repl,
+            &[
+                "to inner()",
+                "constant LIMIT to 5",
+                "say \"inside\"",
+                "end",
+                "to outer()",
+                "inner()",
+                "end",
+            ],
+        );
+
+        let answers = repl.debug_session(&[".debug outer()", ".locals", ".back"]);
+
+        assert!(
+            answers.iter().any(|line| line == "  LIMIT = 5"),
+            "the constant the frame declared is one of the frame's bindings; \
+             it answered:\n{}",
+            answers.join("\n")
+        );
+    }
 
     /// The three-deep chain a `.stack` inside the sub-REPL must name, outermost
     /// frame first. The last statement the program steps in is `set deep to 7`,
