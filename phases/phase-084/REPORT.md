@@ -12,11 +12,354 @@ pipeline repo** (`267f9a2`), so it survives the pipeline's own commits instead
 of living in a working tree that a later tick can lose. The request the
 pipeline builds *today* is pasted below, verbatim.
 
-The full suite is green: **1934 passed; 0 failed; 0 ignored** across 70 test
-binaries. The pipeline's own smoke suite is green at **230 checks** (215 before
-this round), re-run in this round against the committed pipeline change.
+Round 7 closed the last hole in that contract: a **narrow** deny
+(`{"*.md": "deny"}`) is not a deny. It denies the paths it matches and leaves
+every other path to the rules above it — and the global config's
+`external_directory {"**": "allow"}` is one of them — so the suite used to
+read it as the word "deny" and a reviewer that could read outside the
+checkout passed every check in it. Both the suite and the dispatcher now
+require the catch-all.
+
+The full suite is green: **1936 passed; 0 failed; 0 ignored** across 70 test
+binaries, re-measured in round 8. The pipeline's own smoke suite was re-run in
+round 8 against the pipeline-side change it carries: **232 checks**, green
+(230 before it).
+
+Round 6 found **one** gate red on arrival — the acknowledgement audit, red
+because the pipeline re-creates the delivery commit on every round, so the
+previous round's entry goes stale the moment the next one lands — and paid
+it: the entry now names the SHA this history actually carries, measured from
+that commit. Round 7 inherited that green and paid nothing of the kind: the
+review of round 6's delivery returned **six findings — one MAJOR and five
+MINOR** — and all six are fixed, without weakening a gate, deleting a test
+or moving a threshold.
+
+The review of round 7's delivery returned **three findings — one MAJOR and two
+MINOR** — and all three are fixed in round 8, the same way: no gate weakened,
+no test deleted, no threshold moved. The MAJOR was in round 7's own account
+of itself: it said round 6's delivery was inherited **committed**, and the
+reflog shows no commit after `1b58178` — round 6's acknowledgement edit was
+still sitting uncommitted in the working tree — and the change set it called
+three files wide carries **four**. The two MINORs were a claim the documents
+repeated three times (the document-suite guard reads the **working tree's**
+copy, not `HEAD`'s) and a pipeline commit the reviewer could not check from
+this checkout (it is there, and the smoke suite's own output is pasted below).
+
+## Round 8 — this run
+
+Everything from here to the next `## ` heading is **round 8's account, in
+round 8's words**: `this run` in this section means round 8, and the
+measurements are the ones round 8 took. Round 7's account is the section
+below, and where the two disagree about a number, round 8's is the one that
+is re-measured.
+
+This run is the fix round for the review of round 7's delivery. It inherited
+that delivery **uncommitted** — `HEAD` is `1b58178`, the commit that adopted
+**rounds 4 and 5's** work, and no commit has been made since — and it fixed
+the three findings that review raised, **one MAJOR and two MINOR**. No gate
+was weakened, no test deleted, no assertion loosened, no threshold moved, and
+no `#[ignore]`, `// skip` or `allow(clippy::` was added.
+
+| # | Severity | Finding | What this round did |
+|---|---|---|---|
+| 1 | MAJOR | Round 7's account of its inherited state was **false**, and it hid a file from the change set: it said round 6's delivery was inherited **committed** (`HEAD` is `1b58178`), but the reflog shows **no commit after `1b58178`** — thirteen `reset: moving to HEAD` entries with old == new — and `1b58178` is the commit that adopted rounds 4 and 5's work, so round 6's delivery (the acknowledgement repoint, `+11 −3`) was still **uncommitted** in the working tree. The round-7 diff table then called the change set "one rule and two tests … plus the two documents" and listed three files, while the delivery's diff carries **four** | The inherited state is stated correctly in round 7's section below; the round-7 table carries the fourth file as **inherited-uncommitted**, the shape round 4's table uses; and the diff sentence names four files. The "what this round did not do" sentence in round 7's section — which read as though the delivery carried no acknowledgement edit at all — now says that the inherited uncommitted `+11 −3` is what keeps the acknowledgement audit green today |
+| 2 | MINOR | Three statements said the document-suite guard "reads `HEAD`'s committed report and fails against it". It does not: `tests/report_markdown_test.rs:85-88` reads the **working tree's** copy (`fs::read_to_string` of `phases/phase-084/<name>`), so the guard can never fail because of `HEAD`'s copy — it fails when the working-tree document is broken, and a committed report that is broken while the working-tree copy is fixed stays green | All three statements now say the guard reads the working tree's copy, and why that is the right copy to guard: the delivery *is* the working tree, and the pipeline copies it into its own repo before the gate runs. `HEAD`'s committed copy was measured against the same checker in this round and passes too — the paste is under "Tests added" below |
+| 3 | MINOR | Round 7's pipeline half was asserted but unverifiable from this checkout: the commit `52bdf9e` (`rbops/dispatch.sh` +19/−4, `rbops/smoke.sh` +11) and the "232 checks, green" figure live in the pipeline repo, one directory up, outside the checkout, and this reviewer's own permissions denied `external_directory` | The pipeline repo **is** reachable from this checkout. `git -C ../rbops show 52bdf9e` and `bash ../rbops/smoke.sh` were run here, and both outputs are pasted under "The pipeline" below: the commit is in the pipeline repo's history at its `HEAD`, and the suite is green at 232 checks |
+
+### The MAJOR, in full
+
+The reflog is the whole of it:
+
+```
+$ cat .git/logs/HEAD
+0000000000000000000000000000000000000000 b21821d... clone: from github.com:authorss81/redblue.git
+b21821d... 1b58178... commit: resume phase-084: adopt preserved work
+1b58178... 1b58178... reset: moving to HEAD
+1b58178... 1b58178... reset: moving to HEAD
+... thirteen more, all `reset: moving to HEAD`, all with old == new
+```
+
+Exactly **one** commit since the clone, and every line after it is a no-op
+reset. So `HEAD` is `1b58178`, and what that commit carries is:
+
+```
+$ git show --numstat --format="%h %p %s" 1b58178
+1b58178 b21821d resume phase-084: adopt preserved work
+
+30	0	opencode.json
+736	0	phases/phase-084/FINDINGS.md
+1354	0	phases/phase-084/REPORT.md
+1094	0	tests/agent_permissions_test.rs
+453	0	tests/report_markdown_test.rs
+29	2	tests/unreviewed_work_ack_test.rs
+```
+
+`tests/report_markdown_test.rs` is round 4's file and the document suite grew
+in round 5 — so this is the commit that adopted **rounds 4 and 5's** work, as
+the report's own bases section says. Round 6's edit is not in it. Round 6's
+edit is the acknowledgement repoint from `d23068b` to `1b58178`, and it is in
+the working tree, uncommitted:
+
+```
+$ git diff --numstat
+256	28	phases/phase-084/FINDINGS.md
+490	121	phases/phase-084/REPORT.md
+138	13	tests/agent_permissions_test.rs
+11	3	tests/unreviewed_work_ack_test.rs
+```
+
+`tests/unreviewed_work_ack_test.rs` is `+11 −3` — exactly the figure in
+round 6's own table. So round 7's sentence "This run inherited round 6's
+delivery **committed**" was false, and the round-7 table's change set was
+three files wide when the delivery carries four: the acknowledgement file is
+in it, inherited and uncommitted.
+
+**Why it matters.** "What changed" is the phase's account of what it ships.
+When it says the acknowledgement edit is not part of the delivery while the
+delivery is carrying it, the next run reads "the tenth payment falls due to
+the next run" as a note about work nobody did — when the inherited
+uncommitted `+11 −3` is exactly what keeps the acknowledgement audit green
+today. That is the treadmill being paid a tenth time without the report
+counting it, and the report is where the count lives.
+
+### What this round did not do
+
+It did not pay the acknowledgement treadmill: the list it inherited names the
+SHA this history actually carries, and the commit that will carry this
+delivery's work does not exist yet — so the tenth payment falls due to the
+next run, as the Known gaps section says.
+
+It added no test and touched no file under `src/`. It changed
+`opencode.json` not at all. It did not touch the pipeline repo — the pipeline
+half was already committed in round 7 (`52bdf9e`), and this round only
+**checked** it, from a checkout where the check is possible.
+
+## Round 7 — this run
+
+This run inherited round 6's delivery **uncommitted**: `HEAD` is `1b58178`,
+the commit that adopted **rounds 4 and 5's** work, and round 6's own edit —
+the acknowledgement repoint, `+11 −3` in `tests/unreviewed_work_ack_test.rs` —
+was still in the working tree, uncommitted, together with the two delivery
+documents. It was the review of that delivery that set the work. The review
+returned **six findings — one MAJOR and five MINOR** — and all six are fixed
+here. No gate was weakened, no test deleted, no assertion loosened, no
+threshold moved, and no `#[ignore]`, `// skip` or `allow(clippy::` was added.
+
+(That inherited-state sentence is **corrected in round 8**: it said round 6's
+delivery was inherited *committed*, and the reflog shows no commit after
+`1b58178` — see round 8's section above. Round 7's own diff table below is
+corrected with it: the change set carries **four** files, not three.)
+
+| # | Severity | Finding | What this round did |
+|---|---|---|---|
+| 1 | MAJOR | `permission_action` read **any** all-deny object as the bare action `"deny"`, so `agent.reviewer.permission.external_directory = {"*.md": "deny"}` passed every check in the suite — a narrow deny that leaves every path it does not match to the global config's `external_directory {"**": "allow"}` | The object form is a bare action only when it carries a **catch-all** (`*` or `**`). A narrow object is refused, by name, with the reason. Two new tests drive it: `edge_a_narrow_pattern_deny_is_rejected` and `edge_a_narrow_pattern_allow_is_rejected`. The dispatcher's `assert_reviewer_read_only` read the same two shapes, so it inherited the hole: it now refuses a narrow deny too, and the pipeline's smoke suite asserts it |
+| 2 | MINOR | Two line citations in the third review's row were stale again — round 6's own edit to `tests/unreviewed_work_ack_test.rs` moved them | Re-derived from the file that ships: the test is at `:581` and `is_shallow()` at `:306`. The row is re-pasted in both documents |
+| 3 | MINOR | The pasted `git diff b21821d --numstat` block was not the tree's | Re-pasted from the final tree, and the caveat under it now covers every figure in the block |
+| 4 | MINOR | Three documents said opencode's default `read` rules **deny** `.env` files; the phase's own measured ruleset says `read *.env ask` | Corrected in all four places, with what an `ask` means in a headless run |
+| 5 | MINOR | A forward reference promised three sections that were not the three sections immediately below it | The sentence now names the three that are there, and says where the fourth item it promised was settled |
+| 6 | MINOR | The acknowledgement treadmill was counted three ways in `FINDINGS.md` with nothing to reconcile them | Every section in `FINDINGS.md` now names the round that wrote it, and the file opens with the rule that reconciles the counts |
+
+### The MAJOR, in full
+
+The chain was short and it ended in the wrong place. `permission_action`
+accepted an object of pattern → action whenever every pattern in it carried
+the same action, and returned that action as if it were the key's whole rule.
+opencode does not read it that way: it evaluates the **last matching rule**,
+so `{"*.md": "deny"}` denies the markdown files and leaves everything else to
+the rules above it. In this checkout the global config grants
+`external_directory {"**": "allow"}`, and the resolved ruleset this phase
+measured puts that grant *above* the agent's own rules — so a narrow deny
+there left the reviewer free to read outside the checkout, while
+`check_reviewer_denies`, `check_no_grants_beyond` and
+`project_config_pins_reviewer_read_only_and_verifier_privileged` all saw the
+word "deny" and passed.
+
+The suite's own semantics were inverted: it refused a narrow *allow* (a mixed
+object is not one action) and accepted a narrow *deny*, which is the dangerous
+direction. Nothing tested the failing side, because the only object form the
+suite exercised was `{"**": "deny"}` — the catch-all.
+
+The rule now, in the suite:
+
+> An object of patterns is the same rule as a bare action only when every
+> pattern in it carries the same action **and one of those patterns is a
+> catch-all** (`*` or `**`). A narrow pattern decides only the paths it
+> matches; every other path falls through to the rules above it.
+
+Measured by mutating the shipped file, the way the phase has always measured
+its central claim:
+
+```
+$ jq '.agent.reviewer.permission.external_directory = {"*.md": "deny"}' opencode.json > /tmp/mutated.json
+$ cp /tmp/mutated.json opencode.json && cargo test --test agent_permissions_test
+failures:
+    edge_a_narrow_pattern_allow_is_rejected
+    edge_a_permission_object_form_is_rejected_or_accepted
+    edge_a_tool_granted_to_the_reviewer_outside_the_allowed_set_is_rejected
+    edge_an_agent_this_file_does_not_own_is_rejected
+    project_config_denies_every_widening_permission_for_the_reviewer
+    project_config_ships_at_the_repository_root
+test result: FAILED. 24 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The failure names the key and the reason:
+
+```
+`agent.reviewer.permission.external_directory` the patterns ["*.md"] do not cover
+every path: an object of patterns is the same rule as a bare action only when
+one of them is a catch-all (`*` or `**`) — a narrow pattern decides only the
+paths it matches, and every other path falls through to the rules above it
+```
+
+The file was restored from git afterwards (`git diff --stat -- opencode.json`
+→ empty). The shipped `opencode.json` did not change: it spells every one of
+the eleven denies as the bare action, which is what the rule now demands.
+
+### The dispatcher's half of the same hole
+
+`assert_reviewer_read_only` read the same two shapes with the same rule, so a
+narrow deny would have started a review with a reviewer that may read outside
+the checkout. It now refuses a narrow deny (`narrow-deny`, reported with the
+key and the reason), and `reviewer_denied_keys` — which writes the request's
+"with these keys denied:" line — counts a narrow object as denied no more.
+The pipeline's smoke suite asserts it:
+
+```
+refuse_case '.agent.reviewer.permission.external_directory = {"*.md": "deny"}' \
+  "a narrow-pattern deny stops the review"
+```
+
+and the suite is green at **232 checks** (230 before this round).
+
+### What this round did not do
+
+It did not pay the acknowledgement treadmill **again**: the list it inherited
+— round 6's uncommitted repoint to `1b58178` — is the one that names the SHA
+this history actually carries, and it is that inherited, uncommitted `+11 −3`
+in `tests/unreviewed_work_ack_test.rs` that keeps the audit green today. The
+commit that will carry **this** round's work does not exist yet, so the tenth
+payment — for that commit — falls due to the next run, as the Known gaps
+section says.
+
+(**Corrected in round 8**: this paragraph read "it did not pay the
+acknowledgement treadmill" with nothing about the inherited edit, which read as
+though the delivery carried no acknowledgement change at all. It does — it
+carries round 6's, uncommitted.)
+
+## Round 6 — this run
+
+Everything from here to the next `## ` heading is **round 6's account, in
+round 6's words**: `this run` in this section means round 6, and the
+measurements are the ones round 6 took. Round 7's account is the section
+above, and where the two disagree about a number, round 7's is the one that
+is re-measured.
+
+This run inherited round 5's delivery **committed** — `HEAD` is `1b58178`
+(`resume phase-084: adopt preserved work`) — and a **clean working tree**
+(`git status --porcelain` → no output). The phase's substance was already in
+the tree: the repository-root `opencode.json`, its 28 tests, the document
+suite's 10, and the two delivery documents. **One gate was red on arrival**,
+and this round fixed exactly that.
+
+### The one failure: the ninth payment of the acknowledgement treadmill
+
+`cargo test --all-targets` was red on arrival in one test:
+
+```
+$ cargo test --test unreviewed_work_ack_test
+test unreviewed_work_in_head_history_is_acknowledged ... FAILED
+unreviewed-work commits selected: 33 | acknowledged: 33 | unacknowledged: 1 | stale entries: 1 | UNACKNOWLEDGED: 1b5817859a8428a43e5ace66dacddf537f6d002c | STALE: d23068bf4160c14463f4a6af7479b824b4f33429
+```
+
+Both halves are the treadmill, not a defect in this phase's work:
+
+- **unacknowledged `1b58178`** — the commit that carries round 5's delivery
+  into the tree. The pipeline creates it *after* the run that produced the
+  work, so the SHA does not exist while that run writes, and it can only be
+  written by the run that finds it in HEAD's history. This run found it.
+- **stale `d23068b`** — round 5's entry, for the same reason in the other
+  direction. The pipeline re-creates the delivery commit on every round, on
+  the **same parent**, so the previous round's SHA leaves HEAD's ancestry the
+  moment the next one lands:
+
+```
+$ for c in 10f40c6 d23068b 1b58178; do git log --format='%h %p %s' -1 "$c"; done
+10f40c6 b21821d resume phase-084: adopt preserved work
+d23068b b21821d resume phase-084: adopt preserved work
+1b58178 b21821d resume phase-084: adopt preserved work
+```
+
+Three deliveries, one parent — `b21821d`, which is the base the pipeline
+recorded for this phase (`.base`, one directory up). `git merge-base
+--is-ancestor d23068b HEAD` answers `false`, and `scan` reports an
+acknowledgement naming a commit HEAD does not contain as **stale** — so an
+entry *kept* after its commit leaves the history is a guaranteed red gate.
+That is why the entry is **replaced** rather than added to.
+
+### The fix
+
+Two lines of **data** in `tests/unreviewed_work_ack_test.rs`, and nothing
+else: the `ACKNOWLEDGED` entry now names the SHA this history carries
+(`1b58178…`), with the reason measured from `git show --numstat` of that
+commit, and the `MEASURED` entry names the same SHA, because that list is
+required to name commits `git log HEAD` reports. The previous round's entry
+is gone rather than left to go stale.
+
+No test was weakened, no assertion loosened, no threshold moved, no file
+under `src/` touched, and `opencode.json` was not modified — it was already
+correct.
+
+### Red-first, re-measured on the file the phase exists for
+
+The phase's central claim is that removing a single `deny` fails
+`cargo test`. Re-measured this round by flipping one value in the shipped
+file (`agent.reviewer.permission.edit` → `"allow"`) and running the suite:
+
+```
+$ cargo test --test agent_permissions_test
+test edge_a_dropped_deny_key_is_rejected ... FAILED
+test edge_permission_flipped_to_allow_is_rejected ... FAILED
+test project_config_denies_every_widening_permission_for_the_reviewer ... FAILED
+test project_config_pins_reviewer_read_only_and_verifier_privileged ... FAILED
+assertion `left == right` failed: `agent.reviewer.permission.edit` must be "deny"
+```
+
+Ten tests fail on that one flipped value, and the file was restored from git
+afterwards (`git diff --stat opencode.json` → empty).
+
+### The transient shallow-history reading, a third time
+
+`edge_phase_078_commits_are_ancestors_of_head_not_absent` failed on this
+run's **first** test invocation with "history is shallow and completing the
+clone did not make it complete", and passed on every invocation after it —
+in isolation, in the phase's own suite and in the full suite.
+`git rev-parse --is-shallow-repository` says `false` and `.git/shallow` does
+not exist, before and after. It is the same measurement artifact an earlier
+round recorded; it is written down here rather than dismissed, because "the
+audit refused to measure a truncated history" is not a message to dismiss
+without saying so. The audit is right to refuse.
+
+### What this round did not do
+
+It did not touch the pipeline repo. The pipeline is one directory up, outside
+this checkout, and the run's instructions forbid writing outside the
+project. The pipeline-side half of this phase — the dispatcher's
+`assert_reviewer_read_only`, the review request that names the config the
+reviewer is resolved out of, and the pipeline's own `opencode.json` — was
+delivered and committed in round 5 as `267f9a2`, and this round neither
+changed it nor re-ran its smoke suite. The `230 checks` figure in the Gates
+table is therefore **round 5's measurement, carried forward, not
+re-measured here**; the four gates below are this round's own. (Round 7
+touched the dispatcher again — the narrow-deny hole — and re-ran the smoke
+suite at **232**; the Gates table below carries that figure.)
 
 ## Round 5 — this run
+
+Everything from here to the next `## ` heading is **round 5's account, in
+round 5's words**: `this run` in this section means round 5, and the
+measurements are the ones round 5 took. Round 6's account is the section
+above, and where the two disagree about a number, round 6's is the one that
+is re-measured.
 
 This run is the fix round for the review of round 4's delivery. It inherited
 round 4's work **committed** (`HEAD` is `d23068b`) and round 4's own
@@ -137,7 +480,7 @@ SMOKE PASS  230 checks
 | 2 | The section test asserted only that *some* line starts with the heading, so a report that wrapped `## Tests added` in a properly closed fence passed it — the exact regression the phase exists to prevent | The test now computes the fenced regions (under both readings, unioned) and requires each required section to start a line **outside every code block**. `missing_sections()` is the rule; `edge_a_section_heading_inside_a_code_block_is_not_a_section` drives it, and the section test itself was measured red against a report with `## Tests added` wrapped in a fence |
 | 3 | The inherited-state row and the "What changed" row said the test file's only edit was `cargo fmt --all`, while the file carried eight tests and this report said three of them were added that round | Both rows now name the growth: the inherited file was **283 lines with 5 tests**; round 4 added three tests and ran `cargo fmt --all`, which left it at **331 lines with 8 tests**. The three are named |
 | 4 | The findings file said the suite was green with **1929** passing tests while this report said **1932** | Both now say the figure the suite reports today — **1934**, ten of them in the document suite — and the findings file says which round each historical figure belongs to |
-| 5 | The report called two inline-fixture tests "red-first tests … which failed against `HEAD`'s committed report"; neither reads the report | The red-first guard is named as what it is: `phase_084_delivery_documents_are_unambiguous_markdown`, the test that reads `HEAD`'s committed report and fails against it |
+| 5 | The report called two inline-fixture tests "red-first tests … which failed against `HEAD`'s committed report"; neither reads the report | The red-first guard is named as what it is: `phase_084_delivery_documents_are_unambiguous_markdown`, the test that reads the two delivery documents **from the working tree** — `fs::read_to_string` of `phases/phase-084/<name>` — and fails against them. (**Corrected in round 8**: this row said the guard reads `HEAD`'s committed report, and it does not — see round 8's section above.) |
 | 6 | The Known-gaps bullet said **seven** deliveries had paid the acknowledgement treadmill and named `10f40c6` | It now says **eight**, names `d23068b`, and says which delivery is next |
 | 7 | The edge-case matrix had no row for the document checker's empty, singleton, boundary and malformed inputs | The matrix now maps those four classes to the tests that cover them |
 | 8 | The fence fix made quoted review-request artifacts lossy: the request's own closing fence was consumed as the outer fence's terminator, so the paste no longer reproduced the artifact | The naive reading now requires the closing fence to be **at least as long** as the one it closes, which every markdown reader requires anyway. The artifacts are pasted verbatim again, inside four-backtick fences, and `edge_a_longer_outer_fence_may_hold_a_shorter_inner_fence` pins the rule |
@@ -366,10 +709,24 @@ mutation runs that prove the new tests can fail, are under "Tests added".
   cost the preflight its `## Tests added`, and documented round 3's work. It
   changed nothing in the pipeline repo, and read the report's claim that the
   pipeline half was done.
-- **Round 5** (this run) fixed the review of round 4's delivery: the pipeline
-  half was **committed** this time (`267f9a2`), the document suite grew two
-  tests, and the checker's fence rule was corrected so a quoted artifact can
-  be pasted verbatim.
+- **Round 5** fixed the review of round 4's delivery: the pipeline half was
+  **committed** this time (`267f9a2`), the document suite grew two tests, and
+  the checker's fence rule was corrected so a quoted artifact can be pasted
+  verbatim.
+- **Round 6** inherited one red gate — the acknowledgement audit, red because
+  the pipeline re-creates the delivery commit on every round — and paid it:
+  the entry now names the SHA this history carries. It added no test, changed
+  nothing under `src/`, and touched no file in the pipeline repo.
+- **Round 7** closed the narrow-deny hole in the suite and in the dispatcher:
+  two new tests, one rule, and a commit in the pipeline repo (`52bdf9e`). It
+  added no test to the document suite and changed nothing under `src/`.
+- **Round 8** (this run) inherited round 7's delivery **uncommitted** and fixed
+  the three findings the review of it raised — one MAJOR (round 7's own
+  account of the inherited state, and the fourth file it hid from the change
+  set), one MINOR (the document guard described as reading `HEAD`'s copy when
+  it reads the working tree's), one MINOR (the pipeline commit the reviewer
+  could not check from this checkout, checked here). It added no test, changed
+  nothing under `src/`, and touched nothing in the pipeline repo.
 
 The rounds before this one are described in the report they wrote; their
 measurements are re-measured here where they are quoted.
@@ -378,7 +735,7 @@ measurements are re-measured here where they are quoted.
 
 ### The bases every number is measured against
 
-Six commits, and every number in this file says which one it is measured
+Seven commits, and every number in this file says which one it is measured
 against. The first delivery's report gave three accountings of one change
 set and named none of the bases; that is the first thing fixed here.
 
@@ -408,13 +765,21 @@ set and named none of the bases; that is the first thing fixed here.
   history; it carries the same content as `8c54c7a` for the five files below,
   re-applied onto `main`. A diff against it is what round 3 changed on top of
   it.
-- **`d23068b`** (`HEAD` at this run's dispatch, and still `HEAD` now) — the
-  commit that adopted round 3's work. A diff against it is what rounds 4 and
-  5 changed on top of it: the fence fix, the document suite, and the two
-  documents. The pipeline's own commit `267f9a2` is a base in the *other*
-  repository and is measured there.
+- **`d23068b`** — the commit that adopted round 3's work. A diff against it is
+  what rounds 4 and 5 changed on top of it: the fence fix, the document suite,
+  and the two documents. It is **not** in `HEAD`'s ancestry any more — the
+  pipeline re-creates the delivery commit on every round, on the same parent —
+  so a diff against it is a comparison of two deliveries, not of a commit and
+  its successor.
+- **`1b58178`** (`HEAD` at rounds 6, 7 and 8's dispatch, and the commit the
+  acknowledgement entry names) — the commit that adopted rounds 4 and 5's work.
+  Round 6 started from it with a clean tree; rounds 7 and 8 started from it
+  with the previous round's edits still **uncommitted**, because the reflog
+  shows **no commit after it** — so every diff against it measures the
+  working tree, not a delivery. The pipeline's own commit `267f9a2` is a base
+  in the *other* repository and is measured there.
 
-### The project (this repository)
+### The project (this repository) — round 3's accounting
 
 | File | vs `64390ff` (the delivery) | vs `10f40c6` (this round) | What |
 |---|---|---|---|
@@ -424,7 +789,10 @@ set and named none of the bases; that is the first thing fixed here.
 | `phases/phase-084/REPORT.md` | +980 −0 (new file) | rewritten | This file: round 3's state of the tree, the red test and its repair, and the gates re-measured. |
 | `phases/phase-084/FINDINGS.md` | +591 −0 (new file) | +156 −18 | Round 3's findings: the two holes in the file's reach, the seventh acknowledgement entry, and the shallow-history reading recorded again with what was measured. |
 
-Both accountings, in full:
+Both accountings, in full — **round 3's measurement of the tree as it stood
+then**. The tree this round leaves is measured in this section's own round-7
+table below, and the two are not expected to agree: a figure quoted for a
+past round is that round's, and the tree moves.
 
 ```
 $ git diff 64390ff --numstat -- opencode.json phases/phase-084/ \
@@ -471,13 +839,13 @@ every edit to this file; the figures in the table above are the same
 measurement written into rows. Untracked files only appear in it after
 `git add -N`, which is how the new test file got into the diff at all.)
 
-### This run (round 5), against `d23068b` (still `HEAD` — the pipeline has not committed this run's work yet)
+### Round 5's diff, against `d23068b` (round 5's `HEAD`; the pipeline has since re-created the delivery commit, so `d23068b` is no longer in `HEAD`'s ancestry)
 
 Round 5's project-side diff is two tests and the two documents. The pipeline
 side is a separate repository and a separate commit; it is accounted for under
 "The pipeline" below and in "Round 5 — this run" above.
 
-| File | vs `d23068b` (this run) | What |
+| File | vs `d23068b` (round 5) | What |
 |---|---|---|
 | `tests/report_markdown_test.rs` | +453 −0 (new; 331 lines with 8 tests inherited, now 453 lines with 10 tests) | 10 tests. Two are new: `edge_a_section_heading_inside_a_code_block_is_not_a_section` — a heading inside a code block is text, not a heading — and `edge_a_longer_outer_fence_may_hold_a_shorter_inner_fence` — a four-backtick fence may hold a three-backtick one, which is what lets a quoted review request be pasted verbatim. The checker changed with them: the naive fence reading now requires the closing fence to be at least as long as the one it closes, and `ambiguous_fence` reports the shape the two readings actually disagree about |
 | `phases/phase-084/REPORT.md` | +531 −157 | this section, the eight findings and what each one got, the refreshed gate records, and the pasted request the pipeline builds today |
@@ -491,6 +859,80 @@ $ git diff HEAD --numstat
 453	0	tests/report_markdown_test.rs
 7	5	tests/unreviewed_work_ack_test.rs
 ```
+
+### This run (round 6), against `1b58178` (`HEAD` at this run's dispatch)
+
+Round 6's project-side diff is **two lines of data** in one test file, plus
+the two documents. Nothing under `src/` changed, `opencode.json` was not
+touched, no test was added or removed, and no assertion was loosened.
+
+| File | vs `1b58178` (this run) | What |
+|---|---|---|
+| `tests/unreviewed_work_ack_test.rs` | +11 −3 | the acknowledgement entry and the `MEASURED` slot repointed from `d23068b` (no longer in `HEAD`'s history) to `1b58178` (which is), with the reason measured from `git show --numstat 1b58178`: +3696/−2 across 6 files, none under `src/` |
+| `phases/phase-084/REPORT.md` | rewritten | this section, round 6's account, and the refreshed gate records |
+| `phases/phase-084/FINDINGS.md` | round 6's findings | the ninth treadmill payment, and the shallow-history reading recorded a third time |
+
+The documents' own line counts are deliberately not quoted here: both are
+edited by this very section, so any figure written for them would be stale
+by the time it was read. The diff that matters is the one the gate measures,
+and it is pasted under "Gates" below.
+
+### This run (round 7), against `1b58178` (`HEAD` at this run's dispatch)
+
+Round 7's project-side diff is **four files**: **one rule and two tests** in
+the phase's own config suite, the acknowledgement repoint **inherited
+uncommitted** from round 6, and the two delivery documents. Nothing under
+`src/` changed, `opencode.json` was not touched, no test was deleted, and no
+assertion was loosened — the one assertion that changed now *refuses* a shape
+it used to accept.
+
+(The four-file shape is **restated in round 8**: this section said three, and
+named "one rule and two tests … plus the two documents". The delivery's diff
+carries `tests/unreviewed_work_ack_test.rs` as well — see the row below, and
+round 8's section above for why it is inherited and uncommitted.)
+
+| File | vs `1b58178` (this run) | What |
+|---|---|---|
+| `tests/agent_permissions_test.rs` | +138 −13 | `permission_action` now treats an object of pattern → action as a bare action only when it carries a catch-all (`*` or `**`); a narrow object is refused by name, with the reason. Two new tests drive it: `edge_a_narrow_pattern_deny_is_rejected` (four narrow patterns × five keys) and `edge_a_narrow_pattern_allow_is_rejected` (three narrow patterns × three keys). The file is now **1219 lines with 30 tests**, 21 of them `edge_*` |
+| `tests/unreviewed_work_ack_test.rs` | +11 −3 (**inherited uncommitted** — round 6's edit, not round 7's) | the acknowledgement entry and the `MEASURED` slot repointed from `d23068b` (no longer in `HEAD`'s history) to `1b58178` (which is), with the reason measured from `git show --numstat 1b58178`: +3696/−2 across 6 files, none under `src/`. **Round 8** records what this row did not say then: the edit was inherited **uncommitted**, it is the one that keeps the acknowledgement audit green today, and it is part of the delivery all the same |
+| `phases/phase-084/REPORT.md` | rewritten | this section, round 7's account, the review's six findings and what each one got, and the refreshed gate records |
+| `phases/phase-084/FINDINGS.md` | round 7's findings | the round-labelling that reconciles the three counts, the re-derived citations, and the re-pasted numstat |
+
+The suite's own counts against the phase's recorded base (`b21821d`), which
+is what the gate measures:
+
+```
+$ git diff b21821d --numstat -- opencode.json tests/
+30	0	opencode.json
+1219	0	tests/agent_permissions_test.rs
+453	0	tests/report_markdown_test.rs
+37	2	tests/unreviewed_work_ack_test.rs
+```
+
+(The two delivery documents are left out of that listing on purpose: this
+section is inside one of them, so any figure quoted for them would be stale
+by the time it is read. Every figure in the block above is a measurement of
+the tree as it stands when it is read — the command that produced it is the
+one in the block — and `git diff b21821d --numstat` shows the documents too.)
+
+The pipeline's half of this round's change is in the other repository, and is
+accounted for in the section below.
+
+### This run (round 8), against `1b58178` (`HEAD` at this run's dispatch)
+
+Round 8's own project-side diff is **the two delivery documents**, and nothing
+else: no test was added, no file under `src/` changed, `opencode.json` was not
+touched, and the pipeline repo was not touched at all. The **delivery** this
+run ships is four files wide, because it inherits round 6's and round 7's
+uncommitted work on top of the same base — which is the shape round 7's table
+above now records.
+
+| File | vs `1b58178` (the delivery this run ships) | What |
+|---|---|---|
+| `tests/agent_permissions_test.rs` | +138 −13 | round 7's: the narrow-deny rule and the two tests that drive it |
+| `tests/unreviewed_work_ack_test.rs` | +11 −3 | round 6's, inherited **uncommitted**: the acknowledgement repoint |
+| `phases/phase-084/REPORT.md` | rewritten | this document, including round 8's own account and the corrected inherited state |
+| `phases/phase-084/FINDINGS.md` | rewritten | the same, in the findings file |
 
 ### The pipeline (`rbops/`, one directory up)
 
@@ -552,6 +994,75 @@ pipeline repo, and this report names it because it was made. The pipeline's
 own state commits (`phases`, `logs`, `rbops/phases.json`) are its bookkeeping
 and are left alone.
 
+**Round 7's pipeline-side change is a commit in that repository too**, because
+the dispatcher inherited the very hole this round fixed in the suite:
+
+```
+$ cd ../rbops && git show --numstat --format="%h %s" 52bdf9e
+52bdf9e phase-084: a narrow deny is not a deny
+19	4	rbops/dispatch.sh
+11	0	rbops/smoke.sh
+```
+
+| File | Lines | What |
+|---|---|---|
+| `rbops/dispatch.sh` | +19 −4 | `assert_reviewer_read_only` no longer reads any all-deny object as the deny: an object of patterns is a deny only when one of its patterns is a catch-all (`*` or `**`), and a narrow one is refused as `narrow-deny`, naming the key and saying why. `reviewer_denied_keys`, which writes the request's "with these keys denied:" line, counts a narrow object as denied no more |
+| `rbops/smoke.sh` | +11 −0 | the narrow-pattern deny drives the guard: a reviewer whose `external_directory` is `{"*.md": "deny"}` stops the review, and the refusal names the key. **232 checks**, green (230 before) |
+
+**Checked from this checkout, in round 8.** The review that raised this could
+not check it: the pipeline repo is one directory up, outside the checkout, and
+that reviewer's own permissions denied `external_directory`. It is reachable
+from here, and the commit is there — the same commit, at the pipeline repo's
+own `HEAD`:
+
+```
+$ git -C ../rbops log --oneline -1
+52bdf9e phase-084: a narrow deny is not a deny
+$ git -C ../rbops show --numstat --format="%h %s" 52bdf9e
+52bdf9e phase-084: a narrow deny is not a deny
+19	4	rbops/dispatch.sh
+11	0	rbops/smoke.sh
+```
+
+And the pipeline's own suite is green against it, run from this checkout:
+
+```
+$ bash ../rbops/smoke.sh
+...
+== 33. the reviewer is resolved read-only out of the file opencode reads
+  PASS the request names the config the reviewer is resolved out of
+  PASS the request no longer claims there is no config
+  PASS the request names every key the reviewer has denied
+  PASS no agent contract claims there is no config
+  PASS a writable reviewer stops the review
+  PASS the refusal names the key that would widen the reviewer
+  PASS an undeclared widening key stops the review
+  PASS the refusal names the undeclared key
+  PASS a subagent-mode reviewer stops the review
+  PASS the refusal names the mode
+  PASS the object form of an allow stops the review
+  PASS a narrow-pattern deny stops the review
+  PASS the refusal names the key the narrow deny is on
+  PASS a missing config stops the review
+  PASS the object form of a deny is accepted
+  PASS the request diffs against the base the run recorded
+  PASS the review request carries the committed change set
+
+────────────────────────────────────────
+SMOKE PASS  232 checks
+```
+
+The whole run is at `target/tmp/smoke_r8.log`. **What this does and does not
+establish** is worth saying plainly: this is a measurement taken from
+**outside** this checkout, and no gate in *this* repository fails if the
+pipeline commit is absent — the pipeline repo is a separate repository with its
+own commit schedule, and the phase's own suite cannot see it. What the
+pipeline's suite gives is the check that the two halves of the one rule agree:
+the suite refuses a narrow deny, and the dispatcher refuses it too. The
+round-8 verification is that the commit carrying the dispatcher's half is
+really in the pipeline repo's history, and that the suite that drives it is
+green.
+
 The changed Rust files are all under `tests/`, satisfying this phase's
 `must_touch: ["tests/"]`. No file under `src/`, `.github/workflows/`, `rbops/`
 or `.opencode/agent/` is in the project diff. No test was deleted, skipped,
@@ -609,7 +1120,7 @@ them is now true of the tree that ships.
 | 5 | The findings file's round-3 section closed with "1919 passing tests" while the report said 1924 — the pre-addition count | Restated as 1924, the figure the suite reports. |
 | 6 | A test's doc comment claimed "opencode refuses to start on a config that fails it", which the phase's own measurement contradicts: the same build accepted an unknown top-level key with exit 0 | The doc comment now states the measured rule: value validation **is** enforced at startup, total schema conformance is **not**. The test asserts the same narrower thing it always did — that the file names the schema. |
 | 7 | A test's doc comment claimed `*` is one of opencode's permission keys and "grants everything at once". The phase's own schema table lists fifteen keys and `*` is not among them | The doc comment now says `*` is **not** a schema key — in opencode's resolved ruleset it is a *pattern* on a wildcard rule — and says why the case is kept: it pins the allow-list's closed edge. The documents that repeated the claim are corrected too. |
-| 8 | Two citations in the findings file pointed at the wrong lines | `edge_phase_078_commits_are_ancestors_of_head_not_absent` is at `tests/unreviewed_work_ack_test.rs:571` and `is_shallow()` at `tests/unreviewed_work_ack_test.rs:296`; both are corrected. |
+| 8 | Two citations in the findings file pointed at the wrong lines | `edge_phase_078_commits_are_ancestors_of_head_not_absent` is at `tests/unreviewed_work_ack_test.rs:581` and `is_shallow()` at `tests/unreviewed_work_ack_test.rs:306`; both are corrected — and **re-derived in round 7**, because round 6's own edit to that file moved them again and the numbers were not re-checked. |
 
 ## The configuration-resolution rule this relies on
 
@@ -718,9 +1229,9 @@ them.
 ## What the reviewer actually holds now
 
 The resolved configuration, read out of opencode itself in this checkout.
-**Re-measured this round**, from the tree as it stands — the shipped file is
-byte-for-byte the file round 2 shipped, and opencode resolves the reviewer to
-the same 28 rules it did then:
+**Re-measured in rounds 4, 5 and 6, and unchanged in round 7** — the shipped
+file is byte-for-byte the file round 2 shipped (round 7 did not touch it),
+and opencode resolves the reviewer to the same 28 rules it did then:
 
 ```
 $ opencode debug config
@@ -811,8 +1322,9 @@ found undeclared — resolve to `deny`, and `external_directory` resolves to
 line is opencode's own addition, which re-allows the directory it writes tool
 output into; it is appended by opencode after every rule the config carries.
 
-Re-measured this round, the resolved ruleset is the same 28 lines, in the same
-order — the phase's block still comes last, and still wins:
+Re-measured in rounds 4, 5 and 6, the resolved ruleset is the same 28 lines,
+in the same order — the phase's block still comes last, and still wins (and
+round 7 changed nothing here: the shipped file is the same file):
 
 ```
 $ opencode debug agent reviewer | jq -r '.permission[] | "\(.permission) \(.pattern) \(.action)"' \
@@ -840,9 +1352,14 @@ than a file assertion: opencode itself, in this checkout, resolving the name
 cannot confirm is that a *different* opencode build resolves it the same way —
 which is the gap the Known gaps section names.
 
-`read` is deliberately **not** declared: opencode's default rules still deny
-`.env` files, and an agent-level `read: "allow"` would be appended after them
-and re-allow them.
+`read` is deliberately **not** declared: opencode's default rules ASK about
+`.env` files (`read *.env ask`, `read *.env.* ask`), and an agent-level
+`read: "allow"` would be appended after them and re-allow them. The default
+is the safer of the two here, because the pipeline runs `opencode run` with
+nobody to answer a prompt: an `ask` there is a request that cannot be
+granted, which is the same reason `doom_loop` is denied outright rather than
+left to ask. It is an `ask`, not a `deny` — the rules say so, and this
+document used to say otherwise.
 
 `task` is the key that was doing the most damage. The built-in `general`
 subagent "has full tool access" (opencode's agents reference), so a reviewer
@@ -935,15 +1452,21 @@ and its verdict is trusted.
 
 Both of opencode's permission shapes are read: a bare action (`"deny"`) and
 an object of pattern → action (`{"**": "deny"}`). The second is the same rule
-as the first when every pattern in it denies, so both are accepted; an object
-that allows any pattern is not a deny and is refused.
+as the first only when every pattern in it denies **and one of them is a
+catch-all** (`*` or `**`) — a narrow pattern decides only the paths it
+matches, and the rules above it govern the rest, so it is not a deny of the
+key. An object that allows any pattern is refused for the same reason, and so
+is a narrow one. That narrowing is **round 7's**; the rule it replaced read
+any all-deny object as a deny, and it was the same hole the project's own
+suite had.
 
 The smoke suite asserts all of those paths (writable reviewer, undeclared
 widening key, subagent mode, the object form of a deny, the object form of an
-allow, missing config, and the change set actually being present), plus the
-three assertions about the request's own text. Every one of the fifteen new
-checks fails against the old code, and the suite is green at 230 against 215
-before this round.
+allow, a narrow-pattern deny, missing config, and the change set actually
+being present), plus the three assertions about the request's own text. Every
+one of the fifteen checks round 5 added fails against the old code, and the
+two round 7 added fail against the dispatcher round 5 committed. The suite is
+green at **232** against 215 before the first of those commits.
 
 **The request the reviewer is handed.** The preamble used to tell the
 reviewer that the checkout has no `opencode.json` and that `--agent reviewer`
@@ -1002,7 +1525,9 @@ they cannot be right about one file and wrong about the other.
 | `edge_permission_flipped_to_allow_is_rejected` | the damaging edit — all four values flipped, each caught by name |
 | `edge_a_dropped_deny_key_is_rejected` | the deleted deny — each of the eleven keys removed in turn; an undeclared key is inherited, not denied |
 | `edge_a_tool_granted_to_the_reviewer_outside_the_allowed_set_is_rejected` | the allow-list's boundary — `webfetch`, `websearch`, `skill`, `lsp` and `todowrite` (opencode's own keys) and `*` (not a schema key at all), each granted beside the pinned tools |
-| `edge_a_permission_object_form_is_rejected_or_accepted` | both shapes of a permission value — the object form of a deny is accepted, of an allow is rejected, a mixed object is rejected, and an object on an "action only" key is rejected |
+| `edge_a_permission_object_form_is_rejected_or_accepted` | both shapes of a permission value — the object form of a deny is accepted **when it carries a catch-all** (`{"**": "deny"}` and `{"*": "deny"}`), of an allow is rejected, a mixed object is rejected, and an object on an "action only" key is rejected |
+| `edge_a_narrow_pattern_deny_is_rejected` | **added in round 7** — a NARROW deny is not a deny: `{"*.md": "deny"}` decides only the paths it matches and leaves every other path to the rules above it, so four narrow patterns across five of the reviewer's keys must each be refused, by name and with the reason |
+| `edge_a_narrow_pattern_allow_is_rejected` | **added in round 7** — the same rule on the other side: a narrow allow grants the tool for the paths it matches only, so it is not the grant the contract asks for (three narrow patterns across `read` and the verifier's `edit`/`bash`) |
 | `edge_reviewer_mode_subagent_is_rejected` | the mode that binds the name — `subagent`, `all` and `nonsense`, each rejected |
 | `edge_a_missing_or_malformed_mode_is_rejected` | a missing mode and a mode of the wrong type |
 | `edge_reviewer_without_permission_block_is_rejected` | nesting — `agent.reviewer` declared, `permission` absent |
@@ -1022,29 +1547,70 @@ they cannot be right about one file and wrong about the other.
 | `edge_a_section_heading_inside_a_code_block_is_not_a_section` | **added in round 5** — a heading inside a code block is text, not a heading: the section test cannot pass on a document that hides one |
 | `edge_a_longer_outer_fence_may_hold_a_shorter_inner_fence` | **added in round 5** — a four-backtick fence may hold a three-backtick one, which is what lets a quoted review request or a diff be pasted verbatim |
 
-28 `#[test]` functions, **19 of them `edge_*`**, and **all 19 assert that a
-failure is produced** — 18 with `expect_err` on a `Result`, and the
-nineteenth, `edge_a_permission_object_form_is_rejected_or_accepted`, with
-`expect_err` on its three reject branches and `unwrap_or_else` on the one
-branch that must be accepted. The five failing documents the phase requires
-are present as separate tests: the file missing, the `agent` key missing,
-`reviewer` missing, `verifier` missing, and one permission flipped to
-`allow`.
+30 `#[test]` functions, **21 of them `edge_*`**, and **all 21 assert that a
+failure is produced** — 20 with `expect_err` on a `Result`, and the remaining
+one, `edge_a_permission_object_form_is_rejected_or_accepted`, with `expect_err`
+on its three reject branches and `unwrap_or_else` on the one branch that must
+be accepted. The five failing documents the phase requires are present as
+separate tests: the file missing, the `agent` key missing, `reviewer` missing,
+`verifier` missing, and one permission flipped to `allow`.
+
+**Round 6 added no test.** It inherited one red gate and fixed it, and the
+fix is *data*, not behaviour: the acknowledgement list has to name the SHA
+this history carries, and the SHA changes every round. Writing a test for
+"the list names the commit that is in HEAD" would be writing the audit again
+— it is `unreviewed_work_in_head_history_is_acknowledged`, and it was red
+until that round's two lines of data turned it green. The phase's inventory
+was therefore unchanged at **38** `#[test]` functions across the two suites
+it owns.
+
+**Round 7 added two tests**, and both are about the same shape — a permission
+spelled as an object of patterns whose patterns do not cover everything. The
+first says a narrow **deny** is not a deny; the second says the same rule
+holds on the allow side. Neither is a new kind of input: the suite already
+had an object-form test, and it exercised only the catch-all (`{"**":
+"deny"}`) — the one shape the old rule got right. The failing side had no
+test at all, which is why a narrow deny passed every check in the suite. The
+phase's inventory is therefore **40** `#[test]` functions across the two
+suites it owns, and the gate measures them against the phase's recorded base
+(`b21821d`), where they are all new.
 
 On top of those, `tests/report_markdown_test.rs` adds **10 `#[test]`
 functions, 8 of them `edge_*`**. The red-first guard is
 `phase_084_delivery_documents_are_unambiguous_markdown`: it reads the two
-delivery documents as `HEAD` carries them, and it fails against the committed
-report for the reason the preflight reported — the ambiguous fence that hid
-`## Tests added` from the scanner. The two inline-fixture tests inherited from
-the interrupted attempt (`edge_a_fence_with_an_info_string_inside_an_open_fence_is_rejected`
+delivery documents **from the working tree** — `fs::read_to_string` of
+`phases/phase-084/<name>` — and it fails against them for the reason the
+preflight reported: the ambiguous fence that hid `## Tests added` from the
+scanner. The two inline-fixture tests inherited from the interrupted attempt
+(`edge_a_fence_with_an_info_string_inside_an_open_fence_is_rejected`
 and `edge_a_document_that_ends_inside_a_code_block_is_rejected`) drive the
 checker with strings in the test body and never read the report, so they
-cannot fail because of `HEAD`'s copy — they pin the rule, and the test above
-pins the report. Round 5 added two more: the section-inside-a-fence rule and
-the longer-outer-fence rule. The full suite is therefore **1934** tests across
-70 binaries: 28 in the phase's config suite, 10 in the document suite, and
-1896 that belong to other phases and pre-date this one.
+cannot fail because of the report's own copy — they pin the rule, and the test
+above pins the report. Round 5 added two more: the section-inside-a-fence rule
+and the longer-outer-fence rule. The full suite is therefore **1936** tests
+across 70 binaries: 30 in the phase's config suite, 10 in the document suite,
+and 1896 that belong to other phases and pre-date this one.
+
+**What the guard reads, and what it does not.** The guard reads the
+**working tree's** copy of each document, and it never reads `HEAD`'s copy:
+`read_document` is `fs::read_to_string` on a path under the phase's
+directory, so a committed report that is broken while the working tree's copy
+is fixed leaves the guard green. That is the right copy to guard — the
+delivery *is* the working tree, and the pipeline copies this checkout's
+report into its own repo before it runs the gate — but it is not the copy the
+documents used to claim, and the claim was repeated three times before round 8
+corrected it. `HEAD`'s committed copy was measured against the same checker in
+round 8, and it passes too:
+
+```
+$ git show HEAD:phases/phase-084/REPORT.md > phases/phase-084/REPORT.md
+$ git show HEAD:phases/phase-084/FINDINGS.md > phases/phase-084/FINDINGS.md
+$ cargo test --test report_markdown_test
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+(The working tree's copies were restored afterwards — this section is inside
+one of them.)
 
 ### The pipeline's own checks, added with the pipeline commit
 
@@ -1052,7 +1618,8 @@ The dispatcher's half of the contract is in the pipeline repo, so its checks
 are the pipeline's smoke suite (`rbops/smoke.sh`), not this repository's. The
 commit `267f9a2` added a section of **fifteen** checks to it, and the fixture
 project now ships the `opencode.json` the dispatcher resolves the reviewer out
-of. The suite is green at **230 checks** (215 before this commit).
+of. The suite was green at **230 checks** (215 before that commit) when round
+5 ran it; round 7 added two more and re-ran it at **232**.
 
 | Check | What it pins |
 |---|---|
@@ -1069,12 +1636,16 @@ of. The suite is green at **230 checks** (215 before this commit).
 | a missing config stops the review | no file, no reviewer to resolve, no review |
 | the object form of a deny is accepted | `{"**": "deny"}` is the same deny, spelled another way |
 | the object form of an allow stops the review | `{"**": "allow"}` is still an allow |
+| a narrow-pattern deny stops the review | **added in round 7** — `{"*.md": "deny"}` is not a deny: it decides only the paths it matches, and the global config's `external_directory {"**": "allow"}` governs the rest |
+| the refusal names the key the narrow deny is on | as above, by name |
 | the request diffs against the base the run recorded | the review does not re-derive the base from HEAD at review time, which is what emptied the committed diff |
 | the review request carries the committed change set | the recovered work is in the diff the reviewer is handed |
 
 Each of the fifteen fails against the old code, where the request still made
 the stale claim, the reviewer resolved to nothing, and the committed diff was
-empty. The suite is green at 230 against 215 before the commit.
+empty. The suite was green at 230 against 215 before that commit; round 7's
+two checks take it to 232, and they are green against the commit that carries
+the fix.
 
 **Round 3 added five tests to this project's own suite** — three that assert
 the shipped file and two that drive the checker — because the suite was strong
@@ -1156,29 +1727,38 @@ test result: ok (13 passed; tail abbreviated)
 
 ```
 $ cargo test --test agent_permissions_test
-running 28 tests
+running 30 tests
 ...
-test result: ok (28 passed; tail abbreviated)
+test result: ok (30 passed; tail abbreviated)
 ```
+
+(Both pastes are round 7's own runs: the acknowledgement suite is unchanged
+at thirteen tests, and the config suite is two larger than round 4's, by the
+two tests this round added.)
 
 ## Gates
 
+Round 7's own measurements, with the gate's output pasted below them.
+
 | Gate | Result |
 |---|---|
-| `cargo fmt --all -- --check` | **pass** — exit 0, no output, no diff (round 4 inherited this **failing**, on one reformat in the then-untracked `tests/report_markdown_test.rs:75`; round 4 ran `cargo fmt --all`, which is what round 5 inherits green) |
-| `cargo clippy --all-targets -- -D warnings` | **pass** — exit 0, `Finished dev profile`, no warnings; `git diff HEAD -- '*.rs' \| grep -c "allow(clippy::"` → `0` |
-| `cargo test --all-targets` | **pass** — exit 0, **1934 passed; 0 failed; 0 ignored** across 70 test binaries (log at `target/tmp/full_test_r5.log`; `grep -c "FAILED"` → `0`) |
-| `../rbops/verify.sh "phase-084"` | **pass** — exit 0, `VERIFY PASS — phase-084`; every section green, including `report honesty` — run with the recorded environment and output pasted below |
-| `bash rbops/smoke.sh` (pipeline repo) | **pass** — `SMOKE PASS 230 checks` (215 before the pipeline commit `267f9a2`), re-run in this round against the committed pipeline change |
+| `cargo fmt --all -- --check` | **pass** — exit 0, no output, no diff (round 7 re-measured it on the tree this round leaves; the gate's own `cargo fmt --check` is green in the pasted run) |
+| `cargo clippy --all-targets -- -D warnings` | **pass** — exit 0, `Finished dev profile`, no warnings; `git diff HEAD -- '*.rs' \| grep -c "allow(clippy::"` → `0`, and the same against the phase's base `b21821d` → `0` |
+| `cargo test --all-targets` | **pass** — exit 0, **1936 passed; 0 failed; 0 ignored** across 70 test binaries (round 7's own run: log at `target/tmp/full_test_r7.log`; `grep -c "FAILED"` → `0`) |
+| `../rbops/verify.sh "phase-084"` | **pass** — exit 0, `VERIFY PASS — phase-084`; every section green, including `report honesty` — round 7's run, with the environment recorded and the output pasted below |
+| `bash rbops/smoke.sh` (pipeline repo) | **pass** — exit 0, `SMOKE PASS 232 checks` (230 before this round's pipeline commit `52bdf9e`), re-run in round 7 against that commit; log at `target/tmp/smoke_r7.log` |
 
-The fourth gate, from the project root, with the environment round 3
+The fourth gate, from the project root, with the environment round 7
 recorded (wrapped for readability; one line as run):
 
 ```
 $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.json" \
     RBOPS_BASELINE="$PWD/../rbops/baseline.json" \
-    RBOPS_BASE_REF=d23068bf4160c14463f4a6af7479b824b4f33429 \
+    RBOPS_BASE_REF=b21821d6acbc9e1bef8d9d71293bf7cee19a68f1 \
     ../rbops/verify.sh phase-084
+
+
+== manifest
   PASS phase phase-084 is declared in /home/runner/work/rbops/rbops/rbops/phases.json
 
 == report
@@ -1193,7 +1773,7 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS forbidden-path scan done
   PASS no gate-weakening constructs added
   PASS no scratch files
-  PASS diff substance: +1142 -168 (min +5)
+  PASS diff substance: +4426 -2 (min +5)
   PASS implementation touched tests/ (must_touch: tests/)
 
 == cargo fmt
@@ -1203,7 +1783,7 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS cargo clippy -D warnings
 
 == cargo test
-  PASS cargo test: 1934 passed, 0 failed
+  PASS cargo test: 1936 passed, 0 failed
 
 == doc tests
   PASS runs: examples/files.rb
@@ -1218,70 +1798,64 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS example sweep done
 
 == test policy
-  PASS failure-asserting test present: 3
-  PASS test quota met: 10 rust / 0 redblue (need 3 or 2)
-  PASS edge case test present: 8
+  PASS failure-asserting test present: 30
+  PASS test quota met: 40 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 29
   PASS no newly skipped tests
 
 == report honesty
-  PASS reported test count (1934) matches actual (1934)
+  PASS reported test count (1936) matches actual (1936)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-084                ║
 ╚══════════════════════════════════════╝
 ```
 
-Two things about that invocation are measurements, not decoration. The
-environment decides *which* report the gate reads: the bare command's first
-line prints `PASS /home/runner/work/rbops/rbops/phases/phase-084/REPORT.md
+The base is `b21821d` — the commit the dispatcher captured **before** the
+resume merge and recorded in `phases/phase-084/.base` — so the gate measures
+the phase's **whole delivery**, not only what this round changed. That is
+why the test-policy lines read `40 rust` and `29 edge`: the diff against
+that base contains both of the phase's suites. Against the previous delivery
+commit instead, the same gate would count this round's two tests and report
+`2 rust`; the base is what stops a retry from being punished for the tree it
+was given.
+
+One number inside the pasted output is a measurement of the tree rather than
+a verdict: `diff substance: +4426 -2`. It was measured on the tree as it
+stood when the gate ran, and this report's own prose was edited after that
+run — this paragraph included — so the tree now measures differently, and the
+figure the gate prints for it moves with every line that follows. The
+preflight on the final document is the figure for the tree as it now stands,
+and it is green. Every other line of the paste is a verdict, and the
+verdicts are the ones the gate printed.
+
+Three things about that invocation are measurements, not decoration.
+
+The environment decides *which* report the gate reads: the bare command's
+first line prints `PASS /home/runner/work/rbops/rbops/phases/phase-084/REPORT.md
 exists` — a path one directory above this checkout — and reports its section
 results against that copy, while with `RBOPS_ROOT`/`RBOPS_PROJECT_DIR` set to
 this checkout the same line names this checkout's report and all four
 sections pass (both forms measured; see "Round 4 — this run" above for what
-the bare form does). The log of the run above is `target/tmp/v_r5.log`.
+the bare form does). The dispatcher copies this checkout's report into the
+pipeline repo before it runs the gate, so the pipeline's own run reads the
+same bytes this run measured. The log of the run above is
+`target/tmp/v_r7.log`.
 
-And the three test-policy lines — `10 rust`, `3` failure-asserting, `8 edge`
-— are `tests/report_markdown_test.rs`'s ten tests, counted from the diff.
-The file is new and untracked until the pipeline harvests it, so the count
-depends on an intent-to-add entry (`git add -N`) to see it at all — and the
-entry does not survive the run: a 15-second watcher holds
-`git ls-files -s tests/report_markdown_test.rs` at one line for the first
-~165 seconds of a run and at zero for the rest, and verify with the entry gone
-reports `0 rust` (that run: `target/tmp/v_full2.log`, three FAILs, all three
-here green). The run above kept the entry present for its duration with a
-background `git add -N` loop; the tests themselves were never in question —
-they ran in the suite (`1934 passed`) the whole time. The loop repairs
-measurement bookkeeping a run of the suite itself clears; it changes no file
-content and weakens no check. After the pipeline commits the file at harvest
-the entry is unnecessary: every later verify sees a tracked file.
+The three test-policy lines — `40 rust`, `30` failure-asserting, `29 edge` —
+are the phase's two suites counted from the diff against the base: 30 tests
+in `tests/agent_permissions_test.rs` and 10 in `tests/report_markdown_test.rs`,
+of which 21 and 8 are named `edge_*`. Nothing needs an intent-to-add entry
+any more: both files are tracked in the delivery commit, so every later
+verify sees them.
 
-## Invariants touched
-
-- None. No file under `src/` is in the diff, no `Value` variant, error variant,
-  `.rb` extension, `to … end` grammar or `set x to <expr>` form is touched, and
-  every pre-existing test still passes.
-
-## Edge-case matrix (AGENTS.md §3.2)
-
-| Row | Status | Where / why |
-|---|---|---|
-| empty | covered | `edge_missing_agent_key_is_rejected` — `{}`; `edge_malformed_config_is_rejected` — empty file; `edge_a_permission_object_form_is_rejected_or_accepted` — an empty object is not an action; `edge_an_empty_document_is_accepted` — the empty *document*: no fences, no headings to hide, so it is vacuously unambiguous |
-| singleton | covered | `edge_missing_reviewer_is_rejected` and `edge_missing_verifier_is_rejected` — exactly one agent declared; `project_config_declares_exactly_the_two_pipeline_agents` — exactly two, and no third; `edge_a_document_without_code_blocks_is_accepted` — the singleton *document*: one heading and nothing else, no fences, nothing to misread |
-| boundary | covered | `edge_duplicate_permission_key_resolves_to_the_last_value` — the boundary between the first and last occurrence of a repeated key, which is the boundary that decides whether the reviewer is writable; `edge_a_tool_granted_to_the_reviewer_outside_the_allowed_set_is_rejected` — the boundary of the allow-list, a key outside it being a grant; `edge_a_dropped_deny_key_is_rejected` — the boundary between a key that is declared and one that is merely absent, which is where the permissive default lives; `edge_a_permission_object_form_is_rejected_or_accepted` — the boundary between the bare action and the object of one action; `edge_an_agent_this_file_does_not_own_is_rejected` — the boundary of the agent-name set, `build` being just outside it; `edge_a_longer_outer_fence_may_hold_a_shorter_inner_fence` — the boundary of the fence lengths, a three-backtick fence inside a four-backtick one being text to every reader |
-| out_of_bounds | N/A | nothing here is indexable or ranged; no index is computed, so there is no out-of-bounds to reach. The nearest analogue — a key that is not one of the pinned ones — is directly covered: `edge_a_tool_granted_to_the_reviewer_outside_the_allowed_set_is_rejected` (key present, ungranted-enforcement), `edge_reviewer_without_permission_block_is_rejected` (key absent), `edge_permission_value_of_wrong_type_is_rejected` (key present but unusable), `edge_an_agent_this_file_does_not_own_is_rejected` (a name outside the declared set) |
-| type_mismatch | covered | `edge_permission_value_of_wrong_type_is_rejected` — boolean, number, an object with a non-string action and `null` where a string action belongs; `edge_agent_block_of_wrong_type_is_rejected` — array and string where an object belongs; `edge_a_missing_or_malformed_mode_is_rejected` — a boolean where a mode belongs |
-| numeric_boundary | N/A | the config schema admits no numeric field: `PermissionActionConfig` is the enum `["ask","allow","deny"]`. A number is rejected as a type mismatch, not a magnitude, so there is no numeric boundary to cross. Covered by `edge_permission_value_of_wrong_type_is_rejected` (the `bash: 0` case) |
-| unicode | N/A | every key and every legal value in the schema is ASCII (`agent`, `reviewer`, `edit`, `allow`/`deny`/`ask`). No unicode key can be declared, and a unicode value is rejected as a type mismatch — `kind()` in `tests/agent_permissions_test.rs` names the type it found. The UTF-8 BOM case is covered by `edge_malformed_config_is_rejected`. Nothing in this change touches `src/`, where the language's own unicode handling is tested |
-| nesting_recursion | covered | `edge_reviewer_without_permission_block_is_rejected` — `agent.reviewer` declared, `permission` one level down absent; `edge_permission_value_of_wrong_type_is_rejected` — a nested object where a flat action belongs; `edge_a_permission_object_form_is_rejected_or_accepted` — a pattern → action object, one level in, under a key the two-tool lookup never reached |
-| duplicate_missing_keys | covered | missing: `edge_reviewer_without_permission_block_is_rejected`, `edge_missing_reviewer_is_rejected`, `edge_a_dropped_deny_key_is_rejected`, `edge_a_missing_or_malformed_mode_is_rejected`. duplicate: `edge_duplicate_permission_key_resolves_to_the_last_value` — JSON resolves a repeated `edit` last-wins, so a trailing `"allow"` is the one that counts. A section heading that is *present but hidden* is the same class from the reader's side: `edge_a_section_heading_inside_a_code_block_is_not_a_section` — a heading inside a fence is missing to every reader, not merely present |
-| malformed_input | covered | `edge_malformed_config_is_rejected` — empty file, truncated object, trailing comma, UTF-8 BOM, top-level array, bare string; `edge_missing_config_file_is_rejected` — the file that is not there; `edge_a_top_level_permission_block_is_rejected` — a well-formed document in the wrong shape for this file; `edge_a_fence_with_an_info_string_inside_an_open_fence_is_rejected` — the malformed *markdown*: a fence carrying an info string inside an open block, the exact shape that ate `## Tests added`; `edge_a_document_that_ends_inside_a_code_block_is_rejected` — the document that ends inside a block; `edge_a_rejected_document_produces_an_error_not_a_panic` — a rejected document comes back as an `Err`, never a panic |
-| resource_limit | N/A | the change is a JSON document read once by a test plus a bounded walk of an eleven-key object; there is no loop, no recursion, no allocation that grows with input, and no handle held across a failure. `check_no_grants_beyond` and `check_agent_set` iterate maps that the document bounds at the keys a hand-edit adds |
-
-## Re-verification of the phase's original finding
-
-The phase asks for the finding to be re-verified before anything is changed.
-The half of it that is about the **global** config still reproduces exactly as
-written, measured again in round 5:
+Round 5's gate record, for comparison, was the same shape with different
+numbers, and its numbers were the ones its own diff produced: base
+`d23068b`, `diff substance: +1142 -168`, `10 rust / 0 redblue`,
+`3` failure-asserting, `8 edge`, `cargo test: 1934 passed, 0 failed`,
+`VERIFY PASS — phase-084`. Its log was `target/tmp/v_r5.log`. The document
+suite was still untracked in that round, which is why only its ten tests
+counted then; the count is now measured against the base instead.
 
 ```
 $ wc -c ~/.config/opencode/opencode.json
@@ -1312,16 +1886,32 @@ builds today is pasted under "Round 5 — this run".
 - **The acknowledgement treadmill is structural, not accidental.** The pipeline
   commits the agent's work and only then asks the next run to acknowledge the
   commit it just made, so the SHA can never be written by the run that produces
-  the work. **Eight** deliveries have paid it; the eighth was round 4's, for
-  the commit `d23068b` that carried round 3's work, and round 5 inherited that
-  repair green. The ninth falls due to the next run, for the commit that
-  carries round 4's work — a SHA that does not exist yet, so this run cannot
-  write it. FINDINGS.md carries the sequence and the two fixes that would end
-  it: a commit subject that does not match the selector, or the dispatcher
-  adding the line at commit time, where the SHA is known. The second is a
-  dispatcher change, and rounds 3 and 5 did touch the dispatcher — but the
-  line has to be written by the commit, and this phase cannot write a SHA that
-  does not exist yet.
+  the work. **Nine** deliveries have paid it; the ninth was round 6's, for the
+  commit `1b58178` that carried rounds 4 and 5's work, and round 6 inherited
+  the gate red on that line and paid it. The tenth falls due to the next run,
+  for the commit that carries **this delivery's** work — round 6's and round
+  7's, both of which are still uncommitted, together with round 8's
+  corrections — a SHA that does not exist yet, so this run cannot write it.
+  FINDINGS.md carries the sequence and the two fixes
+  that would end it: a commit subject that does not match the selector, or the
+  dispatcher adding the line at commit time, where the SHA is known. The
+  second is a dispatcher change in the pipeline repo, which is outside this
+  checkout — rounds 3, 5 and 7 did touch the dispatcher, but the line has to
+  be written by the commit, and this phase cannot write a SHA that does not
+  exist yet. Round 6 measured the shape of it again: three deliveries, one
+  parent (`b21821d`), so each round's commit replaces the last one's and the
+  entry has to be replaced with it.
+- **The rule about what a deny is, lives in two places.** The project's suite
+  (`permission_action`) and the dispatcher's jq
+  (`assert_reviewer_read_only`) now both say that an object of patterns is a
+  bare action only when it carries a catch-all — and they are two
+  implementations of one rule, in two repositories, written in two languages.
+  Round 7 closed the hole in both at once, which is the only reason it is
+  closed at all: the suite's hole and the dispatcher's hole were the same
+  hole, and neither could see the other. Nothing keeps them in step, and a
+  future edit to one of them that widens the rule widens it silently — the
+  other one is still green. The rule the suite asserts is the specification;
+  the dispatcher's copy of it is not derived from the suite, and cannot be.
 - **The tests cannot prove opencode's resolution.** They assert a file's
   contents; they cannot assert which file opencode opened. The dispatcher's
   `assert_reviewer_read_only` closes the sharpest half of that gap — it
@@ -1349,6 +1939,9 @@ builds today is pasted under "Round 5 — this run".
   started, and the diff in "The pipeline" section above is this round's.)
 - **The `read` rules are opencode's, not ours.** The project file does not
   declare `read`, `glob`, `grep` or `list`: opencode allows them by default,
-  and its default `read` rules still deny `.env` files. An agent-level
-  `read: "allow"` would be appended after those rules and re-allow them, so
-  the allow-list permits that spelling but the shipped file does not use it.
+  and its default `read` rules ASK about `.env` files (`read *.env ask`),
+  they do not deny them. An agent-level `read: "allow"` would be appended
+  after those rules and re-allow them, so the allow-list permits that
+  spelling but the shipped file does not use it. In a headless run the ask
+  cannot be answered, so the read does not happen — the same reason
+  `doom_loop` is denied outright rather than left to ask.

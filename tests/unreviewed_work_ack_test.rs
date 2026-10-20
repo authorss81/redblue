@@ -117,10 +117,18 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries no production code: +1/-927 across 2 files, neither under src/ (phase-088's acknowledgement data and its bookkeeping). Acknowledged because the selector is a case-insensitive substring test on `resume phase-` and the subject merely *contains* the phrase; deliberately not rewritten."),
     // The commit that carried THIS phase's work into the tree, found in HEAD's
     // history by the run that inherited it. It carries the shipped
-    // `opencode.json`, the phase's own suite and its report; no file under
+    // `opencode.json`, the phase's own suites and its report; no file under
     // src/ is in it. Deliberately not rewritten: published history is immutable
     // under AGENTS.md 1.6.
-    ("d23068bf4160c14463f4a6af7479b824b4f33429", "resume phase-084: adopt preserved work. Carries unreviewed code (+2722/-2, 5 files, none under src/ - the repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the phase's own test suite tests/agent_permissions_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. It replaces the `10f40c6a` entry this history does not contain: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
+    //
+    // The pipeline re-creates this commit on every round: each delivery's
+    // commit is rebuilt on the same parent (b21821d), so the previous
+    // round's SHA leaves HEAD's ancestry the moment the next one lands. The
+    // entry therefore names the SHA this history actually carries, and the
+    // previous round's entry is gone rather than left to go stale: `scan`
+    // reports an acknowledgement naming a commit HEAD does not contain as
+    // stale, and a stale entry is a failure.
+    ("1b5817859a8428a43e5ace66dacddf537f6d002c", "resume phase-084: adopt preserved work. Carries unreviewed code (+3696/-2, 6 files, none under src/ - the repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the phase's own suites tests/agent_permissions_test.rs and tests/report_markdown_test.rs, the acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. It replaces the `d23068b` entry this history does not contain: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -250,7 +258,7 @@ const MEASURED: &[(&str, &str)] = &[
         "resume phase-062",
     ),
     (
-        "d23068bf4160c14463f4a6af7479b824b4f33429",
+        "1b5817859a8428a43e5ace66dacddf537f6d002c",
         "resume phase-084",
     ),
 ];

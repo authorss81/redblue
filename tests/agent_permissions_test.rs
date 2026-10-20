@@ -39,8 +39,9 @@
 //! `customize-opencode` skill opencode ships (section "Where files live").
 //! A test can prove the file says the right thing; it cannot prove which file
 //! opencode opened. What it *can* do is fail the moment a `deny` is dropped,
-//! an agent is renamed, a mode is changed, or a `default_agent` is quietly
-//! reintroduced to repoint the implementer agent.
+//! a `deny` is narrowed to a pattern that leaves the rest of the paths to the
+//! rules above it, an agent is renamed, a mode is changed, or a
+//! `default_agent` is quietly reintroduced to repoint the implementer agent.
 //!
 //! Two further rules keep the file from reaching past the agent it is about.
 //! opencode deep-merges the project config over the global one, per key, so
@@ -110,8 +111,12 @@ const REVIEWER_DENIED: [&str; 11] = [
 /// The shipped file does not declare them. opencode already allows `read`,
 /// `glob` and `grep` by default, and declaring `read: "allow"` would be an
 /// *widening* rather than a statement of intent: opencode's default `read`
-/// rules deny `.env` files, and an agent-level `read: "allow"` is appended
-/// after them, so it would win the last-match and re-allow them.
+/// rules ASK about `.env` files (`read *.env ask`), and an agent-level
+/// `read: "allow"` is appended after them, so it would win the last-match
+/// and re-allow them. The default is the safer of the two here: the pipeline
+/// runs `opencode run` with nobody to answer a prompt, so an `ask` is a
+/// request that cannot be granted — the same reason `doom_loop` is denied
+/// outright rather than left to ask.
 const REVIEWER_ALLOWED: [&str; 4] = ["read", "glob", "grep", "list"];
 
 /// The permission keys whose schema type is the bare action only.
@@ -130,6 +135,14 @@ const STRING_ONLY_KEYS: [&str; 5] = [
 
 /// The mode an agent must declare to be selectable as `--agent <name>`.
 const PRIMARY_MODE: &str = "primary";
+
+/// The patterns that cover everything a permission key governs.
+///
+/// A bare action is opencode's own shorthand for the catch-all rule
+/// (`"deny"` is `{"*": "deny"}`), and the global config writes the same
+/// catch-all as `{"**": "allow"}`. A pattern that is neither of those covers
+/// only what it matches.
+const CATCH_ALL_PATTERNS: [&str; 2] = ["*", "**"];
 
 /// The agents this file is allowed to declare.
 ///
@@ -181,13 +194,24 @@ fn kind(value: &Value) -> &'static str {
 /// The action a permission value applies, or the reason it does not resolve.
 ///
 /// opencode accepts two shapes for a permission value: a bare action
-/// (`"deny"`), and an object of pattern → action (`{"**": "deny"}`). The
-/// object form is the same rule as the bare one when every pattern in it
-/// carries the same action, and it is the only form opencode's schema allows
-/// for `read`, `edit`, `glob`, `grep`, `list`, `bash`, `task`,
-/// `external_directory`, `lsp` and `skill`. A mixed object is not one action —
-/// it denies some patterns and allows others — so it is rejected here rather
-/// than read as whichever action happened to come first.
+/// (`"deny"`), and an object of pattern → action (`{"**": "deny"}`). The bare
+/// action is opencode's shorthand for the catch-all rule `{"*": action}`, and
+/// an object is the same rule as the bare one only when every pattern in it
+/// carries the same action AND one of those patterns is a catch-all (`*` or
+/// `**`).
+///
+/// A narrow pattern is NOT the same rule, and the difference is the whole
+/// point. opencode evaluates the LAST matching rule, so `{"*.md": "deny"}`
+/// denies the markdown files and leaves every other path to the rules above
+/// it — and in this checkout the global config's `external_directory
+/// {"**": "allow"}` sits above the agent's own rules. Reading that object as
+/// the word "deny" is how a reviewer that may read outside the checkout
+/// passes a suite that says it may not, so a narrow object is refused here
+/// rather than read as the action it spells.
+///
+/// A mixed object is not one action either — it denies some patterns and
+/// allows others — so it is rejected rather than read as whichever action
+/// happened to come first.
 fn permission_action<'a>(key: &str, value: &'a Value) -> Result<&'a str, String> {
     match value {
         Value::String(action) => Ok(action.as_str()),
@@ -217,7 +241,21 @@ fn permission_action<'a>(key: &str, value: &'a Value) -> Result<&'a str, String>
                     }
                 }
             }
-            action.ok_or_else(|| "an empty object grants nothing and is not an action".to_string())
+            let action = action
+                .ok_or_else(|| "an empty object grants nothing and is not an action".to_string())?;
+            if !patterns
+                .keys()
+                .any(|pattern| CATCH_ALL_PATTERNS.contains(&pattern.as_str()))
+            {
+                let names: Vec<&str> = patterns.keys().map(String::as_str).collect();
+                return Err(format!(
+                    "the patterns {names:?} do not cover every path: an object of patterns is the \
+                     same rule as a bare action only when one of them is a catch-all (`*` or \
+                     `**`) — a narrow pattern decides only the paths it matches, and every other \
+                     path falls through to the rules above it"
+                ));
+            }
+            Ok(action)
         }
         other => Err(format!("must be a string action, found {}", kind(other))),
     }
@@ -323,6 +361,11 @@ fn check_no_grants_beyond(agents: &Map<String, Value>, name: &str) -> Result<(),
 /// key is not denied by the file: opencode's defaults are permissive and the
 /// global config grants `webfetch` and `external_directory`, so the key comes
 /// back as allowed.
+///
+/// "Deny" here means the bare action, or the object form of it that covers
+/// everything — [`permission_action`] refuses a narrow object, so
+/// `{"*.md": "deny"}` cannot pass as a deny here. A deny that covers only
+/// the paths it matches leaves the rest of them to the rules above it.
 fn check_reviewer_denies(agents: &Map<String, Value>, name: &str) -> Result<(), String> {
     let permissions = agents
         .get(name)
@@ -941,7 +984,8 @@ fn edge_a_tool_granted_to_the_reviewer_outside_the_allowed_set_is_rejected() {
 /// opencode accepts an object of pattern → action for most permission keys,
 /// and `{"**": "deny"}` denies exactly what `"deny"` denies. A config that
 /// spells the deny that way is correct and must be accepted; one that spells
-/// an ALLOW that way, or that mixes the two, must not be.
+/// an ALLOW that way, one that mixes the two, and one that narrows the
+/// pattern must not be.
 #[test]
 fn edge_a_permission_object_form_is_rejected_or_accepted() {
     // Accepted: the object form of a deny, on a key opencode types as a rule.
@@ -950,6 +994,15 @@ fn edge_a_permission_object_form_is_rejected_or_accepted() {
         config["agent"]["reviewer"]["permission"][key] = serde_json::json!({ "**": "deny" });
         check_document(&config.to_string()).unwrap_or_else(|error| {
             panic!("`permission.{key}` as {{\"**\": \"deny\"}} is the deny spelled another way: {error}")
+        });
+    }
+
+    // Accepted: the same catch-all under the other spelling of one.
+    for key in ["external_directory", "edit", "skill", "lsp", "bash"] {
+        let mut config = shipped_config();
+        config["agent"]["reviewer"]["permission"][key] = serde_json::json!({ "*": "deny" });
+        check_document(&config.to_string()).unwrap_or_else(|error| {
+            panic!("`permission.{key}` as {{\"*\": \"deny\"}} is the deny spelled another way: {error}")
         });
     }
 
@@ -986,6 +1039,78 @@ fn edge_a_permission_object_form_is_rejected_or_accepted() {
         error.contains("takes a bare action"),
         "the error must say the key takes a bare action, got: {error}"
     );
+}
+
+/// A NARROW deny is not a deny.
+///
+/// `{"*.md": "deny"}` denies the markdown files and nothing else. opencode
+/// evaluates the LAST matching rule, so every path the pattern does not match
+/// falls through to the rules above it — and in this checkout the global
+/// config grants `external_directory {"**": "allow"}` above the agent's own
+/// rules. A narrow deny there leaves the reviewer free to read outside the
+/// checkout while every other check in this suite still sees the word
+/// "deny".
+///
+/// This is the shape the checker used to accept, and it is the direction that
+/// matters: a mixed object was refused because it is not one action, while a
+/// narrow deny was read as a deny. The dangerous direction was the one that
+/// passed.
+#[test]
+fn edge_a_narrow_pattern_deny_is_rejected() {
+    for key in ["external_directory", "edit", "bash", "skill", "lsp"] {
+        for pattern in ["*.md", "/tmp/*", "src/**", "*.rs"] {
+            let mut rule = Map::new();
+            rule.insert(pattern.to_string(), Value::String("deny".to_string()));
+            let mut config = shipped_config();
+            config["agent"]["reviewer"]["permission"][key] = Value::Object(rule);
+            let error = check_document(&config.to_string()).expect_err(&format!(
+                "a narrow deny on `{key}` decides only the paths {pattern:?} matches, and the rest \
+                 fall through to the rules above it"
+            ));
+            assert!(
+                error.contains(&format!("`agent.reviewer.permission.{key}`")),
+                "the error must name the offending key, got: {error}"
+            );
+            assert!(
+                error.contains("do not cover every path"),
+                "the error must say why a narrow pattern is not a deny, got: {error}"
+            );
+        }
+    }
+}
+
+/// A narrow ALLOW is refused for the same reason a narrow deny is.
+///
+/// The rule is one rule: an object of patterns is the same as a bare action
+/// only when it covers everything. `{"*.rs": "allow"}` grants the tool for
+/// the Rust files and not for the rest, so it is not the grant the contract
+/// asks for — and the verifier, which has to edit the whole tree, is not
+/// covered by it either.
+#[test]
+fn edge_a_narrow_pattern_allow_is_rejected() {
+    for (name, key) in [
+        ("reviewer", "read"),
+        ("verifier", "edit"),
+        ("verifier", "bash"),
+    ] {
+        for pattern in ["*.rs", "/tmp/*", "src/**"] {
+            let mut rule = Map::new();
+            rule.insert(pattern.to_string(), Value::String("allow".to_string()));
+            let mut config = shipped_config();
+            config["agent"][name]["permission"][key] = Value::Object(rule);
+            let error = check_document(&config.to_string()).expect_err(&format!(
+                "a narrow allow on `{name}.{key}` grants only the paths {pattern:?} matches"
+            ));
+            assert!(
+                error.contains(&format!("`agent.{name}.permission.{key}`")),
+                "the error must name the offending key, got: {error}"
+            );
+            assert!(
+                error.contains("do not cover every path"),
+                "the error must say why a narrow pattern is not an allow, got: {error}"
+            );
+        }
+    }
 }
 
 /// The mode is what binds `--agent reviewer` to this agent at all: opencode
