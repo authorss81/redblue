@@ -731,6 +731,16 @@ impl Vm {
         forked
     }
 
+    /// The directory this VM resolves a program's `import` against.
+    ///
+    /// A VM that answers a question *for* a program - the debug sub-REPL's
+    /// scratch VM, evaluating a watch expression - has to resolve an import
+    /// where that program resolves it, or `MathUtils.circle_area(5)` is "no such
+    /// module" because the watcher looked in the wrong directory.
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// Re-points this VM at the bindings the observed step was running with, so
     /// an expression evaluated now reads the program's variables as they are
     /// *at that step* rather than as they were at some earlier one.
@@ -762,6 +772,11 @@ impl Vm {
         self.call_depth = 0;
         self.call_stack.clear();
         self.frame_writes.clear();
+        // The locals stack was replaced wholesale, so the base the frame's own
+        // scopes begin at is a number into a stack that no longer exists. Left
+        // stale it would index the wrong scopes, and `DebugEvent::scope_base`
+        // would hand the watcher the caller's bindings as the frame's own.
+        self.frame_scope_base = 0;
         self.loop_depth = 0;
         self.loop_control = None;
         self.assertions_failed = 0;
@@ -2784,5 +2799,50 @@ impl Vm {
 impl Default for Vm {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+
+    /// The frame base is an index into the locals stack, and it says where the
+    /// frame's own scopes begin inside it.
+    ///
+    /// `observe_bindings` replaces that stack wholesale - it hands the VM the
+    /// bindings of an observed step, and the step's scopes are not the scopes
+    /// the VM was holding. A base left over from before the replacement is an
+    /// index into a stack that no longer exists, so it points at the wrong
+    /// scopes, and `DebugEvent::scope_base` would hand the watcher the
+    /// caller's bindings as the frame's own.
+    ///
+    /// The base is only non-zero while a call is open, so the test makes one:
+    /// a function that calls another puts a frame on the stack, and the base
+    /// moves past the scopes the call captured.
+    #[test]
+    fn edge_observing_bindings_restarts_the_frame_base() {
+        let mut vm = Vm::new();
+
+        // The base is only non-zero while a call is open, and no call is open
+        // here, so it is put where a live frame would have put it: the point is
+        // that `observe_bindings` restarts it whatever it was.
+        assert_eq!(
+            vm.frame_scope_base, 0,
+            "a VM with no call open has its frame base at the top of the stack"
+        );
+        vm.frame_scope_base = 3;
+
+        // The bindings of an observed step replace the stack. The base must be
+        // restarted with them, not carried over from the stack they replaced.
+        vm.observe_bindings(&[], &HashMap::new());
+
+        assert_eq!(
+            vm.frame_scope_base, 0,
+            "the frame base is an index into the locals stack, and \
+             observe_bindings replaced that stack, so the base has to be \
+             restarted with it"
+        );
     }
 }

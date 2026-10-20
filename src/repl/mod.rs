@@ -7182,11 +7182,7 @@ mod tests {
 
         use super::{feed, Repl};
         use crate::repl::style::{Paint, Style};
-        use crate::repl::{
-            hint_lines, tutorial_lines, MAX_BLOCK_BYTES, MAX_BLOCK_LINES, SCRATCH_DIR_ATTEMPTS,
-            TUTORIAL,
-        };
-        use crate::value::Value;
+        use crate::repl::{hint_lines, tutorial_lines, SCRATCH_DIR_ATTEMPTS, TUTORIAL};
 
         /// A scratch directory under the checkout, unique per test so two running
         /// in parallel cannot collide.

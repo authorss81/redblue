@@ -131,7 +131,7 @@ impl DebugRepl {
         // so an effectful builtin — `files.write`, `network.post` — is refused
         // at the call rather than run for real on behalf of an expression that
         // was only being watched.
-        let mut scratch = Vm::new();
+        let mut scratch = Vm::new_in(vm.root());
         scratch.ask_questions(true);
         // The budget is one evaluation's, not a program's: see
         // [`WATCH_MAX_STEPS`].
@@ -736,4 +736,105 @@ fn is_there_but_not_readable(error: &std::io::Error) -> bool {
         error.kind(),
         std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! The scratch VM a watch is evaluated on, and the roots it resolves against.
+
+    use std::path::PathBuf;
+
+    use crate::parser::Program;
+    use crate::repl::style::Style;
+    use crate::Vm;
+
+    use super::{lock, DebugRepl};
+
+    /// A directory of its own with a module in it.
+    ///
+    /// The module is called `Probe` and exists nowhere else, so an import of it
+    /// only resolves for a VM rooted here. The process's own directory has
+    /// `modules/MathUtils.rb` and `modules/SuiteKit.rb` and no `Probe`, so a VM
+    /// rooted at `.` cannot import it - which is what makes the difference
+    /// between the two roots observable at all.
+    fn directory_with_a_probe_module() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "redblue_watch_root_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let modules = dir.join("modules");
+        std::fs::create_dir_all(&modules).expect("the module directory should be creatable");
+        std::fs::write(
+            modules.join("Probe.rb"),
+            "module Probe\n    to probe()\n        give back 7\n    end\n    export all\nend\n",
+        )
+        .expect("the module should be writable");
+        dir
+    }
+
+    /// The program `source` is, parsed but not analysed.
+    fn program(source: &str) -> Program {
+        let tokens = crate::lexer::Lexer::tokenize(source).expect("the source should lex");
+        crate::parser::parse(tokens).expect("the source should parse")
+    }
+
+    /// A watch is evaluated on a VM of its own, and that VM answers a question
+    /// *for the program* - so an import it evaluates has to resolve where that
+    /// program's imports resolve, not wherever the process happens to be.
+    ///
+    /// The scratch was built with `Vm::new()`, which roots it at `.`. The
+    /// program's own VM is rooted wherever the program was resolved from, and the
+    /// two are not the same place: a program in a directory of its own resolves
+    /// `import` against that directory, and a scratch rooted at `.` resolves it
+    /// against the process's directory instead. A watch that imports a module then
+    /// fails with "cannot find module" for a module the program can see perfectly
+    /// well.
+    ///
+    /// This is the invariant the scratch is built on, and it is asserted against a
+    /// module that exists ONLY in the program's own root: with the scratch rooted
+    /// there, the import resolves; rooted anywhere else, it does not.
+    #[test]
+    fn the_watch_scratch_resolves_an_import_where_the_program_resolves_it() {
+        let dir = directory_with_a_probe_module();
+        let vm = Vm::new_in(&dir);
+        let repl = DebugRepl::new(vm, Style::detect());
+
+        let mut state = lock(&repl.state);
+        let source = "import Probe\nset answer to Probe.probe()\n";
+
+        state
+            .scratch
+            .run_quietly(&program(source))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the watch scratch should import Probe from the program's own \
+                 root ({}), but it failed with {error:?}",
+                    dir.display()
+                )
+            });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The scratch and the program it watches resolve the same import, so the
+    /// root is not merely similar - it is the same directory.
+    #[test]
+    fn the_watch_scratch_and_the_program_share_one_root() {
+        let dir = directory_with_a_probe_module();
+        let vm = Vm::new_in(&dir);
+        let repl = DebugRepl::new(vm, Style::detect());
+
+        let state = lock(&repl.state);
+        assert_eq!(
+            state.scratch.root(),
+            dir.as_path(),
+            "the watch scratch should resolve imports against the same root the \
+         program does"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

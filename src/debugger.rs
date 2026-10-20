@@ -151,7 +151,10 @@ impl DebugEvent<'_> {
                     bindings.push((name.to_string(), value));
                 }
             };
-            let scopes = self.scopes.get(self.scope_base..).unwrap_or(self.scopes);
+            // A base past the end of the stack is a bug, not a reason to show
+            // the caller's scopes as the frame's own: the frame owns nothing
+            // then, and saying so is better than showing the wrong bindings.
+            let scopes = self.scopes.get(self.scope_base..).unwrap_or(&[]);
             for scope in scopes.iter().rev() {
                 for (name, value) in scope.iter() {
                     hold(name, value.clone());
