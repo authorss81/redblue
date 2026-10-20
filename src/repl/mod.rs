@@ -5952,7 +5952,7 @@ mod tests {
     /// list, a nested record and a list of records all came out as one
     /// unreadable line, and there was no way to ask for JSON or for columns.
     ///
-    /// These drive the session the way a user does, through the command
+    /// These drive the session the way a user does: through the command
     /// dispatcher, so a command that parses and is never dispatched fails here.
     mod printing {
         use super::{feed, Repl};
@@ -6137,6 +6137,85 @@ mod tests {
                     completions
                 );
             }
+        }
+
+        /// The three commands are dispatched as commands.
+        ///
+        /// A command that parses and is never dispatched is a command nobody
+        /// can use, and the parse test above cannot see it: the dispatcher is
+        /// a second place the three names are written down. So the line is
+        /// handed to the dispatcher itself here, and the one thing that tells
+        /// a command from source is checked — a line run as source binds `_`,
+        /// and a line run as a command binds nothing.
+        #[test]
+        fn the_three_printing_commands_are_dispatched_and_not_run_as_source() {
+            for command in [".pretty 1 + 1", ".json 1 + 1", ".table [{ a: 1 }]"] {
+                let mut repl = Repl::new();
+
+                assert!(
+                    repl.handle_command(command),
+                    "{} is a command, and the dispatcher consumes it",
+                    command
+                );
+                assert!(
+                    repl.lookup("_").is_none(),
+                    "{} is not run as source: a source line would have bound _",
+                    command
+                );
+            }
+        }
+
+        /// An expression that does not parse is refused as the failure it is.
+        ///
+        /// The three commands ask about a value, and a line that is not an
+        /// expression holds no value to ask about: the refusal says so rather
+        /// than printing nothing at all.
+        #[test]
+        fn edge_a_printing_command_of_a_line_that_does_not_parse_is_refused() {
+            let mut repl = Repl::new();
+
+            for (command, refusal) in [
+                (
+                    ".pretty",
+                    repl.pretty_answer("1 +")
+                        .expect_err("a line that does not parse is refused"),
+                ),
+                (
+                    ".json",
+                    repl.json_answer("[1, 2")
+                        .expect_err("a line that does not parse is refused"),
+                ),
+                (
+                    ".table",
+                    repl.table_answer("{ a: }")
+                        .expect_err("a line that does not parse is refused"),
+                ),
+            ] {
+                assert!(
+                    refusal.starts_with("Error:"),
+                    "{} refuses a line that does not parse, and says so: {}",
+                    command,
+                    refusal
+                );
+            }
+        }
+
+        /// A table of exactly one record is a table: a header row naming the
+        /// keys, and one row under it.
+        #[test]
+        fn edge_a_table_of_one_record_names_its_keys_once() {
+            let mut repl = Repl::new();
+
+            let shown = repl
+                .table_answer("[{ name: \"ada\", age: 36 }]")
+                .expect("one record is a table");
+            let lines: Vec<&str> = shown.trim_end_matches('\n').split('\n').collect();
+
+            assert_eq!(
+                lines,
+                vec!["name  age", "ada   36"],
+                "a header row and one row, and the key is named once"
+            );
         }
     }
 
