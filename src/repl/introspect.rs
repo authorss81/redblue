@@ -317,23 +317,31 @@ fn shape_of(value: &Value) -> String {
 /// `x + 1`, `files.read("a.rb")`. Anything else is named back to the user, with
 /// the keyword they wrote, rather than being run and then reported about.
 pub fn expression_of(program: &Program) -> Result<&Expr, String> {
+    expression_of_for(program, ":type")
+}
+
+/// The one expression a command will evaluate, or why it refuses the program.
+///
+/// [`expression_of`] with the command's own name in the refusal, so a user who
+/// typed `.pretty` is not told about `:type` — the same rule, told to the
+/// person who has to read it.
+pub fn expression_of_for<'a>(program: &'a Program, command: &str) -> Result<&'a Expr, String> {
     match program.statements.as_slice() {
         [Stmt {
             statement: Statement::Expr(expr),
             ..
         }] => Ok(expr),
         [Stmt { statement, .. }] => Err(format!(
-            "Error: :type is a question about a value, and `{}` is a statement. \
-             Type the expression you want described, or run the statement as a line.",
+            "Error: {command} is a question about a value, and `{}` is a statement. \
+             Type the expression you want shown, or run the statement as a line.",
             statement_keyword(statement)
         )),
-        [] => Err(
-            "Error: :type was given nothing to describe. Type the expression you want described."
-                .to_string(),
-        ),
+        [] => Err(format!(
+            "Error: {command} was given nothing to show. Type the expression you want shown."
+        )),
         statements => Err(format!(
-            "Error: :type is a question about one value, and this is {} statement(s). \
-             Type the expression you want described, or run the lines as a program.",
+            "Error: {command} is a question about one value, and this is {} statement(s). \
+             Type the expression you want shown, or run the lines as a program.",
             statements.len()
         )),
     }
