@@ -7183,6 +7183,23 @@ mod tests {
         use super::{feed, Repl};
         use crate::repl::style::{Paint, Style};
         use crate::repl::{hint_lines, tutorial_lines, SCRATCH_DIR_ATTEMPTS, TUTORIAL};
+        // The editor script these tests drive is a shell script, so they are
+        // Unix-only - one of them Linux-only, because it reads the mode back
+        // with `stat -c` rather than BSD's `stat -f`.
+        //
+        // Their imports follow the code. Imported unconditionally they are an
+        // UNUSED IMPORT on Windows, where none of that code is compiled - and
+        // `cargo clippy --all-targets -- -D warnings` says so, on a Windows
+        // machine, correctly, and the temptation is to delete them. They are
+        // then missing on Linux, where the code IS compiled, and the build
+        // fails with "cannot find value MAX_BLOCK_BYTES" in a file nobody
+        // touched.
+        //
+        // The lint cannot see the other platform. The import can.
+        #[cfg(unix)]
+        use crate::repl::{MAX_BLOCK_BYTES, MAX_BLOCK_LINES};
+        #[cfg(unix)]
+        use crate::value::Value;
 
         /// A scratch directory under the checkout, unique per test so two running
         /// in parallel cannot collide.
