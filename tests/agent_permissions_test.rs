@@ -41,6 +41,15 @@
 //! opencode opened. What it *can* do is fail the moment a `deny` is dropped,
 //! an agent is renamed, a mode is changed, or a `default_agent` is quietly
 //! reintroduced to repoint the implementer agent.
+//!
+//! Two further rules keep the file from reaching past the agent it is about.
+//! opencode deep-merges the project config over the global one, per key, so
+//! both of these would move a permission for an agent the file does not
+//! declare: a **top-level `permission` block**, which applies to every agent
+//! that declares no block of its own, and an **agent this file does not own**
+//! — `build` above all, since the pipeline runs every phase's implementer as
+//! `--agent build` and a block for that name here would replace the global
+//! one for it.
 
 use std::path::{Path, PathBuf};
 
@@ -121,6 +130,17 @@ const STRING_ONLY_KEYS: [&str; 5] = [
 
 /// The mode an agent must declare to be selectable as `--agent <name>`.
 const PRIMARY_MODE: &str = "primary";
+
+/// The agents this file is allowed to declare.
+///
+/// The project config is the pipeline's agent file: it declares the reviewer
+/// and the verifier, and nothing else. A third name is the hazard — `build`
+/// above all, because `rbops` runs every phase's implementer as
+/// `--agent build`. opencode resolves a name in the project config first and
+/// only then in the global one, so a `build` block here would OVERRIDE the
+/// global config for that name: the implementer's permissions would move
+/// without the global file changing, and without any other gate noticing.
+const PIPELINE_AGENTS: [&str; 2] = ["reviewer", "verifier"];
 
 /// The project config filename opencode looks for at the working directory.
 const CONFIG_FILE: &str = "opencode.json";
@@ -327,6 +347,27 @@ fn check_reviewer_denies(agents: &Map<String, Value>, name: &str) -> Result<(), 
     Ok(())
 }
 
+/// Require the `agent` map to hold exactly the agents this file owns.
+///
+/// The project config is deep-merged over the global one, and the merge is
+/// per key: a `build` block here replaces the global `build` block for
+/// `--agent build`, which is the agent every phase's implementer runs as. An
+/// agent that does not belong here is therefore a way to move the
+/// implementer's permissions that leaves no trace in the global config.
+fn check_agent_set(agents: &Map<String, Value>) -> Result<(), String> {
+    for name in agents.keys() {
+        if !PIPELINE_AGENTS.contains(&name.as_str()) {
+            return Err(format!(
+                "`agent.{name}` is declared, and this file declares only {}: an agent block here \
+                 overrides the global config for `--agent {name}`, so the permissions of that agent \
+                 could be moved without anything else noticing",
+                PIPELINE_AGENTS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The whole contract, as one fallible check, so a failure names the exact key
 /// that is wrong instead of reporting a pile of assertions.
 fn check_document(text: &str) -> Result<(), String> {
@@ -339,6 +380,14 @@ fn check_document(text: &str) -> Result<(), String> {
         return Err(format!(
             "{CONFIG_FILE} declares `default_agent`: {}. Every other agent invocation falls back to it, and the implementer agent must stay the one opencode chooses for itself.",
             agent
+        ));
+    }
+    if root.contains_key("permission") {
+        return Err(format!(
+            "{CONFIG_FILE} declares a top-level `permission` block: opencode deep-merges the \
+             project config over the global one, so a top-level block here applies to every agent \
+             that does not declare a block of its own - the implementer's included. A permission \
+             belongs under the agent it is for."
         ));
     }
     let agents = root.get("agent").ok_or_else(|| {
@@ -358,6 +407,7 @@ fn check_document(text: &str) -> Result<(), String> {
     check_mode(agents, "verifier")?;
     check_reviewer_denies(agents, "reviewer")?;
     check_no_grants_beyond(agents, "reviewer")?;
+    check_agent_set(agents)?;
     Ok(())
 }
 
@@ -532,6 +582,124 @@ fn project_config_declares_no_default_agent() {
             .expect("the config must be an object")
             .contains_key("default_agent"),
         "opencode.json must not declare `default_agent`: it would repoint the agent every phase runs as"
+    );
+}
+
+/// The `agent` map holds exactly the two agents this file owns.
+///
+/// `rbops` runs every phase's implementer as `--agent build`. opencode
+/// resolves a name in the project config first and only then in the global
+/// one, so a `build` block here would replace the global block for that
+/// name: the implementer's permissions would move while the global config
+/// stayed exactly as the pipeline wrote it. Nothing else in this suite looks
+/// at the names, so this is the only place that can catch it.
+#[test]
+fn project_config_declares_exactly_the_two_pipeline_agents() {
+    let agents = shipped_config()
+        .get("agent")
+        .and_then(Value::as_object)
+        .expect("`agent` must be an object keyed by agent name")
+        .clone();
+    let mut names: Vec<&str> = agents.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["reviewer", "verifier"],
+        "the project config declares the pipeline's two agents and nothing else"
+    );
+    assert!(
+        !agents.contains_key("build"),
+        "the implementer agent must keep resolving from the global config: a block here would \
+         override it"
+    );
+}
+
+/// No top-level `permission` block.
+///
+/// opencode deep-merges the project config over the global one, and a
+/// top-level `permission` block applies to every agent that does not declare
+/// a block of its own — the implementer's, for one. The shipped file puts
+/// every permission under the agent it is for, so the global block is left
+/// exactly as the pipeline wrote it.
+#[test]
+fn project_config_declares_no_top_level_permission_block() {
+    let config = shipped_config();
+    assert!(
+        !config
+            .as_object()
+            .expect("the config must be an object")
+            .contains_key("permission"),
+        "opencode.json must not declare a top-level `permission` block: it is merged over the \
+         global one and applies to every agent that declares no block of its own"
+    );
+}
+
+/// The file names the schema it was validated against.
+///
+/// The shipped file was checked against opencode's published JSON Schema, and
+/// the check is repeatable by anyone: naming the schema in the file is what
+/// makes it so, and a changed URL is a changed schema — so the file has to say
+/// which one it claims to satisfy.
+///
+/// What opencode does with a bad config was MEASURED, not assumed, and the
+/// measurement is narrower than "it refuses to start". On this build opencode
+/// refuses to start when a config's VALUES are wrong (a `mode` outside the
+/// enum is rejected with exit 1 and the offending value named), but it accepts
+/// an unknown top-level key with exit 0. So: value validation is enforced at
+/// startup; total schema conformance is not. This test therefore asserts the
+/// file NAMES the schema, and the schema-validity claim rests on the separate
+/// `jsonschema` run recorded in the report — not on opencode's startup check.
+#[test]
+fn project_config_declares_the_schema_it_is_validated_against() {
+    let config = shipped_config();
+    assert_eq!(
+        config
+            .as_object()
+            .expect("the config must be an object")
+            .get("$schema")
+            .and_then(Value::as_str),
+        Some("https://opencode.ai/config.json"),
+        "opencode.json must name the schema it is written against"
+    );
+}
+
+/// An agent this file does not own is refused, and the refusal names it.
+///
+/// `build` is the one that matters: the pipeline runs every phase's
+/// implementer as `--agent build`, and a block for that name here overrides
+/// the global config for it.
+#[test]
+fn edge_an_agent_this_file_does_not_own_is_rejected() {
+    for name in ["build", "auditor"] {
+        let mut config = shipped_config();
+        config["agent"][name] = serde_json::json!({
+            "mode": "primary",
+            "permission": {"edit": "allow", "bash": "allow"}
+        });
+        let error = check_document(&config.to_string())
+            .expect_err("this file declares the pipeline's two agents and no others");
+        assert!(
+            error.contains(&format!("`agent.{name}`")),
+            "the error must name the agent that does not belong here, got: {error}"
+        );
+    }
+}
+
+/// A top-level `permission` block is refused.
+///
+/// It is merged over the global one and applies to every agent that declares
+/// no block of its own, which is how a project config reaches past the agent
+/// it is supposed to be about.
+#[test]
+fn edge_a_top_level_permission_block_is_rejected() {
+    let mut config = shipped_config();
+    config["permission"] = serde_json::json!({"edit": "allow", "bash": "allow"});
+    let error = check_document(&config.to_string()).expect_err(
+        "a top-level permission block applies to every agent that declares no block of its own",
+    );
+    assert!(
+        error.contains("top-level `permission`"),
+        "the error must say which block is wrong, got: {error}"
     );
 }
 
@@ -744,8 +912,17 @@ fn edge_duplicate_permission_key_resolves_to_the_last_value() {
 /// reviewer that can act, and every assertion above looks straight past it.
 ///
 /// The keys here are opencode's own: `write` is not one of them — `edit`
-/// covers it — but `websearch`, `skill`, `lsp` and `todowrite` are, and so is
-/// the `*` wildcard that grants everything at once.
+/// covers it — and `websearch`, `skill`, `lsp` and `todowrite` are. The last
+/// entry, `*`, is NOT a schema key either: `AgentConfig.permission` has
+/// exactly fifteen keys (`read`, `edit`, `glob`, `grep`, `list`, `bash`,
+/// `task`, `external_directory`, `todowrite`, `question`, `webfetch`,
+/// `websearch`, `lsp`, `doom_loop`, `skill`) and `*` is not among them. In
+/// opencode's resolved ruleset `*` appears as the PATTERN on a wildcard rule,
+/// never as a permission key you can configure. It is here to pin the
+/// allow-list's own edge: the list is closed, so a key that is not in the
+/// schema at all is refused for the same reason an unknown schema key is —
+/// the checker does not ask "is this a key opencode knows", it asks "is this
+/// one of the four the reviewer may hold".
 #[test]
 fn edge_a_tool_granted_to_the_reviewer_outside_the_allowed_set_is_rejected() {
     for tool in ["webfetch", "websearch", "skill", "lsp", "todowrite", "*"] {

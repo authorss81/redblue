@@ -5,17 +5,20 @@
 The phase's subject is the reviewer's permissions. The first delivery shipped
 `opencode.json` at the project root with `edit` and `bash` denied, and a test
 file that asserted the file's contents. The review of that delivery returned
-eleven findings; this round fixed all eleven. The second review of that round
-returned seven more; this round fixed all seven too. The four that changed
-what the phase *claims* are below, together with the two that are still open.
+eleven findings; round 2 fixed all eleven. The second review of that round
+returned seven more; round 2 fixed all seven too. The third review returned
+eight more, and **this round** fixed all eight: the first two were about the
+pipeline repo, which did not carry the fixes round 2's report claimed it had;
+the rest were about this document's own numbers, citations and claims. They
+are the last section of this file, and the report has the same table.
 
 The five that are closed, in the order the first review listed them:
 
 | # | Finding | Fixed by |
 |---|---|---|
 | 1 | Only `edit` and `bash` were declared, so `task`, `webfetch` and `external_directory` were left to opencode's permissive default | `opencode.json` declares every widening key as `deny`; `project_config_denies_every_widening_permission_for_the_reviewer` asserts each one is present |
-| 4 | `cmd_review` re-derived the diff base from `HEAD`, so every review of a committed phase was handed an empty change set | `cmd_run` records the pre-phase base in `phases/<phase>/.base`; `cmd_review` reads it back |
-| 5 | The review preamble told the reviewer the checkout has no `opencode.json`, and nothing asserted the resolved permissions | The preamble states what is true; `assert_reviewer_read_only` resolves `agent.reviewer.permission` and refuses the review when it does not say `deny` |
+| 4 | `cmd_review` re-derived the diff base from `HEAD`, so every review of a committed phase was handed an empty change set | `cmd_run` records the pre-phase base in `phases/<phase>/.base`; `cmd_review` reads it back. **Re-done in round 3**: the pipeline repo did not carry it when this run started |
+| 5 | The review preamble told the reviewer the checkout has no `opencode.json`, and nothing asserted the resolved permissions | The preamble states what is true; `assert_reviewer_read_only` resolves `agent.reviewer.permission` and refuses the review when it does not say `deny`. **Re-done in round 3**, for the same reason as the second review's finding 3 |
 | 7 | "Only one project config may be shipped" was asserted only for `opencode.json` | `project_config_ships_in_exactly_one_form` asserts the `.jsonc` variants absent too |
 | 11 | `tests/unreviewed_work_ack_test.rs` still opened with a stale placeholder marker | Removed; the file says what it is |
 
@@ -25,10 +28,10 @@ The seven that the second review returned, and what each one got:
 |---|---|---|
 | 1 | `check_document` never inspected `agent.*.mode`, so the one field that decides whether `--agent reviewer` binds to the read-only agent was unpinned — the phase argued `mode` was load-bearing but closed the gap by argument, not by assertion | `check_mode` requires `mode: "primary"` for both agents and is called from `check_document`; `project_config_declares_primary_mode_for_both_agents` asserts the shipped file; `edge_reviewer_mode_subagent_is_rejected` mutates the shipped mode to `subagent`, `all` and `nonsense` in turn and requires each to fail |
 | 2 | The deny set covered 5 of opencode's permission keys; `websearch` and `skill` were undeclared and therefore allowed, while the report asserted the opposite | The shipped file now denies every widening key (11 of them); `REVIEWER_DENIED` covers them; `check_no_grants_beyond` is an allow-list — `read`, `glob`, `grep` and `list` may be allowed, everything else must deny |
-| 3 | The report said the dispatch preamble no longer claimed the checkout had no `opencode.json`, but the request handed to the reviewer still said so | The preamble in `rbops/dispatch.sh` was corrected, the audit contract's header said the same thing and was corrected too, and the pipeline's own smoke suite now ASSERTS the request: it must name the shipped config, must not claim there is none, and must name the denied keys |
+| 3 | The report said the dispatch preamble no longer claimed the checkout had no `opencode.json`, but the request handed to the reviewer still said so | The preamble in `rbops/dispatch.sh` was corrected, the audit contract's header said the same thing and was corrected too, and the pipeline's own smoke suite now ASSERTS the request: it must name the shipped config, must not claim there is none, and must name the denied keys. **Re-done in round 3**: when this run started the pipeline repo still carried the stale claim in three files, and this round's review request carried it verbatim |
 | 4 | Three irreconcilable accountings of one change set | Every number in the report now names the commit it is measured against, and both numstats are pasted in full |
 | 5 | The pasted `verify.sh` output was not the output for the tree being shipped | The gate was re-run after the last edit to these documents and the fresh output is pasted, with one sentence about the drift that pasting it creates |
-| 6 | The "a third tool granted to the reviewer" case listed `write`, which is not an opencode permission key | The case now uses opencode's own keys: `webfetch`, `websearch`, `skill`, `lsp`, `todowrite` and the `*` wildcard |
+| 6 | The "a third tool granted to the reviewer" case listed `write`, which is not an opencode permission key | The case now uses opencode's own keys: `webfetch`, `websearch`, `skill`, `lsp` and `todowrite` — plus `*`, which is **not** a schema key either but is kept on purpose: it pins the allow-list's own edge, that the list is closed, so a key opencode does not even have is refused |
 | 7 | The checks required every permission value to be a bare string, though opencode accepts the object form for most keys | `permission_action` reads both shapes, and only for the keys opencode's schema types as rules; `edge_a_permission_object_form_is_rejected_or_accepted` covers both branches |
 
 The three that were about this phase's own paperwork — the impossible test
@@ -145,8 +148,11 @@ The pipeline's own `rbops/opencode.json` declared its `reviewer` agent with
 mode `subagent` and `webfetch` allowed. That file is not in the project's
 resolution path — the review runs with `--dir` at the project checkout, which
 is its own Git root — but it is the same footgun in the same repository, and
-the phase's argument applies to it as much as to the project's file, so it
-now declares `mode: "primary"` and the same eleven denies.
+the phase's argument applies to it as much as to the project's file, so
+**round 3** changed it to declare `mode: "primary"` and the same eleven
+denies. (Round 2's delivery of this findings file said round 2 had already
+made that change. It had not — the pipeline repo carried the old block when
+this run started.)
 
 The same grep is the reason the test module's doc comment was wrong: there is
 no `--agent verifier` anywhere in `rbops/`. The gates run as scripts
@@ -232,33 +238,53 @@ pipeline had committed the phase's work. `git diff "$base"..HEAD` is
 therefore empty for every phase whose work was committed, and the review
 request's file list and diff sections were both blank.
 
-Measured on the smoke suite's fixture, before and after:
+Measured on the smoke suite's fixture, before and after — the same fixture,
+the same run, the only difference being which base the review uses:
 
 ```
-# before — the file list and the committed diff are both empty
+# before — the committed section is empty, so the reviewer is handed nothing
 ### File list (always complete — content below may be capped)
-```
-```
-```
-## 1. Committed changes (1c596cd5522bb57e8ece0321e7d3c877947e3f24..HEAD)
-```diff
-```
 
-# after
-### File list (always complete — content below may be capped)
 ```
 19	0	phases/phase-001/REPORT.md
 16	0	src/vm.rs
-5	0	target/debug/rb
 ```
 
-## 1. Committed changes (e3eb6ea201fd1d835373431ae5276b66ecce4a40..HEAD)
+## 1. Committed changes (7180e154491812e5b0cab6f8751a1cf08fa82100..HEAD)
 
 ```diff
-diff --git a/phases/phase-001/REPORT.md b/phases/phase-001/REPORT.md
-new file mode 100644
+```
+
+# after — the recovered work is in the diff
+### File list (always complete — content below may be capped)
+
+```
+6	0	src/vm.rs
+5	0	target/debug/rb
+11	0	tests/resumed_probe.rs
+19	0	phases/phase-001/REPORT.md
+16	0	src/vm.rs
+```
+
+## 1. Committed changes (b5c5d69aa68f6f456a282b3a8bb402435a7059b3..HEAD)
+
+```diff
+diff --git a/src/vm.rs b/src/vm.rs
+index 3e082d1..c79f5ff 100644
+--- a/src/vm.rs
++++ b/src/vm.rs
+@@ -1 +1,7 @@
+ fn placeholder() {}
++// recovered work from attempt 1
++pub fn recovered_fn() -> u8 { 7 }
++pub fn recovered_fn2() -> u8 { 8 }
++pub fn recovered_fn3() -> u8 { 9 }
++pub fn recovered_fn4() -> u8 { 10 }
++pub fn recovered_fn5() -> u8 { 11 }
 ...
 ```
+
+(The SHAs are the fixture's own — a fresh temporary clone per run.)
 
 `cmd_run` already captured the right base — it captures it *before* any
 resume merge, "so the gate judges the phase's END STATE" — and then threw it
@@ -398,7 +424,7 @@ directory's mode before using it.
 ## A transient shallow-history reading that was not a defect
 
 `edge_phase_078_commits_are_ancestors_of_head_not_absent`
-(`tests/unreviewed_work_ack_test.rs:556`) failed on that same first run with
+(`tests/unreviewed_work_ack_test.rs:571`) failed on that same first run with
 "history is shallow and completing the clone did not make it complete". It passed
 on every subsequent run, in isolation and in the full suite, and the repository
 is not shallow:
@@ -410,7 +436,7 @@ $ ls .git/shallow
 ls: cannot access '.git/shallow': No such file or directory
 ```
 
-`is_shallow()` at `tests/unreviewed_work_ack_test.rs:281` shells out to that
+`is_shallow()` at `tests/unreviewed_work_ack_test.rs:296` shells out to that
 exact command, so the only reading consistent with the panic is a moment when
 the answer was `true`. Recorded because it is what the first output said, and
 because "the audit refused to measure a truncated history" is a message that
@@ -451,3 +477,115 @@ action **or** an object of pattern → action) and five — `todowrite`,
 `PermissionActionConfig`, a bare action and nothing else. That split is why
 the checker accepts the object form for some keys and refuses it for the
 others.
+
+## Round 3: two ways the shipped file could reach past the agent it is about
+
+The suite that round 2 left behind was strong about the *reviewer's*
+permissions and weak about the file's *reach*. opencode deep-merges the
+project config over the global one, per key, so two shapes of a project config
+move a permission for an agent the file does not declare — and neither was
+pinned by any assertion:
+
+| # | Hole | Now |
+|---|---|---|
+| 1 | A **top-level `permission` block** in the project config applies to every agent that declares no block of its own — including `build`, the agent every phase's implementer runs as. The shipped file has none, and the report said so, but nothing asserted it: `check_document` only refused a top-level `default_agent`. | `check_document` refuses a top-level `permission` block, and `project_config_declares_no_top_level_permission_block` asserts the shipped file has none. `edge_a_top_level_permission_block_is_rejected` drives the rule. |
+| 2 | An **agent this file does not own** — `build` above all — would replace the global block for that name, because the project config is consulted first. The report claimed "the file declares no `build` agent", and nothing asserted it: `check_document` looked up `reviewer` and `verifier` and never looked at the *set* of names. | `check_agent_set` refuses any agent outside `{reviewer, verifier}`, and `project_config_declares_exactly_the_two_pipeline_agents` asserts the shipped map holds exactly those two. `edge_an_agent_this_file_does_not_own_is_rejected` drives the rule with `build` and `auditor`. |
+
+A third, smaller, hole was closed at the same time: the shipped file names
+the schema it was validated against (`$schema`), and nothing asserted it —
+`project_config_declares_the_schema_it_is_validated_against` does now. The
+URL is the one the file was checked against in the section above; a change to
+it is a change to the schema the file claims to satisfy, and it should fail
+loudly rather than silently stop being the schema.
+
+Measured, by mutating the shipped file and re-running the suite:
+
+```
+$ # a `build` agent added
+test project_config_declares_exactly_the_two_pipeline_agents ... FAILED
+test project_config_ships_at_the_repository_root ... FAILED
+test result: FAILED. 25 passed; 3 failed; 0 ignored
+
+$ # a top-level `permission` block added
+test project_config_declares_no_top_level_permission_block ... FAILED
+test project_config_ships_at_the_repository_root ... FAILED
+test result: FAILED. 19 passed; 9 failed; 0 ignored
+
+$ # `$schema` removed
+test project_config_declares_the_schema_it_is_validated_against ... FAILED
+test result: FAILED. 27 passed; 1 failed; 0 ignored
+```
+
+The file was restored from `target/tmp/opencode.json.bak` and confirmed
+byte-for-byte (`cmp` → identical, `git diff -- opencode.json` → empty)
+before the gate run.
+
+## Round 3: the acknowledgement sequence, seventh time
+
+| delivery | commit carrying this phase's work | what the entry had to become |
+|---|---|---|
+| 7 | `10f40c6a437ea44032e639616e40ff7bd1027a3f` | **added**: the list this run inherited named every matching commit in the history except this one, which is the commit that carried round 2's work |
+
+The repair is the same one line as before, and the same reason it is
+structural: the pipeline commits the agent's work and only then asks the next
+run to acknowledge the commit it just made, so the SHA cannot be written by
+the run that produces the work. The list is again exactly the set of matching
+commits in `git log HEAD`, measured both ways:
+
+```
+$ grep -oE '\("[0-9a-f]{40}"' tests/unreviewed_work_ack_test.rs | tr -d '("' | sort -u > ack.txt
+$ git log --format='%H%x09%s' HEAD \
+    | awk -F'\t' '{s=tolower($2); if (index(s,"checkpoint")||index(s,"resume phase-")) print $1}' \
+    | sort -u > head.txt
+$ diff ack.txt head.txt && echo IDENTICAL
+IDENTICAL
+```
+
+## Round 3: the shallow-history reading, again
+
+The first run of `unreviewed_work_ack_test` in this round failed with
+
+```
+history is shallow and completing the clone did not make it complete: the
+audit refuses to read a truncated `git log HEAD`, because a truncated log
+reads as a clean one. Run `git fetch --unshallow` first.
+```
+
+and every run after it passed, in isolation and in the full suite. The
+repository is not shallow:
+
+```
+$ git rev-parse --is-shallow-repository
+false
+$ ls .git/shallow
+ls: cannot access '.git/shallow': No such file or directory
+```
+
+`is_shallow()` at `tests/unreviewed_work_ack_test.rs` shells out to exactly
+that command, so the only reading consistent with the panic is a moment when
+the answer was `true`. Round 2 recorded the same thing and it is recorded
+again here, because the message is one a reader should not dismiss without
+saying so. Nothing in the phase changed the repository's history, and the
+full suite is green with 1924 passing tests.
+
+## Round 3: the third review's eight findings
+
+The third review's findings were all about **claims** — about this file, about
+`REPORT.md`, and about the pipeline repo. Two of them were the serious kind:
+the report said the pipeline's half of the contract was shipped, and it was
+not. The pipeline repo is a separate repository, and the round-2 changes to it
+were not in it when this run started.
+
+| # | Finding | What this round did |
+|---|---|---|
+| 1 | The report claimed the stale "the checkout has no `opencode.json`" statement had been removed from the review request and was gated by the pipeline's smoke suite. The request handed to that reviewer still carried it, verbatim, and named no shipped config and no denied keys | Found the claim where it actually lived: `grep -rn "has no opencode.json" rbops/` matches `rbops/agents/reviewer.md`, `rbops/agents/verifier.md` and `rbops/agents/auditor.md`, and the dispatch preamble said the same thing. All four are corrected. The pipeline's own `reviewer` agent block is now `mode: "primary"` with the eleven denies. The smoke suite asserts the request's text — it must name the shipped config, must not claim there is none, must name the denied keys — and each of those assertions was checked against the old text, where it fails. The three assertions were also run against the **real** request this checkout produces, and it passes them. |
+| 2 | The pasted `git diff 10f40c6 --numstat` block and the `diff substance` figure the gate reports disagreed by one line | The block is re-pasted from the final tree and the figure refreshed to the same sum. The report says, once, that pasting the number moves it, and that is still true. |
+| 3 | The acknowledgement entry's `+2055/-2, 5 files` could not be reconciled with the report's two numstats | The entry is right: `git show --numstat 10f40c6` gives exactly that. The report's *bases* section was the thing that was wrong — it did not say that `10f40c6`'s first parent is `b21821d`, so `git show` (which measures against the parent) and a diff against `64390ff` looked like two accountings of one change set. The bases section now names `b21821d` and says what each of the five commits measures. |
+| 4 | The report said this round changed the pipeline's own `opencode.json` in one place and that this round changed nothing outside this repository in another | **This round changed the pipeline repo**, and both places now say so. The pipeline section carries the real diff, and the round-2 review records say the pipeline half was re-done rather than inherited. |
+| 5 | This file's round-3 section closed with "1919 passing tests" while the report said 1924 | Restated as 1924, the figure the suite reports. 1919 was the count before this round's five new tests were written. |
+| 6 | A test's doc comment claimed "opencode refuses to start on a config that fails it" — stronger than the phase's own measurement, which found the same build accepted an unknown top-level key with exit 0 | The doc comment now states the measured rule: value validation is enforced at startup, total schema conformance is not. |
+| 7 | A test's doc comment claimed `*` is one of opencode's permission keys | `*` is not a schema key — the schema types fifteen, and `*` is not among them; in opencode's resolved ruleset it is a *pattern* on a wildcard rule. The doc comment says so, and says why the case is kept anyway: it pins the allow-list's closed edge. The two documents that repeated the claim are corrected too. |
+| 8 | Two citations in this file pointed at the wrong lines | `edge_phase_078_commits_are_ancestors_of_head_not_absent` is at `tests/unreviewed_work_ack_test.rs:571`; `is_shallow()` is at `tests/unreviewed_work_ack_test.rs:296`. Both corrected. |
+
+None of the eight was fixed by weakening a gate, deleting a test or moving a
+threshold. The fourteen new smoke checks are new assertions, not relaxed ones.
