@@ -245,30 +245,28 @@ the same run, the only difference being which base the review uses:
 # before — the committed section is empty, so the reviewer is handed nothing
 ### File list (always complete — content below may be capped)
 
-```
 19	0	phases/phase-001/REPORT.md
 16	0	src/vm.rs
-```
 
 ## 1. Committed changes (7180e154491812e5b0cab6f8751a1cf08fa82100..HEAD)
 
-```diff
 ```
 
+```
 # after — the recovered work is in the diff
 ### File list (always complete — content below may be capped)
 
-```
 6	0	src/vm.rs
 5	0	target/debug/rb
 11	0	tests/resumed_probe.rs
 19	0	phases/phase-001/REPORT.md
 16	0	src/vm.rs
+
 ```
 
+```
 ## 1. Committed changes (b5c5d69aa68f6f456a282b3a8bb402435a7059b3..HEAD)
 
-```diff
 diff --git a/src/vm.rs b/src/vm.rs
 index 3e082d1..c79f5ff 100644
 --- a/src/vm.rs
@@ -566,7 +564,9 @@ that command, so the only reading consistent with the panic is a moment when
 the answer was `true`. Round 2 recorded the same thing and it is recorded
 again here, because the message is one a reader should not dismiss without
 saying so. Nothing in the phase changed the repository's history, and the
-full suite is green with 1924 passing tests.
+full suite is green: **1934 passed; 0 failed; 0 ignored** across 70 test
+binaries as of round 5 (1924 at round 3; the document suite's ten tests are
+the difference — eight of them at round 4, two more at round 5).
 
 ## Round 3: the third review's eight findings
 
@@ -589,3 +589,148 @@ were not in it when this run started.
 
 None of the eight was fixed by weakening a gate, deleting a test or moving a
 threshold. The fourteen new smoke checks are new assertions, not relaxed ones.
+
+## Round 4: the preflight's invisible `## Tests added`, and the eighth treadmill payment
+
+This run inherited round 3's delivery committed at `HEAD` (`d23068b`) plus
+uncommitted work from an interrupted attempt. Three facts were measured before
+anything was changed.
+
+**1. The preflight failure reproduces against the committed report.**
+`report missing section: Tests added` was reported against `REPORT.md` as
+`HEAD` carries it, and the cause is a fence-pairing disagreement:
+
+```
+$ git show HEAD:phases/phase-084/REPORT.md | <fence scan>
+ambiguous fence inside open block (strict): [(559, 'diff')]
+'## Tests added' line: [655]
+"'## Tests added' inside a code block under naive reading": 655
+```
+
+Round 3's report opened a plain fence and, inside it, a fence with the info
+string `diff` at line 559. CommonMark closes a fence only on a backtick run
+with no info string, so to a strict reader line 559 is content; to a reader
+that treats every fence-looking line as a boundary it is a boundary. The
+pairings differ by one from there on, and `## Tests added` (line 655),
+`## Gates`, `## Invariants touched` and `## Known gaps / follow-ups` end up
+inside a code block for the second reader — invisible to the scanner that
+reported the gap. The inherited edit removes the nested fences; both readings
+now pair the same regions. It is pinned by `tests/report_markdown_test.rs`,
+which fails on the old shape and on an unterminated fence, and accepts a
+balanced document.
+
+**2. The acknowledgement sequence, eighth time.** With the inherited work
+stashed, the suite's own selector reported the mirror image of round 3's
+failure:
+
+```
+unreviewed-work commits selected: 33 | acknowledged: 33 | unacknowledged: 1 |
+  stale entries: 1 | UNACKNOWLEDGED:
+  d23068bf4160c14463f4a6af7479b824b4f33429	resume phase-084: adopt preserved work
+  | STALE: 10f40c6a437ea44032e639616e40ff7bd1027a3f
+test result: FAILED. 12 passed; 1 failed
+```
+
+| delivery | commit carrying this phase's work | what the entry had to become |
+|---|---|---|
+| 8 | `d23068bf4160c14463f4a6af7479b824b4f33429` | **repointed**: round 3's entry for `10f40c6` went stale — `git merge-base --is-ancestor 10f40c6a437ea44032e639616e40ff7bd1027a3f HEAD` exits 1 — and `d23068b`, which this history does carry, was unacknowledged. Figures re-measured from `git show --numstat d23068b`: `+2722/-2`, 5 files, none under `src/` |
+
+The inherited edit is the repair, and it is the same one-line repair described
+above; no assertion moved. The fix that would end the treadmill is unchanged
+too and still belongs to the dispatcher: write the line at commit time, where
+the SHA is known.
+
+**3. The inherited test file was not rustfmt-clean.**
+`cargo fmt --all -- --check` as found failed with one diff, in the untracked
+`tests/report_markdown_test.rs` at line 75 (a method chain split across
+lines). `cargo fmt --all` fixed it. That reformat was **not** round 4's only
+edit to that file: round 4 also **added three tests** to it —
+`edge_a_rejected_document_produces_an_error_not_a_panic`,
+`edge_an_empty_document_is_accepted` and
+`edge_a_document_without_code_blocks_is_accepted` — which took it from the
+**283 lines with 5 tests** it was inherited at to the **331 lines with 8
+tests** it shipped with.
+
+## Verification note for round 4
+
+The gates for round 4 are in `REPORT.md`'s Gates table, refreshed from this
+run's own runs. The pipeline's smoke suite was not re-run this run: the
+pipeline repo lives outside this checkout and this run was instructed not to
+inspect it, so its last-measured state (227 checks, round 3) is reported as
+such rather than as this run's result. **Round 5 re-ran it**, against the
+committed pipeline change: 230 checks, green.
+
+## Round 4: the gate's two off-tree measurements
+
+**The bare `verify.sh` invocation reads a different report than this
+checkout's.** Without `RBOPS_ROOT`/`RBOPS_PROJECT_DIR` set to this checkout,
+the gate's first line is
+`PASS /home/runner/work/rbops/rbops/phases/phase-084/REPORT.md exists` — a
+path one directory above this working directory — and the section checks run
+against that copy. Measured: with this checkout's `REPORT.md` emptied to zero
+bytes, that invocation still passes `What changed`, `Gates` and `Known gaps`
+and still fails `Tests added`, so the three headings are being found in the
+parent copy and the fourth is not — the same single failure the preflight
+reported at dispatch. The round-3 environment (`RBOPS_ROOT`,
+`RBOPS_PROJECT_DIR`, `RBOPS_PHASES`, `RBOPS_BASELINE`, `RBOPS_BASE_REF`)
+points the gate at this checkout, and then all four sections pass. The
+pipeline side of this — why the default root resolves one level up — belongs
+to the pipeline repo; nothing in this checkout can change it.
+
+**The policy's diff loses a new file's intent-to-add entry mid-run.** The
+test-policy section counts new `#[test]` functions from the diff. A new,
+untracked file enters the diff only through `git add -N`, and the entry does
+not survive a run: a watcher printing `git ls-files -s
+tests/report_markdown_test.rs` every 15 seconds holds one line for the first
+~165 seconds of a verify run and zero for every sample after, and verify with
+the entry gone reports `0 rust` for the quota, no `edge_*`, and no
+failure-asserting test (that run: `target/tmp/v_full2.log`) — three failures
+that are entirely a measurement artifact: the same eight tests ran in the
+suite (that round: `1932 passed`) the whole time. Keeping the entry present with a
+background `git add -N` loop for the duration of the run turns exactly those
+three lines green (the passing run: `target/tmp/v_final.log`), with no file
+content changed and no check weakened. After the pipeline harvests the file
+into a commit the loop and the entry are both unnecessary: the file is
+tracked and every later diff sees it.
+
+## Round 5: the review of round 4's delivery, and what it took
+
+The review of round 4's delivery raised eight findings — one BLOCKER, three
+MAJOR, four MINOR. All eight are fixed. None of them was fixed by weakening a
+gate, deleting a test, or moving a threshold.
+
+| # | Severity | Finding | What this round did |
+|---|---|---|---|
+| 1 | BLOCKER | The report's headline claim — that the review request says the checkout has a config instead of claiming it has none — was false: the request this round's reviewer received carried the stale sentence verbatim, and the inlined `rbops/agents/reviewer.md` header still said the checkout "has no opencode.json", while `opencode.json` sat at the checkout root with `mode: "primary"` and the eleven denies. Round 4 changed nothing in the pipeline repo, and round 3's fix had lived only in that repo's uncommitted working tree, so it did not survive | The pipeline-side change was made again and **committed in the pipeline repo** as `267f9a2` (`rbops/dispatch.sh`, `rbops/smoke.sh`, the three agent contracts, the pipeline's own `opencode.json`, `.gitignore`). The request the pipeline builds *today* is pasted in `REPORT.md`, and the pipeline's smoke suite was re-run against the commit: 230 checks, green, against 215 before it |
+| 2 | MAJOR | The section test asserted only that some line starts with the heading, so a report that wrapped `## Tests added` in a properly closed fence passed it — while the fence-aware scanner still could not see the heading | `missing_sections()` computes the fenced regions under both readings and requires each required section to start a line **outside every code block**. `edge_a_section_heading_inside_a_code_block_is_not_a_section` drives it, and the section test itself was measured red against a report with the heading wrapped in a fence |
+| 3 | MAJOR | The inherited-state row and the "What changed" row said the test file's only edit was `cargo fmt --all`, while the file carried eight tests and this file's own round-4 section repeated the claim | Both rows now name the growth: 283 lines with 5 tests inherited, 331 lines with 8 tests shipped, with the three added tests named — in `REPORT.md` and in the round-4 section of this file |
+| 4 | MAJOR | This file said the suite was green with **1929** passing tests while `REPORT.md` said **1932** | Both now say the figure the suite reports today — **1934**, ten of them in the document suite — and this file says which round each historical figure belongs to |
+| 5 | MINOR | The report called two inline-fixture tests "red-first tests … which failed against `HEAD`'s committed report"; neither reads the report | The red-first guard is named as what it is: `phase_084_delivery_documents_are_unambiguous_markdown`, the one that reads `HEAD`'s committed report and fails against it |
+| 6 | MINOR | The Known-gaps bullet said **seven** deliveries had paid the acknowledgement treadmill and named `10f40c6` | It now says **eight**, names `d23068b`, and says which delivery is next |
+| 7 | MINOR | The edge-case matrix had no row for the document checker's empty, singleton, boundary and malformed inputs | The matrix maps those four classes to the tests that cover them |
+| 8 | MINOR | The fence fix made quoted review-request artifacts lossy: the request's own closing fence was consumed as the outer fence's terminator, so the paste no longer reproduced the artifact | The naive fence reading now requires the closing fence to be **at least as long** as the one it closes, which every markdown reader requires anyway. The artifacts are pasted verbatim again, inside four-backtick fences, and `edge_a_longer_outer_fence_may_hold_a_shorter_inner_fence` pins the rule |
+
+### The shape of finding 1, and why it recurred
+
+The finding is not that the pipeline's code was wrong. It was that the
+pipeline's code was **never delivered**: round 3 made the change in the
+pipeline repo's working tree, and a working tree is not a delivery. The
+pipeline commits its own state, and it commits the paths it knows about;
+`rbops/dispatch.sh`, `rbops/smoke.sh` and the pipeline's `opencode.json` were
+not among them, so a change to them that was never committed simply stopped
+existing. Round 4 read the report, believed it, and changed nothing there.
+
+So the fix is not "make the change again" — it is "make the change again, and
+put it in the repo's history", which is what `267f9a2` is. The two halves of
+the contract are now in one place each: the file that declares the reviewer's
+permissions is this checkout's `opencode.json`, and the dispatcher that reads
+it is the pipeline's `dispatch.sh`, committed.
+
+### The other thing this round measured
+
+The pipeline's own suite is not a project test and does not run in
+`cargo test`, so the phase's gate table has to say which of the two numbers
+belongs to which suite. It does: 1934 across 70 binaries for this repository,
+230 checks for the pipeline's, and the commit that carries the second one is
+named.
+

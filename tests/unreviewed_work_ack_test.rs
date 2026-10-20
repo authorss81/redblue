@@ -83,9 +83,11 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // that commit cannot be written here by the agent that produced the work --
     // it can only be written by the run that finds it in HEAD's history. The
     // parked deliveries of phase-084 named their own commit's SHA here
-    // (`48d5bf0`, `c1ebb59`), and both went stale the moment main moved past
-    // them; the entries are gone for that reason, and the commits themselves
-    // are still on their own branches, not on HEAD.
+    // (`48d5bf0`, `c1ebb59`, `10f40c6a`), and each went stale the moment main
+    // moved past it; the entries are gone for that reason, and the commits
+    // themselves are still on their own branches, not on HEAD. The entry below
+    // therefore names the commit this history actually carries, re-measured
+    // from `git show --numstat` of that commit rather than carried over.
     ("25e9b68d7529459ac0638f208d3e153681f80e32", "resume phase-020: adopt preserved work. Carries unreviewed code (+333/-0, 1 file, all outside src/). Deliberately not rewritten: published history is immutable under AGENTS.md 1.6."),
     ("11b9fe2fc7d790068459f9554affa26f15af6a45", "resume phase-021: adopt preserved work. Carries unreviewed code (+3353/-1, 5 files, +223 lines under src/). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("4c45731b08b8f347beac5f46506456065aebc33e", "resume phase-021: adopt preserved work, the second of two. Carries unreviewed code (+690/-173, 6 files, +48 lines under src/). Deliberately not rewritten; a list keyed on phase number would silently tolerate this one, so it is keyed on the SHA."),
@@ -118,7 +120,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // `opencode.json`, the phase's own suite and its report; no file under
     // src/ is in it. Deliberately not rewritten: published history is immutable
     // under AGENTS.md 1.6.
-    ("10f40c6a437ea44032e639616e40ff7bd1027a3f", "resume phase-084: adopt preserved work. Carries unreviewed code (+2055/-2, 5 files, none under src/ - the repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the phase's own test suite tests/agent_permissions_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
+    ("d23068bf4160c14463f4a6af7479b824b4f33429", "resume phase-084: adopt preserved work. Carries unreviewed code (+2722/-2, 5 files, none under src/ - the repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the phase's own test suite tests/agent_permissions_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. It replaces the `10f40c6a` entry this history does not contain: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -248,7 +250,7 @@ const MEASURED: &[(&str, &str)] = &[
         "resume phase-062",
     ),
     (
-        "10f40c6a437ea44032e639616e40ff7bd1027a3f",
+        "d23068bf4160c14463f4a6af7479b824b4f33429",
         "resume phase-084",
     ),
 ];
