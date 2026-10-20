@@ -2,11 +2,20 @@
   "$schema": "https://opencode.ai/config.json",
   "agent": {
     "reviewer": {
-      "description": "Read-only reviewer for a redblue pipeline phase. Reviews the phase diff and emits findings; may not edit files or run commands.",
+      "description": "Read-only reviewer for a redblue pipeline phase. Reviews the phase diff and emits findings; may not edit files, run commands, fetch the web, launch subagents, or touch paths outside the checkout.",
       "mode": "primary",
       "permission": {
         "edit": "deny",
-        "bash": "deny"
+        "bash": "deny",
+        "task": "deny",
+        "todowrite": "deny",
+        "skill": "deny",
+        "lsp": "deny",
+        "question": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "doom_loop": "deny",
+        "external_directory": "deny"
       }
     },
     "verifier": {

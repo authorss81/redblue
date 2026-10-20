@@ -50,8 +50,11 @@
 //! entries that name a commit this history does not contain, so a list of SHAs
 //! that satisfy nothing cannot pass by looking thorough.
 
-// Minimal replacement for an invalid placeholder that introduced a syntax error
-// TODO: replace with real assertions that exercise the intended behavior.
+// What this file now is: the audit described above, written as assertions
+// rather than as prose. The acknowledgement list below is data, the selector
+// that picks the commits out of the history is a function, and the tests at the
+// bottom are what make a commit that no reviewer saw impossible to leave
+// unrecorded.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
