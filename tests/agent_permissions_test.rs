@@ -1,0 +1,917 @@
+//! The opencode configuration the pipeline's agents are resolved out of.
+//!
+//! `rbops` launches the reviewer as `opencode --agent reviewer`, and the
+//! implementer as `--agent build`. opencode resolves agent definitions from the
+//! project config first — `./opencode.json` at the working directory, walked up
+//! to the worktree root — and only then from `~/.config/opencode/opencode.json`,
+//! with the project deep-merged over the global. Before this file existed the
+//! checkout declared no `agent` key anywhere in that path, so neither name
+//! resolved and both agents silently ran as the global `default_agent: build`,
+//! whose `edit` and `bash` are `allow`. The reviewer is contractually
+//! read-only; a permissions gap that makes it writable is invisible to every
+//! gate, because nothing the gate runs asks the reviewer to write something.
+//!
+//! Two things bind `--agent reviewer` to this file's agent, and both are
+//! asserted here:
+//!
+//! - the **permission block**, which decides what the reviewer may do; and
+//! - the **mode**, which decides whether the name resolves to this agent at
+//!   all. opencode binds `--agent <name>` to a *primary* agent: a name that
+//!   resolves to a subagent makes opencode print `agent "reviewer" is a
+//!   subagent, not a primary agent. Falling back to default agent` and run the
+//!   default agent instead — here `build`, whose `edit` and `bash` are
+//!   `allow`. A permission block that is never bound is not a permission
+//!   block.
+//!
+//! `agent.verifier` is declared here, but no `--agent verifier` exists in
+//! `rbops` today — the pipeline runs its gates as a script, not as an agent. It
+//! is declared because a dispatcher that runs a phase's gates as an agent must
+//! resolve to *these* permissions rather than to the global build agent, and
+//! because the declaration is what makes that wiring a one-word change instead
+//! of a second permissions hole. The tests below pin the declaration; they do
+//! not claim the pipeline launches it.
+//!
+//! These tests read the shipped file and assert its contents. That is the whole
+//! claim they can make: the opencode config schema is documented at
+//! <https://opencode.ai/config.json>, and the resolution order above is
+//! documented in opencode's configuration reference
+//! (<https://opencode.ai/docs/config>, section "Locations") and in the
+//! `customize-opencode` skill opencode ships (section "Where files live").
+//! A test can prove the file says the right thing; it cannot prove which file
+//! opencode opened. What it *can* do is fail the moment a `deny` is dropped,
+//! an agent is renamed, a mode is changed, or a `default_agent` is quietly
+//! reintroduced to repoint the implementer agent.
+
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+/// The two tools whose permissions this phase exists to pin, per agent.
+const TOOLS: [&str; 2] = ["edit", "bash"];
+
+/// Every permission key the reviewer must deny, and why each one is named.
+///
+/// The list is opencode's own key set. The schema types `AgentConfig.permission`
+/// with `read`, `edit`, `glob`, `grep`, `list`, `bash`, `task`,
+/// `external_directory`, `todowrite`, `question`, `webfetch`, `websearch`,
+/// `lsp`, `doom_loop` and `skill`; every one of them that is not a read-only
+/// tool is here.
+///
+/// - `edit` covers `write`, `edit` and `apply_patch` — one key, not three.
+/// - `bash` is the shell the reviewer has no business running.
+/// - `task` is what stops the reviewer from delegating to a subagent, and the
+///   built-in `general` subagent has full tool access.
+/// - `webfetch` and `websearch` are the two ways out of the checkout: one is
+///   granted by the global config, the other by opencode's permissive default.
+/// - `skill` loads a skill file into the reviewer's context. A skill is
+///   instructions the reviewer then follows, and it can be fetched from disk
+///   or from a URL — a grant, not a read.
+/// - `lsp` runs language-server queries. The reviewer has no use for it and no
+///   reason to hold it.
+/// - `question` asks a human. A pipeline review has no human to ask, and the
+///   answer would be the only way to widen the reviewer.
+/// - `todowrite` writes to the session, not to the tree — but it is still a
+///   grant, and the reviewer is granted nothing it does not need.
+/// - `doom_loop` is opencode's repeated-call guard. It defaults to `ask`, and
+///   the pipeline runs `opencode run` with nobody to answer a prompt, so it is
+///   denied outright: the guard blocks the repeated call instead of waiting
+///   for an answer that will never come.
+/// - `external_directory` is the one the global config grants as
+///   `{"**": "allow"}`.
+///
+/// opencode's defaults are permissive ("Most permissions default to `allow`"),
+/// so a key that is not declared is a key that is allowed.
+const REVIEWER_DENIED: [&str; 11] = [
+    "edit",
+    "bash",
+    "task",
+    "todowrite",
+    "skill",
+    "lsp",
+    "question",
+    "webfetch",
+    "websearch",
+    "doom_loop",
+    "external_directory",
+];
+
+/// The permission keys the reviewer may keep: the read-only tools its job
+/// needs, and nothing else.
+///
+/// The shipped file does not declare them. opencode already allows `read`,
+/// `glob` and `grep` by default, and declaring `read: "allow"` would be an
+/// *widening* rather than a statement of intent: opencode's default `read`
+/// rules deny `.env` files, and an agent-level `read: "allow"` is appended
+/// after them, so it would win the last-match and re-allow them.
+const REVIEWER_ALLOWED: [&str; 4] = ["read", "glob", "grep", "list"];
+
+/// The permission keys whose schema type is the bare action only.
+///
+/// opencode types the rest of the keys as `PermissionRuleConfig`, which is
+/// either a bare action or an object of pattern → action. These five are typed
+/// as the action alone, so an object of patterns is not a value opencode can
+/// apply to them.
+const STRING_ONLY_KEYS: [&str; 5] = [
+    "todowrite",
+    "question",
+    "webfetch",
+    "websearch",
+    "doom_loop",
+];
+
+/// The mode an agent must declare to be selectable as `--agent <name>`.
+const PRIMARY_MODE: &str = "primary";
+
+/// The project config filename opencode looks for at the working directory.
+const CONFIG_FILE: &str = "opencode.json";
+
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn config_path() -> PathBuf {
+    project_root().join(CONFIG_FILE)
+}
+
+/// A path under the build directory that is guaranteed not to exist, so the
+/// missing-file case is exercised without touching the filesystem.
+fn absent_path() -> PathBuf {
+    let path = project_root().join("target/tmp/agent_permissions_absent.json");
+    assert!(
+        !path.exists(),
+        "{} must not exist for this test to mean anything",
+        path.display()
+    );
+    path
+}
+
+/// Name a JSON value's type in an error message, so "wrong shape" and "wrong
+/// value" do not read the same in a failing gate.
+fn kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+/// The action a permission value applies, or the reason it does not resolve.
+///
+/// opencode accepts two shapes for a permission value: a bare action
+/// (`"deny"`), and an object of pattern → action (`{"**": "deny"}`). The
+/// object form is the same rule as the bare one when every pattern in it
+/// carries the same action, and it is the only form opencode's schema allows
+/// for `read`, `edit`, `glob`, `grep`, `list`, `bash`, `task`,
+/// `external_directory`, `lsp` and `skill`. A mixed object is not one action —
+/// it denies some patterns and allows others — so it is rejected here rather
+/// than read as whichever action happened to come first.
+fn permission_action<'a>(key: &str, value: &'a Value) -> Result<&'a str, String> {
+    match value {
+        Value::String(action) => Ok(action.as_str()),
+        Value::Object(patterns) => {
+            if STRING_ONLY_KEYS.contains(&key) {
+                return Err(format!(
+                    "takes a bare action: opencode's schema types `{key}` as one, and an object \
+                     of patterns is not a value it can apply"
+                ));
+            }
+            let mut action: Option<&str> = None;
+            for (pattern, value) in patterns {
+                let value = value.as_str().ok_or_else(|| {
+                    format!(
+                        "the pattern {pattern:?} must be a string action, found {}",
+                        kind(value)
+                    )
+                })?;
+                match action {
+                    None => action = Some(value),
+                    Some(previous) if previous == value => {}
+                    Some(previous) => {
+                        return Err(format!(
+                            "the patterns disagree: {previous:?} and {value:?} — a mixed object is \
+                             not one action"
+                        ))
+                    }
+                }
+            }
+            action.ok_or_else(|| "an empty object grants nothing and is not an action".to_string())
+        }
+        other => Err(format!("must be a string action, found {}", kind(other))),
+    }
+}
+
+/// Assert one agent holds `action` for every tool in [`TOOLS`].
+fn check_agent(agents: &Map<String, Value>, name: &str, action: &str) -> Result<(), String> {
+    let agent = agents.get(name).ok_or_else(|| {
+        format!("`agent.{name}` is not declared: --agent {name} resolves to nothing here")
+    })?;
+    let permissions = agent.get("permission").ok_or_else(|| {
+        format!("`agent.{name}.permission` is not declared: {name} would inherit the global permission block")
+    })?;
+    let permissions = permissions
+        .as_object()
+        .ok_or_else(|| format!("`agent.{name}.permission` must be an object keyed by tool name"))?;
+    for tool in TOOLS {
+        let value = permissions.get(tool).ok_or_else(|| {
+            format!("`agent.{name}.permission.{tool}` is not declared: {name} would inherit `permission.{tool}` for {tool}")
+        })?;
+        let found = permission_action(tool, value)
+            .map_err(|error| format!("`agent.{name}.permission.{tool}` {error}"))?;
+        if found != action {
+            return Err(format!(
+                "`agent.{name}.permission.{tool}` is {found:?}, expected {action:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Require an agent to declare `mode: "primary"`.
+///
+/// `--agent <name>` names a TOP-LEVEL agent. opencode resolves the name and,
+/// when the agent it finds is a subagent, prints `agent "reviewer" is a
+/// subagent, not a primary agent. Falling back to default agent` and runs the
+/// default agent instead — which here is `build`, whose `edit` and `bash` are
+/// `allow`. The permission block would then be read and never applied, so the
+/// mode is as load-bearing as the permissions it guards.
+fn check_mode(agents: &Map<String, Value>, name: &str) -> Result<(), String> {
+    let agent = agents
+        .get(name)
+        .ok_or_else(|| format!("`agent.{name}` is not declared"))?;
+    let mode = agent.get("mode").ok_or_else(|| {
+        format!("`agent.{name}.mode` is not declared: --agent {name} binds nothing without it")
+    })?;
+    let found = mode.as_str().ok_or_else(|| {
+        format!(
+            "`agent.{name}.mode` must be a string mode, found {}",
+            kind(mode)
+        )
+    })?;
+    if found != PRIMARY_MODE {
+        return Err(format!(
+            "`agent.{name}.mode` is {found:?}, expected {PRIMARY_MODE:?}: --agent {name} names a \
+             top-level agent, and opencode binds the name to a primary one"
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a grant to the read-only agent for any tool outside the allowed set.
+///
+/// The reviewer is read-only in full, so the permission block is an
+/// ALLOW-LIST: [`REVIEWER_ALLOWED`] may be allowed and every other key must
+/// deny. A third key granted beside the pinned ones — `websearch`, `skill`,
+/// `lsp`, `todowrite` — is a reviewer that can act, and
+/// [`check_agent`] looks up exactly [`TOOLS`], so it would never visit them.
+/// The list is what makes the rule checkable in the other direction too: a key
+/// that is not on it cannot be granted, whether it is one opencode documents
+/// today or one it adds tomorrow.
+fn check_no_grants_beyond(agents: &Map<String, Value>, name: &str) -> Result<(), String> {
+    let permissions = agents
+        .get(name)
+        .and_then(|agent| agent.get("permission"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("`agent.{name}.permission` must be an object"))?;
+    for (tool, value) in permissions {
+        let found = permission_action(tool, value)
+            .map_err(|error| format!("`agent.{name}.permission.{tool}` {error}"))?;
+        if REVIEWER_ALLOWED.contains(&tool.as_str()) {
+            if found != "allow" {
+                return Err(format!(
+                    "`agent.{name}.permission.{tool}` is {found:?}: {name} needs {tool} to do its job"
+                ));
+            }
+        } else if found != "deny" {
+            return Err(format!(
+                "`agent.{name}.permission.{tool}` is {found:?}: {name} is read-only, so only {} may \
+                 be granted to it",
+                REVIEWER_ALLOWED.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Require every key in [`REVIEWER_DENIED`] to be present AND to deny.
+///
+/// This is the check the other two cannot make. [`check_agent`] looks up
+/// exactly [`TOOLS`], and [`check_no_grants_beyond`] visits only the keys that
+/// ARE present — so a key that was never declared passes both. An undeclared
+/// key is not denied by the file: opencode's defaults are permissive and the
+/// global config grants `webfetch` and `external_directory`, so the key comes
+/// back as allowed.
+fn check_reviewer_denies(agents: &Map<String, Value>, name: &str) -> Result<(), String> {
+    let permissions = agents
+        .get(name)
+        .and_then(|agent| agent.get("permission"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("`agent.{name}.permission` must be an object"))?;
+    for tool in REVIEWER_DENIED {
+        let value = permissions.get(tool).ok_or_else(|| {
+            format!(
+                "`agent.{name}.permission.{tool}` is not declared: opencode's defaults are \
+                 permissive, so an undeclared key is an ALLOWED key"
+            )
+        })?;
+        let found = permission_action(tool, value)
+            .map_err(|error| format!("`agent.{name}.permission.{tool}` {error}"))?;
+        if found != "deny" {
+            return Err(format!(
+                "`agent.{name}.permission.{tool}` is {found:?}, expected \"deny\""
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The whole contract, as one fallible check, so a failure names the exact key
+/// that is wrong instead of reporting a pile of assertions.
+fn check_document(text: &str) -> Result<(), String> {
+    let root: Value = serde_json::from_str(text)
+        .map_err(|error| format!("{CONFIG_FILE} is not valid JSON: {error}"))?;
+    let root = root
+        .as_object()
+        .ok_or_else(|| format!("{CONFIG_FILE} must be a JSON object, found {}", kind(&root)))?;
+    if let Some(agent) = root.get("default_agent") {
+        return Err(format!(
+            "{CONFIG_FILE} declares `default_agent`: {}. Every other agent invocation falls back to it, and the implementer agent must stay the one opencode chooses for itself.",
+            agent
+        ));
+    }
+    let agents = root.get("agent").ok_or_else(|| {
+        format!(
+            "{CONFIG_FILE} declares no `agent` key: --agent reviewer resolves to the global config"
+        )
+    })?;
+    let agents = agents.as_object().ok_or_else(|| {
+        format!(
+            "`agent` must be an object keyed by agent name, found {}",
+            kind(agents)
+        )
+    })?;
+    check_agent(agents, "reviewer", "deny")?;
+    check_agent(agents, "verifier", "allow")?;
+    check_mode(agents, "reviewer")?;
+    check_mode(agents, "verifier")?;
+    check_reviewer_denies(agents, "reviewer")?;
+    check_no_grants_beyond(agents, "reviewer")?;
+    Ok(())
+}
+
+/// [`check_document`] on a file, with the path in every message.
+fn check_file(path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("{} cannot be read: {error}", path.display()))?;
+    check_document(&text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Read the shipped config, with a message that says what to do about it.
+fn shipped_config() -> Value {
+    let path = config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "{} is missing or unreadable ({error}). opencode resolves a project agent from this file \
+             before ~/.config/opencode/opencode.json; without it --agent reviewer falls through to \
+             the global default_agent, and the `verifier` declaration is lost with it.",
+            path.display()
+        )
+    });
+    serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("{} is not valid JSON: {error}", path.display()))
+}
+
+/// The file the pipeline actually reads is at the root, where opencode looks
+/// first, and not under `.opencode/agent/` — a path this project's gate treats
+/// as forbidden.
+#[test]
+fn project_config_ships_at_the_repository_root() {
+    let path = config_path();
+    assert!(path.is_file(), "{} must exist as a file", path.display());
+    assert_eq!(
+        path.parent(),
+        Some(project_root().as_path()),
+        "{} must sit at the repository root, where opencode looks before the global file",
+        path.display()
+    );
+    assert!(
+        !project_root().join(".opencode/agent").join(CONFIG_FILE).exists(),
+        "the config must not live under .opencode/agent/, which is a forbidden path for this project"
+    );
+    assert!(
+        !project_root().join(".opencode").join(CONFIG_FILE).exists(),
+        "only one project config may be shipped: a second copy under .opencode/ is not consulted"
+    );
+    check_file(&path)
+        .expect("the shipped opencode.json must satisfy the agent permission contract");
+}
+
+/// Only one project config may be shipped, in any of the forms opencode reads.
+///
+/// opencode looks for the project config as `opencode.json`, then
+/// `opencode.jsonc`, then `.opencode/opencode.json`, then
+/// `.opencode/opencode.jsonc`, walking up from the working directory to the
+/// worktree root. A second copy in a `.jsonc` form sits in the very same
+/// resolution path, so opencode would consult it and this suite — which reads
+/// `opencode.json` by name — would never see it.
+#[test]
+fn project_config_ships_in_exactly_one_form() {
+    for relative in [
+        "opencode.jsonc",
+        ".opencode/opencode.json",
+        ".opencode/opencode.jsonc",
+        ".opencode/agent/opencode.json",
+        ".opencode/agent/opencode.jsonc",
+    ] {
+        let path = project_root().join(relative);
+        assert!(
+            !path.exists(),
+            "{} must not exist: only one project config may be shipped, and opencode reads the \
+             .jsonc variants too",
+            path.display()
+        );
+    }
+}
+
+/// The reviewer's widening permissions are denied, not merely unmentioned.
+///
+/// opencode's defaults are permissive and the global config this project
+/// merges with grants `webfetch` and `external_directory`, so a key the
+/// project config leaves out is a key the reviewer gets. Each one is asserted
+/// by name, because the failure has to name the key that came back allowed.
+#[test]
+fn project_config_denies_every_widening_permission_for_the_reviewer() {
+    let agents = shipped_config()
+        .get("agent")
+        .and_then(Value::as_object)
+        .expect("`agent` must be an object keyed by agent name")
+        .clone();
+    check_reviewer_denies(&agents, "reviewer")
+        .expect("the reviewer must deny every permission key that could widen it");
+    let permissions = agents
+        .get("reviewer")
+        .and_then(|agent| agent.get("permission"))
+        .and_then(Value::as_object)
+        .expect("`agent.reviewer.permission` must be an object");
+    for tool in REVIEWER_DENIED {
+        let value = permissions
+            .get(tool)
+            .expect("the reviewer must declare every widening permission");
+        let action = permission_action(tool, value)
+            .unwrap_or_else(|error| panic!("`agent.reviewer.permission.{tool}` {error}"));
+        assert_eq!(
+            action, "deny",
+            "`agent.reviewer.permission.{tool}` must be \"deny\""
+        );
+    }
+}
+
+/// All four permission values, read straight out of the file: `reviewer` denies
+/// `edit` and `bash`, `verifier` allows both. Dropping one `deny` fails here.
+#[test]
+fn project_config_pins_reviewer_read_only_and_verifier_privileged() {
+    let agents = shipped_config()
+        .get("agent")
+        .and_then(Value::as_object)
+        .expect("`agent` must be an object keyed by agent name")
+        .clone();
+    for (name, action) in [("reviewer", "deny"), ("verifier", "allow")] {
+        let permissions = agents
+            .get(name)
+            .and_then(|agent| agent.get("permission"))
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("`agent.{name}.permission` must be an object"));
+        for tool in TOOLS {
+            assert_eq!(
+                permissions.get(tool).and_then(Value::as_str),
+                Some(action),
+                "`agent.{name}.permission.{tool}` must be {action:?}"
+            );
+        }
+    }
+}
+
+/// Both agents are declared `mode: "primary"`, which is what makes
+/// `--agent reviewer` bind to them at all.
+///
+/// opencode binds a command-line `--agent <name>` to a primary agent and
+/// falls back to `default_agent` for anything else, so a mode that says
+/// "subagent" leaves the permission block below unread and the reviewer
+/// running as the writable build agent.
+#[test]
+fn project_config_declares_primary_mode_for_both_agents() {
+    let agents = shipped_config()
+        .get("agent")
+        .and_then(Value::as_object)
+        .expect("`agent` must be an object keyed by agent name")
+        .clone();
+    for name in ["reviewer", "verifier"] {
+        check_mode(&agents, name)
+            .unwrap_or_else(|error| panic!("agent.{name} must be a primary agent: {error}"));
+        assert_eq!(
+            agents
+                .get(name)
+                .and_then(|agent| agent.get("mode"))
+                .and_then(Value::as_str),
+            Some(PRIMARY_MODE),
+            "`agent.{name}.mode` must be {PRIMARY_MODE:?}"
+        );
+    }
+}
+
+/// No `default_agent`: the implementer agent is opencode's business, and a
+/// key here could repoint it without any gate noticing.
+#[test]
+fn project_config_declares_no_default_agent() {
+    let config = shipped_config();
+    assert!(
+        !config
+            .as_object()
+            .expect("the config must be an object")
+            .contains_key("default_agent"),
+        "opencode.json must not declare `default_agent`: it would repoint the agent every phase runs as"
+    );
+}
+
+/// The absence of the file is the failure this phase fixes.
+#[test]
+fn edge_missing_config_file_is_rejected() {
+    let path = absent_path();
+    let error =
+        check_file(&path).expect_err("a config that is not there cannot pin any permission");
+    assert!(
+        error.contains("cannot be read"),
+        "the error must say the file could not be read, got: {error}"
+    );
+}
+
+/// An empty document, and a document whose `agent` block is gone: both leave
+/// `--agent reviewer` resolving to the global config.
+#[test]
+fn edge_missing_agent_key_is_rejected() {
+    for (label, text) in [
+        ("empty document", "{}"),
+        ("agent key absent", r#"{"$schema":"x"}"#),
+    ] {
+        let error = check_document(text).expect_err(&format!("{label} declares no agents"));
+        assert!(
+            error.contains("`agent` key"),
+            "{label}: the error must name the missing `agent` key, got: {error}"
+        );
+    }
+}
+
+/// Only the verifier declared is still a gap: the reviewer falls back.
+#[test]
+fn edge_missing_reviewer_is_rejected() {
+    let text = r#"{"agent":{"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#;
+    let error =
+        check_document(text).expect_err("a config with no reviewer cannot hold it read-only");
+    assert!(
+        error.contains("`agent.reviewer` is not declared"),
+        "the error must name the missing reviewer, got: {error}"
+    );
+}
+
+/// A `default_agent` in the project config is the one key that can repoint the
+/// agent every phase runs as, so it is rejected whatever it names.
+#[test]
+fn edge_default_agent_key_is_rejected() {
+    for name in ["build", "reviewer"] {
+        let mut config = shipped_config();
+        config["default_agent"] = Value::String(name.to_string());
+        let error = check_document(&config.to_string())
+            .expect_err("a `default_agent` must not be accepted, whatever it names");
+        assert!(
+            error.contains("`default_agent`"),
+            "the error must name the offending key, got: {error}"
+        );
+    }
+}
+
+/// The `agent` key present but unusable is the same failure as its absence: no
+/// name resolves.
+#[test]
+fn edge_agent_block_of_wrong_type_is_rejected() {
+    for (label, text) in [
+        ("an array of names", r#"{"agent":["reviewer","verifier"]}"#),
+        ("a bare string", r#"{"agent":"reviewer"}"#),
+    ] {
+        let error =
+            check_document(text).expect_err(&format!("`agent` holding {label} declares no agents"));
+        assert!(
+            error.contains("`agent` must be an object"),
+            "{label}: the error must explain the expected shape, got: {error}"
+        );
+    }
+}
+
+/// The verifier is declared so that a dispatcher running a phase's gates as an
+/// agent resolves to these permissions instead of the global build agent. The
+/// declaration is part of the contract even though `rbops` does not launch
+/// `--agent verifier` today.
+#[test]
+fn edge_missing_verifier_is_rejected() {
+    let text = r#"{"agent":{"reviewer":{"permission":{"edit":"deny","bash":"deny"}}}}"#;
+    let error =
+        check_document(text).expect_err("a config with no verifier cannot pin the gate runner");
+    assert!(
+        error.contains("`agent.verifier` is not declared"),
+        "the error must name the missing verifier, got: {error}"
+    );
+}
+
+/// A deny that is DELETED is as bad as a deny that is flipped: opencode's
+/// defaults are permissive, so the key comes back as allowed by inheritance
+/// rather than as denied by the file. The shipped config is mutated through a
+/// real JSON value, so the test cannot drift from the document it copies.
+#[test]
+fn edge_a_dropped_deny_key_is_rejected() {
+    for tool in REVIEWER_DENIED {
+        let mut config = shipped_config();
+        config["agent"]["reviewer"]["permission"]
+            .as_object_mut()
+            .expect("`agent.reviewer.permission` must be an object")
+            .remove(tool);
+        let error = check_document(&config.to_string())
+            .expect_err(&format!("`permission.{tool}` deleted is a deleted deny"));
+        assert!(
+            error.contains(&format!("`agent.reviewer.permission.{tool}`")),
+            "the error must name the dropped key, got: {error}"
+        );
+    }
+}
+
+/// The single most damaging edit: one `deny` becomes `allow`. The shipped file
+/// is mutated through a real JSON value, not retyped, so the test cannot drift
+/// from the document it is a copy of.
+#[test]
+fn edge_permission_flipped_to_allow_is_rejected() {
+    let config = shipped_config();
+    for (name, tool, flipped) in [
+        ("reviewer", "edit", "allow"),
+        ("reviewer", "bash", "allow"),
+        ("verifier", "edit", "deny"),
+        ("verifier", "bash", "deny"),
+    ] {
+        let mut config = config.clone();
+        config["agent"][name]["permission"][tool] = Value::String(flipped.to_string());
+        let error = check_document(&config.to_string())
+            .expect_err("a flipped permission must be caught, whatever it was flipped to");
+        assert!(
+            error.contains(&format!("`agent.{name}.permission.{tool}`")),
+            "the error must name the flipped key, got: {error}"
+        );
+    }
+}
+
+/// An agent named but granted nothing.
+#[test]
+fn edge_reviewer_without_permission_block_is_rejected() {
+    let text = r#"{"agent":{"reviewer":{"description":"read only"},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#;
+    let error = check_document(text)
+        .expect_err("a permission-less reviewer inherits whatever the global config grants");
+    assert!(
+        error.contains("`agent.reviewer.permission` is not declared"),
+        "the error must name the missing permission block, got: {error}"
+    );
+}
+
+/// A permission whose value is the wrong type is not a permission opencode can
+/// apply, and reading it as one would silently widen the reviewer.
+#[test]
+fn edge_permission_value_of_wrong_type_is_rejected() {
+    for (label, text, expected) in [
+        (
+            "boolean",
+            r#"{"agent":{"reviewer":{"permission":{"edit":true,"bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+            "must be a string action",
+        ),
+        (
+            "number",
+            r#"{"agent":{"reviewer":{"permission":{"edit":"deny","bash":0}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+            "must be a string action",
+        ),
+        (
+            "object with a non-string action",
+            r#"{"agent":{"reviewer":{"permission":{"edit":{"*":true},"bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+            "must be a string action",
+        ),
+        (
+            "object mixing two actions",
+            r#"{"agent":{"reviewer":{"permission":{"edit":{"*":"deny","/tmp/*":"allow"},"bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+            "the patterns disagree",
+        ),
+        (
+            "object granting an action the reviewer must not have",
+            r#"{"agent":{"reviewer":{"permission":{"edit":{"*":"allow"},"bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+            "`agent.reviewer.permission.edit` is \"allow\", expected \"deny\"",
+        ),
+        (
+            "null permission block",
+            r#"{"agent":{"reviewer":{"permission":null},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+            "must be an object",
+        ),
+    ] {
+        let error = check_document(text).expect_err(&format!(
+            "a {label} permission must not be read as an action"
+        ));
+        assert!(
+            error.contains(expected),
+            "{label}: the error must say {expected:?}, got: {error}"
+        );
+    }
+}
+
+/// A repeated key resolves last-wins, which for `edit` on the reviewer means a
+/// trailing `"allow"` is the one that counts. Pinned so a hand-merged file
+/// cannot hide behind the first occurrence.
+#[test]
+fn edge_duplicate_permission_key_resolves_to_the_last_value() {
+    let text = r#"{"agent":{"reviewer":{"permission":{"edit":"allow","edit":"allow","bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#;
+    let error =
+        check_document(text).expect_err("the surviving value is allow, whatever came before it");
+    assert!(
+        error.contains("`agent.reviewer.permission.edit` is \"allow\""),
+        "the error must report the value that survives, got: {error}"
+    );
+}
+
+/// The reviewer is read-only in full, not read-only for the two tools this file
+/// happens to name. A tool granted outside the allowed set is still a
+/// reviewer that can act, and every assertion above looks straight past it.
+///
+/// The keys here are opencode's own: `write` is not one of them — `edit`
+/// covers it — but `websearch`, `skill`, `lsp` and `todowrite` are, and so is
+/// the `*` wildcard that grants everything at once.
+#[test]
+fn edge_a_tool_granted_to_the_reviewer_outside_the_allowed_set_is_rejected() {
+    for tool in ["webfetch", "websearch", "skill", "lsp", "todowrite", "*"] {
+        let mut config = shipped_config();
+        config["agent"]["reviewer"]["permission"][tool] = Value::String("allow".to_string());
+        let error = check_document(&config.to_string()).expect_err(&format!(
+            "the reviewer is read-only: `permission.{tool}` must not be grantable"
+        ));
+        assert!(
+            error.contains(&format!("`agent.reviewer.permission.{tool}`")),
+            "the error must name the extra grant, got: {error}"
+        );
+    }
+}
+
+/// opencode accepts an object of pattern → action for most permission keys,
+/// and `{"**": "deny"}` denies exactly what `"deny"` denies. A config that
+/// spells the deny that way is correct and must be accepted; one that spells
+/// an ALLOW that way, or that mixes the two, must not be.
+#[test]
+fn edge_a_permission_object_form_is_rejected_or_accepted() {
+    // Accepted: the object form of a deny, on a key opencode types as a rule.
+    for key in ["external_directory", "edit", "skill", "lsp", "bash"] {
+        let mut config = shipped_config();
+        config["agent"]["reviewer"]["permission"][key] = serde_json::json!({ "**": "deny" });
+        check_document(&config.to_string()).unwrap_or_else(|error| {
+            panic!("`permission.{key}` as {{\"**\": \"deny\"}} is the deny spelled another way: {error}")
+        });
+    }
+
+    // Rejected: the same spelling of an allow is still an allow.
+    for key in ["external_directory", "edit", "skill"] {
+        let mut config = shipped_config();
+        config["agent"]["reviewer"]["permission"][key] = serde_json::json!({ "**": "allow" });
+        let error = check_document(&config.to_string()).expect_err(&format!(
+            "`permission.{key}` as {{\"**\": \"allow\"}} grants what the reviewer must not have"
+        ));
+        assert!(
+            error.contains(&format!("`agent.reviewer.permission.{key}`")),
+            "the error must name the offending key, got: {error}"
+        );
+    }
+
+    // Rejected: a mixed object denies some patterns and allows others, so it
+    // is not one action and must not be read as one.
+    let mut config = shipped_config();
+    config["agent"]["reviewer"]["permission"]["external_directory"] =
+        serde_json::json!({ "**": "deny", "/tmp/*": "allow" });
+    let error = check_document(&config.to_string()).expect_err("a mixed object is not one action");
+    assert!(
+        error.contains("the patterns disagree"),
+        "the error must say the object mixes two actions, got: {error}"
+    );
+
+    // Rejected: opencode's schema types these keys as a bare action, so an
+    // object of patterns is not a value it can apply to them at all.
+    let mut config = shipped_config();
+    config["agent"]["reviewer"]["permission"]["websearch"] = serde_json::json!({ "**": "deny" });
+    let error = check_document(&config.to_string()).expect_err("`websearch` takes a bare action");
+    assert!(
+        error.contains("takes a bare action"),
+        "the error must say the key takes a bare action, got: {error}"
+    );
+}
+
+/// The mode is what binds `--agent reviewer` to this agent at all: opencode
+/// falls back to the default agent for a subagent, and the default agent here
+/// is `build`, whose `edit` and `bash` are `allow`. The permission block would
+/// be read and never applied.
+#[test]
+fn edge_reviewer_mode_subagent_is_rejected() {
+    for mode in ["subagent", "all", "nonsense"] {
+        let mut config = shipped_config();
+        config["agent"]["reviewer"]["mode"] = Value::String(mode.to_string());
+        let error = check_document(&config.to_string()).expect_err(&format!(
+            "mode {mode:?} does not bind --agent reviewer to this agent"
+        ));
+        assert!(
+            error.contains("`agent.reviewer.mode`"),
+            "the error must name the mode, got: {error}"
+        );
+    }
+}
+
+/// A missing mode and a mode of the wrong type are the same failure as a mode
+/// that says the wrong thing: nothing binds the name.
+#[test]
+fn edge_a_missing_or_malformed_mode_is_rejected() {
+    let mut config = shipped_config();
+    config["agent"]["reviewer"]
+        .as_object_mut()
+        .expect("`agent.reviewer` must be an object")
+        .remove("mode");
+    let error =
+        check_document(&config.to_string()).expect_err("an agent with no mode binds nothing");
+    assert!(
+        error.contains("`agent.reviewer.mode` is not declared"),
+        "the error must name the missing mode, got: {error}"
+    );
+
+    let mut config = shipped_config();
+    config["agent"]["verifier"]["mode"] = Value::Bool(true);
+    let error =
+        check_document(&config.to_string()).expect_err("a mode that is not a string is not a mode");
+    assert!(
+        error.contains("`agent.verifier.mode` must be a string mode"),
+        "the error must explain the expected shape, got: {error}"
+    );
+}
+
+/// The failure channel itself, stated as an assertion: a broken document is an
+/// `Err`, never a panic and never a silently accepted file.
+///
+/// The other tests in this file call `expect_err`, which is the same assertion
+/// in a different shape. This one says it as `assert!(result.is_err())`, so the
+/// failure is visible at the assertion itself, and it checks the message is
+/// not empty — a rejection that says nothing is not an actionable rejection.
+#[test]
+fn edge_a_broken_document_is_an_err_and_not_a_panic() {
+    for (label, text) in [
+        ("empty document", "{}"),
+        ("no agent key", r#"{"$schema":"x"}"#),
+        (
+            "no reviewer",
+            r#"{"agent":{"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+        ),
+        (
+            "no verifier",
+            r#"{"agent":{"reviewer":{"permission":{"edit":"deny","bash":"deny"}}}}"#,
+        ),
+        (
+            "a flipped permission",
+            r#"{"agent":{"reviewer":{"permission":{"edit":"allow","bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#,
+        ),
+        (
+            "a reviewer that is a subagent",
+            r#"{"agent":{"reviewer":{"mode":"subagent","permission":{"edit":"deny","bash":"deny"}},"verifier":{"mode":"primary","permission":{"edit":"allow","bash":"allow"}}}}"#,
+        ),
+        ("not json at all", "not json at all"),
+    ] {
+        let result = check_document(text);
+        assert!(result.is_err(), "{label}: must be rejected, got Ok");
+        let error = result.expect_err("the failure was asserted above");
+        assert!(
+            !error.trim().is_empty(),
+            "{label}: the rejection must say what is wrong with the document"
+        );
+    }
+}
+
+/// Malformed files, including the ones a half-written checkout produces.
+#[test]
+fn edge_malformed_config_is_rejected() {
+    for (label, text) in [
+        ("empty file", ""),
+        ("truncated", r#"{"agent":{"reviewer":"#),
+        ("trailing comma", r#"{"agent":{},}"#),
+        ("byte order mark", "\u{feff}{\"agent\":{}}"),
+        ("not an object", r#"["agent"]"#),
+        ("a bare string", r#""reviewer""#),
+    ] {
+        let error =
+            check_document(text).expect_err(&format!("a {label} config must not be accepted"));
+        assert!(
+            error.contains(CONFIG_FILE) || error.contains("must be an object"),
+            "{label}: the error must say what is wrong with the file, got: {error}"
+        );
+    }
+}
