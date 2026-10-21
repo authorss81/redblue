@@ -50,8 +50,11 @@
 //! entries that name a commit this history does not contain, so a list of SHAs
 //! that satisfy nothing cannot pass by looking thorough.
 
-// Minimal replacement for an invalid placeholder that introduced a syntax error
-// TODO: replace with real assertions that exercise the intended behavior.
+// What this file now is: the audit described above, written as assertions
+// rather than as prose. The acknowledgement list below is data, the selector
+// that picks the commits out of the history is a function, and the tests at the
+// bottom are what make a commit that no reviewer saw impossible to leave
+// unrecorded.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -71,6 +74,20 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // The pipeline's resume path. Every one of these landed on HEAD carrying work
     // that no reviewer saw. Line counts are `git show --numstat`, so they can be
     // re-derived rather than trusted.
+    //
+    // A commit is listed here only while it is IN this history. The list is
+    // checked against `git log HEAD` in both directions: a commit that is in the
+    // log and not listed is unreviewed work, and a listed commit that the log
+    // does not contain is stale. Both are failures. The pipeline creates the
+    // commit that carries a phase's work *after* the agent's run, so the SHA of
+    // that commit cannot be written here by the agent that produced the work --
+    // it can only be written by the run that finds it in HEAD's history. The
+    // parked deliveries of phase-084 named their own commit's SHA here
+    // (`48d5bf0`, `c1ebb59`, `10f40c6a`), and each went stale the moment main
+    // moved past it; the entries are gone for that reason, and the commits
+    // themselves are still on their own branches, not on HEAD. The entry below
+    // therefore names the commit this history actually carries, re-measured
+    // from `git show --numstat` of that commit rather than carried over.
     ("25e9b68d7529459ac0638f208d3e153681f80e32", "resume phase-020: adopt preserved work. Carries unreviewed code (+333/-0, 1 file, all outside src/). Deliberately not rewritten: published history is immutable under AGENTS.md 1.6."),
     ("11b9fe2fc7d790068459f9554affa26f15af6a45", "resume phase-021: adopt preserved work. Carries unreviewed code (+3353/-1, 5 files, +223 lines under src/). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("4c45731b08b8f347beac5f46506456065aebc33e", "resume phase-021: adopt preserved work, the second of two. Carries unreviewed code (+690/-173, 6 files, +48 lines under src/). Deliberately not rewritten; a list keyed on phase number would silently tolerate this one, so it is keyed on the SHA."),
@@ -98,6 +115,34 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("373513e4bba22305b6967f524ea02f1daa497532", "resume phase-061: adopt preserved work. Carries unreviewed code (+2247/-22, 7 files, +1907/-22 under src/ - the REPL discoverability work: member completion after a module dot (`complete_dotted`/`split_dotted` and the bare-dot case in src/repl/completer.rs, +127), the `$EDITOR` round trip for `.edit` (`ScratchDir`, `private_scratch_dir`, `write_scratch_file`, `read_edited_block`, `edit_in`, `edit_with`, `execute_code_from` in src/repl/mod.rs), the guided tour `:tutorial` with `:hint` and the `advance_tutorial_step` walk in src/repl/mod.rs, the inline call-signature hint behind the `Hinter` hook (`signature_hint` in src/repl/editor.rs, +184/-5), `stdlib::module_members` in src/stdlib.rs (+14), and the three command rows in src/repl/commands.rs (+41)), plus this phase's REPORT.md and 29 tests). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The earlier phase-061 resume it replaces (0e84349) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     ("0647108eaf64d08d8df2f4a4338f9447ab1b4f35", "resume phase-062: adopt preserved work. Carries unreviewed code (+1231/-22, 5 files, +1231/-22 under src/ - the debug sub-REPL: `.debug` with `.watch`/`.stack`/`.locals`/`.back` (src/repl/debug_repl.rs is new, +514; the five command rows in src/repl/commands.rs, +116/-7; the session-loop wiring in src/repl/mod.rs, +446/-15), the frame-tracking fields `call_stack`, `scope_base` and `frame_writes` on `DebugEvent` in src/debugger.rs (+77) and the matching `Vm` fields and `call_user_function` bookkeeping in src/interpreter.rs (+78)). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries no production code: +1/-927 across 2 files, neither under src/ (phase-088's acknowledgement data and its bookkeeping). Acknowledged because the selector is a case-insensitive substring test on `resume phase-` and the subject merely *contains* the phrase; deliberately not rewritten."),
+    // The commit that carried THIS phase's work into the tree, found in HEAD's
+    // history by the run that inherited it. It carries the shipped
+    // `opencode.json`, the phase's own suites and its report; no file under
+    // src/ is in it. Deliberately not rewritten: published history is immutable
+    // under AGENTS.md 1.6.
+    //
+    // The pipeline re-creates this commit on every round: each delivery's
+    // commit is rebuilt on the same parent (b21821d), so the previous
+    // round's SHA leaves HEAD's ancestry the moment the next one lands. The
+    // entry therefore names the SHA this history actually carries, and the
+    // previous round's entry is gone rather than left to go stale: `scan`
+    // reports an acknowledgement naming a commit HEAD does not contain as
+    // stale, and a stale entry is a failure.
+    //
+    // The SHA below and the line counts in its reason were re-measured from
+    // `git show --numstat` of THAT commit in THIS history, not carried over
+    // from the previous round's entry.
+    //
+    // This entry is on `ACKNOWLEDGED` and DELIBERATELY not on `MEASURED`. The
+    // audit's requirement is that every unreviewed commit in the log carries
+    // an acknowledgement, and this commit is in the log, so it needs one.
+    // `MEASURED` asks a different question — "measured on a complete
+    // history" — and the delivery commit is not measured: it does not exist
+    // while the work that goes into it is being written, and the pipeline
+    // rebuilds it on the same parent on every round, so a SHA pinned there
+    // leaves `HEAD`'s ancestry the moment the next round lands and costs
+    // that round a second line for a commit nobody measured.
+    ("2f7e437f5f9cf46031457b80c0b292c8ff9bd139", "resume phase-084: adopt preserved work. Carries unreviewed code (+4719/-2, 6 files, none under src/ - the repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the phase's own suites tests/agent_permissions_test.rs and tests/report_markdown_test.rs, the acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. It replaces the `1b58178` entry this history does not contain: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -121,6 +166,21 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// Every SHA here is required to be present in the log this file reads. That is
 /// the half of the promise the other half does not make on its own: a list can
 /// satisfy itself by naming commits that no longer exist.
+///
+/// The delivery commit of the phase that owns this file is DELIBERATELY not
+/// on this list, though it is on [`ACKNOWLEDGED`]. The two lists answer
+/// different questions. `ACKNOWLEDGED` says "this commit is in the log and
+/// carries unreviewed work", and the audit needs an entry for every such
+/// commit — including the one this phase's own work arrived in, which the
+/// pipeline creates after the run that wrote the work. `MEASURED` says "this
+/// commit was MEASURED on a complete history", and the delivery commit is not
+/// one: it does not exist while the work is being written, and the pipeline
+/// re-creates it on the same parent on every round, so a SHA written here
+/// leaves `HEAD`'s ancestry the moment the next round lands. Pinning it here
+/// would make the next round pay for a commit nobody measured — and neither
+/// of the repairs the phase's own findings propose for the acknowledgement
+/// list (a commit-time dispatcher line, or a subject shape the selector
+/// misses) can repair a list that asserts the SHA's PRESENCE in the log.
 const MEASURED: &[(&str, &str)] = &[
     (
         "25e9b68d7529459ac0638f208d3e153681f80e32",
