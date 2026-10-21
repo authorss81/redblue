@@ -1308,3 +1308,343 @@ changes its default `read` rules to allow `.env` files outright, the
 reviewer's block will still say nothing about `read` and the file will be
 wrong — that is a gap about opencode's defaults, not about this file, and
 the live `opencode debug agent reviewer` measurement is what would show it.
+
+## Round 11: the last open list in the file, and the twelfth payment of the treadmill (round 11)
+
+The tree arrived with **one** red test: `unreviewed_work_in_head_history_is_acknowledged`,
+and it was the treadmill this phase has paid on every round since round 3.
+The pipeline re-creates the delivery commit on each round — `resume phase-084:
+adopt preserved work`, rebuilt on the same parent `b21821d` — so the SHA the
+previous round wrote into `ACKNOWLEDGED` (`2f7e437`) is not an ancestor of
+this history any more, while this history's resume commit (`18c0c46`) is not
+on the list. The audit reported both halves: one commit in the log that
+nothing acknowledged, and one acknowledged commit the log does not contain.
+The entry now names `18c0c46`, re-measured from `git show --numstat` of that
+commit (+4352/−2 across six files, none under `src/`), and the stale entry is
+gone rather than left to rot.
+
+**What else this round did.** The five findings the previous round's review
+returned were already fixed in the tree, so this round went looking for the
+next one — and found the same class of hole one level to the side.
+
+The file closes every level of itself but one. The top level is exactly
+`$schema` and `agent`; an agent block is exactly `description`, `mode` and
+`permission`; the reviewer's permission block is exactly the eleven keys it
+must deny. The **verifier's** permission block was still open, in both
+directions, and nothing in the suite noticed.
+
+What that allowed, concretely:
+
+- a **third key** — `external_directory`, `read`, `task`, anything — accepted
+  silently: a grant no assertion in this suite reads;
+- a **misspelling** — `bashh` — accepted silently: a grant that is dead on
+  arrival while the key it meant stays undeclared;
+- a **denial** — `external_directory: "deny"` — accepted silently, and this
+  one is the sharpest of the three. The verifier runs a phase's gates, and
+  the gates need the toolchain, and the toolchain is **outside the checkout**:
+  cargo reads `~/.cargo`, rustup keeps the compilers in `~/.rustup`. A denial
+  of `external_directory` there would stop cargo reading its own registry —
+  a way to break the gate that changes nothing the reviewer can see, and
+  breaks it in the one direction where the failure looks like a flaky test
+  rather than like a permissions hole.
+
+`check_verifier_grants` closes it: the verifier's block must declare exactly
+`edit` and `bash`, both allowed, and no other key. Seven tests came with it
+— one positive, five `edge_*`, and one that asserts a failure is produced —
+and the rule was watched to fail twice, once by removing the check from the
+checker and once by mutating the shipped file.
+
+**The completeness claim, which was only half-claimed.** "The reviewer is
+read-only" is a claim about every permission key opencode knows, and the
+suite asserted it as two independent lists — eleven keys denied by name
+(`REVIEWER_DENIED`) and four deliberately left undeclared
+(`REVIEWER_UNDECLARED`) — with nothing asserting that the two together cover
+the key set. They did cover it; now `PERMISSION_KEYS` holds the fifteen keys
+`AgentConfig.permission` is typed with and
+`project_config_accounts_for_every_permission_key_opencode_knows` asserts the
+partition. That test failed for a real reason while it was being written —
+`list` sorts before `lsp`, and the two lists had been written in the schema's
+order rather than in the sorted one — which is the shape of a test that can
+fail for the reason it claims to test.
+
+### Round 11: what this round did and did not do (round 11)
+
+**Did:** re-point the acknowledgement entry at the SHA this history carries,
+with the line counts re-measured from that commit; close the verifier's
+permission block with `check_verifier_grants`, in both directions; add
+`PERMISSION_KEYS` and the assertion that the reviewer's two lists partition
+the permission key set; add seven tests (one positive, five `edge_*`, one
+failure-asserting) and take the suite in that file from thirty-nine tests to
+forty-six.
+
+**Did not:** touch `opencode.json` — the file earlier rounds shipped is the
+file that ships, and `git diff --stat -- opencode.json` is empty; touch
+anything under `src/`; touch the pipeline repo — the run's instruction was
+not to inspect it, so no claim is made about its current contents; weaken,
+delete or re-scope a gate or a test; add an `#[ignore]`, a `// skip` or an
+`allow(clippy::`.
+
+**The gates, measured in this round.** `cargo fmt --all -- --check` clean,
+`cargo clippy --all-targets -- -D warnings` clean, `cargo test --all-targets`
+**1952 passed; 0 failed; 0 ignored**, `cargo test --doc` two doc tests, and
+`rbops/verify.sh phase-084` **VERIFY PASS** — measured twice, once against
+this checkout's own report and once against the pipeline's stale copy, which
+warns that it under-claims the count and passes.
+
+**One thing a reviewer should check.** The verifier's block is now closed in
+the same way the reviewer's is, and the reason it is closed is the opposite
+one: the verifier's block may not DENY. A reviewer who reads
+`check_verifier_grants` as "the verifier may hold nothing but `edit` and
+`bash`" will be right about the key set and wrong about the effect — the
+verifier inherits every other permission from the global config, exactly as
+the reviewer inherits the read-only ones from opencode's defaults. The rule
+closes the block in the direction that would *take a permission away*, which
+is the direction that breaks the gate.
+
+## Round 12: the review of round 11's delivery, and its three findings (round 12)
+
+The review of round 11's delivery returned **three findings — one MAJOR and
+two MINOR** — and all three are fixed in this round, the same way every
+earlier round has done it: no gate weakened, no test deleted, no threshold
+moved, no `#[ignore]`, no `// skip`, no `allow(clippy::`.
+
+### The MAJOR: the delivery commit is acknowledged by its SUBJECT now
+
+**What the finding said.** The tree this delivery commits fails the
+project's own audit test the moment the pipeline creates the delivery
+commit. `tests/unreviewed_work_ack_test.rs` pinned the delivery commit's
+**SHA** in `ACKNOWLEDGED`, and the pipeline re-creates that commit on every
+round — each delivery is squashed onto the same parent `b21821d` — so the
+SHA the previous round pinned leaves `HEAD`'s ancestry the moment the next
+one lands. The audit then reports **two** things, and both are failures: the
+new commit is unreviewed work that nothing acknowledges, and the old entry
+is stale.
+
+The reviewer could not run the pipeline's gate, so what settles it is one
+run against the committed tree. Here is that run, on a clone of this
+repository rebuilt the way the pipeline rebuilds it — a commit on `b21821d`
+whose subject is `resume phase-084: adopt preserved work`, carrying this
+round's tree, with the file as it stood before this round's fix:
+
+```
+$ git clone --quiet /home/runner/work/rbops/rbops/redblue /tmp/opencode/sim
+$ cd /tmp/opencode/sim && git checkout --quiet -b sim-delivery b21821d
+$ cp .../tests/unreviewed_work_ack_test.rs tests/
+$ git add -A && git commit -m "resume phase-084: adopt preserved work"
+$ cargo test --test unreviewed_work_ack_test unreviewed_work_in_head_history_is_acknowledged
+
+unreviewed-work commits selected: 33 | acknowledged: 33 | unacknowledged: 1 | stale entries: 1
+| UNACKNOWLEDGED: 0e39ce668bd0c696aa62b3885b4996f8cd7946df	resume phase-084: adopt preserved work
+| STALE: 2f7e437f5f9cf46031457b80c0b292c8ff9bd139
+
+test result: FAILED. 0 passed; 1 failed
+```
+
+That is the finding reproduced exactly: two failures on the tree that gets
+committed. The same clone, with this round's file, is green — all sixteen
+tests pass, including `unreviewed_work_in_head_history_is_acknowledged`.
+
+**The gate itself, run against the committed tree.** The reviewer of this
+round asked for exactly one measurement, because the report's gate number is
+otherwise a measurement of the *pre-commit* tree: a run of
+`rbops/verify.sh phase-084` against the tree the pipeline commits. Here it
+is, on a clone rebuilt the way the pipeline rebuilds it — a commit on
+`b21821d` whose subject is `resume phase-084: adopt preserved work`, with
+`18c0c46` nowhere in its ancestry:
+
+```
+$ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" \
+    RBOPS_PHASES=.../rbops/phases.json RBOPS_BASELINE=.../rbops/baseline.json \
+    RBOPS_BASE_REF=b21821d6acbc9e1bef8d9d71293bf7cee19a68f1 \
+    .../rbops/verify.sh phase-084
+  PASS diff substance: +5640 -6 (min +5)
+  PASS cargo test: 1955 passed, 0 failed
+  PASS reported test count (1955) matches actual (1955)
+
+  VERIFY PASS — phase-084
+```
+
+The audit test is inside that run: the whole suite on the committed tree is
+**1955 passed; 0 failed; 0 ignored**.
+
+**Why a SHA could not be the answer.** The delivery commit is created by the
+pipeline *after* the run that wrote the work, and it is created **again** on
+every round, on the same parent. There is therefore no SHA that can be
+written into the tree at the moment the work is written: the one that is
+right today is wrong the moment the next round lands, and the one that is
+right tomorrow does not exist yet. Twelve rounds of this phase paid that
+bill in turn — `48d5bf0`, `c1ebb59`, `10f40c6a`, `1b58178`, `2f7e437`,
+`18c0c46` — and the entry was re-pointed each time, which is the treadmill
+the phase's own findings have been describing since round 3 without closing
+it.
+
+**What is left that survives the rebuild: the subject.** The pipeline writes
+`resume <phase>: adopt preserved work` (or `… adopt WIP checkpoint`), and
+the subject does not change from round to round. So the file now pins the
+subject and resolves the SHA out of the log at audit time:
+
+- `DELIVERY_SUBJECT_PREFIX` — `resume phase-084:` — the prefix that
+  identifies this phase's own delivery commit, and nothing wider;
+- `DELIVERY_REASON` — the reason that commit is tolerated, held to the same
+  standard as every entry's (a reason that records nothing would acknowledge
+  nothing, so it goes through `validate_acknowledgements` too);
+- `delivery_acknowledgements` — reads the log, and returns the delivery
+  commit's SHA with that reason;
+- `scan` — the resolved commit joins the acknowledged set, so it is neither
+  unreviewed nor stale, and the **stale** check deliberately still looks only
+  at the pinned entries: a SHA that cannot be pinned cannot go stale.
+
+**The rule is narrow, and that is asserted.** Another phase's `resume
+phase-083: …` is still unreviewed work with nothing acknowledging it, and a
+commit that merely *mentions* this phase's delivery subject is not the
+delivery commit either — the rule anchors at the start of the subject.
+`edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule`
+says both, and `edge_a_rebuilt_delivery_commit_is_neither_unreviewed_nor_stale`
+says the rest: a rebuilt delivery commit is neither unreviewed nor stale,
+and the same log with the previous round's SHA pinned reports it as stale —
+which is the whole reason the rule pins the subject.
+
+**The rule cannot hide a commit.** It is a rule about one subject, and a
+commit whose subject does not match it is reported like any other. If the
+pipeline stopped writing that subject, the delivery commit would be reported
+as unreviewed work — loudly, not silently — and
+`edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry`
+fails if this history stops carrying a delivery commit at all.
+
+### The first MINOR: the report's own diff tables did not match the diff
+
+**What the finding said.** The report's tables did not describe the change
+set being shipped. The "this round's own diff" row for `REPORT.md` said
+`+245 −60` where the measurement is `+247 −62`, and the "delivery as a
+whole" row for the acknowledgement file said `+62 −2` where the change set
+measures `+62 −2` against `b21821d` but `+63 −3` by the reviewer's
+arithmetic. The pasted gate line `diff substance: +4870 -2` was the sum of
+the report's own table plus the two files the table did not list — the
+table was incomplete, so a reader could not reconcile the gate's number with
+the table at all.
+
+**What is true, measured.** Two things were wrong and one was a category
+error.
+
+1. The table was **incomplete**: the delivery touches six files and the
+   table listed four. `opencode.json` (+30) and `tests/report_markdown_test.rs`
+   (+453) were in the delivery and in neither table. The totals therefore did
+   not sum to the tree, and the gate's `diff substance` line could not be
+   checked against the report.
+2. The "this round's own diff" row for `REPORT.md` was **stale by two
+   lines**: the row was measured before the last two lines of the report
+   were written, and the report's own size is what the row reports.
+3. The acknowledgement file's row is a **category error, not an
+   arithmetic one**: `git diff --numstat` is computed directly between the
+   base and the tree, so the two changes do not simply add up. The round-11
+   change re-pointed one line that was *itself an addition* relative to
+   `b21821d`, so the file measures `+62 −2` against the base both before
+   and after it — the SHA changed, the line count against the base did not.
+   Adding `62 + 1` and `2 + 1` gives `63 3`, which is the sum of two
+   diffs and the numstat of neither.
+
+**What this round does about it.** Both tables now list **every** file the
+delivery touches, with the numbers re-derived from `git diff --numstat
+b21821d` and `git diff --numstat 18c0c46` at the moment the report was
+final, and the report says out loud which of those numbers is
+self-referential: `REPORT.md`'s own row reports the size of the document
+that states it, so it moves with the document. Every other row is
+re-derivable by anyone who reads the command.
+
+### The second MINOR: a test that could not detect what it claimed to detect
+
+**What the finding said.** `project_config_accounts_for_every_permission_key_opencode_knows`
+asserted `REVIEWER_DENIED ∪ REVIEWER_UNDECLARED == PERMISSION_KEYS`, and all
+three are hand-copied constants in the same file. A key opencode publishes
+tomorrow lands in neither list and the test stays green — while the test's
+own doc said "a key opencode adds tomorrow is in neither of them — and this
+is where that shows up", and the report said "a key opencode adds tomorrow
+is a key that shows up in exactly one place". Neither is true of a test that
+compares three constants with each other.
+
+The finding also measured that the enumeration is not opencode's full set:
+the resolved ruleset this phase's own report pastes contains `plan_enter *
+deny` and `plan_exit * deny`, two permission entries in none of the three
+lists. The security effect is nil — the reviewer's block is closed against
+every key outside `REVIEWER_DENIED` — but the round presented the test as
+one of its two substantive closures, and the test's name and doc made a
+guarantee it did not deliver.
+
+**What is true now, re-measured against the schema and against opencode
+itself.** The published schema types `AgentConfig.permission` as a
+`PermissionConfig`, which is an `anyOf` of a bare action and an object with
+exactly these fifteen properties:
+
+```
+$ jq -r '."$defs".PermissionConfig.anyOf | .[] | select(.properties) | .properties | keys[]' \
+    /tmp/opencode/schema.json
+bash
+doom_loop
+edit
+external_directory
+glob
+grep
+list
+lsp
+question
+read
+skill
+task
+todowrite
+webfetch
+websearch
+```
+
+`plan_enter` and `plan_exit` are not in it — `grep -c plan_enter` against
+the schema is `0` — so an agent's permission block cannot configure them,
+and opencode denies both in its own defaults (they are lines 7 and 8 of the
+resolved ruleset this phase pastes, for the reviewer and the verifier
+alike).
+
+**What this round does about it.** The test is renamed to what it asserts —
+`the_reviewers_two_lists_partition_the_permission_key_constant` — and its
+doc says what it can and cannot do: it compares three constants written out
+in the same file, so it cannot detect a key opencode publishes tomorrow,
+and what it supports is the claim it can support, that the two lists cannot
+drift apart. The "a key opencode adds tomorrow" claim is out of the doc and
+out of the report's summary, and the report says instead what the live
+measurement shows: opencode's own resolved ruleset is where a new key
+appears.
+
+The partition itself is now asserted a little harder than before: the
+declared key set is checked to be a **set** (no key twice) as well as
+partitioned, because a repeat in it would make the union equal to it while
+it was not a set at all.
+
+### Round 12: what this round did and did not do (round 12)
+
+**Did:** replace the SHA-pinned delivery entry with a subject-pinned rule
+that resolves the delivery commit out of the log, so a rebuilt delivery
+commit is neither unreviewed nor stale by construction; add three tests to
+the acknowledgement suite (two `edge_*` on fixtures and one against this
+history) and take that file from thirteen tests to sixteen; rename the
+permission-key completeness test to what it asserts and correct the claim it
+makes; re-derive both diff tables in the report from `git diff --numstat`
+and complete them with the two files they were missing; and measure the
+shipped tree against the schema and against opencode itself.
+
+**Did not:** touch `opencode.json` — the file earlier rounds shipped is the
+file that ships, and `git diff --stat -- opencode.json` is empty; touch
+anything under `src/`; touch the pipeline repo; weaken, delete or re-scope
+a gate or a test; add an `#[ignore]`, a `// skip` or an `allow(clippy::)`;
+and pin a SHA for the delivery commit anywhere, which is the one thing that
+could not be done honestly.
+
+**The gates, measured in this round.** `cargo fmt --all -- --check` clean,
+`cargo clippy --all-targets -- -D warnings` clean, `cargo test --all-targets`
+**1955 passed; 0 failed; 0 ignored**, `cargo test --doc` two doc tests, and
+`rbops/verify.sh phase-084` **VERIFY PASS**.
+
+**One thing a reviewer should check.** The delivery rule is a rule about a
+SUBJECT, and it is the only place in this phase where a commit is
+acknowledged without a SHA naming it. The narrowness is the whole safety
+argument: it matches `resume phase-084:` and nothing else, it is asserted
+against another phase's delivery subject, and a commit that merely mentions
+the subject is not covered. If a future round widens that prefix, the audit
+stops being able to tell this phase's delivery commit from anyone else's,
+and the test that says so will fail.

@@ -67,6 +67,13 @@
 //! intent — opencode's default `read` rules ask about `.env` files, and an
 //! agent-level `read: "allow"` is appended after them and wins the
 //! last-match.
+//!
+//! The verifier's block is closed the same way, in the other direction: it
+//! declares **exactly** the two tools it needs — `edit` and `bash`, both
+//! allowed — and nothing else. A third key there is a grant no assertion in
+//! this suite reads, and a denial there would take the toolchain away: the
+//! verifier runs the gates, and cargo reads `~/.cargo` while the toolchain
+//! lives in `~/.rustup`, outside the checkout.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -142,6 +149,60 @@ const REVIEWER_DENIED: [&str; 11] = [
 /// So the reviewer's permission block is exactly the eleven denied keys, and
 /// a `read`/`glob`/`grep`/`list` key in it is refused in either direction.
 const REVIEWER_UNDECLARED: [&str; 4] = ["read", "glob", "grep", "list"];
+
+/// Every permission key the published schema types a permission block with.
+///
+/// `AgentConfig.permission` is a `PermissionConfig`, which is either a bare
+/// action or an object with exactly these fifteen properties — re-measured
+/// against the schema at <https://opencode.ai/config.json>, whose
+/// `PermissionConfig` is an `anyOf` of a bare action and an object with these
+/// keys: `bash`, `doom_loop`, `edit`, `external_directory`, `glob`, `grep`,
+/// `list`, `lsp`, `question`, `read`, `skill`, `task`, `todowrite`,
+/// `webfetch`, `websearch`. The reviewer's block accounts for all of them:
+/// eleven are denied by name ([`REVIEWER_DENIED`]) and four are deliberately
+/// left undeclared ([`REVIEWER_UNDECLARED`]), because opencode already allows
+/// the read-only ones by default and declaring them would be a widening rather
+/// than a statement of intent.
+///
+/// **What this list is not.** It is not every permission opencode *resolves*.
+/// The resolved ruleset carries two entries that this list does not name —
+/// `plan_enter` and `plan_exit` — and the schema does not type them as
+/// permission keys at all (`grep -c plan_enter` against the published schema
+/// is `0`), so an agent's permission block cannot configure them. opencode
+/// denies both in its own defaults, for the reviewer and the verifier alike;
+/// this file's block is not what denies them, and nothing here claims it is.
+///
+/// The list is here so that "the reviewer is read-only" can be checked as a
+/// COMPLETE claim rather than a partial one — a complete claim **over the
+/// keys the schema types**, which is the set this file can act on at all.
+/// The two lists are not two independent sets: they are a partition of this
+/// constant.
+///
+/// **It cannot detect a key opencode publishes tomorrow.** The key set is
+/// written out here, and the schema is not read at test time, so a key
+/// published tomorrow lands in neither list and nothing in this suite says
+/// so. What the test below asserts is the partition of THIS constant, and
+/// the claim it supports is the one this file can support: every key this
+/// suite knows about is either denied by name or deliberately left
+/// undeclared. The live measurement (`opencode debug agent reviewer`) is what
+/// shows a key opencode has added.
+const PERMISSION_KEYS: [&str; 15] = [
+    "bash",
+    "doom_loop",
+    "edit",
+    "external_directory",
+    "glob",
+    "grep",
+    "list",
+    "lsp",
+    "question",
+    "read",
+    "skill",
+    "task",
+    "todowrite",
+    "webfetch",
+    "websearch",
+];
 
 /// The permission keys whose schema type is the bare action only.
 ///
@@ -540,6 +601,54 @@ fn check_reviewer_denies(agents: &Map<String, Value>, name: &str) -> Result<(), 
     Ok(())
 }
 
+/// Require the verifier's permission block to declare no key beyond the two
+/// the verifier needs.
+///
+/// The reviewer's block is closed in the direction that matters to it
+/// ([`check_reviewer_denies`] and [`check_no_grants_beyond`]). The verifier is
+/// the opposite kind of agent — it runs a phase's gates — and its block is
+/// closed in the other direction, for two reasons:
+///
+/// - a **third key** is a grant that no assertion in this suite reads, and a
+///   misspelled one (`bashh`) is a grant that is dead on arrival while the
+///   key it meant stays undeclared;
+/// - and a **denial** takes the toolchain away. The gates need the toolchain,
+///   and the toolchain is outside the checkout: cargo reads `~/.cargo` and
+///   rustup keeps the compilers in `~/.rustup`. A denial of
+///   `external_directory` here would stop cargo reading its own registry,
+///   which is a way to break the gate that changes nothing the reviewer can
+///   see.
+///
+/// Every key the block does NOT name is one the verifier inherits from the
+/// global config, which is where the rest of its permissions belong.
+fn check_verifier_grants(agents: &Map<String, Value>, name: &str) -> Result<(), String> {
+    let permissions = agents
+        .get(name)
+        .and_then(|agent| agent.get("permission"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("`agent.{name}.permission` must be an object"))?;
+    for (tool, value) in permissions {
+        // The value's shape is read first, for the reason
+        // `check_no_grants_beyond` reads it first: a value opencode cannot
+        // apply is malformed whatever key it sits under, and saying so names
+        // the more specific fault.
+        permission_action(tool, value)
+            .map_err(|error| format!("`agent.{name}.permission.{tool}` {error}"))?;
+        if !TOOLS.contains(&tool.as_str()) {
+            return Err(format!(
+                "`agent.{name}.permission.{tool}` is declared, and the verifier's block declares \
+                 only {}: a key here is a grant or a denial that no assertion in this suite \
+                 reads. The verifier runs the gates and inherits everything else from the global \
+                 config, which is where the rest of its permissions belong - and a denial here \
+                 would take the toolchain away, because cargo reads ~/.cargo and the toolchain \
+                 lives in ~/.rustup, outside the checkout.",
+                TOOLS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Require the `agent` map to hold exactly the agents this file owns.
 ///
 /// The project config is deep-merged over the global one, and the merge is
@@ -653,6 +762,7 @@ fn check_document(text: &str) -> Result<(), String> {
     check_mode(agents, "verifier")?;
     check_reviewer_denies(agents, "reviewer")?;
     check_no_grants_beyond(agents, "reviewer")?;
+    check_verifier_grants(agents, "verifier")?;
     check_agent_set(agents)?;
     check_agent_keys(agents)?;
     Ok(())
@@ -1710,4 +1820,176 @@ fn project_config_declares_only_the_own_keys_for_each_agent() {
             AGENT_KEYS.join(", ")
         );
     }
+}
+
+/// The verifier's block declares the two tools it needs, and nothing else.
+///
+/// The verifier runs a phase's gates, so it needs the shell and the editor,
+/// and it inherits everything else from the global config. A third key in its
+/// block would be a grant — or a denial — that no assertion in this suite
+/// reads, so the block is closed the way the reviewer's is.
+#[test]
+fn project_config_declares_only_the_two_tools_the_verifier_needs() {
+    let agents = shipped_config()
+        .get("agent")
+        .and_then(Value::as_object)
+        .expect("`agent` must be an object keyed by agent name")
+        .clone();
+    check_verifier_grants(&agents, "verifier")
+        .expect("the verifier's block declares the two tools it needs and nothing else");
+    let permissions = agents
+        .get("verifier")
+        .and_then(|agent| agent.get("permission"))
+        .and_then(Value::as_object)
+        .expect("`agent.verifier.permission` must be an object");
+    let mut keys: Vec<&str> = permissions.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["bash", "edit"],
+        "the verifier's block declares the two tools it needs and nothing else"
+    );
+}
+
+/// The reviewer's two permission lists partition the declared key set.
+///
+/// The eleven keys the reviewer denies by name ([`REVIEWER_DENIED`]) and the
+/// four it deliberately leaves undeclared ([`REVIEWER_UNDECLARED`]) are a
+/// partition of [`PERMISSION_KEYS`]: no key is in both lists, and no key is
+/// in neither. The key set itself is the fifteen keys the published schema
+/// types a permission block with — the set this file can act on — and the
+/// reviewer's block says something about every one of them, deliberately.
+///
+/// **What this test does not do.** It compares three constants written out in
+/// this file, so it cannot detect a permission key opencode publishes
+/// tomorrow: there is nothing here to detect it FROM. The claim it supports
+/// is therefore the one it can support — the two lists cannot drift apart,
+/// and the key set is a set — and the live measurement (`opencode debug agent
+/// reviewer`) is what shows a key opencode has added.
+#[test]
+fn the_reviewers_two_lists_partition_the_permission_key_constant() {
+    let mut declared = PERMISSION_KEYS.to_vec();
+    declared.sort_unstable();
+    let mut without_repeats = declared.clone();
+    without_repeats.dedup();
+    assert_eq!(
+        declared.len(),
+        without_repeats.len(),
+        "the declared permission key set must not name a key twice: a repeat would make the \
+         union below equal to it while it is not a set at all"
+    );
+
+    let mut accounted: Vec<&str> = REVIEWER_DENIED
+        .iter()
+        .chain(REVIEWER_UNDECLARED.iter())
+        .copied()
+        .collect();
+    accounted.sort_unstable();
+    assert_eq!(
+        accounted,
+        PERMISSION_KEYS.to_vec(),
+        "the reviewer's deny list and its undeclared list must partition the permission key set \
+         this suite declares: no key in both, no key in neither"
+    );
+}
+
+/// The verifier with no permission block at all.
+///
+/// It would inherit the global config's block — `bash: allow`, `edit: allow` —
+/// which is the same answer, but it would be the global file's answer rather
+/// than this one's, and the global file is the pipeline's to change.
+#[test]
+fn edge_a_verifier_without_a_permission_block_is_rejected() {
+    let text = r#"{"agent":{"reviewer":{"permission":{"edit":"deny","bash":"deny"}},"verifier":{"description":"runs the gates"}}}"#;
+    let error = check_document(text)
+        .expect_err("a verifier with no permission block inherits the global one instead");
+    assert!(
+        error.contains("`agent.verifier.permission` is not declared"),
+        "the error must name the missing permission block, got: {error}"
+    );
+}
+
+/// Half of the verifier's block is not enough.
+///
+/// One tool and no other: the missing one is inherited from the global config
+/// instead of being stated here, so the block says less than it means.
+#[test]
+fn edge_a_verifier_block_missing_one_of_the_two_tools_is_rejected() {
+    for missing in ["edit", "bash"] {
+        let mut config = shipped_config();
+        config["agent"]["verifier"]["permission"]
+            .as_object_mut()
+            .expect("`agent.verifier.permission` must be an object")
+            .remove(missing);
+        let error = check_document(&config.to_string()).expect_err(&format!(
+            "the verifier's block without {missing} inherits it instead"
+        ));
+        assert!(
+            error.contains(&format!("`agent.verifier.permission.{missing}`")),
+            "the error must name the missing key, got: {error}"
+        );
+    }
+}
+
+/// A third key in the verifier's block.
+///
+/// A grant here is a permission no assertion in this suite reads, and a
+/// misspelled one is a grant that is dead on arrival while the key it meant
+/// stays undeclared.
+#[test]
+fn edge_a_third_permission_declared_for_the_verifier_is_rejected() {
+    for key in ["external_directory", "read", "task", "bashh"] {
+        let mut config = shipped_config();
+        config["agent"]["verifier"]["permission"][key] = Value::String("allow".to_string());
+        let error = check_document(&config.to_string()).expect_err(&format!(
+            "the verifier's block declares only edit and bash, not {key}"
+        ));
+        assert!(
+            error.contains(&format!("`agent.verifier.permission.{key}`")),
+            "the error must name the extra key, got: {error}"
+        );
+    }
+}
+
+/// A denial in the verifier's block.
+///
+/// The verifier runs the gates, and the gates need the toolchain — which
+/// lives outside the checkout. A denial here takes the toolchain away
+/// without changing anything the reviewer can see.
+#[test]
+fn edge_a_permission_denied_for_the_verifier_is_rejected() {
+    let mut config = shipped_config();
+    config["agent"]["verifier"]["permission"]["external_directory"] =
+        Value::String("deny".to_string());
+    let error = check_document(&config.to_string())
+        .expect_err("the verifier must reach outside the checkout to run the toolchain");
+    assert!(
+        error.contains("`agent.verifier.permission.external_directory`"),
+        "the error must name the denied key, got: {error}"
+    );
+    assert!(
+        error.contains("outside the checkout"),
+        "the error must say why the verifier needs it, got: {error}"
+    );
+}
+
+/// A permission value the verifier cannot apply.
+///
+/// A value opencode cannot read as an action is malformed whatever key it sits
+/// under, and reading it as one would move the verifier without anything
+/// noticing.
+#[test]
+fn edge_a_permission_value_of_the_wrong_type_for_the_verifier_is_rejected() {
+    let mut config = shipped_config();
+    config["agent"]["verifier"]["permission"]["bash"] = serde_json::json!(7);
+    let result = check_document(&config.to_string());
+    assert!(
+        result.is_err(),
+        "a number is not an action opencode can apply, and it must come back as an error"
+    );
+    let error = result.expect_err("a number is not an action opencode can apply");
+    assert!(
+        error.contains("must be a string action"),
+        "the error must say the value is not an action, got: {error}"
+    );
 }
