@@ -166,7 +166,7 @@ window — on a shallow copy of this checkout:
 | `tests/checkpoint_ancestry_test.rs` | refused the same way, with no retry at all | **25 of 25 green** |
 | the clone the audit measured | complete (162 commits) a few seconds *after* the refusal | complete (162 commits) when the audit measured it |
 
-**The gates.** The full suite is green: **1963 passed; 0 failed; 0
+**The gates.** The full suite is green: **1967 passed; 0 failed; 0
 ignored**, across the repository's test binaries, re-measured in this round.
 `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`
 are clean, and `rbops/verify.sh phase-084` passes. No gate was weakened, no
@@ -200,6 +200,45 @@ last of those is **absorbed by the repair waiting for the clone's state**,
 not excluded, and it was measured that way — with a competing fetch holding
 `.git/shallow.lock` for twelve seconds.
 
+**This round closed the last place the file this phase ships could be read
+differently by the two readers that matter.** Every assertion in this phase's
+suite reads `opencode.json` with `serde_json`, and opencode reads it with its
+own parser — and the two are not the same parser, so the file is the one
+artifact they share and the two places they could disagree are the two places
+worth closing. The first is **JSON(C)**: opencode parses the project config
+as JSON(C), so a comment and a trailing comma are legal to it, and both were
+measured to be accepted by `opencode debug config` on this build, while
+`serde_json` refuses both. The safe direction is the strict one, so a config
+opencode would read and the suite cannot is now **refused** rather than
+half-read and agreed with by accident. The second is a **duplicate key**:
+`serde_json` resolves one to the LAST value and so does opencode — measured,
+with a config that declared `edit` twice resolving to the second one — and
+the suite now pins its half of that agreement in both directions.
+
+**And it fixed a stale error message in the phase's own audit.** Both audit
+files repair a shallow clone by attempting a fetch more than once, and both
+kept the failure of an attempt that a later attempt had already got past: the
+loop set the failure on every failing attempt and never cleared it, so a
+failed attempt followed by a **successful** one left the refusal naming the
+earlier error — sending a reader after a lock that was already free. (When
+every attempt fails, the old code named the last failing attempt, because
+each failure overwrites the last; that half was already right, and the test
+says so rather than claiming it as a change.) The refusal now names the last
+attempt's outcome, and a last attempt that did not fail names no failure at
+all.
+
+**The review of this round's delivery found five things, and all five are
+fixed.** Four of them were about the *account* — the words in this document
+and in FINDINGS.md — and one was about a test that could not fail:
+
+| Finding | Fix |
+|---|---|
+| the round-15 account of the stale failure did not match the code it quoted: it said the old code kept "the FIRST attempt's failure across the whole loop", but the quoted loop overwrites the failure on every failing attempt, so the old code named the *last* failing attempt. The real defect was a failed attempt followed by a **successful** one, where the failure was never cleared — and the test's first assertion was that "every attempt fails" case, which passes under the old code too | The account now describes the real defect, in this document and in FINDINGS.md. The test now leads with the discriminating case — a failed attempt followed by successful ones — and the half that pins "every attempt fails names the last one" is kept with a comment saying plainly that it is behaviour the old code already had. Measured: with the fix reverted, the test fails on the first half. |
+| `edge_duplicate_permission_key_resolves_to_the_last_value` declared `edit` twice with the *same* value, so the surviving value was the same under a first-wins resolution and under a last-wins one and the assertion held either way | The fixture now declares `"edit":"deny","edit":"allow"`, so only a last-wins resolution reports `"allow"`. Measured: with the map a first-wins parser would build, the test fails on the value the error reports. |
+| the Gates section said 1967 in its table and 1963 in the sentence under it — the previous round's tree, before this round's four tests landed — and an earlier round's gate paste (1955/1963) was carried twice | The sentence says 1967, and the duplicated paste is gone. |
+| three `diff substance` numbers were quoted for one gate run against one base (`+471 −61`, `+405 −13` and the round table's `+322 −6`), and nothing in the document reconciled them | One measurement is quoted now — `git diff --numstat 1d73e8c` against the tree that ships — and it is the number in the preflight paste, the number in the gate paste, and the total in this round's table. |
+| the `opencode.json` row said `+30 −0` and, in the same row, that the file's diff was empty — and the table's own base (`b21821d`) makes that diff non-empty, because the file is new there | The row names the base the emptiness is measured against (`1d73e8c`), and says that the `+30 −0` is against `b21821d`, where the file is new. |
+
 **Where the history of this phase lives.** Rounds 1–12 wrote their accounts
 into earlier revisions of this document and into
 `phases/phase-084/FINDINGS.md`, which keeps the running audit section by
@@ -214,25 +253,25 @@ before the resume merge (`b21821d`):
 
 | File | Lines | What |
 |---|---|---|
-| `opencode.json` | +30 −0 | The shipped project config: the reviewer's eleven denies, the verifier's two allows, no `default_agent`, no top-level `permission` block. Unchanged since round 8 — `git diff --stat -- opencode.json` is empty. |
-| `tests/agent_permissions_test.rs` | +1995 −0 | The whole suite: the permission contract, the mode, the shipping state of the file, the top-level allow-list, the agent-level allow-list, the reviewer's exact-key rule and the `git` failure message (round 10), the verifier's exact-key rule (round 11), and the permission-key partition test, renamed to what it asserts (round 12). |
+| `opencode.json` | +30 −0 | The shipped project config: the reviewer's eleven denies, the verifier's two allows, no `default_agent`, no top-level `permission` block. Unchanged since round 8 — `git diff --stat 1d73e8c -- opencode.json` is empty. (Against this table's own base `b21821d` the same file is `+30 −0`, because it is a *new* file there; the two numbers are about two different bases, and neither of them is a change to the file.) |
+| `tests/agent_permissions_test.rs` | +2069 −0 | The whole suite: the permission contract, the mode, the shipping state of the file, the top-level allow-list, the agent-level allow-list, the reviewer's exact-key rule and the `git` failure message (round 10), the verifier's exact-key rule (round 11), and the permission-key partition test, renamed to what it asserts (round 12). |
 | `tests/report_markdown_test.rs` | +453 −0 | The phase's own two delivery documents must read the same way under every markdown reader, and the report must still carry the four sections the gate and the preflight look for. |
-| `tests/unreviewed_work_ack_test.rs` | +929 −19 | The acknowledgement data, the delivery-commit rule that replaced the SHA-pinned entry the pipeline's per-round rebuild made stale (round 12), the serialised history repair that stopped the audit failing on the first run in a shallow checkout (round 13), and — **this round** — the repair that waits for the clone's state instead of counting attempts, with the serialisation measured inside the repair's own locked region. |
-| `tests/checkpoint_ancestry_test.rs` | +265 −36 | **This round**: the sibling audit file, which had the identical lost-lock false refusal with no retry at all, given the same repair — the same policy, the same state watch, the same refusal — and a test of its own for the contended case. |
-| `phases/phase-084/FINDINGS.md` | +1947 −0 | The running audit, one tagged section per round, the newest last. |
-| `phases/phase-084/REPORT.md` | +1484 −0 | This document: the delivery in the tree now, with the measured evidence and the citation preserved. **Self-referential** — see the note below the table. |
-| **Total, excluding this document** | **+5619 −55** | The sum of the six rows above it. |
-| **Total, including this document** | **+7103 −55** | The sum of all seven rows: this is the gate's own `diff substance` line for this base, and it moves with this document. |
+| `tests/unreviewed_work_ack_test.rs` | +999 −19 | The acknowledgement data, the delivery-commit rule that replaced the SHA-pinned entry the pipeline's per-round rebuild made stale (round 12), the serialised history repair that stopped the audit failing on the first run in a shallow checkout (round 13), and — **this round** — the repair that waits for the clone's state instead of counting attempts, with the serialisation measured inside the repair's own locked region. |
+| `tests/checkpoint_ancestry_test.rs` | +335 −36 | **This round**: the sibling audit file, which had the identical lost-lock false refusal with no retry at all, given the same repair — the same policy, the same state watch, the same refusal — and a test of its own for the contended case. |
+| `phases/phase-084/FINDINGS.md` | +2127 −0 | The running audit, one tagged section per round, the newest last. |
+| `phases/phase-084/REPORT.md` | +1600 −0 | This document: the delivery in the tree now, with the measured evidence and the citation preserved. **Self-referential** — see the note below the table. |
+| **Total, excluding this document** | **+6013 −55** | The sum of the six rows above it. |
+| **Total, including this document** | **+7613 −55** | The sum of all seven rows: this is the gate's own `diff substance` line for this base, and it moves with this document. |
 
 **How to re-derive every number above, and which one cannot be re-derived by
 reading this document.** Each row is `git diff --numstat <base> -- <path>`,
 run against the tree as it stands when this document was final: the six
-non-report rows against `b21821d`, and the table below against `d425e2b`
-(this round's parent, the resume commit). One number is self-referential —
-`REPORT.md`'s own row is this document's length in the delivery, so stating
-it changes it; the row is the number as of the final edit, and the totals
-move with it. Every other row is re-derivable by anyone who reads the
-command.
+non-report rows against `b21821d`, and this round's table below against
+`1d73e8c` (this round's parent, the resume commit). One number is
+self-referential — `REPORT.md`'s own row is this document's length in the
+delivery, so stating it changes it; the row is the number as of the final
+edit, and the totals move with it. Every other row is re-derivable by anyone
+who reads the command.
 
 **The two totals and the gate's own number are the same measurement.** The
 gate's `diff substance` line is the raw numstat sum over every changed file
@@ -252,14 +291,27 @@ against the base did not. Adding the two diffs — `62 + 1` and `2 + 1` —
 gives `+63 −3`, which is the sum of two diffs and the numstat of neither.
 The numstat is always measured directly, never summed.
 
-**This round's own diff**, measured against the commit the dispatcher
-captured before this run (`d425e2b`, the resume commit):
+**This round's own diff (round 15)**, measured against the commit the
+dispatcher captured before this run (`1d73e8c`, the resume commit):
+
+| File | Lines | What |
+|---|---|---|
+| `tests/agent_permissions_test.rs` | +75 −1 | The two ways the file this phase ships could be read differently by the suite and by opencode: a config opencode would read and the suite cannot (JSON(C): a comment, a trailing comma) is refused, and a duplicate key resolves to the last value — the same way opencode resolves it. And the fixture of the older duplicate-key test now declares two *different* values, so its assertion discriminates the resolution order instead of holding under either. |
+| `tests/unreviewed_work_ack_test.rs` | +73 −3 | The refusal names the **last** attempt's outcome and not a stale one, plus the test that drives it — with the case that discriminates, a failed attempt followed by successful ones. |
+| `tests/checkpoint_ancestry_test.rs` | +73 −3 | The same refusal and the same test in the sibling audit file. |
+| `phases/phase-084/FINDINGS.md` | +180 −0 | This round's section of the running audit, and the account of the review that corrected it. |
+| `phases/phase-084/REPORT.md` | — | This document, updated for the round. Self-referential, as above. |
+| **Total, excluding this document** | **+401 −7** | The sum of the four rows above it. |
+| **Total, including this document** | **+622 −112** | The sum of all five rows above it: the same measurement as the gate's `diff substance` line for this base, and the number this document quotes everywhere it quotes it. |
+
+**Round 14's own diff**, measured against the commit the dispatcher captured
+before that run (`d425e2b`, the resume commit):
 
 | File | Lines | What |
 |---|---|---|
 | `tests/unreviewed_work_ack_test.rs` | +589 −13 | The repair that waits for the clone's **state**: `RepairPolicy` (attempts, delay, ceiling, poll), `wait_for_completion`, the refusal that names the repair's own failure, the counter inside the repair's locked region (`REPAIRS_IN_FLIGHT`, `REPAIRS_PEAK`, `REPAIRS_ENTERED`), `ensure_full_history_with`, and six tests. |
-| `tests/checkpoint_ancestry_test.rs` | +265 −36 | The same repair in the sibling audit file, which had the lost-lock false refusal with no retry at all: `RepairPolicy`, `wait_for_completion`, the same refusal, and a test for the contended case. |
-| `phases/phase-084/FINDINGS.md` | +297 −0 | This round's section of the running audit. |
+| `tests/checkpoint_ancestry_test.rs` | +265 −36 | **Round 14**: the sibling audit file, which had the identical lost-lock false refusal with no retry at all, given the same repair — the same policy, the same state watch, the same refusal — and a test of its own for the contended case. |
+| `phases/phase-084/FINDINGS.md` | +297 −0 | Round 14's section of the running audit. |
 | `phases/phase-084/REPORT.md` | +354 −42 | This document, updated for the round. Self-referential, as above. |
 | **Total** | **+1505 −91** | The sum of the four rows above it, and the gate's own `diff substance` line for this base: `PASS diff substance: +1505 -91 (min +5)`. |
 
@@ -440,6 +492,30 @@ same build accepted an unknown top-level key with exit 0, so "the schema is
 enforced at startup" is a claim this report does not make. The shipped file
 is schema-valid either way, so nothing about this phase depends on the
 difference.
+
+**How opencode PARSES the file, and how the suite parses it.** The same
+build's own error message says it: `Config file at … is not valid JSON(C)`.
+opencode reads the project config as **JSON(C)**, and this suite reads it
+with `serde_json`, which is plain JSON. The two parsers are not the same
+parser, and the file is the one artifact both of them read — so the two
+places they could disagree are the two places this round closed. Both were
+measured on this build, not inferred:
+
+| In the file | opencode | `serde_json` | What the suite does |
+|---|---|---|---|
+| a `//` line comment | accepted (`opencode debug config` exits 0) | refused | refused, and the refusal says the file is not plain JSON |
+| a `/* */` block comment | accepted | refused | refused, the same way |
+| a trailing comma | accepted | refused | refused, the same way |
+| a duplicate key | resolved to the **last** value | resolved to the **last** value | resolved to the last value, and the rule is pinned by a test in both directions |
+| trailing garbage after the document | refused (`not valid JSON(C)`, exit 1) | refused | refused |
+
+The direction is the strict one on purpose. A file the suite cannot read is
+a file whose contents the suite cannot vouch for, so it is refused outright
+rather than half-read and agreed with by accident; and where the two parsers
+*do* agree — the duplicate key — the suite pins its half of that agreement
+rather than leaving it to the accident of two implementations happening to
+match. The shipped file is plain JSON and declares no duplicate key, so
+neither question arises for it; the tests are what keep it that way.
 
 **The permission shapes the checker accepts.** The same skill states the
 rules the suite enforces:
@@ -776,9 +852,9 @@ test result: FAILED. 0 passed; 1 failed
 
 The same clone with this round's file is green: all sixteen tests pass.
 
-**And the gate itself, run against the committed tree.** The review of this
-round asked for exactly one measurement, because the report's gate number is
-otherwise a measurement of the *pre-commit* tree: a run of
+**And the gate itself, run against the committed tree.** The review of the
+previous round asked for exactly one measurement, because the report's gate
+number is otherwise a measurement of the *pre-commit* tree: a run of
 `rbops/verify.sh phase-084` against the tree the pipeline commits. Here it
 is, on a clone rebuilt the way the pipeline rebuilds it — a commit on
 `b21821d` whose subject is `resume phase-084: adopt preserved work`, with
@@ -796,37 +872,90 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" \
   VERIFY PASS — phase-084
 ```
 
-The audit test is inside that run: the whole suite on the committed tree is
-**1955 passed; 0 failed; 0 ignored**.
+**Those numbers are the previous round's, and they are about that clone
+and that base** — `b21821d`, and the tree as it stood at that round's commit
+— so they are not this round's measurement. This round's measurement is the
+one under *Gates*, and it is a single number: `git diff --numstat 1d73e8c`
+against the tree that ships.
 
-**The fix.** What survives the rebuild is the **subject**, so the subject is
-what the file pins:
+**The gate reads its report from the pipeline's copy, not from this
+checkout's**: `dispatch.sh` harvests `phases/phase-084/REPORT.md` out of the
+project and into the pipeline root before the gate runs. The run under
+*Gates* points `RBOPS_ROOT` at this checkout, so it checks the report **in
+the tree**; after the harvest the pipeline reads the same text from its own
+copy, and the check comes out the same.
 
-- `DELIVERY_SUBJECT_PREFIX` — `resume phase-084:` — identifies this phase's
-  own delivery commit and nothing wider;
-- `DELIVERY_REASON` — the reason that commit is tolerated, held to the same
-  standard as every entry's (it goes through `validate_acknowledgements`
-  too, because a reason that records nothing would acknowledge nothing);
-- `delivery_acknowledgements` — reads the log and returns the delivery
-  commit's SHA with that reason;
-- `scan` — the resolved commit joins the acknowledged set, so it is neither
-  unreviewed nor stale. The **stale** check deliberately still looks only at
-  the pinned entries: a SHA that cannot be pinned cannot point at nothing.
+**The diff-based half, re-run against the shipping tree.** The cheap half of
+the gate — the part that reads the diff and the report, and the part that
+needs no build — was re-run against the tree as it ships, and it is green.
+Its `diff substance` line is the same measurement as the full gate's, because
+both read the same diff:
 
-**The rule cannot hide a commit.** It is a rule about one subject. Another
-phase's `resume phase-083: …` is still unreviewed work with nothing
-acknowledging it, and a commit that merely *mentions* this phase's delivery
-subject is not the delivery commit either — the rule anchors at the start of
-the subject. If the pipeline stopped writing that subject, the delivery
-commit would be reported as unreviewed work, loudly, and
-`edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry` fails
-if this history stops carrying a delivery commit at all.
+```
+$ RBOPS_PREFLIGHT=1 RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" \
+    RBOPS_PHASES="$PWD/../rbops/phases.json" RBOPS_BASELINE="$PWD/../rbops/baseline.json" \
+    RBOPS_BASE_REF=1d73e8c ../rbops/verify.sh phase-084
 
-**What this round did not do.** It did not pin a SHA anywhere else for the
-delivery commit, and it did not add the delivery commit to `MEASURED` — that
-list asserts a SHA's *presence* in the log, which the pipeline's per-round
-rebuild breaks by construction, so the commit is deliberately off it and the
-reason is written beside the list.
+== manifest
+  PASS phase phase-084 is declared in /home/runner/work/rbops/rbops/rbops/phases.json
+
+== report
+  PASS /home/runner/work/rbops/rbops/redblue/phases/phase-084/REPORT.md exists
+  PASS section: What changed
+  PASS section: Tests added
+  PASS section: Gates
+  PASS section: Known gaps
+  PASS report has at least one real evidence row
+
+== diff hygiene
+  PASS forbidden-path scan done
+  PASS no gate-weakening constructs added
+  PASS no scratch files
+  PASS diff substance: +622 -112 (min +5)
+  PASS implementation touched tests/ (must_touch: tests/)
+
+== cargo fmt
+  SKIP cargo fmt — needs a build; preflight does not build
+
+== examples
+  SKIP examples — needs a build; preflight does not build
+
+== test policy
+  PASS failure-asserting test present: 6
+  PASS test quota met: 4 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 4
+  PASS no newly skipped tests
+
+== report honesty
+  PASS reported test count (1967) matches actual (1967)
+
+╔══════════════════════════════════════╗
+║ PREFLIGHT CLEAN — phase-084           ║
+║ diff-based checks only; no build run ║
+╚══════════════════════════════════════╝
+```
+
+**One diff measurement, quoted once.** Every `diff substance` number this
+round quotes **for this round's base** is one measurement:
+`git diff --numstat 1d73e8c` against the tree that ships — the whole
+delivery since this round's parent, the resume commit. That command is what
+produces it, and the number it produces is the one pasted above, the one
+pasted under *Gates*, and the total in this round's table. They are the same
+number because `numstat` counts **lines**: quoting a number changes no line,
+so the measurement does not move when it is written down. The round's table
+leaves this document's own row out of its total, because this document's row
+is its own length and cannot be stated without changing it.
+
+The build half — `cargo fmt`, `cargo clippy`, `cargo test --all-targets`,
+`cargo test --doc` and the example sweep — is the paste under *Gates*, run
+against the same tree.
+
+Measured against the base the dispatcher captured before the resume merge
+(`b21821d`) instead — the whole delivery, this phase's own file and the two
+documents with it — the same gate reports `diff substance: +7613 -55`, the
+totals in the delivery table above, with `test quota met: 71 rust / 0
+redblue`, `edge case test present: 55` and `failure-asserting test present:
+48` for the delivery as a whole.
 
 ## Tests added
 
@@ -859,6 +988,10 @@ reason is written beside the list.
 | `edge_the_repair_waits_under_a_generous_ceiling_and_a_bounded_number_of_attempts` | boundary / resource — the ceiling the repair waits under is generous enough to outlast a fetch that is already in flight, and the number of attempts is bounded. A bound nobody reads is a bound that can be shrunk by accident. |
 | `edge_the_real_history_repair_runs_inside_the_locked_region` | resource / state — the accessor the audit actually calls, git's own fetch and all, runs inside the locked region the serialisation test measures. Without it, the lock would guard a path nothing uses. |
 | `edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted` (in `tests/checkpoint_ancestry_test.rs`) | resource / state — the same contention, in the sibling audit file, which had the lost-lock false refusal with no retry at all. |
+| `edge_a_config_opencode_would_read_but_the_suite_cannot_is_rejected` | malformed input — the two readers of this phase's file are not the same parser. opencode reads the project config as JSON(C), so a line comment, a block comment and a trailing comma are legal to it — all three were measured to be accepted by `opencode debug config` on this build — while `serde_json` refuses them. The suite is the stricter of the two on purpose: a file it cannot read is a file it cannot vouch for. |
+| `edge_a_duplicate_key_resolves_to_the_last_value` | duplicate / missing keys — the other place the two readers could disagree. `serde_json` resolves a repeated key to the LAST value and so does opencode (measured: a config that declared `edit` twice resolved to the second one). The second `agent` block is the one that is read, in both directions. |
+| `edge_the_refusal_names_the_last_attempts_failure_and_not_a_stale_one` (in `tests/unreviewed_work_ack_test.rs`) | error message — the refusal names the outcome of the LAST attempt. Before this round the failure was set on every failing attempt and never cleared, so a failed attempt followed by a **successful** one left the refusal naming the earlier error — a reader could be sent after a lock that was already free. (When every attempt fails the old code named the last failing attempt, because each failure overwrites the last; that half was already right.) |
+| `edge_the_refusal_names_the_last_attempts_failure_and_not_a_stale_one` (in `tests/checkpoint_ancestry_test.rs`) | error message — the same refusal, in the sibling audit file, which carried the identical stale-failure pattern. |
 
 The phase's five required failing cases, all present and all driving a
 failing path:
@@ -1206,8 +1339,8 @@ it does not apply.
 | numeric_boundary | N/A | The file holds no numbers. There is no arithmetic in it, so there is no `0/0`, no `NaN`, no `±Infinity` and no precision boundary to be wrong about; the only numbers in this phase are the counts in this document, which are measured by `git` and by the test runner |
 | unicode | N/A | The file holds no text values — the only strings in it are schema key names (`edit`, `bash`, `external_directory`, …), which are ASCII, and two English descriptions. There is no user text, no emoji, no CJK and no combining mark anywhere in the subject of this phase, so there is no encoding boundary to cross. The one place unicode does appear is the *report's* subject matter, and `tests/report_markdown_test.rs` guards that: it checks both delivery documents read the same way under a CommonMark fence reader and under a simpler one, which is where a stray backtick or an unusual character would show |
 | nesting_recursion | N/A | The document is three levels deep by schema (`agent.<name>.permission.<key>`) and the checker walks exactly that depth with no recursion in it. There is no nesting to bound and no mutual recursion to guard; the closest analogue — a value nested in the wrong place — is covered by `edge_agent_block_of_wrong_type_is_rejected` |
-| duplicate_missing_keys | covered | `edge_duplicate_permission_key_resolves_to_the_last_value` (a repeated key resolves last-wins, so a trailing `"allow"` is the one that counts), `edge_a_dropped_deny_key_is_rejected` (a deleted key is a deleted deny), `edge_missing_reviewer_is_rejected`, `edge_missing_verifier_is_rejected`, `edge_a_verifier_block_missing_one_of_the_two_tools_is_rejected` (a deleted key is an inherited permission), and — the permission key set itself — `the_reviewers_two_lists_partition_the_permission_key_constant`, which now asserts the set is a set and not just partitioned |
-| malformed_input | covered | `edge_malformed_config_is_rejected` (empty file, truncated JSON, trailing comma, byte order mark, a non-object document, a bare string), `edge_malformed_config_is_rejected`'s companion `edge_a_missing_or_malformed_mode_is_rejected`, and `edge_permission_value_of_wrong_type_is_rejected` for the values inside a well-formed document. The audit's own malformed input is `edge_malformed_log_lines_are_refused_rather_than_skipped` and `edge_a_two_tab_delimited_log_line_is_malformed` in `tests/unreviewed_work_ack_test.rs` |
+| duplicate_missing_keys | covered | `edge_duplicate_permission_key_resolves_to_the_last_value` (a repeated key resolves last-wins, so a trailing `"allow"` is the one that counts), `edge_a_duplicate_key_resolves_to_the_last_value` (the same rule at the top level, where a repeated `agent` block means the **second** block is the one that is read — in both directions), `edge_a_dropped_deny_key_is_rejected` (a deleted key is a deleted deny), `edge_missing_reviewer_is_rejected`, `edge_missing_verifier_is_rejected`, `edge_a_verifier_block_missing_one_of_the_two_tools_is_rejected` (a deleted key is an inherited permission), and — the permission key set itself — `the_reviewers_two_lists_partition_the_permission_key_constant`, which now asserts the set is a set and not just partitioned |
+| malformed_input | covered | `edge_malformed_config_is_rejected` (empty file, truncated JSON, trailing comma, byte order mark, a non-object document, a bare string), `edge_a_config_opencode_would_read_but_the_suite_cannot_is_rejected` (a line comment, a block comment and a trailing comma — all three legal to opencode, which reads this file as JSON(C), and all three refused here, because the suite is the stricter of the two readers on purpose), `edge_malformed_config_is_rejected`'s companion `edge_a_missing_or_malformed_mode_is_rejected`, and `edge_permission_value_of_wrong_type_is_rejected` for the values inside a well-formed document. The audit's own malformed input is `edge_malformed_log_lines_are_refused_rather_than_skipped` and `edge_a_two_tab_delimited_log_line_is_malformed` in `tests/unreviewed_work_ack_test.rs` |
 | resource_limit | covered | The checker reads one 905-byte file and walks fixed key lists; there is no recursion, no loop over unbounded input and no output to cap. The one resource-shaped concern in this phase's subject is opencode's own repeated-call guard, `doom_loop`, and the shipped file **denies** it outright rather than leaving it to `ask` — a `ask` in a headless pipeline run is a request that cannot be granted, so denying it makes the guard block the call instead of waiting forever for an answer. That is asserted by `project_config_denies_every_widening_permission_for_the_reviewer`. The other resource-shaped thing this phase owns is the **history repair** the acknowledgement suite runs before it measures anything: it is bounded (`RepairPolicy::attempts` — three fetches, and `RepairPolicy::wait` — half a minute of watching the clone's depth), serialised (`HISTORY_REPAIR`), and a clone that cannot be completed is refused rather than waited on. `edge_the_history_repair_is_serialised_between_threads`, `edge_a_repair_that_lands_after_a_contended_attempt_is_accepted`, `edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted`, `edge_the_repair_waits_under_a_generous_ceiling_and_a_bounded_number_of_attempts` and `edge_the_history_repair_is_driven_by_the_depth_and_not_by_the_fetch` drive it. |
 
 ## Gates
@@ -1216,7 +1349,7 @@ it does not apply.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass — no `allow(clippy::` was added |
-| `cargo test --all-targets` | 1963 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 1967 passed, 0 failed, 0 ignored |
 | `cargo test --doc` | pass — 2 doc tests run |
 | `rbops/verify.sh phase-084` | pass — every check green |
 | `opencode debug config` / `opencode debug agent reviewer` | the reviewer resolves to 28 rules whose last eleven are this phase's denies |
@@ -1225,7 +1358,7 @@ Every number in this table was measured in this round. The suite total is the
 sum of the `N passed` lines of `cargo test --all-targets` in this checkout,
 which is the same measurement `rbops/verify.sh` makes against
 `/tmp/test.log` — and it is the number the gate itself printed: `PASS cargo
-test: 1963 passed, 0 failed`. The `cargo test --doc` line is the doc-test
+test: 1967 passed, 0 failed`. The `cargo test --doc` line is the doc-test
 target's own count: two doc tests, in `src/bootstrap.rs` and
 `src/bytecode/mod.rs`.
 
@@ -1237,8 +1370,9 @@ than a harvested copy of it:
 ```
 $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.json" \
     RBOPS_BASELINE="$PWD/../rbops/baseline.json" \
-    RBOPS_BASE_REF=d425e2b322bd3be245ecbedc0be4636bd1141114 \
+    RBOPS_BASE_REF=1d73e8c \
     ../rbops/verify.sh phase-084
+
 
 == manifest
   PASS phase phase-084 is declared in /home/runner/work/rbops/rbops/rbops/phases.json
@@ -1255,7 +1389,7 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS forbidden-path scan done
   PASS no gate-weakening constructs added
   PASS no scratch files
-  PASS diff substance: +1505 -91 (min +5)
+  PASS diff substance: +622 -112 (min +5)
   PASS implementation touched tests/ (must_touch: tests/)
 
 == cargo fmt
@@ -1265,7 +1399,7 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS cargo clippy -D warnings
 
 == cargo test
-  PASS cargo test: 1963 passed, 0 failed
+  PASS cargo test: 1967 passed, 0 failed
 
 == doc tests
   PASS runs: examples/files.rb
@@ -1280,60 +1414,28 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS example sweep done
 
 == test policy
-  PASS failure-asserting test present: 3
-  PASS test quota met: 8 rust / 0 redblue (need 3 or 2)
-  PASS edge case test present: 8
+  PASS failure-asserting test present: 6
+  PASS test quota met: 4 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 4
   PASS no newly skipped tests
 
 == report honesty
-  PASS reported test count (1963) matches actual (1963)
+  PASS reported test count (1967) matches actual (1967)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-084                ║
 ╚══════════════════════════════════════╝
 ```
 
-**Two runs of the gate, and why they differ by one line.** The gate reads its
-report from the pipeline's copy, not from this checkout's: `dispatch.sh`
-harvests `phases/phase-084/REPORT.md` out of the project and into the
-pipeline root before the gate runs. Run against the pipeline root, the gate
-reads the copy left there by an earlier round — which claims 1955 — and says
-so:
+**The gate's own diff measurement, this round.** The `diff substance` line in
+the paste above is the number the gate measured for the base it was given
+(`1d73e8c`, this round's parent) against the tree as it ships — the same
+measurement as `git diff --numstat 1d73e8c`, and the same one the preflight
+paste and this round's table carry. The gate's other checks are in that paste
+too: `implementation touched tests/ (must_touch: tests/)`, `test quota met: 4
+rust / 0 redblue`, `edge case test present: 4`, `failure-asserting test
+present: 6`, `no newly skipped tests`.
 
-```
-== report honesty
-  WARN report claims 1955 passing, actual run has 1963 — under-claimed, fix the number
-  PASS reported test count (1955) does not exceed actual (1963)
-
-╔══════════════════════════════════════╗
-║ VERIFY PASS — phase-084                ║
-╚══════════════════════════════════════╝
-```
-
-With this report harvested in place of the stale copy, the same gate says:
-
-```
-== report honesty
-  PASS reported test count (1963) matches actual (1963)
-
-╔══════════════════════════════════════╗
-║ VERIFY PASS — phase-084                ║
-╚══════════════════════════════════════╝
-```
-
-Both runs are green. The second is the one the pipeline will see, because the
-harvest runs before the gate.
-
-The gate's own diff measurements, against this round's parent (`d425e2b`,
-the resume commit): `diff substance: +495 -37`, `implementation touched
-tests/ (must_touch: tests/)`, `test quota met: 4 rust / 0 redblue`, `edge
-case test present: 4`, `failure-asserting test present: 2`, `no newly skipped
-tests`. Measured against the base the dispatcher captured before the resume
-merge (`b21821d`) instead — the whole delivery, this phase's own file and the
-two documents with it — the same gate reports `diff substance: +6141 -21`
-(measured before this document's last two lines; the number moves with it),
-`test quota met: 63 rust / 0 redblue`, `edge case test present: 47` and
-`failure-asserting test present: 41`.
 
 ## Invariants touched
 
@@ -1429,7 +1531,21 @@ two documents with it — the same gate reports `diff substance: +6141 -21`
   build that changed its resolution order would leave it green while the
   reviewer again ran with edit access. The live `opencode debug agent
   reviewer` measurement above is the only thing that closes that gap today,
-  and it is a measurement of *this* build, not of every build.
+  and it is a measurement of *this* build, not of every build. **This round
+  did not close it, and did not pretend to:** a test that ran
+  `opencode debug agent reviewer` would close it, but it would make the
+  suite's result depend on whether opencode is installed on the machine
+  running the gates, and a test that passes or fails with the environment is
+  a test that can pass without proving anything. The measurements are in
+  FINDINGS.md instead, labelled as measurements of this build.
+- **The two readers of this phase's file are pinned against each other only
+  as far as they were measured.** This round established that opencode reads
+  the project config as JSON(C) and that it resolves a duplicate key to the
+  last value — the same way `serde_json` does — and the suite now refuses
+  the JSON(C) extras and pins the duplicate-key rule. What it cannot do is
+  prove that a *future* opencode keeps resolving duplicates the same way; the
+  defence is that the shipped file declares no duplicate key, so the question
+  does not arise for it. → FINDINGS.md.
 - **The allow-lists are pinned to the schema as it is published today.** The
   agent-level list (`description`, `mode`, `permission`) and the top-level
   list (`$schema`, `agent`) are closed, so a key opencode adds tomorrow is

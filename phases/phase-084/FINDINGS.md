@@ -1945,3 +1945,183 @@ to: three attempts, and then up to half a minute of watching the depth. That
 is a deliberate trade — the alternative is a refusal over a clone that a
 competing fetch completes moments later — and the ceiling is a named value
 that a test pins, so it cannot quietly shrink.
+
+## Round 15: the two parsers must not read the same file differently, and the refusal must not name a failure that has already gone away (round 15)
+
+### What this round found
+
+Two things, both found by reading the phase's own delivery for the places
+where it could still be wrong, and both measured rather than argued.
+
+**The first is about the file this phase ships.** Every assertion in
+`tests/agent_permissions_test.rs` reads `opencode.json` with `serde_json`, and
+opencode reads it with its own parser. The two are not the same parser, and
+the file is the one artifact both of them read, so the two places they could
+disagree are the two places worth closing.
+
+The first disagreement is **JSON(C)**. opencode parses the project config as
+JSON(C) — the error it prints when the file is broken says so — and a
+comment and a trailing comma are both legal to it. Measured on this build:
+
+```
+$ cat opencode.json
+{"$schema":"https://opencode.ai/config.json", // the pipeline's two agents
+"agent":{"reviewer":{"mode":"primary","permission":{"edit":"deny","bash":"deny"}}}}
+$ opencode debug config
+{ ... }                     # exit 0 — the comment was accepted
+```
+
+`serde_json`, which the suite reads the file with, is plain JSON and refuses
+both. The safe direction is the strict one, so the suite now says so
+explicitly: a config opencode would read and the suite cannot is **refused**
+rather than half-read and agreed with by accident. The shipped file is plain
+JSON, and the test is what keeps it that way.
+
+The second disagreement is a **duplicate key**. `serde_json` resolves one to
+the LAST value; opencode does too — measured on this build, where a config
+that declared `edit` twice resolved to the second one, and a config with two
+`agent` blocks resolved to the second block. The two agree today, and the
+test now pins the suite's half of that agreement in both directions: the
+second block is the one that is read, whether it is a good one or a bad one.
+
+**The second is in the phase's own audit machinery, and it is a stale error
+message.** Both audit files repair a shallow clone by attempting a fetch more
+than once, and both refused the clone with the repair's own failure named in
+the refusal. The failure they named was not always the last attempt's: the
+loop only ever **set** the failure, and it set it on every failing attempt:
+
+```rust
+if let Err(e) = complete() {
+    failure = Some(e);          // set on a failure, never cleared
+}
+```
+
+So a failing attempt followed by a **succeeding** one left the refusal naming
+the earlier error: `Some(e)` was never cleared, and the refusal went on
+describing a problem that had already gone away. (When every attempt fails,
+the old code names the *last* failing attempt, because each failure
+overwrites the last — that half was already right, and this round's test
+says so rather than claiming it as a change.) A reader holding that message is
+sent looking for a lock that is free, for an error the last attempt did not
+produce. The refusal now names the last attempt's outcome, and a last attempt
+that did not fail names no failure at all.
+
+### What this round did
+
+1. **`edge_a_config_opencode_would_read_but_the_suite_cannot_is_rejected`**
+   (`tests/agent_permissions_test.rs`) — a line comment, a block comment and a
+   trailing comma are all refused by the suite, with the refusal saying the
+   file is not plain JSON.
+2. **`edge_a_duplicate_key_resolves_to_the_last_value`**
+   (`tests/agent_permissions_test.rs`) — the second `agent` block is the one
+   that is read, in both directions: a second block without a reviewer is
+   refused, and a second block that is whole is accepted even when the first
+   one was not.
+3. **The refusal names the last attempt's outcome** — the one-line change in
+   `tests/unreviewed_work_ack_test.rs` and in
+   `tests/checkpoint_ancestry_test.rs`: `failure = complete().err()` in place
+   of a `Some(e)` that was set on a failure and never cleared. A failed
+   attempt followed by a successful one no longer leaves the earlier error in
+   the refusal.
+   **`edge_the_refusal_names_the_last_attempts_failure_and_not_a_stale_one`**
+   in each file drives it, and drives it with the case that discriminates —
+   the attempt that fails followed by the ones that succeed — because the
+   case where *every* attempt fails is one the old code already got right.
+4. **`edge_duplicate_permission_key_resolves_to_the_last_value`'s fixture now
+   declares two different values** (`tests/agent_permissions_test.rs`) — its
+   two occurrences of `edit` said the same thing, so the value that survived
+   was the same under a first-wins resolution and under a last-wins one and
+   the assertion held either way. The fixture says `"edit":"deny","edit":
+   "allow"` now, so only a last-wins resolution reports the `"allow"` the
+   test asserts.
+
+### The ability to fail, watched
+
+Every test this round added or changed was watched to fail against a mutated
+tree, and the tree was restored:
+
+| Test | Mutation | What it printed |
+|---|---|---|
+| `edge_a_config_opencode_would_read_but_the_suite_cannot_is_rejected` | the trailing-comma case's input replaced by plain, valid JSON | `a trailing comma: the refusal must say the file is not plain JSON, got: `agent.reviewer` is not declared: --agent reviewer resolves to nothing here` |
+| `edge_a_duplicate_key_resolves_to_the_last_value` | the whole block moved to the FIRST position | `the second `agent` block is the one that is read, and it declares both agents: "`agent.reviewer` is not declared: --agent reviewer resolves to nothing here"` |
+| `edge_duplicate_permission_key_resolves_to_the_last_value` | the fixture changed to the map a **first-wins** parser would build (`"edit":"deny","edit":"deny"`) — the two values in the shipped fixture differ, so only a last-wins resolution reports the second one | `the error must report the value that survives, got: `agent.reviewer.mode` is not declared: --agent reviewer binds nothing without it` |
+| `edge_the_refusal_names_the_last_attempts_failure_and_not_a_stale_one` (`tests/unreviewed_work_ack_test.rs`) | the fix reverted: `failure = complete().err()` back to `if let Err(e) = complete() { failure = Some(e) }` | `the refusal must not name a failure the last attempt did not have, got: history is shallow and completing the clone did not make it complete: the FIRST attempt's error. …` |
+| `edge_the_refusal_names_the_last_attempts_failure_and_not_a_stale_one` (`tests/checkpoint_ancestry_test.rs`) | the same revert | the same failure |
+
+### What this round did not do
+
+**Did not** touch `opencode.json` — the file is byte-for-byte the file rounds
+2–8 shipped, and against this round's base (`1d73e8c`, the resume commit)
+`git diff --stat 1d73e8c -- opencode.json` is empty. (Against `b21821d`, the
+base the whole delivery is measured from, the same file is `+30 −0`, because
+it is a *new* file there; the two numbers are about two different bases and
+neither of them is a change to the file.)
+**Did not** touch anything under `src/`. **Did not** touch the pipeline repo.
+**Did not** weaken, delete or re-scope a gate or a test; the audit still
+refuses a truncated log, and the refusal still arrives with the reason it
+refused. **Did not** add an `#[ignore]`, a `// skip` or an
+`allow(clippy::)`.
+
+**Did not** make the suite tolerant of JSON(C). The direction is the strict
+one on purpose: the suite must be able to read every byte of the file it
+vouches for, and a file it cannot read is a file it cannot vouch for.
+
+### What this round did not do, and why
+
+**Did not** add a test that runs opencode. The suite still cannot prove
+which file opencode opened — that gap is named in the report's *Known gaps*
+and it is not closed by this round. A test that runs `opencode debug agent
+reviewer` would close it, but it would make the suite's result depend on
+whether opencode is installed on the machine running the gates, and a test
+that passes or fails with the environment is a test that can pass without
+proving anything. The measurement is in this document instead, where it is
+labelled as a measurement of *this* build.
+
+### The review of this round's delivery, and what it took
+
+A review of this round's delivery found five things. Four of them were about
+the *account* — the words in this section and in the report — and one was about
+a test that could not fail. All five are fixed, and the gates were run again
+afterwards.
+
+1. **The account of the stale failure was wrong, and so was the test's
+   first assertion.** The account quoted the pre-fix loop and then described
+   it as keeping "the FIRST attempt's failure across the whole loop". It did
+   not: `failure = Some(e)` overwrites the failure on every failing attempt,
+   so when every attempt fails the old code named the *last* failing
+   attempt. The real defect was the other shape — a failing attempt followed
+   by a **succeeding** one, where `Some(e)` was never cleared. The section
+   above now describes that, and the test leads with the discriminating case
+   (a failed attempt followed by successful ones) instead of the case that
+   holds under the old code too; the all-attempts-fail half is kept, and the
+   comment on it says plainly that it pins behaviour the old code already had.
+2. **`edge_duplicate_permission_key_resolves_to_the_last_value` could not
+   fail.** Its fixture declared `edit` twice with the *same* value, so the
+   surviving value was the same under a first-wins resolution and under a
+   last-wins one and the assertion held either way. The fixture now declares
+   `"edit":"deny","edit":"allow"`, so only a last-wins resolution reports
+   `"allow"`. Measured: with the fixture changed to the map a first-wins
+   parser would build, the test fails with `` `agent.reviewer.mode` is not
+   declared ``, because the checker's first complaint is then no longer about
+   `edit` at all.
+3. **The gates section quoted a stale test count.** The table said 1967 and
+   the sentence under it said 1963 — the previous round's tree, before this
+   round's four tests landed. The sentence now says 1967, and the block that
+   repeated an earlier round's gate run — with its 1955 and 1963 — is gone.
+4. **Three `diff substance` numbers were quoted for one gate run.** The
+   report carried +471 −61, +405 −13 and the round table's own +322 −6 for
+   the same base, and no line in the document reconciled them. One
+   measurement is quoted now — `git diff --numstat 1d73e8c` against the
+   shipping tree — and it is the number in the preflight paste, the number
+   in the gate paste and the round table's total.
+5. **The `opencode.json` row contradicted itself.** The row's Lines column
+   said `+30 −0` while its What column said the diff of that file was empty,
+   and the table's own base (`b21821d`) makes that diff non-empty, because
+   the file is new there. The row now names the base the emptiness is
+   measured against.
+
+### The gates, measured in this round
+
+`cargo fmt --all -- --check` clean, `cargo clippy --all-targets -- -D
+warnings` clean, `cargo test --all-targets` **1967 passed; 0 failed; 0
+ignored**, and `rbops/verify.sh phase-084` **VERIFY PASS**.

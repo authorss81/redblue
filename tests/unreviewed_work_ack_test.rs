@@ -644,12 +644,14 @@ fn ensure_history_with(
     // attempt, and between attempts the depth is watched until the next
     // attempt is due. The attempts are bounded, and the watching is bounded
     // too, so a clone that really cannot be completed is still refused.
+    // The refusal names the LAST attempt's outcome, not an earlier one's. An
+    // error the last attempt no longer reproduces is not the reason the clone
+    // is still short, and a reader who is handed it is being told about a
+    // problem that has already gone away.
     let mut failure: Option<String> = None;
     let mut waited = Duration::ZERO;
     for attempt in 1..=policy.attempts {
-        if let Err(e) = complete() {
-            failure = Some(e);
-        }
+        failure = complete().err();
         if !is_shallow()? {
             return Ok(());
         }
@@ -1453,6 +1455,74 @@ fn edge_the_history_repair_is_driven_by_the_depth_and_not_by_the_fetch() {
     assert!(
         err.contains("shallow"),
         "the refusal must say why, got: {err}"
+    );
+}
+
+/// The refusal names the failure of the LAST attempt, not a stale one.
+///
+/// The repair attempts the fetch more than once, and one attempt can fail
+/// while the next one succeeds without the clone becoming complete — a fetch
+/// that succeeds is not the same thing as a fetch that completes the history.
+/// The refusal has to say what the LAST attempt did, because that is the
+/// attempt a reader has to reproduce. An earlier attempt's error is a problem
+/// that has already gone away, and a reader holding it is sent looking for a
+/// lock that is free.
+#[test]
+fn edge_the_refusal_names_the_last_attempts_failure_and_not_a_stale_one() {
+    // The behaviour change: the first attempt fails and the ones after it do
+    // not. The last attempt's outcome is "no failure", so the refusal must
+    // name none — the earlier attempt's error is a problem that has already
+    // gone away.
+    let attempts = Cell::new(0);
+    let err = ensure_history_with(
+        &|| Ok(true),
+        &|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err("the FIRST attempt's error".into())
+            } else {
+                Ok(())
+            }
+        },
+        fixture_policy(),
+    )
+    .expect_err("a clone that stays short must be refused even when the last attempt did not fail");
+    assert!(
+        !err.contains("the FIRST attempt's error"),
+        "the refusal must not name a failure the last attempt did not have, got: {err}"
+    );
+    assert!(
+        err.contains("shallow"),
+        "the refusal must still say why the history was not read, got: {err}"
+    );
+
+    // The other direction: every attempt fails, and the refusal names the LAST
+    // one. This half is NOT the behaviour change — the old code overwrote the
+    // failure on every failing attempt, so it named the last failing attempt
+    // too — and it is here to keep the rule whole, so that a repair which
+    // fails for two different reasons names the one a reader can reproduce.
+    let attempts = Cell::new(0);
+    let err = ensure_history_with(
+        &|| Ok(true),
+        &|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err("the FIRST attempt's error".into())
+            } else {
+                Err("the LAST attempt's error".into())
+            }
+        },
+        fixture_policy(),
+    )
+    .expect_err("a clone that stays short must be refused, not audited");
+    assert!(
+        err.contains("the LAST attempt's error"),
+        "the refusal must name the failure of the last attempt, got: {err}"
+    );
+    assert!(
+        !err.contains("the FIRST attempt's error"),
+        "the refusal must not name an earlier attempt's failure: it is not the reason the clone \
+         is still short, got: {err}"
     );
 }
 

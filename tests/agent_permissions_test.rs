@@ -1253,9 +1253,15 @@ fn edge_permission_value_of_wrong_type_is_rejected() {
 /// A repeated key resolves last-wins, which for `edit` on the reviewer means a
 /// trailing `"allow"` is the one that counts. Pinned so a hand-merged file
 /// cannot hide behind the first occurrence.
+///
+/// The two values differ on purpose: a fixture that declared the same value
+/// twice would report the same error under a first-wins resolution and under a
+/// last-wins one, and would pin nothing. Here the first occurrence is a
+/// `"deny"` — a config that is correct — and the second is the `"allow"` that
+/// must be the one that survives.
 #[test]
 fn edge_duplicate_permission_key_resolves_to_the_last_value() {
-    let text = r#"{"agent":{"reviewer":{"permission":{"edit":"allow","edit":"allow","bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#;
+    let text = r#"{"agent":{"reviewer":{"permission":{"edit":"deny","edit":"allow","bash":"deny"}},"verifier":{"permission":{"edit":"allow","bash":"allow"}}}}"#;
     let error =
         check_document(text).expect_err("the surviving value is allow, whatever came before it");
     assert!(
@@ -1530,6 +1536,74 @@ fn edge_malformed_config_is_rejected() {
             "{label}: the error must say what is wrong with the file, got: {error}"
         );
     }
+}
+
+/// opencode reads this file as JSON(C); the suite must be the stricter one.
+///
+/// opencode's own parser accepts a comment and a trailing comma in
+/// `opencode.json` — both were measured on this build, with
+/// `opencode debug config` exiting 0 over a config carrying each of them —
+/// while `serde_json`, which is what this suite reads the file with, is plain
+/// JSON and refuses both. The two parsers must not read the same file
+/// differently, and the safe direction is the strict one: a file the suite
+/// cannot read is a file whose contents the suite cannot vouch for, so it is
+/// refused outright rather than half-read and agreed with by accident.
+///
+/// The shipped file is plain JSON, and this test is what keeps it that way.
+#[test]
+fn edge_a_config_opencode_would_read_but_the_suite_cannot_is_rejected() {
+    for (label, text) in [
+        (
+            "a line comment",
+            "{\n  // the pipeline's two agents\n  \"agent\": {}\n}",
+        ),
+        (
+            "a block comment",
+            "{/* the pipeline's two agents */\"agent\":{}}",
+        ),
+        ("a trailing comma", r#"{"$schema":"x","agent":{},}"#),
+    ] {
+        let error = check_document(text).expect_err(&format!(
+            "a config with {label} is legal to opencode and must still be refused here: the \
+             suite reads this file with a stricter parser on purpose"
+        ));
+        assert!(
+            error.contains("is not valid JSON"),
+            "{label}: the refusal must say the file is not plain JSON, got: {error}"
+        );
+    }
+}
+
+/// A duplicate key resolves to the LAST value, here and in opencode.
+///
+/// This is the other place the two parsers could read the same file
+/// differently, and they do not: `serde_json` keeps the last value for a
+/// repeated key, and so does opencode — measured on this build, where a
+/// config that declared `edit` twice resolved to the second one. The two
+/// halves of that agreement are pinned below: the second block is the one
+/// that is read, whether it is a good one or a bad one.
+#[test]
+fn edge_a_duplicate_key_resolves_to_the_last_value() {
+    let reviewer = r#""reviewer":{"mode":"primary","permission":{"edit":"deny","bash":"deny","task":"deny","todowrite":"deny","skill":"deny","lsp":"deny","question":"deny","webfetch":"deny","websearch":"deny","doom_loop":"deny","external_directory":"deny"}}"#;
+    let verifier = r#""verifier":{"mode":"primary","permission":{"edit":"allow","bash":"allow"}}"#;
+
+    // The second `agent` block is the one that is read, so a second block
+    // without a reviewer is a config without a reviewer.
+    let second_is_short = format!(r#"{{"agent":{{{reviewer}}},"agent":{{{verifier}}}}}"#);
+    let error = check_document(&second_is_short).expect_err(
+        "the second `agent` block is the one that is read, and it declares no reviewer",
+    );
+    assert!(
+        error.contains("reviewer"),
+        "the refusal must name the agent that is missing, got: {error}"
+    );
+
+    // And the other way round: a second block that is complete is a config
+    // that is complete, even though the first one was not.
+    let second_is_whole =
+        format!(r#"{{"agent":{{{verifier}}},"agent":{{{reviewer},{verifier}}}}}"#);
+    check_document(&second_is_whole)
+        .expect("the second `agent` block is the one that is read, and it declares both agents");
 }
 
 /// The config must be SHIPPED, not merely present.
