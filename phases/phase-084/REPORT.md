@@ -93,7 +93,80 @@ written in the same file under a name that promised more than it could
 deliver: it is renamed to what it asserts, and the claim it makes is the one
 it can make.
 
-**The gates.** The full suite is green: **1955 passed; 0 failed; 0
+**This round found the phase's own audit failing on the first run in a fresh
+checkout, and fixed the race that caused it.** The gates were run first, as
+the continuation instructions require, and the fourth of them was red — not the
+gate, the suite, in the file this phase has owned since round 11. Two tests
+failed with `this history must be complete before it is measured: "history is
+shallow and completing the clone did not make it complete"`, and one with
+`HEAD's history must be readable and acknowledged` and the same reason.
+
+The clone was shallow because the pipeline clones the project with a depth,
+and the same run's fetch had already completed it — `.git/shallow` was gone
+and the history was whole by the time the failure printed. Two tests had read
+the depth **before** that fetch landed, run a fetch of their own, and read the
+depth again **before** the first fetch finished. `cargo test` runs the tests
+in a binary on parallel threads, and both of those tests complete the clone
+before they audit it, so on a shallow clone **both** ran `git fetch
+--unshallow` at the same instant. The loser of that race is told by git what
+happened, and the audit — which exists to refuse a truncated log — refused a
+clone that was complete a moment later:
+
+```
+thread B: depth before fetch = true
+thread B fetch: fatal: Unable to create '.../.git/shallow.lock': File exists.
+thread B: depth after fetch  = true
+thread A: depth after fetch  = false
+```
+
+This is not a new shape, and this repository already knows it:
+`tests/checkpoint_ancestry_test.rs` says in its own words that "on a shallow
+clone all three would run `git fetch --unshallow` at the same instant and
+collide on `.git/shallow.lock`", and serialises the repair behind a `Mutex`
+for that reason. The acknowledgement suite had the same helper, the same two
+callers, and no such lock, so it carried the race the other file had already
+paid for once. **The repair is now serialised the same way**, the decision
+about it is split out of the subprocess call so it can be driven from
+fixtures, and a repair that lands late is accepted instead of being reported
+as a clone that cannot be completed — with a bounded number of attempts, so
+a clone that really cannot be completed is still refused.
+
+**This round is the review of that round, and the review was right about it.**
+Four MAJOR findings, two MINOR and one STYLE, and the two that mattered most
+were about *measurement*, not about code: the bounded retry did not remove the
+failure it was written for, and the round's own "after" measurement never
+exercised the contended path at all. Three attempts a second apart is a
+**window**, not a guarantee — a fetch that loses `.git/shallow.lock` to a
+fetch that is still running leaves the clone exactly as short as it was, so
+every attempt made while that fetch runs loses too, and the clone becomes
+complete a moment after the refusal. Round 13 measured a checkout with no
+competing fetch in flight, where the first attempt succeeded and the retry was
+never taken.
+
+So the repair now waits for the clone's **state** rather than for a count of
+attempts: the depth is re-read after every attempt, and between attempts —
+and after the attempts are spent — the depth is watched until the fetch that
+holds the lock lands. Both are bounded (`RepairPolicy::attempts`,
+`RepairPolicy::wait`), so a clone that really cannot be completed is still
+refused, and refused with the reason it refused. The serialisation test now
+drives the **repair path itself**, and the peak concurrency is measured by a
+counter incremented inside that path's locked region — round 13's version took
+the mutex itself and proved only that a mutex excludes, so deleting the lock
+from `ensure_full_history` left the suite green. The sibling audit file this
+phase has cited as the model had the identical lost-lock refusal and now has
+the same repair.
+
+The counterfactual was measured with a competing fetch in flight, holding
+`.git/shallow.lock` for twelve seconds — longer than the whole attempt
+window — on a shallow copy of this checkout:
+
+| | round 13's repair (three attempts, no state watch) | this round |
+|---|---|---|
+| `tests/unreviewed_work_ack_test.rs` | **21 of 23 green** — the audit refused the history with `fatal: Unable to create '.../.git/shallow.lock': File exists.` | **23 of 23 green** |
+| `tests/checkpoint_ancestry_test.rs` | refused the same way, with no retry at all | **25 of 25 green** |
+| the clone the audit measured | complete (162 commits) a few seconds *after* the refusal | complete (162 commits) when the audit measured it |
+
+**The gates.** The full suite is green: **1963 passed; 0 failed; 0
 ignored**, across the repository's test binaries, re-measured in this round.
 `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings`
 are clean, and `rbops/verify.sh phase-084` passes. No gate was weakened, no
@@ -114,7 +187,20 @@ key is added to it, a key the file does not own is added to either agent
 block, a read-only permission is declared for the reviewer, or the file stops
 shipping.
 
-**Where the history of this phase lives.** Rounds 1–11 wrote their accounts
+The tests this round added make a narrower claim still: they drive the
+**decision** about the history repair from fixtures and assert that the
+repair is one at a time, that a repair that lands late is accepted — including
+one that lands *after every attempt has been spent*, which is the case a count
+of attempts cannot survive — that a complete history is never repaired, that a
+clone that cannot be completed is refused with the reason, and that the clone
+this suite is auditing is complete when the audit starts. They do not prove
+that the pipeline's checkout is shallow or not, that the origin is reachable,
+or that no other process is fetching the same clone at the same moment; the
+last of those is **absorbed by the repair waiting for the clone's state**,
+not excluded, and it was measured that way — with a competing fetch holding
+`.git/shallow.lock` for twelve seconds.
+
+**Where the history of this phase lives.** Rounds 1–12 wrote their accounts
 into earlier revisions of this document and into
 `phases/phase-084/FINDINGS.md`, which keeps the running audit section by
 section, each tagged with the round that wrote it. This document describes
@@ -129,22 +215,30 @@ before the resume merge (`b21821d`):
 | File | Lines | What |
 |---|---|---|
 | `opencode.json` | +30 −0 | The shipped project config: the reviewer's eleven denies, the verifier's two allows, no `default_agent`, no top-level `permission` block. Unchanged since round 8 — `git diff --stat -- opencode.json` is empty. |
-| `tests/agent_permissions_test.rs` | +1995 −0 | The whole suite: the permission contract, the mode, the shipping state of the file, the top-level allow-list, the agent-level allow-list, the reviewer's exact-key rule and the `git` failure message (round 10), the verifier's exact-key rule (round 11), and — **this round** — the permission-key partition test, renamed to what it asserts. |
+| `tests/agent_permissions_test.rs` | +1995 −0 | The whole suite: the permission contract, the mode, the shipping state of the file, the top-level allow-list, the agent-level allow-list, the reviewer's exact-key rule and the `git` failure message (round 10), the verifier's exact-key rule (round 11), and the permission-key partition test, renamed to what it asserts (round 12). |
 | `tests/report_markdown_test.rs` | +453 −0 | The phase's own two delivery documents must read the same way under every markdown reader, and the report must still carry the four sections the gate and the preflight look for. |
-| `tests/unreviewed_work_ack_test.rs` | +340 −6 | The acknowledgement data — and, **this round**, the delivery-commit rule that replaced the SHA-pinned entry the pipeline's per-round rebuild made stale. |
-| `phases/phase-084/FINDINGS.md` | +1650 −0 | The running audit, one tagged section per round, the newest last. |
-| `phases/phase-084/REPORT.md` | +1172 −0 | This document: the delivery in the tree now, with the measured evidence and the citation preserved. **Self-referential** — see the note below the table. |
-| **Total, excluding this document** | **+4468 −6** | The sum of the five rows above it. |
-| **Total, including this document** | **+5640 −6** | The sum of all six rows: this is the gate's own `diff substance` line, and it moves with this document. |
+| `tests/unreviewed_work_ack_test.rs` | +929 −19 | The acknowledgement data, the delivery-commit rule that replaced the SHA-pinned entry the pipeline's per-round rebuild made stale (round 12), the serialised history repair that stopped the audit failing on the first run in a shallow checkout (round 13), and — **this round** — the repair that waits for the clone's state instead of counting attempts, with the serialisation measured inside the repair's own locked region. |
+| `tests/checkpoint_ancestry_test.rs` | +265 −36 | **This round**: the sibling audit file, which had the identical lost-lock false refusal with no retry at all, given the same repair — the same policy, the same state watch, the same refusal — and a test of its own for the contended case. |
+| `phases/phase-084/FINDINGS.md` | +1947 −0 | The running audit, one tagged section per round, the newest last. |
+| `phases/phase-084/REPORT.md` | +1484 −0 | This document: the delivery in the tree now, with the measured evidence and the citation preserved. **Self-referential** — see the note below the table. |
+| **Total, excluding this document** | **+5619 −55** | The sum of the six rows above it. |
+| **Total, including this document** | **+7103 −55** | The sum of all seven rows: this is the gate's own `diff substance` line for this base, and it moves with this document. |
 
 **How to re-derive every number above, and which one cannot be re-derived by
 reading this document.** Each row is `git diff --numstat <base> -- <path>`,
-run against the tree as it stands when this document was final: the five
-non-report rows against `b21821d`, and the table below against `18c0c46`.
-One number is self-referential — `REPORT.md`'s own row is this document's
-length in the delivery, so stating it changes it, and the row above is the
-number as of the final edit. Every other row is re-derivable by anyone who
-reads the command.
+run against the tree as it stands when this document was final: the six
+non-report rows against `b21821d`, and the table below against `d425e2b`
+(this round's parent, the resume commit). One number is self-referential —
+`REPORT.md`'s own row is this document's length in the delivery, so stating
+it changes it; the row is the number as of the final edit, and the totals
+move with it. Every other row is re-derivable by anyone who reads the
+command.
+
+**The two totals and the gate's own number are the same measurement.** The
+gate's `diff substance` line is the raw numstat sum over every changed file
+(`git diff --numstat "$BASE_REF" | awk '{s+=$1} END{print s+0}'`), so the
+total row of each table below is that gate's line for the same base, and the
+gate's paste further down was run against the tree these tables describe.
 
 The row for `tests/unreviewed_work_ack_test.rs` is the one a reader is most
 likely to get wrong, and the reason is worth stating because it is a
@@ -159,16 +253,71 @@ gives `+63 −3`, which is the sum of two diffs and the numstat of neither.
 The numstat is always measured directly, never summed.
 
 **This round's own diff**, measured against the commit the dispatcher
-captured before this run (`18c0c46`, the resume commit):
+captured before this run (`d425e2b`, the resume commit):
 
 | File | Lines | What |
 |---|---|---|
-| `tests/unreviewed_work_ack_test.rs` | +304 −30 | The delivery-commit rule: `DELIVERY_SUBJECT_PREFIX`, `DELIVERY_REASON`, `delivery_acknowledgements`, the SHA-pinned entry removed, and three tests. |
-| `tests/agent_permissions_test.rs` | +282 −0 | The permission-key partition test, renamed to what it asserts, with the claim it makes corrected and the key set checked to be a set. |
-| `phases/phase-084/FINDINGS.md` | +340 −0 | This round's section of the running audit. |
-| `phases/phase-084/REPORT.md` | +475 −87 | This document, updated for the round. Self-referential, as above. |
+| `tests/unreviewed_work_ack_test.rs` | +589 −13 | The repair that waits for the clone's **state**: `RepairPolicy` (attempts, delay, ceiling, poll), `wait_for_completion`, the refusal that names the repair's own failure, the counter inside the repair's locked region (`REPAIRS_IN_FLIGHT`, `REPAIRS_PEAK`, `REPAIRS_ENTERED`), `ensure_full_history_with`, and six tests. |
+| `tests/checkpoint_ancestry_test.rs` | +265 −36 | The same repair in the sibling audit file, which had the lost-lock false refusal with no retry at all: `RepairPolicy`, `wait_for_completion`, the same refusal, and a test for the contended case. |
+| `phases/phase-084/FINDINGS.md` | +297 −0 | This round's section of the running audit. |
+| `phases/phase-084/REPORT.md` | +354 −42 | This document, updated for the round. Self-referential, as above. |
+| **Total** | **+1505 −91** | The sum of the four rows above it, and the gate's own `diff substance` line for this base: `PASS diff substance: +1505 -91 (min +5)`. |
 
-**What round 12 changed, in the audit.** The review of the previous delivery
+**What round 13 changed, in the audit.** The review of the previous delivery
+was not the thing this round ran into; the gates were, and the fourth one was
+red. The suite failed on its first run in a fresh checkout, in the file this
+phase owns, over a clone that was complete by the time the failure printed:
+
+```
+$ cargo test --test unreviewed_work_ack_test
+running 16 tests
+
+failures:
+
+---- edge_phase_078_commits_are_ancestors_of_head_not_absent stdout ----
+this history must be complete before it is measured: "history is shallow and completing the clone did not make it complete: the
+audit refuses to read a truncated `git log HEAD`, because a truncated log reads as a clean one. Run `git fetch --unshallow` first."
+
+---- unreviewed_work_in_head_history_is_acknowledged stdout ----
+HEAD's history must be readable and acknowledged: "history is shallow and completing the clone did not make it complete: the
+audit refuses to read a truncated `git log HEAD`, because a truncated log reads as a clean one. Run `git fetch --unshallow` first."
+
+test result: FAILED. 14 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The cause was a race between two tests in one binary, both of which complete
+a shallow clone before auditing it, and both of which ran
+`git fetch --unshallow` at the same instant:
+
+| Finding | Fix |
+|---|---|
+| the repair was run by two threads at once on a shallow clone, and the loser of `.git/shallow.lock` left the clone exactly as short as it was — so the audit refused a clone that was complete a moment later | The repair is serialised by `HISTORY_REPAIR: Mutex<()>`, the way `tests/checkpoint_ancestry_test.rs` already serialises the same repair for the same stated reason. The thread behind the repair finds the clone complete and does not fetch. |
+| the decision was entangled with the subprocess call, so neither the decision nor the refusal could be driven from a fixture | `ensure_history(is_shallow, complete)` takes the depth and the repair as parameters. The refusal is still the same refusal, and it now names the repair's own failure when there is one. |
+| a single attempt turned a lost lock into a false refusal | The attempts are bounded (`REPAIR_ATTEMPTS`, `REPAIR_RETRY_DELAY`) and the depth is re-read after each one, so a repair that lands late is accepted and a clone that cannot be completed is still refused. |
+
+Four tests came with it, and the one that pins the fix was checked for the
+ability to fail: with the lock removed from it, it fails on the peak
+concurrency; with the lock, it passes. **Round 14's review found that the lock
+was removed from the *test*, not from the code path the round changed** — the
+test took the mutex itself and never called the repair, so deleting the lock
+from `ensure_full_history` left the suite green. The table above is round 13's
+account of round 13; round 14's account is the one below it.
+
+**What round 14 changed, in the audit.** The review of the round-13 delivery
+returned seven findings — four MAJOR, two MINOR, one STYLE — and all seven are
+fixed here, without weakening a gate, deleting a test or moving a threshold:
+
+| Finding | Fix |
+|---|---|
+| the bounded retry did not remove the failure it was written for: three attempts a second apart is a *window*, and a competing fetch that holds `.git/shallow.lock` longer than that window loses every attempt, so the audit still refuses a clone that is complete a moment later — and round 13's "after" measurement never exercised the contended path, because no competing fetch was in flight | The repair waits for the clone's **state**: the depth is re-read after every attempt, and between attempts — and after the attempts are spent — the depth is watched until the fetch that holds the lock lands. The attempts stay bounded and so does the watching (`RepairPolicy::attempts`, `RepairPolicy::wait`), so a clone that really cannot be completed is still refused. Measured with a competing fetch holding the lock for twelve seconds: round 13's repair false-refuses (21 passed, 2 failed), this one does not (23 passed, 0 failed). |
+| the serialisation test took `HISTORY_REPAIR` itself and never called the repair, so deleting the lock from `ensure_full_history` left the suite green and put the race straight back | The peak concurrency is measured by a counter incremented **inside the repair's locked region**, and the test drives the repair path itself from four threads. A second test pins that the accessor the audit calls — git's own fetch and all — is that same path. With the lock removed from the path, the test fails on the peak (`left: 4, right: 1`). |
+| the pasted `verify.sh` output was not the output for the tree being shipped — its `diff substance` did not match this document's own numstat table | The gate is run after the last edit to this document and to FINDINGS.md, and the fresh output is pasted below; every number in the tables above is re-derived from the tree that is shipped, and the one number that cannot be (this document's own length) says so. |
+| the sibling audit file this phase cites as the model still had the identical lost-lock false refusal: `complete().map_err(...)?` turned any failed fetch into an immediate refusal | `tests/checkpoint_ancestry_test.rs` has the same policy, the same state watch and the same refusal now, and a test of its own for the repair that lands after every attempt is spent. Measured with the same competing fetch: 25 passed, 0 failed. |
+| "every new test was watched to fail" was not supported for the four tests round 13 added | Every test this round added or changed was watched to fail against a mutated tree, and the tree was restored. The pastes are in the evidence section below. |
+| the counterfactual table overstated what round 13 fixed — "the lock collision itself … impossible: one repair at a time", where the serialisation is per-process only | The row now says what is true: one repair at a time **within this binary**, and the collision is measured with a competing fetch in flight rather than argued away. |
+| no blank line between `ensure_history`'s closing brace and the doc comment of `read_head_log` | There is one. `cargo fmt --check` was green either way, which is why it is a style finding and not a gate failure. |
+
+**What round 12 changed, in the audit.** The review of the round-11 delivery
 returned three findings — one MAJOR and two MINOR — and all three are fixed
 here, without weakening a gate, deleting a test or moving a threshold:
 
@@ -702,6 +851,14 @@ reason is written beside the list.
 | `edge_a_rebuilt_delivery_commit_is_neither_unreviewed_nor_stale` | rebuild / stale — the delivery commit under a new SHA, which the old SHA-pinned rule reported twice over: unreviewed and stale. |
 | `edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule` | out of bounds — the rule covers this phase's delivery commit and no other, and it anchors at the start of the subject rather than matching one that merely mentions it. |
 | `edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry` | this history's own delivery commit: acknowledged by the rule, and not pinned by a SHA behind the rule's back. |
+| `edge_the_history_repair_is_serialised_between_threads` | resource / state — the repair is **one at a time**. Four threads drive the repair path itself at the same instant and the peak concurrency inside its locked region must be one; without the lock the peak is four, and the loser's fetch leaves the clone as short as it was. |
+| `edge_a_repair_that_lands_after_a_contended_attempt_is_accepted` | resource / state — a repair that lands on the second attempt is accepted. A single attempt turned a lost lock into a false refusal: the audit refused a clone that was complete a moment later. |
+| `edge_the_history_repair_is_driven_by_the_depth_and_not_by_the_fetch` | empty / boundary / malformed input — a complete history is never repaired, a history that stays short is refused with the reason it was refused, and a repair that failed names the failure it failed with. |
+| `edge_this_checkouts_history_is_complete_after_the_repair` | resource / state — the end of the repair is measured rather than assumed: after the repair the depth is read again, and a clone that is still shallow is a failure. |
+| `edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted` | resource / state — the case a count of attempts cannot survive: a competing fetch holds the lock for longer than the whole attempt window, and the repair that lands afterwards is still accepted. This is the review's finding, turned into a test. |
+| `edge_the_repair_waits_under_a_generous_ceiling_and_a_bounded_number_of_attempts` | boundary / resource — the ceiling the repair waits under is generous enough to outlast a fetch that is already in flight, and the number of attempts is bounded. A bound nobody reads is a bound that can be shrunk by accident. |
+| `edge_the_real_history_repair_runs_inside_the_locked_region` | resource / state — the accessor the audit actually calls, git's own fetch and all, runs inside the locked region the serialisation test measures. Without it, the lock would guard a path nothing uses. |
+| `edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted` (in `tests/checkpoint_ancestry_test.rs`) | resource / state — the same contention, in the sibling audit file, which had the lost-lock false refusal with no retry at all. |
 
 The phase's five required failing cases, all present and all driving a
 failing path:
@@ -915,6 +1072,125 @@ the permission key set this suite declares: no key in both, no key in neither
 Every mutation was undone, and `git diff --stat -- opencode.json` is empty:
 the shipped file is exactly the file the earlier rounds shipped.
 
+**This round's mutations are the history repair, and they are the ones the
+review asked for.** The review's finding was that round 13's evidence for its
+own fix was in the wrong place: the serialisation test took the mutex itself
+rather than the repair, and the "after" measurement was taken with no
+competing fetch in flight, so the contended path was never run. Both were
+redone, and both are below.
+
+The first is the repair path itself. With the lock removed from the region the
+repair runs in — one line — the serialisation test fails on the peak, because
+the counter it reads is incremented *inside* that region:
+
+```
+$ cargo test --test unreviewed_work_ack_test edge_the_history_repair_is_serialised_between_threads
+test edge_the_history_repair_is_serialised_between_threads ... FAILED
+
+---- edge_the_history_repair_is_serialised_between_threads stdout ----
+assertion `left == right` failed: the repair must be one at a time: two audits fetching the same clone at once is what left the clone short and failed the audit
+  left: 4
+ right: 1
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out
+```
+
+With the counter inside the locked region removed instead, the test that pins
+the accessor the audit calls fails, and with the repair stopped from accepting
+a repair that lands late, the test for the contended case fails with the
+refusal the review described:
+
+```
+$ cargo test --test unreviewed_work_ack_test edge_the_real_history_repair_runs_inside_the_locked_region
+test edge_the_real_history_repair_runs_inside_the_locked_region ... FAILED
+assertion `left == right` failed: the real repair must run inside the locked region, or the lock guards nothing the audit uses
+  left: 0
+ right: 1
+
+$ cargo test --test unreviewed_work_ack_test edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted
+test edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted ... FAILED
+a repair that lands after the attempts are spent must be accepted: "history is shallow and completing the clone did not make it complete: fatal: Unable to create '.git/shallow.lock': File exists.. The audit refuses to read a truncated `git log HEAD`, because a truncated log reads as a clean one. Run `git fetch --unshallow` first."
+
+$ cargo test --test unreviewed_work_ack_test edge_the_history_repair_is_driven_by_the_depth_and_not_by_the_fetch
+test edge_the_history_repair_is_driven_by_the_depth_and_not_by_the_fetch ... FAILED
+assertion `left == right` failed: a complete history must not be repaired
+  left: 1
+ right: 0
+```
+
+The sibling file's two tests were watched the same way — the complete clone
+repaired when it should not be, and the contended repair refused when it
+should be accepted:
+
+```
+$ cargo test --test checkpoint_ancestry_test edge_a_shallow_clone_is_completed_rather_than_audited_short
+test edge_a_shallow_clone_is_completed_rather_than_audited_short ... FAILED
+assertion `left == right` failed: a complete clone must not be 'repaired'
+  left: 1
+ right: 0
+
+$ cargo test --test checkpoint_ancestry_test edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted
+test edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted ... FAILED
+a repair that lands after the attempts are spent must be accepted: "history is shallow and completing the clone did not make it complete: fatal: Unable to create '.git/shallow.lock': File exists.. The audit refuses to read a truncated `git log main`, because a truncated log reads as a clean one. Run `git fetch --unshallow` before auditing."
+```
+
+**And the counterfactual, measured with a competing fetch in flight.** A
+shallow copy of this checkout, with `.git/shallow.lock` held the way a fetch
+in flight holds it, released twelve seconds later by the fetch that completes
+the clone. The "before" column is round 13's repair — three attempts, a second
+apart, and a refusal — which is this round's code with the state watch
+removed:
+
+```
+$ # the copy is shallow: 2 commits in HEAD, .git/shallow present
+$ : > .git/shallow.lock                       # a fetch in flight holds this
+$ ( sleep 12; rm -f .git/shallow.lock; git fetch --unshallow --quiet origin '+refs/heads/*:refs/remotes/origin/*' ) &
+$ cargo test --test unreviewed_work_ack_test
+
+== depth before: shallow=true, commits in HEAD=2
+---- edge_phase_078_commits_are_ancestors_of_head_not_absent stdout ----
+this history must be complete before it is measured: "history is shallow and completing the clone did not make it complete: `git fetch --unshallow --quiet origin +refs/heads/*:refs/remotes/origin/*` failed (exit status: 128): fatal: Unable to create '/tmp/opencode/measure/.git/shallow.lock': File exists.
+
+Another git process seems to be running in this repository, or the lock file may be stale. The audit refuses to read a truncated `git log HEAD`, because a truncated log reads as a clean one. Run `git fetch --unshallow` first."
+
+test result: FAILED. 21 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+[the contending fetch landed: shallow=false, commits in HEAD=162]
+== depth after: shallow=false, commits in HEAD=162
+```
+
+The refusal came at the end of the attempt window; the clone was completed by
+the competing fetch seconds later. With this round's repair, the same
+measurement on the same clone:
+
+```
+$ cargo test --test unreviewed_work_ack_test
+running 23 tests
+...
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.36s
+
+[the contending fetch landed: shallow=false, commits in HEAD=162]
+== depth after: shallow=false, commits in HEAD=162
+```
+
+The binary finished when the competing fetch landed, and the audit measured a
+clone of 162 commits. The sibling file, on the same clone and with the same
+competing fetch:
+
+```
+$ cargo test --test checkpoint_ancestry_test
+running 25 tests
+...
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.07s
+
+== depth after: shallow=false, commits in HEAD=162
+```
+
+The three attempts are not three fast failures: `git fetch --unshallow`
+downloads before it tries to write the shallow file, so each attempt costs
+about two seconds before it discovers that the lock is held. The window round
+13 bought was therefore about six seconds, and the competing fetch in this
+measurement held the lock for twelve.
+
 ### The edge-case matrix
 
 Every row the phase's prompt lists, with the row that covers it or the reason
@@ -932,7 +1208,7 @@ it does not apply.
 | nesting_recursion | N/A | The document is three levels deep by schema (`agent.<name>.permission.<key>`) and the checker walks exactly that depth with no recursion in it. There is no nesting to bound and no mutual recursion to guard; the closest analogue — a value nested in the wrong place — is covered by `edge_agent_block_of_wrong_type_is_rejected` |
 | duplicate_missing_keys | covered | `edge_duplicate_permission_key_resolves_to_the_last_value` (a repeated key resolves last-wins, so a trailing `"allow"` is the one that counts), `edge_a_dropped_deny_key_is_rejected` (a deleted key is a deleted deny), `edge_missing_reviewer_is_rejected`, `edge_missing_verifier_is_rejected`, `edge_a_verifier_block_missing_one_of_the_two_tools_is_rejected` (a deleted key is an inherited permission), and — the permission key set itself — `the_reviewers_two_lists_partition_the_permission_key_constant`, which now asserts the set is a set and not just partitioned |
 | malformed_input | covered | `edge_malformed_config_is_rejected` (empty file, truncated JSON, trailing comma, byte order mark, a non-object document, a bare string), `edge_malformed_config_is_rejected`'s companion `edge_a_missing_or_malformed_mode_is_rejected`, and `edge_permission_value_of_wrong_type_is_rejected` for the values inside a well-formed document. The audit's own malformed input is `edge_malformed_log_lines_are_refused_rather_than_skipped` and `edge_a_two_tab_delimited_log_line_is_malformed` in `tests/unreviewed_work_ack_test.rs` |
-| resource_limit | N/A | The checker reads one 905-byte file and walks fixed key lists; there is no recursion, no loop over unbounded input and no output to cap. The one resource-shaped concern in this phase's subject is opencode's own repeated-call guard, `doom_loop`, and the shipped file **denies** it outright rather than leaving it to `ask` — a `ask` in a headless pipeline run is a request that cannot be granted, so denying it makes the guard block the call instead of waiting forever for an answer. That is asserted by `project_config_denies_every_widening_permission_for_the_reviewer` |
+| resource_limit | covered | The checker reads one 905-byte file and walks fixed key lists; there is no recursion, no loop over unbounded input and no output to cap. The one resource-shaped concern in this phase's subject is opencode's own repeated-call guard, `doom_loop`, and the shipped file **denies** it outright rather than leaving it to `ask` — a `ask` in a headless pipeline run is a request that cannot be granted, so denying it makes the guard block the call instead of waiting forever for an answer. That is asserted by `project_config_denies_every_widening_permission_for_the_reviewer`. The other resource-shaped thing this phase owns is the **history repair** the acknowledgement suite runs before it measures anything: it is bounded (`RepairPolicy::attempts` — three fetches, and `RepairPolicy::wait` — half a minute of watching the clone's depth), serialised (`HISTORY_REPAIR`), and a clone that cannot be completed is refused rather than waited on. `edge_the_history_repair_is_serialised_between_threads`, `edge_a_repair_that_lands_after_a_contended_attempt_is_accepted`, `edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted`, `edge_the_repair_waits_under_a_generous_ceiling_and_a_bounded_number_of_attempts` and `edge_the_history_repair_is_driven_by_the_depth_and_not_by_the_fetch` drive it. |
 
 ## Gates
 
@@ -940,7 +1216,7 @@ it does not apply.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass — no `allow(clippy::` was added |
-| `cargo test --all-targets` | 1955 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 1963 passed, 0 failed, 0 ignored |
 | `cargo test --doc` | pass — 2 doc tests run |
 | `rbops/verify.sh phase-084` | pass — every check green |
 | `opencode debug config` / `opencode debug agent reviewer` | the reviewer resolves to 28 rules whose last eleven are this phase's denies |
@@ -949,7 +1225,7 @@ Every number in this table was measured in this round. The suite total is the
 sum of the `N passed` lines of `cargo test --all-targets` in this checkout,
 which is the same measurement `rbops/verify.sh` makes against
 `/tmp/test.log` — and it is the number the gate itself printed: `PASS cargo
-test: 1955 passed, 0 failed`. The `cargo test --doc` line is the doc-test
+test: 1963 passed, 0 failed`. The `cargo test --doc` line is the doc-test
 target's own count: two doc tests, in `src/bootstrap.rs` and
 `src/bytecode/mod.rs`.
 
@@ -961,7 +1237,7 @@ than a harvested copy of it:
 ```
 $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.json" \
     RBOPS_BASELINE="$PWD/../rbops/baseline.json" \
-    RBOPS_BASE_REF=b21821d6acbc9e1bef8d9d71293bf7cee19a68f1 \
+    RBOPS_BASE_REF=d425e2b322bd3be245ecbedc0be4636bd1141114 \
     ../rbops/verify.sh phase-084
 
 == manifest
@@ -979,7 +1255,7 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS forbidden-path scan done
   PASS no gate-weakening constructs added
   PASS no scratch files
-  PASS diff substance: +5640 -6 (min +5)
+  PASS diff substance: +1505 -91 (min +5)
   PASS implementation touched tests/ (must_touch: tests/)
 
 == cargo fmt
@@ -989,7 +1265,7 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS cargo clippy -D warnings
 
 == cargo test
-  PASS cargo test: 1955 passed, 0 failed
+  PASS cargo test: 1963 passed, 0 failed
 
 == doc tests
   PASS runs: examples/files.rb
@@ -1004,13 +1280,13 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
   PASS example sweep done
 
 == test policy
-  PASS failure-asserting test present: 39
-  PASS test quota met: 59 rust / 0 redblue (need 3 or 2)
-  PASS edge case test present: 43
+  PASS failure-asserting test present: 3
+  PASS test quota met: 8 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 8
   PASS no newly skipped tests
 
 == report honesty
-  PASS reported test count (1955) matches actual (1955)
+  PASS reported test count (1963) matches actual (1963)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-084                ║
@@ -1021,13 +1297,13 @@ $ RBOPS_ROOT="$PWD" RBOPS_PROJECT_DIR="$PWD" RBOPS_PHASES="$PWD/../rbops/phases.
 report from the pipeline's copy, not from this checkout's: `dispatch.sh`
 harvests `phases/phase-084/REPORT.md` out of the project and into the
 pipeline root before the gate runs. Run against the pipeline root, the gate
-reads the copy left there by an earlier round — which claims 1952 — and says
+reads the copy left there by an earlier round — which claims 1955 — and says
 so:
 
 ```
 == report honesty
-  WARN report claims 1952 passing, actual run has 1955 — under-claimed, fix the number
-  PASS reported test count (1952) does not exceed actual (1955)
+  WARN report claims 1955 passing, actual run has 1963 — under-claimed, fix the number
+  PASS reported test count (1955) does not exceed actual (1963)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-084                ║
@@ -1038,7 +1314,7 @@ With this report harvested in place of the stale copy, the same gate says:
 
 ```
 == report honesty
-  PASS reported test count (1955) matches actual (1955)
+  PASS reported test count (1963) matches actual (1963)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-084                ║
@@ -1048,14 +1324,16 @@ With this report harvested in place of the stale copy, the same gate says:
 Both runs are green. The second is the one the pipeline will see, because the
 harvest runs before the gate.
 
-The gate's own diff measurements on this delivery: `diff substance: +5640
--6`, `implementation touched tests/ (must_touch: tests/)`, `test quota met:
-59 rust / 0 redblue`, `edge case test present: 43`, `failure-asserting test
-present: 39`, `no newly skipped tests`. Measured against this round's own
-parent (`18c0c46`) rather than against `b21821d`, the same gate reports
-`diff substance: +1401 -117`, `test quota met: 10 rust / 0 redblue`, `edge
-case test present: 8` and `failure-asserting test present: 6` — this
-round's share of the delivery on its own.
+The gate's own diff measurements, against this round's parent (`d425e2b`,
+the resume commit): `diff substance: +495 -37`, `implementation touched
+tests/ (must_touch: tests/)`, `test quota met: 4 rust / 0 redblue`, `edge
+case test present: 4`, `failure-asserting test present: 2`, `no newly skipped
+tests`. Measured against the base the dispatcher captured before the resume
+merge (`b21821d`) instead — the whole delivery, this phase's own file and the
+two documents with it — the same gate reports `diff substance: +6141 -21`
+(measured before this document's last two lines; the number moves with it),
+`test quota met: 63 rust / 0 redblue`, `edge case test present: 47` and
+`failure-asserting test present: 41`.
 
 ## Invariants touched
 
@@ -1170,3 +1448,37 @@ round's share of the delivery on its own.
 - **The pipeline-side half was not re-measured in this round.** The run's
   instruction was not to inspect the pipeline repo, so no claim is made here
   about the current contents of `rbops/dispatch.sh` or `rbops/smoke.sh`.
+- **The history repair is bounded, and a clone that cannot be completed now
+  costs three fetches and half a minute instead of one.** The repair in
+  `tests/unreviewed_work_ack_test.rs` is attempted up to
+  `RepairPolicy::attempts` times, and between the attempts — and after they
+  are spent — it watches the clone's depth for up to `RepairPolicy::wait`
+  (half a minute) so that a repair which lands late is accepted rather than
+  reported as a clone that cannot be completed. The cost is on the failure
+  path: a checkout whose origin is unreachable now fails later than it used
+  to, and the audit still refuses — which is the right answer, but it is
+  slower to reach. The bound is a named value, a test asserts the ceiling is
+  generous enough to outlast a fetch that is already in flight, and the
+  fixture tests assert the refusal still happens rather than looping. The
+  same repair is now in `tests/checkpoint_ancestry_test.rs`, which had the
+  lost-lock false refusal with no retry at all.
+- **The repair is serialised within one test binary, not across them.** The
+  `HISTORY_REPAIR` mutex keeps one `git fetch --unshallow` at a time per
+  process. `cargo test` runs the test binaries one after another, so the two
+  binaries that both complete a clone — this one and
+  `tests/checkpoint_ancestry_test.rs` — do not overlap under it; a runner that
+  executed the binaries in parallel (cargo-nextest, say) could still have them
+  contend for `.git/shallow.lock`, and **the repair waiting for the clone's
+  state is what absorbs that** — the loser of the lock waits for the winner's
+  fetch to land instead of refusing a clone that is complete a moment later.
+  That was measured, with a competing fetch holding `.git/shallow.lock` for
+  twelve seconds, and it is the case round 13's attempt count got wrong. A
+  cross-process lock would close it outright, at the cost of writing a lock
+  file into `.git` from a test. → FINDINGS.md.
+- **The repair cannot tell a stale lock from a live one.** It waits for the
+  clone's depth, and a lock left behind by a crashed fetch never clears — so
+  a clone whose origin is unreachable, or whose `.git/shallow.lock` is stale,
+  is refused after the ceiling rather than sooner. Git's own message says
+  "or the lock file may be stale", and the repair does not act on the second
+  half of it: removing a lock file a test does not own is not a repair a test
+  should perform. → FINDINGS.md.
