@@ -39,6 +39,16 @@
 //! depth *again* and refuses if the history is still short. Completing a clone
 //! is not tolerating a short one. What the audit will never do is report "no
 //! checkpoints found" out of a log it knows is incomplete.
+//!
+//! # The repair waits for the clone, not for a count of attempts
+//!
+//! The repair can lose `.git/shallow.lock` to another fetch of the same clone
+//! — the pipeline's own, or the other audit file's. A fetch that loses the
+//! lock leaves the clone exactly as short as it was, so the repair waits for
+//! the clone's **state**: the depth is re-read after every attempt, and the
+//! depth is watched until a fetch that is already in flight lands. A repair
+//! that counted its attempts instead refused clones that were complete a
+//! moment later, which is the false refusal this audit exists to prevent.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -46,6 +56,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// One history repair at a time.
 ///
@@ -127,6 +138,64 @@ fn is_shallow() -> Result<bool, String> {
     }
 }
 
+/// How the repair behaves.
+///
+/// The repair is a `git fetch --unshallow`, and it can lose
+/// `.git/shallow.lock` to another fetch of the same clone — the pipeline's
+/// own, or the other audit file's. A fetch that loses the lock leaves the
+/// clone exactly as short as it was, so **counting attempts is the wrong thing
+/// to count**: three attempts a second apart is a two-second window, and a
+/// contending fetch that holds the lock for three seconds loses every one of
+/// them. What the repair has to wait for is the clone's *state*, and the
+/// ceiling on that wait is generous, because the fetch that will complete the
+/// clone may still be running.
+#[derive(Clone, Copy)]
+struct RepairPolicy {
+    /// How many times the repair may be attempted.
+    ///
+    /// Bounded, because a clone that cannot be completed is an error, not a
+    /// hang.
+    attempts: usize,
+    /// How long to wait between two attempts.
+    retry_delay: Duration,
+    /// How long, in total, the repair is willing to spend watching the clone's
+    /// depth for a completion that lands late.
+    wait: Duration,
+    /// How often the depth is read while waiting.
+    poll: Duration,
+}
+
+/// The policy the audit runs under: three attempts, and half a minute of
+/// watching the clone's depth for the completion that lands late.
+///
+/// The ceiling is generous on purpose. It has to outlast a fetch that is
+/// already in flight, because that is the fetch whose lock every attempt
+/// loses. A ceiling that is too small brings back the failure this file
+/// exists to prevent: a clone that is complete a moment later is refused.
+fn repair_policy() -> RepairPolicy {
+    RepairPolicy {
+        attempts: 3,
+        retry_delay: Duration::from_secs(1),
+        wait: Duration::from_secs(30),
+        poll: Duration::from_millis(200),
+    }
+}
+
+/// The same policy with the clock turned down, for the tests that drive the
+/// decision from fixtures.
+///
+/// The shape is the shape production has — the same number of attempts, the
+/// same order of events — with the waits scaled down so that a test does not
+/// spend half a minute proving a point about milliseconds.
+fn fixture_policy() -> RepairPolicy {
+    RepairPolicy {
+        attempts: 3,
+        retry_delay: Duration::from_millis(20),
+        wait: Duration::from_millis(500),
+        poll: Duration::from_millis(5),
+    }
+}
+
 /// Make the clone able to answer for `main`'s whole history, or refuse.
 ///
 /// `is_shallow` reports the depth and `complete` is the one repair the audit is
@@ -139,29 +208,114 @@ fn is_shallow() -> Result<bool, String> {
 /// the exact false pass this audit exists to prevent. So a shallow clone is
 /// never measured on what it has: it is completed first, and if it is still
 /// short afterwards the audit refuses instead of reporting a truncated log.
+///
+/// The repair waits for the clone's **state**, not for a count of attempts: a
+/// fetch that loses `.git/shallow.lock` to a fetch that is still running
+/// leaves the clone short, and the clone becomes complete the moment that
+/// fetch lands. Counting attempts refused a clone that was complete a moment
+/// later; watching the depth does not.
 fn ensure_history(
     is_shallow: &dyn Fn() -> Result<bool, String>,
     complete: &dyn Fn() -> Result<(), String>,
 ) -> Result<(), String> {
+    ensure_history_with(is_shallow, complete, repair_policy())
+}
+
+/// The decision, with its policy as a third parameter.
+///
+/// The policy is a parameter because the production ceiling is half a minute
+/// and a test that drives the decision from fixtures must not spend half a
+/// minute proving a point about milliseconds. The shape is the same either
+/// way: the same attempts, the same order of events, the same refusal.
+fn ensure_history_with(
+    is_shallow: &dyn Fn() -> Result<bool, String>,
+    complete: &dyn Fn() -> Result<(), String>,
+    policy: RepairPolicy,
+) -> Result<(), String> {
     if !is_shallow()? {
         return Ok(());
     }
-    complete().map_err(|e| {
-        format!(
-            "history is shallow and it could not be completed: {e}. The audit refuses \
-             to read a truncated `git log main`, because a truncated log reads as a \
-             clean one."
-        )
-    })?;
-    if is_shallow()? {
-        return Err(
-            "history is shallow and completing the clone did not make it complete: \
-             `git log main` would return a truncated log, and a truncated log reads \
-             as a clean one. Run `git fetch --unshallow` before auditing."
-                .into(),
-        );
+    // A fetch that loses the lock leaves the clone exactly as short as it was,
+    // so one attempt refuses a clone that is complete a moment later. The
+    // repair therefore waits for the clone's *state*: the depth is re-read
+    // after every attempt, and between attempts the depth is watched until
+    // the next attempt is due. The attempts are bounded and the watching is
+    // bounded too, so a clone that really cannot be completed is still
+    // refused.
+    let mut failure: Option<String> = None;
+    let mut waited = Duration::ZERO;
+    for attempt in 1..=policy.attempts {
+        if let Err(e) = complete() {
+            failure = Some(e);
+        }
+        if !is_shallow()? {
+            return Ok(());
+        }
+        if attempt == policy.attempts {
+            break;
+        }
+        // The fetch that holds the lock may land at any moment, and when it
+        // does the clone is complete. Watch for it rather than counting.
+        let window = policy.retry_delay.min(policy.wait.saturating_sub(waited));
+        if wait_for_completion(is_shallow, &mut waited, window, policy.poll)? {
+            return Ok(());
+        }
     }
-    Ok(())
+    // The attempts are spent and the clone is still short — but the fetch that
+    // holds the lock may still be running, and it will leave the clone
+    // complete. The rest of the budget is spent watching for that, and only
+    // then is the clone refused.
+    let window = policy.wait.saturating_sub(waited);
+    if wait_for_completion(is_shallow, &mut waited, window, policy.poll)? {
+        return Ok(());
+    }
+    Err(refusal(failure))
+}
+
+/// Watch the clone's depth until it is complete or the window ends.
+///
+/// `waited` is charged with the time spent here, so the ceiling covers every
+/// wait the repair makes and not only this one. The answer is whether the
+/// clone became complete: a repair that lands late is accepted, and a clone
+/// that never becomes complete is refused by the caller.
+fn wait_for_completion(
+    is_shallow: &dyn Fn() -> Result<bool, String>,
+    waited: &mut Duration,
+    window: Duration,
+    poll: Duration,
+) -> Result<bool, String> {
+    let start = Instant::now();
+    loop {
+        if !is_shallow()? {
+            *waited += start.elapsed();
+            return Ok(true);
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= window {
+            *waited += elapsed;
+            return Ok(false);
+        }
+        std::thread::sleep(poll.max(Duration::from_millis(1)).min(window - elapsed));
+    }
+}
+
+/// The refusal, with the repair's own failure named when there was one.
+///
+/// The reason is in the refusal because "the clone could not be completed" and
+/// "the fetch could not take the lock" are different problems, and a reader
+/// holding the second one cannot fix it by running the first one's remedy.
+fn refusal(failure: Option<String>) -> String {
+    match failure {
+        Some(e) => format!(
+            "history is shallow and completing the clone did not make it complete: {e}. \
+             The audit refuses to read a truncated `git log main`, because a truncated log \
+             reads as a clean one. Run `git fetch --unshallow` before auditing."
+        ),
+        None => "history is shallow and completing the clone did not make it complete: \
+             `git log main` would return a truncated log, and a truncated log reads as a \
+             clean one. Run `git fetch --unshallow` before auditing."
+            .into(),
+    }
 }
 
 /// The real accessor: this clone, and the single repair the audit may attempt.
@@ -1015,17 +1169,23 @@ fn edge_a_shallow_clone_is_completed_rather_than_audited_short() {
 
     // Complete already: no repair is attempted, so nothing is invented.
     let repairs = Cell::new(0usize);
-    ensure_history(&|| Ok(false), &|| {
-        repairs.set(repairs.get() + 1);
-        Ok(())
-    })
+    ensure_history_with(
+        &|| Ok(false),
+        &|| {
+            repairs.set(repairs.get() + 1);
+            Ok(())
+        },
+        fixture_policy(),
+    )
     .expect("a complete clone is audit-ready");
     assert_eq!(repairs.get(), 0, "a complete clone must not be 'repaired'");
 
     // Shallow and the repair fails: an error, and git's own reason survives it.
-    let err = ensure_history(&|| Ok(true), &|| {
-        Err("fatal: 'origin' does not appear to be a git repository".into())
-    })
+    let err = ensure_history_with(
+        &|| Ok(true),
+        &|| Err("fatal: 'origin' does not appear to be a git repository".into()),
+        fixture_policy(),
+    )
     .expect_err("a shallow clone that cannot be completed is not auditable");
     assert!(
         err.contains("shallow"),
@@ -1043,26 +1203,36 @@ fn edge_a_shallow_clone_is_completed_rather_than_audited_short() {
     // Shallow, the repair runs, and the clone is STILL short: refused, not
     // audited. This is the case that would otherwise be the false pass.
     let attempts = Cell::new(0usize);
-    let err = ensure_history(&|| Ok(true), &|| {
-        attempts.set(attempts.get() + 1);
-        Ok(())
-    })
+    let err = ensure_history_with(
+        &|| Ok(true),
+        &|| {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        },
+        fixture_policy(),
+    )
     .expect_err("a clone that is still shallow reads as a clean one, so it is refused");
-    assert_eq!(
-        attempts.get(),
-        1,
-        "the repair is attempted exactly once, not retried"
+    assert!(
+        attempts.get() >= 1,
+        "the repair must have been attempted before the history is refused"
+    );
+    assert!(
+        attempts.get() <= fixture_policy().attempts,
+        "the repair must be bounded, or a clone that cannot be completed is a \
+         hang instead of an error: {} attempts",
+        attempts.get()
     );
     assert!(err.contains("truncated"), "got: {err}");
 
     // Shallow, the repair runs, and the clone is now complete: audited.
     let reads = Cell::new(0usize);
-    ensure_history(
+    ensure_history_with(
         &|| {
             reads.set(reads.get() + 1);
             Ok(reads.get() == 1)
         },
         &|| Ok(()),
+        fixture_policy(),
     )
     .expect("a clone that was completed is audit-ready");
     assert_eq!(
@@ -1073,14 +1243,73 @@ fn edge_a_shallow_clone_is_completed_rather_than_audited_short() {
 
     // An unreadable depth is an error, not a `false` that would launder a
     // truncated log into a clean history.
-    assert!(
-        ensure_history(&|| Err("not a repository".into()), &|| Ok(()))
-            .expect_err("an unknown depth is not a depth of zero")
-            .contains("not a repository")
-    );
+    assert!(ensure_history_with(
+        &|| Err("not a repository".into()),
+        &|| Ok(()),
+        fixture_policy()
+    )
+    .expect_err("an unknown depth is not a depth of zero")
+    .contains("not a repository"));
 
     // And the real accessor: this checkout is complete, so nothing is fetched.
     ensure_full_history().expect("this checkout's history is complete, so no fetch is needed");
+}
+
+/// A repair that lands after every attempt has been spent is still accepted.
+///
+/// This is the contention the repair can meet against a fetch from outside
+/// this binary: the pipeline's own fetch holds `.git/shallow.lock` for as long
+/// as it takes, every attempt made while it holds the lock loses, and the
+/// clone becomes complete the moment it lands. A repair that counted its
+/// attempts refused a clone that was complete a moment later — the exact
+/// failure the audit exists to prevent, arrived at from the other direction.
+#[test]
+fn edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // The contending fetch: it holds the lock for longer than the whole
+    // attempt window, and only then leaves the clone complete.
+    let contention = Duration::from_millis(150);
+    assert!(
+        contention > fixture_policy().retry_delay * fixture_policy().attempts as u32,
+        "premise: the contention must outlast every attempt, or this is the \
+         test that already passed"
+    );
+    let landed = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+
+    let attempts = Cell::new(0usize);
+    let reading = Arc::clone(&landed);
+    ensure_history_with(
+        &|| {
+            if started.elapsed() >= contention {
+                reading.store(true, Ordering::SeqCst);
+            }
+            Ok(!reading.load(Ordering::SeqCst))
+        },
+        &|| {
+            attempts.set(attempts.get() + 1);
+            // Every attempt loses the lock: the fetch that holds it is still
+            // running, and it is that fetch which will complete the clone.
+            Err("fatal: Unable to create '.git/shallow.lock': File exists.".into())
+        },
+        fixture_policy(),
+    )
+    .expect("a repair that lands after the attempts are spent must be accepted");
+
+    assert_eq!(
+        attempts.get(),
+        fixture_policy().attempts,
+        "every attempt must have lost the lock, or this test did not measure \
+         the contention it is about"
+    );
+    assert!(
+        started.elapsed() >= contention,
+        "the repair must have waited for the clone to become complete, not \
+         counted its attempts and refused: {:?}",
+        started.elapsed()
+    );
 }
 
 /// The branch the audit reads is `main`, and only `main`.

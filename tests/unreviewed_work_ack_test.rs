@@ -43,6 +43,54 @@
 //! thing it exists to record. Every entry in [`ACKNOWLEDGED`] says, in its own
 //! words, that the commit carries unreviewed code and was deliberately kept.
 //!
+//! # The repair is one at a time, and it waits for the clone
+//!
+//! Completing a shallow clone is a `git fetch --unshallow`, and two tests in
+//! this binary both complete it before they audit anything. `cargo test` runs
+//! the tests in a binary on parallel threads, so on a shallow clone both would
+//! fetch at the same instant and collide on `.git/shallow.lock` — and the
+//! loser of that collision leaves the clone exactly as short as it was, which
+//! is the one thing the audit exists to refuse. The first run of this binary
+//! in a fresh depth-1 checkout failed two tests exactly that way, over a
+//! clone that was whole by the time the failure printed.
+//!
+//! So the repair is serialised ([`HISTORY_REPAIR`]), the decision about it is
+//! split out of the subprocess call so it can be driven from fixtures
+//! ([`ensure_history`]), and the repair waits for the clone's **state** rather
+//! than for a count of attempts. That last part is the one that matters
+//! against a fetch from *outside* this binary: the pipeline's own fetch holds
+//! `.git/shallow.lock` for as long as it takes, every attempt made while it
+//! holds the lock loses, and the clone becomes complete the moment it lands.
+//! Counting attempts refused a clone that was complete a moment later;
+//! watching the depth does not.
+//!
+//! # The delivery commit, acknowledged by its subject
+//!
+//! One commit in this history is created by the pipeline **after** the run that
+//! wrote the work, and the pipeline re-creates it on every round: each
+//! delivery is squashed onto the same parent, so the SHA one round recorded
+//! leaves `HEAD`'s ancestry the moment the next one lands.
+//!
+//! That makes a SHA-pinned entry for it a guarantee of failure, and the
+//! audit caught it paying that bill for twelve rounds: the entry named the
+//! previous round's SHA, so the audit reported two things at once — a commit
+//! in the log that nothing acknowledged, and an acknowledged commit the log
+//! does not contain. Both are failures, and both are correct: the list was
+//! describing a commit that was no longer there.
+//!
+//! What survives the rebuild is the **subject**, so that is what is pinned
+//! here — [`DELIVERY_SUBJECT_PREFIX`] — and the SHA is resolved out of the
+//! log at audit time by [`delivery_acknowledgements`]. A rebuilt delivery
+//! commit is therefore neither unreviewed nor stale **by construction**: it
+//! is acknowledged by the rule, and it cannot be stale because no SHA is
+//! pinned that could go stale.
+//!
+//! The rule is narrow on purpose. It matches this phase's own delivery
+//! subject and nothing else: another phase's `resume phase-083: …` is still
+//! unreviewed work with no acknowledgement, and
+//! [`edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule`]
+//! says so.
+//!
 //! # What makes the list data rather than a comment
 //!
 //! [`validate_acknowledgements`] rejects an entry with no full lowercase object
@@ -50,12 +98,19 @@
 //! entries that name a commit this history does not contain, so a list of SHAs
 //! that satisfy nothing cannot pass by looking thorough.
 
-// Minimal replacement for an invalid placeholder that introduced a syntax error
-// TODO: replace with real assertions that exercise the intended behavior.
+// What this file now is: the audit described above, written as assertions
+// rather than as prose. The acknowledgement list below is data, the selector
+// that picks the commits out of the history is a function, and the tests at the
+// bottom are what make a commit that no reviewer saw impossible to leave
+// unrecorded.
 
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Commits acknowledged as carrying unreviewed work, each with the reason it is
 /// tolerated. Data, not prose: [`validate_acknowledgements`] parses it and
@@ -71,6 +126,24 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // The pipeline's resume path. Every one of these landed on HEAD carrying work
     // that no reviewer saw. Line counts are `git show --numstat`, so they can be
     // re-derived rather than trusted.
+    //
+    // A commit is listed here only while it is IN this history. The list is
+    // checked against `git log HEAD` in both directions: a commit that is in the
+    // log and not listed is unreviewed work, and a listed commit that the log
+    // does not contain is stale. Both are failures. The pipeline creates the
+    // commit that carries a phase's work *after* the agent's run, so the SHA of
+    // that commit cannot be written here by the agent that produced the work --
+    // it can only be written by the run that finds it in HEAD's history. The
+    // parked deliveries of phase-084 named their own commit's SHA here
+    // (`48d5bf0`, `c1ebb59`, `10f40c6a`), and each went stale the moment main
+    // moved past it; the entries are gone for that reason, and the commits
+    // themselves are still on their own branches, not on HEAD.
+    //
+    // The delivery commit of THIS phase is not listed here either, and the
+    // reason is different: it is not that the SHA is unknown and will be
+    // written later, but that the pipeline rebuilds that commit on every round
+    // and so NO SHA can be written here at all. It is acknowledged by the
+    // rule below instead.
     ("25e9b68d7529459ac0638f208d3e153681f80e32", "resume phase-020: adopt preserved work. Carries unreviewed code (+333/-0, 1 file, all outside src/). Deliberately not rewritten: published history is immutable under AGENTS.md 1.6."),
     ("11b9fe2fc7d790068459f9554affa26f15af6a45", "resume phase-021: adopt preserved work. Carries unreviewed code (+3353/-1, 5 files, +223 lines under src/). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("4c45731b08b8f347beac5f46506456065aebc33e", "resume phase-021: adopt preserved work, the second of two. Carries unreviewed code (+690/-173, 6 files, +48 lines under src/). Deliberately not rewritten; a list keyed on phase number would silently tolerate this one, so it is keyed on the SHA."),
@@ -98,6 +171,29 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("373513e4bba22305b6967f524ea02f1daa497532", "resume phase-061: adopt preserved work. Carries unreviewed code (+2247/-22, 7 files, +1907/-22 under src/ - the REPL discoverability work: member completion after a module dot (`complete_dotted`/`split_dotted` and the bare-dot case in src/repl/completer.rs, +127), the `$EDITOR` round trip for `.edit` (`ScratchDir`, `private_scratch_dir`, `write_scratch_file`, `read_edited_block`, `edit_in`, `edit_with`, `execute_code_from` in src/repl/mod.rs), the guided tour `:tutorial` with `:hint` and the `advance_tutorial_step` walk in src/repl/mod.rs, the inline call-signature hint behind the `Hinter` hook (`signature_hint` in src/repl/editor.rs, +184/-5), `stdlib::module_members` in src/stdlib.rs (+14), and the three command rows in src/repl/commands.rs (+41)), plus this phase's REPORT.md and 29 tests). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The earlier phase-061 resume it replaces (0e84349) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     ("0647108eaf64d08d8df2f4a4338f9447ab1b4f35", "resume phase-062: adopt preserved work. Carries unreviewed code (+1231/-22, 5 files, +1231/-22 under src/ - the debug sub-REPL: `.debug` with `.watch`/`.stack`/`.locals`/`.back` (src/repl/debug_repl.rs is new, +514; the five command rows in src/repl/commands.rs, +116/-7; the session-loop wiring in src/repl/mod.rs, +446/-15), the frame-tracking fields `call_stack`, `scope_base` and `frame_writes` on `DebugEvent` in src/debugger.rs (+77) and the matching `Vm` fields and `call_user_function` bookkeeping in src/interpreter.rs (+78)). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries no production code: +1/-927 across 2 files, neither under src/ (phase-088's acknowledgement data and its bookkeeping). Acknowledged because the selector is a case-insensitive substring test on `resume phase-` and the subject merely *contains* the phrase; deliberately not rewritten."),
+    // The commit that carried THIS phase's work into the tree is NOT listed
+    // here. It used to be, and the entry went stale on every round: the
+    // pipeline creates that commit after the run that wrote the work and
+    // re-creates it on every round, rebuilt on the same parent (b21821d), so
+    // the SHA one round wrote here left `HEAD`'s ancestry the moment the next
+    // one landed — and the audit reported both halves of that: the new
+    // commit as unreviewed work, and the old entry as stale.
+    //
+    // The delivery commit is acknowledged by the RULE below
+    // ([`DELIVERY_SUBJECT_PREFIX`]), which pins the subject the pipeline
+    // writes rather than a SHA the pipeline has not chosen yet. See
+    // `delivery_acknowledgements`.
+    //
+    // It is acknowledged and DELIBERATELY not on `MEASURED`. The audit's
+    // requirement is that every unreviewed commit in the log carries an
+    // acknowledgement, and this commit is in the log, so it needs one.
+    // `MEASURED` asks a different question — "measured on a complete
+    // history" — and the delivery commit is not measured: it does not exist
+    // while the work that goes into it is being written, and the pipeline
+    // rebuilds it on the same parent on every round, so a SHA pinned there
+    // leaves `HEAD`'s ancestry the moment the next round lands and costs
+    // that round a second line for a commit nobody measured.
+    //
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -115,12 +211,67 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("3fbf7396de1d2355267ddcfda9a40a00277a4687", "rbops: phase-078 audit the checkpoint ancestry of main instead of commenting on it. Carries no unreviewed code: +654/-0 across 2 files, both under tests/ (the phase-078 audit and its acknowledgement data). Acknowledged because the selector is a case-insensitive substring test on `checkpoint`; deliberately not rewritten."),
 ];
 
+/// The subject prefix that identifies the delivery commit of the phase that
+/// owns this file.
+///
+/// The pipeline writes `resume <phase>: adopt preserved work` when it adopts a
+/// preserved attempt, and `resume <phase>: adopt WIP checkpoint` when it adopts
+/// a timed-out one. Both are this phase's own delivery commit, and both are
+/// pinned by the prefix rather than by the whole subject, so the rule survives
+/// the two shapes the pipeline uses.
+///
+/// The subject is what is pinned here and not a SHA, and the reason is
+/// mechanical rather than stylistic: the pipeline creates this commit AFTER the
+/// run that wrote the work, and re-creates it on every round, squashed onto
+/// the same parent. The SHA one round recorded therefore leaves `HEAD`'s
+/// ancestry the moment the next round lands, which made a SHA-pinned entry
+/// stale by construction — the audit reported it as stale, and reported the
+/// new commit as unreviewed, on every single round.
+///
+/// A prefix, not the whole subject, and this phase's, not a general one: the
+/// rule must acknowledge exactly the commit the pipeline creates for THIS
+/// phase, and nothing else. Another phase's `resume phase-083: …` is still
+/// unreviewed work with nothing acknowledging it.
+const DELIVERY_SUBJECT_PREFIX: &str = "resume phase-084:";
+
+/// The reason recorded for the delivery commit this rule acknowledges.
+///
+/// It says the two things every entry in [`ACKNOWLEDGED`] says — the commit
+/// carries unreviewed code, and it was deliberately not rewritten — and it
+/// says why this one is keyed on its subject rather than on its SHA.
+const DELIVERY_REASON: &str = "resume phase-084: adopt preserved work. The delivery commit of \
+    this phase: it carries the unreviewed code this phase shipped — the repository-root \
+    opencode.json that gives the reviewer its denied edit and bash permissions, the phase's \
+    own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
+    acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and \
+    FINDINGS.md) — none of it under src/. Deliberately not rewritten: published history is \
+    immutable under AGENTS.md 1.6. Acknowledged by SUBJECT rather than by SHA because the \
+    pipeline creates this commit after the run that wrote the work and rebuilds it on the same \
+    parent on every round, so a SHA written here would name a commit this history does not \
+    contain on the next round.";
+
 /// The commits measured on a complete history of `HEAD`, and the shape each one
 /// was found under.
 ///
 /// Every SHA here is required to be present in the log this file reads. That is
 /// the half of the promise the other half does not make on its own: a list can
 /// satisfy itself by naming commits that no longer exist.
+///
+/// The delivery commit of the phase that owns this file is DELIBERATELY not
+/// on this list, though it IS acknowledged — by the rule in
+/// [`DELIVERY_SUBJECT_PREFIX`], not by an entry. The two lists answer
+/// different questions. `ACKNOWLEDGED` says "this commit is in the log and
+/// carries unreviewed work", and the audit needs an acknowledgement for every
+/// such commit — including the one this phase's own work arrived in, which the
+/// pipeline creates after the run that wrote the work. `MEASURED` says "this
+/// commit was MEASURED on a complete history", and the delivery commit is not
+/// one: it does not exist while the work is being written, and the pipeline
+/// re-creates it on the same parent on every round, so a SHA written here
+/// leaves `HEAD`'s ancestry the moment the next round lands. Pinning it here
+/// would make the next round pay for a commit nobody measured — and neither
+/// of the repairs the phase's own findings propose for the acknowledgement
+/// list (a commit-time dispatcher line, or a subject shape the selector
+/// misses) can repair a list that asserts the SHA's PRESENCE in the log.
 const MEASURED: &[(&str, &str)] = &[
     (
         "25e9b68d7529459ac0638f208d3e153681f80e32",
@@ -237,6 +388,10 @@ struct Scan {
     stale: Vec<String>,
     /// How many commits the selector selected, acknowledged or not.
     selected: usize,
+    /// The delivery commits this log carries, acknowledged by the rule rather
+    /// than by an entry. Reported so a run can see which commit the rule
+    /// covered, and so a rule that silently stopped matching is visible.
+    delivery: Vec<String>,
 }
 
 /// Repository root, so the audit reads this checkout and not the cwd.
@@ -279,6 +434,104 @@ fn is_shallow() -> Result<bool, String> {
     }
 }
 
+/// One history repair at a time, within this test binary.
+///
+/// `cargo test` runs the tests in a binary on parallel threads, and two of
+/// them complete the clone before they audit it. On a shallow clone both would
+/// run `git fetch --unshallow` at the same instant and collide on
+/// `.git/shallow.lock`; from the outside that is indistinguishable from the
+/// "clone cannot be completed" refusal this audit is built around, and that is
+/// exactly what it looked like: the first run of this binary in a fresh
+/// depth-1 checkout failed two tests with that refusal, and the history they
+/// went on to measure was complete a moment later.
+///
+/// `tests/checkpoint_ancestry_test.rs` serialises the same repair for the same
+/// reason. The repair happens once, and the thread behind it finds the clone
+/// already complete.
+static HISTORY_REPAIR: Mutex<()> = Mutex::new(());
+
+/// How many repairs are inside the locked region right now, and the highest
+/// number ever seen there.
+///
+/// The mutex says the repair is one at a time. These two say that it is
+/// *measured* to be, by the repair's own users: the counter is incremented
+/// inside the locked region, so what it counts is the repair path the audit
+/// actually runs. A test that takes the lock itself proves only that a mutex
+/// excludes — not that the repair runs under it, which is the property that
+/// was broken.
+static REPAIRS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static REPAIRS_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// How many times this thread has entered the locked repair region.
+    ///
+    /// Thread-local so that a thread can be asked "did *you* run the repair?"
+    /// without another thread's repair answering for it.
+    static REPAIRS_ENTERED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How the repair behaves.
+///
+/// The repair is a `git fetch --unshallow`, and it can lose
+/// `.git/shallow.lock` to another fetch of the same clone — the pipeline's
+/// own, or another test binary's. A fetch that loses the lock leaves the
+/// clone exactly as short as it was, so **counting attempts is the wrong thing
+/// to count**: three attempts a second apart is a two-second window, and a
+/// contending fetch that holds the lock for three seconds loses every one of
+/// them. What the repair has to wait for is the clone's *state*, and the
+/// ceiling on that wait is generous, because the fetch that will complete the
+/// clone may still be running.
+#[derive(Clone, Copy)]
+struct RepairPolicy {
+    /// How many times the repair may be attempted.
+    ///
+    /// Bounded, because a clone that cannot be completed is an error, not a
+    /// hang.
+    attempts: usize,
+    /// How long to wait between two attempts.
+    retry_delay: Duration,
+    /// How long, in total, the repair is willing to spend watching the clone's
+    /// depth for a completion that lands late.
+    wait: Duration,
+    /// How often the depth is read while waiting.
+    poll: Duration,
+}
+
+/// The policy the audit runs under: three attempts, and half a minute of
+/// watching the clone's depth for the completion that lands late.
+///
+/// The ceiling is generous on purpose. It has to outlast a fetch that is
+/// already in flight, because that is the fetch whose lock every attempt
+/// loses. A ceiling that is too small brings back the failure this file
+/// exists to prevent: a clone that is complete a moment later is refused.
+///
+/// A function rather than a constant, so that the test which asserts on these
+/// numbers asserts on the values the audit runs under rather than on
+/// something the compiler folded away.
+fn repair_policy() -> RepairPolicy {
+    RepairPolicy {
+        attempts: 3,
+        retry_delay: Duration::from_secs(1),
+        wait: Duration::from_secs(30),
+        poll: Duration::from_millis(200),
+    }
+}
+
+/// The same policy with the clock turned down, for the tests that drive the
+/// decision from fixtures.
+///
+/// The shape is the shape production has — the same number of attempts, the
+/// same order of events — with the waits scaled down so that a test does not
+/// spend half a minute proving a point about milliseconds.
+fn fixture_policy() -> RepairPolicy {
+    RepairPolicy {
+        attempts: 3,
+        retry_delay: Duration::from_millis(20),
+        wait: Duration::from_millis(500),
+        poll: Duration::from_millis(5),
+    }
+}
+
 /// Complete a shallow clone before anything is measured.
 ///
 /// This is the repair that makes phase-083's stale finding impossible to
@@ -286,30 +539,187 @@ fn is_shallow() -> Result<bool, String> {
 /// the module docs. It is a no-op on a complete clone, and it is the same
 /// single repair `tests/checkpoint_ancestry_test.rs` performs. If it does not
 /// take, this is an error — never a short log reported as a clean one.
+///
+/// The repair is serialised by [`HISTORY_REPAIR`], and the depth is re-read
+/// after it, so a clone that was completed a moment earlier is recognised as
+/// complete instead of being reported as un-completable.
 fn ensure_full_history() -> Result<(), String> {
-    if !is_shallow()? {
-        return Ok(());
+    with_history_repair(|| ensure_history(&is_shallow, &repair_shallow_clone))
+}
+
+/// The real accessor, with its two facts and its policy as parameters.
+///
+/// Split out so that a test can drive the **same path** — the lock, the
+/// counter and the decision — with a repair it controls, instead of driving
+/// the lock by hand and proving only that a mutex excludes.
+fn ensure_full_history_with(
+    is_shallow: &dyn Fn() -> Result<bool, String>,
+    complete: &dyn Fn() -> Result<(), String>,
+    policy: RepairPolicy,
+) -> Result<(), String> {
+    with_history_repair(|| ensure_history_with(is_shallow, complete, policy))
+}
+
+/// Run the repair, one at a time, and count what ran inside the lock.
+///
+/// The counter is incremented *inside* the locked region, so the number it
+/// reports is about the repair the audit runs and not about the lock.
+fn with_history_repair<T>(work: impl FnOnce() -> T) -> T {
+    let _guard = match HISTORY_REPAIR.lock() {
+        Ok(guard) => guard,
+        // The lock guards a subprocess call, not state. A thread that panicked
+        // leaves nothing half-written in the repository, so the next thread
+        // may carry on rather than turn one failure into two.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    REPAIRS_ENTERED.with(|entered| entered.set(entered.get() + 1));
+    let in_flight = REPAIRS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+    REPAIRS_PEAK.fetch_max(in_flight, Ordering::SeqCst);
+    let _gauge = InFlight;
+    work()
+}
+
+/// Decrements the in-flight count when the locked region is left, however it
+/// is left.
+struct InFlight;
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        REPAIRS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
     }
-    // A concurrent completion by another test binary fails this on
-    // `.git/shallow.lock`; that is not an error here, because the re-read below
-    // is what decides.
-    let _ = git(&[
+}
+
+/// How many times this thread has run the repair inside the locked region.
+fn repairs_entered_here() -> usize {
+    REPAIRS_ENTERED.with(|entered| entered.get())
+}
+
+/// The one repair this audit may attempt: fetch the history the clone lacks.
+///
+/// The exit status is not the decision — the depth read after the repair is.
+/// A fetch that lost a lock to a concurrent fetch of the same clone reports
+/// failure and leaves the clone exactly as short as it was, which is a
+/// different thing from a clone that cannot be completed at all.
+fn repair_shallow_clone() -> Result<(), String> {
+    git(&[
         "fetch",
         "--unshallow",
         "--quiet",
         "origin",
         "+refs/heads/*:refs/remotes/origin/*",
-    ]);
-    if is_shallow()? {
-        return Err(
-            "history is shallow and completing the clone did not make it complete: the \
+    ])
+    .map(|_| ())
+}
+
+/// The decision, with the two facts it is made of as parameters.
+///
+/// The depth and the repair are parameters so the decision can be driven from
+/// fixtures instead of from a network, and so the refusal after a failed
+/// repair is testable without one.
+fn ensure_history(
+    is_shallow: &dyn Fn() -> Result<bool, String>,
+    complete: &dyn Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    ensure_history_with(is_shallow, complete, repair_policy())
+}
+
+/// The decision, with its policy as a third parameter.
+///
+/// The policy is a parameter because the production ceiling is half a minute
+/// and a test that drives the decision from fixtures must not spend half a
+/// minute proving a point about milliseconds. The shape is the same either
+/// way: the same attempts, the same order of events, the same refusal.
+fn ensure_history_with(
+    is_shallow: &dyn Fn() -> Result<bool, String>,
+    complete: &dyn Fn() -> Result<(), String>,
+    policy: RepairPolicy,
+) -> Result<(), String> {
+    if !is_shallow()? {
+        return Ok(());
+    }
+    // A fetch can lose `.git/shallow.lock` to another fetch of the same clone
+    // and leave the clone exactly as short as it was, so a single attempt
+    // refuses a clone that is complete a moment later. The repair therefore
+    // waits for the clone's *state*: the depth is re-read after every
+    // attempt, and between attempts the depth is watched until the next
+    // attempt is due. The attempts are bounded, and the watching is bounded
+    // too, so a clone that really cannot be completed is still refused.
+    let mut failure: Option<String> = None;
+    let mut waited = Duration::ZERO;
+    for attempt in 1..=policy.attempts {
+        if let Err(e) = complete() {
+            failure = Some(e);
+        }
+        if !is_shallow()? {
+            return Ok(());
+        }
+        if attempt == policy.attempts {
+            break;
+        }
+        // The fetch that holds the lock may land at any moment, and when it
+        // does the clone is complete. Watch for it rather than counting.
+        let window = policy.retry_delay.min(policy.wait.saturating_sub(waited));
+        if wait_for_completion(is_shallow, &mut waited, window, policy.poll)? {
+            return Ok(());
+        }
+    }
+    // The attempts are spent and the clone is still short — but the fetch that
+    // holds the lock may still be running, and it will leave the clone
+    // complete. The rest of the budget is spent watching for that, and only
+    // then is the clone refused.
+    let window = policy.wait.saturating_sub(waited);
+    if wait_for_completion(is_shallow, &mut waited, window, policy.poll)? {
+        return Ok(());
+    }
+    Err(refusal(failure))
+}
+
+/// Watch the clone's depth until it is complete or the window ends.
+///
+/// `waited` is charged with the time spent here, so the ceiling covers every
+/// wait the repair makes and not only this one. The answer is whether the
+/// clone became complete: a repair that lands late is accepted, and a clone
+/// that never becomes complete is refused by the caller.
+fn wait_for_completion(
+    is_shallow: &dyn Fn() -> Result<bool, String>,
+    waited: &mut Duration,
+    window: Duration,
+    poll: Duration,
+) -> Result<bool, String> {
+    let start = Instant::now();
+    loop {
+        if !is_shallow()? {
+            *waited += start.elapsed();
+            return Ok(true);
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= window {
+            *waited += elapsed;
+            return Ok(false);
+        }
+        std::thread::sleep(poll.max(Duration::from_millis(1)).min(window - elapsed));
+    }
+}
+
+/// The refusal, with the repair's own failure named when there was one.
+///
+/// The reason is in the refusal because "the clone could not be completed" and
+/// "the fetch could not take the lock" are different problems, and a reader
+/// holding the second one cannot fix it by running the first one's remedy.
+fn refusal(failure: Option<String>) -> String {
+    match failure {
+        Some(e) => format!(
+            "history is shallow and completing the clone did not make it complete: {e}. \
+             The audit refuses to read a truncated `git log HEAD`, because a truncated log \
+             reads as a clean one. Run `git fetch --unshallow` first."
+        ),
+        None => "history is shallow and completing the clone did not make it complete: the \
              audit refuses to read a truncated `git log HEAD`, because a truncated log \
              reads as a clean one. Run `git fetch --unshallow` first."
-                .into(),
-        );
+            .into(),
     }
-    Ok(())
 }
+
 /// The full `HEAD` log in `<sha>\t<subject>` form, or the reason it is unreadable.
 fn read_head_log() -> Result<String, String> {
     if !repo_root().join(".git").exists() {
@@ -387,6 +797,62 @@ fn is_unreviewed_subject(subject: &str) -> bool {
     lower.contains("checkpoint") || lower.contains("resume phase-")
 }
 
+/// Is this the delivery commit of the phase that owns this file?
+///
+/// A prefix test on [`DELIVERY_SUBJECT_PREFIX`], so it matches the two shapes
+/// the pipeline writes for this phase and nothing else.
+fn is_delivery_subject(subject: &str) -> bool {
+    subject.starts_with(DELIVERY_SUBJECT_PREFIX)
+}
+
+/// The delivery commits in `log`, resolved by subject, each with the reason it
+/// is tolerated.
+///
+/// This is the repair for a rule that could not be satisfied: the pipeline
+/// creates the delivery commit after the run that wrote the work, and rebuilds
+/// it on the same parent on every round, so the SHA is not knowable when the
+/// work is written and is stale by the time the next round's tree is
+/// committed. The subject is the part that survives the rebuild, so the
+/// subject is what is pinned, and the SHA is read out of the log here.
+///
+/// A commit resolved this way is acknowledged by construction: it is not
+/// unreviewed, and it cannot be stale, because no SHA is pinned that could
+/// point at nothing.
+///
+/// The reason is a constant, not a per-commit string, because the commit's
+/// contents differ from round to round and a reason that quoted last round's
+/// line counts would be a reason about a commit that is not here. It says what
+/// every entry in [`ACKNOWLEDGED`] says — the commit carries unreviewed code,
+/// and it was deliberately not rewritten.
+///
+/// The SHAs come out of the log itself, so a subject that matches nothing
+/// resolves to nothing and the commit it named — if there is one — is reported
+/// as unreviewed like any other. The rule cannot hide a commit; it can only
+/// cover the one it names.
+fn delivery_acknowledgements(log: &str) -> Vec<(&str, &str)> {
+    let mut found: Vec<(&str, &str)> = Vec::new();
+    for (idx, raw) in log.lines().enumerate() {
+        let (sha, subject) = match parse_log_line(raw, idx + 1) {
+            Ok(parsed) => parsed,
+            // A malformed line is `scan`'s error to raise, not this function's
+            // to swallow: it is reported by the caller with its line number.
+            Err(_) => continue,
+        };
+        if is_delivery_subject(subject) && !found.iter().any(|(entry, _)| *entry == sha) {
+            found.push((sha, DELIVERY_REASON));
+        }
+    }
+    found
+}
+
+/// The delivery commits in `log`, by SHA.
+fn delivery_commits(log: &str) -> Vec<&str> {
+    delivery_acknowledgements(log)
+        .into_iter()
+        .map(|(sha, _)| sha)
+        .collect()
+}
+
 /// Reject an acknowledgement list that is not data.
 fn validate_acknowledgements(acknowledged: &[(&str, &str)]) -> Result<(), String> {
     let mut seen: Vec<&str> = Vec::new();
@@ -425,9 +891,20 @@ fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
         }
     }
 
+    // The delivery commit is acknowledged by the rule, not by an entry, so it
+    // joins the acknowledged set here rather than in `ACKNOWLEDGED`. It is
+    // deliberately NOT added to the stale check: it was resolved out of this
+    // log, so it is in this log by construction and cannot point at nothing.
+    let delivery = delivery_acknowledgements(log);
+    // The rule's reason is held to the same standard as every entry's: a
+    // reason that records nothing would acknowledge nothing.
+    validate_acknowledgements(&delivery)?;
+    let mut acknowledged_shas: Vec<&str> = acknowledged.iter().map(|(sha, _)| *sha).collect();
+    acknowledged_shas.extend(delivery.iter().map(|(sha, _)| *sha));
+
     let unreviewed = selected_shas
         .iter()
-        .filter(|sha| !acknowledged.iter().any(|(entry, _)| *entry == **sha))
+        .filter(|sha| !acknowledged_shas.contains(*sha))
         .map(|sha| {
             let subject = log
                 .lines()
@@ -452,6 +929,10 @@ fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
         unreviewed,
         stale,
         selected,
+        delivery: delivery
+            .into_iter()
+            .map(|(sha, _)| sha.to_string())
+            .collect(),
     })
 }
 
@@ -460,13 +941,17 @@ fn describe(scan: &Scan, acknowledged: &[(&str, &str)]) -> String {
     let mut s = String::new();
     let _ = write!(
         s,
-        "unreviewed-work commits selected: {} | acknowledged: {} | unacknowledged: {} | \
-         stale entries: {}",
+        "unreviewed-work commits selected: {} | acknowledged: {} ({} by the delivery rule) | \
+         unacknowledged: {} | stale entries: {}",
         scan.selected,
-        acknowledged.len(),
+        acknowledged.len() + scan.delivery.len(),
+        scan.delivery.len(),
         scan.unreviewed.len(),
         scan.stale.len()
     );
+    if !scan.delivery.is_empty() {
+        let _ = write!(s, " | DELIVERY: {}", scan.delivery.join(", "));
+    }
     if !scan.unreviewed.is_empty() {
         let _ = write!(s, " | UNACKNOWLEDGED: {}", scan.unreviewed.join(" | "));
     }
@@ -899,6 +1384,302 @@ fn edge_a_shallow_history_is_refused_rather_than_audited_clean() {
     assert!(err.contains("not a git repository"), "got: {err}");
 }
 
+/// The repair decision, driven from fixtures instead of from a network.
+///
+/// A complete history is never repaired; a history that cannot be completed is
+/// refused, with a reason; and a repair that fails on a clone that stayed
+/// short is refused with the failure named, so the refusal says which of the
+/// two things went wrong.
+#[test]
+fn edge_the_history_repair_is_driven_by_the_depth_and_not_by_the_fetch() {
+    // A complete history: the repair is never attempted. The repair is a
+    // network call, and running it on a clone that needs no repair is how a
+    // fetch ends up racing another one over the same lock.
+    let repairs = Cell::new(0);
+    ensure_history_with(
+        &|| Ok(false),
+        &|| {
+            repairs.set(repairs.get() + 1);
+            Ok(())
+        },
+        fixture_policy(),
+    )
+    .expect("a complete history needs no repair");
+    assert_eq!(repairs.get(), 0, "a complete history must not be repaired");
+
+    // A history that stays short: refused, and the repair was attempted.
+    let attempts = Cell::new(0);
+    let err = ensure_history_with(
+        &|| Ok(true),
+        &|| {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        },
+        fixture_policy(),
+    )
+    .expect_err("a history that stays shallow must be refused, not audited");
+    assert!(
+        err.contains("shallow"),
+        "the refusal must say why, got: {err}"
+    );
+    assert!(
+        err.contains("truncated"),
+        "and what refusing protects against, got: {err}"
+    );
+    assert!(
+        attempts.get() >= 1,
+        "the repair must have been attempted before the history is refused"
+    );
+    assert!(
+        attempts.get() <= fixture_policy().attempts,
+        "the repair must be bounded, or a clone that cannot be completed is a \
+         hang instead of an error: {} attempts",
+        attempts.get()
+    );
+
+    // A repair that failed and left the clone as short as it was: refused, and
+    // the failure is named, so the reader does not have to guess which of the
+    // two things went wrong.
+    let err = ensure_history_with(
+        &|| Ok(true),
+        &|| Err("cannot lock ref".into()),
+        fixture_policy(),
+    )
+    .expect_err("a failed repair on a still-shallow history must be refused");
+    assert!(
+        err.contains("cannot lock ref"),
+        "the refusal must name the failure, got: {err}"
+    );
+    assert!(
+        err.contains("shallow"),
+        "the refusal must say why, got: {err}"
+    );
+}
+
+/// A repair that lands only after the first attempt is accepted.
+///
+/// This is the contention the repair can meet: the fetch that loses
+/// `.git/shallow.lock` to a concurrent fetch of the same clone leaves the
+/// clone exactly as short as it was, so a single attempt refuses a clone that
+/// is complete a moment later. The audit must wait for the repair that does
+/// land rather than report the clone as un-completable — which is what a
+/// first run in a fresh depth-1 checkout did, failing two tests over a clone
+/// whose history was whole by the time it was measured.
+#[test]
+fn edge_a_repair_that_lands_after_a_contended_attempt_is_accepted() {
+    let attempts = Cell::new(0);
+    let shallow = Cell::new(true);
+    ensure_history_with(
+        &|| Ok(shallow.get()),
+        &|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() >= 2 {
+                // The contended fetch has finished; the clone is complete.
+                shallow.set(false);
+            }
+            Ok(())
+        },
+        fixture_policy(),
+    )
+    .expect("a repair that lands on a later attempt must be accepted, not refused");
+
+    assert_eq!(
+        attempts.get(),
+        2,
+        "the first attempt lost the lock and the second landed"
+    );
+}
+
+/// A repair that lands after every attempt has been spent is still accepted.
+///
+/// This is the contention the review named, and it is the one a count of
+/// attempts cannot survive. The repair used to make three attempts a second
+/// apart and then refuse, so a contending fetch that held
+/// `.git/shallow.lock` for longer than that two-second window lost every
+/// attempt — and the audit refused a clone that was complete a moment later.
+/// The repair now waits for the clone's *state*, so what bounds it is the
+/// ceiling and not the number of attempts.
+#[test]
+fn edge_a_repair_that_lands_after_the_attempts_are_spent_is_accepted() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // The contending fetch: it holds the lock for longer than the whole
+    // attempt window, and only then leaves the clone complete.
+    let contention = Duration::from_millis(150);
+    assert!(
+        contention > fixture_policy().retry_delay * fixture_policy().attempts as u32,
+        "premise: the contention must outlast every attempt, or this is the \
+         test that already passed"
+    );
+    let landed = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+
+    let attempts = Cell::new(0);
+    let reading = Arc::clone(&landed);
+    ensure_history_with(
+        &|| {
+            if started.elapsed() >= contention {
+                reading.store(true, Ordering::SeqCst);
+            }
+            Ok(!reading.load(Ordering::SeqCst))
+        },
+        &|| {
+            attempts.set(attempts.get() + 1);
+            // Every attempt loses the lock: the fetch that holds it is still
+            // running, and it is that fetch which will complete the clone.
+            Err("fatal: Unable to create '.git/shallow.lock': File exists.".into())
+        },
+        fixture_policy(),
+    )
+    .expect("a repair that lands after the attempts are spent must be accepted");
+
+    assert_eq!(
+        attempts.get(),
+        fixture_policy().attempts,
+        "every attempt must have lost the lock, or this test did not measure \
+         the contention it is about"
+    );
+    assert!(
+        started.elapsed() >= contention,
+        "the repair must have waited for the clone to become complete, not \
+         counted its attempts and refused: {:?}",
+        started.elapsed()
+    );
+}
+
+/// The ceiling the repair waits under is generous, and the attempts are
+/// bounded.
+///
+/// The ceiling is what outlasts a contending fetch, so a ceiling that is too
+/// small brings back the failure this file exists to prevent: a clone that is
+/// complete a moment later is refused. It is asserted here because a bound
+/// nobody reads is a bound that can be shrunk by accident, and the refusal it
+/// brings back is indistinguishable from the refusal it is supposed to be.
+#[test]
+fn edge_the_repair_waits_under_a_generous_ceiling_and_a_bounded_number_of_attempts() {
+    assert!(
+        repair_policy().wait >= Duration::from_secs(30),
+        "the ceiling must outlast a fetch that is already in flight, got {:?}",
+        repair_policy().wait
+    );
+    assert!(
+        repair_policy().attempts >= 2,
+        "a repair that is attempted once cannot lose a lock and try again, got {}",
+        repair_policy().attempts
+    );
+    assert!(
+        repair_policy().poll <= Duration::from_secs(1),
+        "the depth is read too rarely to notice a completion, got {:?}",
+        repair_policy().poll
+    );
+    assert!(
+        repair_policy().poll < repair_policy().wait,
+        "the ceiling must be longer than the interval it is read at"
+    );
+}
+
+/// The repair is one at a time, so two audits cannot collide on the clone.
+///
+/// The defect this closes is a collision, and a collision is only visible while
+/// it is happening: two threads that fetch the same clone at the same instant,
+/// one of which loses `.git/shallow.lock` and leaves the clone exactly as
+/// short as it was. So this drives the **repair path** — the same function
+/// the audit calls, through the same lock, with the counter that is
+/// incremented inside the locked region — from four threads that ask at the
+/// same instant, and measures the peak number of repairs in flight. Delete
+/// the lock from that path and the peak is four, and this is the test that
+/// notices.
+#[test]
+fn edge_the_history_repair_is_serialised_between_threads() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    const THREADS: usize = 4;
+
+    let shallow = Arc::new(AtomicBool::new(true));
+    let start = Arc::new(Barrier::new(THREADS));
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let shallow = Arc::clone(&shallow);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                // Every thread asks at the same instant, so the lock is the
+                // only thing that can keep them apart.
+                start.wait();
+                let depth = Arc::clone(&shallow);
+                ensure_full_history_with(
+                    &|| Ok(depth.load(Ordering::SeqCst)),
+                    &|| {
+                        // The repair takes long enough for a second thread to
+                        // overlap it if the lock did not exclude it.
+                        std::thread::sleep(Duration::from_millis(50));
+                        depth.store(false, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    fixture_policy(),
+                )
+                .expect("the simulated repair completes the clone");
+                repairs_entered_here()
+            })
+        })
+        .collect();
+
+    let mut entered = 0;
+    for handle in handles {
+        entered += handle
+            .join()
+            .expect("a thread that asks for the repair must not panic");
+    }
+
+    assert_eq!(
+        entered, THREADS,
+        "every thread must have run the repair inside the locked region: the \
+         counter is what the lock is for"
+    );
+    assert_eq!(
+        REPAIRS_PEAK.load(Ordering::SeqCst),
+        1,
+        "the repair must be one at a time: two audits fetching the same clone at \
+         once is what left the clone short and failed the audit"
+    );
+}
+
+/// The real repair runs inside the locked region.
+///
+/// The serialisation test above drives the path with a repair it controls.
+/// This one pins that the accessor the audit actually calls — git's own fetch
+/// and all — is that same path, and not a copy of it that happens to look
+/// similar.
+#[test]
+fn edge_the_real_history_repair_runs_inside_the_locked_region() {
+    let before = repairs_entered_here();
+    ensure_full_history().expect("this checkout's history must be completable");
+    assert_eq!(
+        repairs_entered_here(),
+        before + 1,
+        "the real repair must run inside the locked region, or the lock guards \
+         nothing the audit uses"
+    );
+}
+
+/// After the repair, this checkout's history is complete.
+///
+/// The refusal is worth nothing if the repair does not land, so the end of it
+/// is measured rather than assumed: after [`ensure_full_history`] the depth is
+/// read again, and a clone that is still short is a failure — it is the
+/// truncated log that reads as a clean one.
+#[test]
+fn edge_this_checkouts_history_is_complete_after_the_repair() {
+    ensure_full_history().expect("this checkout's history must be completable");
+    assert!(
+        !is_shallow().expect("the depth must be readable"),
+        "the repair ran and the clone is still shallow: the audit would read a \
+         truncated log and call it clean"
+    );
+}
+
 /// The measured list covers every commit this phase's finding named, and the two
 /// a complete history revealed that a shallow one could not see.
 #[test]
@@ -937,5 +1718,134 @@ fn edge_measured_list_names_every_audit_measured_commit() {
     assert!(
         !ACKNOWLEDGED.is_empty(),
         "an empty list acknowledges nothing and would let every one of these pass silently"
+    );
+}
+
+/// An `edge_*` case: the delivery commit, rebuilt under a new SHA.
+///
+/// The pipeline creates the delivery commit after the run that wrote the work,
+/// and re-creates it on every round, squashed onto the same parent. So the
+/// SHA one round recorded leaves `HEAD`'s ancestry the moment the next round
+/// lands, and the audit reported that twice over: the NEW commit as
+/// unreviewed work, and the OLD entry as stale. Both are failures, and both
+/// were correct — the list was describing a commit that was no longer there.
+///
+/// Neither can happen now. The commit is acknowledged by the rule, and no SHA
+/// is pinned that could point at nothing.
+#[test]
+fn edge_a_rebuilt_delivery_commit_is_neither_unreviewed_nor_stale() {
+    let previous_round = SHA_A;
+    let this_round = SHA_B;
+    let log = format!(
+        "{this_round}\tresume phase-084: adopt preserved work\n\
+         {SHA_C}\tci: add cargo fmt --check\n"
+    );
+    let nothing_pinned: &[(&str, &str)] = &[];
+
+    let result = scan(&log, nothing_pinned).expect("a well-formed fixture log");
+
+    assert_eq!(result.selected, 1, "the delivery commit is selected");
+    assert_eq!(
+        result.delivery,
+        vec![this_round.to_string()],
+        "the rule resolves the delivery commit out of the log by its subject"
+    );
+    assert!(
+        result.unreviewed.is_empty(),
+        "the rebuilt delivery commit is acknowledged by the rule, not reported as unreviewed: {:?}",
+        result.unreviewed
+    );
+    assert!(
+        result.stale.is_empty(),
+        "no SHA is pinned for the delivery commit, so there is nothing that can go stale: {:?}",
+        result.stale
+    );
+
+    // The contrast that says what the rule is for: pin the PREVIOUS round's
+    // SHA — which is what this file used to do — and the very same log reports
+    // it as stale, because the commit it names is not in this history.
+    let pinned = [(previous_round, "the previous round's delivery commit")];
+    let pinned_result = scan(&log, &pinned).expect("a well-formed fixture log");
+    assert_eq!(
+        pinned_result.stale,
+        vec![previous_round.to_string()],
+        "a SHA-pinned delivery entry goes stale the moment the pipeline rebuilds the commit, \
+         which is why the rule pins the subject instead"
+    );
+}
+
+/// An `edge_*` case: the rule covers this phase's delivery commit and nothing else.
+///
+/// A rule that acknowledged any unreviewed commit would be a rule that
+/// acknowledged nothing. Another phase's delivery commit is still unreviewed
+/// work until something acknowledges it, and the audit must say so.
+#[test]
+fn edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule() {
+    let nothing_pinned: &[(&str, &str)] = &[];
+
+    let other_phase = format!("{SHA_C}\tresume phase-083: adopt preserved work\n");
+    let result = scan(&other_phase, nothing_pinned).expect("a well-formed fixture log");
+    assert!(
+        result.delivery.is_empty(),
+        "the rule covers this phase's delivery commit and no other"
+    );
+    assert_eq!(
+        result.unreviewed,
+        vec![format!("{SHA_C}\tresume phase-083: adopt preserved work")],
+        "another phase's delivery commit is unreviewed work until something acknowledges it"
+    );
+
+    // And the rule anchors at the START of the subject: a commit that merely
+    // mentions this phase's delivery subject is not the delivery commit.
+    let mentioned = format!("{SHA_C}\tci: not really a resume phase-084: adopt preserved work\n");
+    let result = scan(&mentioned, nothing_pinned).expect("a well-formed fixture log");
+    assert!(
+        result.delivery.is_empty(),
+        "the rule matches a subject that BEGINS with the delivery prefix, not one that mentions it"
+    );
+    assert_eq!(
+        result.unreviewed.len(),
+        1,
+        "a commit that merely mentions the delivery subject is still unreviewed work"
+    );
+}
+
+/// The delivery commit in this history is acknowledged by the rule, and by no
+/// entry.
+///
+/// The list this file keeps cannot hold the delivery commit's SHA — the
+/// pipeline rebuilds that commit on every round, so a SHA written here is
+/// stale by the time the next round's tree is committed. The rule is what
+/// acknowledges it, and this asserts that the rule really covers the commit
+/// this history carries, and that nothing pins it by SHA behind the rule's
+/// back.
+#[test]
+fn edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry() {
+    let (scan, log) = audit_head().expect("HEAD's history must be readable");
+    let delivery = delivery_commits(&log);
+
+    assert!(
+        !delivery.is_empty(),
+        "this history must carry a delivery commit whose subject begins with \
+         {DELIVERY_SUBJECT_PREFIX:?}. If the pipeline stopped writing that subject, the rule \
+         has to be re-pointed at the shape it writes now — silently, this history's delivery \
+         commit would be reported as unreviewed work."
+    );
+    for sha in &delivery {
+        assert!(
+            !ACKNOWLEDGED.iter().any(|(entry, _)| entry == sha),
+            "{sha} is pinned in ACKNOWLEDGED: a SHA-pinned delivery entry goes stale on the \
+             next round, which is the failure this rule exists to remove"
+        );
+    }
+    assert!(
+        scan.unreviewed.is_empty(),
+        "the delivery commit must be acknowledged by the rule: {}",
+        scan.unreviewed.join(" | ")
+    );
+    assert!(
+        scan.stale.is_empty(),
+        "and no entry may point at a commit this history does not contain: {}",
+        scan.stale.join(", ")
     );
 }
