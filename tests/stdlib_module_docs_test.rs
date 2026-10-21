@@ -363,10 +363,7 @@ fn edge_a_builtin_given_a_text_says_nothing_and_names_the_refusal() {
             .unwrap_or_else(|error| panic!("{source} should compile: {error:?}"));
 
         let (mut walker, walked) = redblue::run_isolated(&program);
-        let walker_error = match walked {
-            Ok(value) => panic!("`{source}` must be refused by the walker, got {value:?}"),
-            Err(error) => error,
-        };
+        let walker_error = walked.expect_err(&format!("`{source}` must be refused by the walker"));
         let said_by_walker = walker.take_output();
         assert!(
             said_by_walker.is_empty(),
@@ -375,10 +372,9 @@ fn edge_a_builtin_given_a_text_says_nothing_and_names_the_refusal() {
 
         let mut vm = BytecodeVm::new();
         vm.set_echo(false);
-        let vm_error = match vm.run(&chunk) {
-            Ok(_) => panic!("`{source}` must be refused by the bytecode VM"),
-            Err(error) => error,
-        };
+        let vm_error = vm
+            .run(&chunk)
+            .expect_err(&format!("`{source}` must be refused by the bytecode VM"));
         let said_by_vm = vm.take_output();
         assert!(
             said_by_vm.is_empty(),
@@ -402,6 +398,82 @@ fn edge_a_builtin_given_a_text_says_nothing_and_names_the_refusal() {
             vm_error.message(),
             walker_error.message(),
             "`{source}` must be refused the same way on both engines"
+        );
+    }
+}
+
+/// A builtin that cannot answer is refused **by the library**, and the refusal
+/// is a `Result` a caller can act on — not a wrong answer and not a panic.
+///
+/// The test above asks the two VMs directly. This one asks
+/// [`redblue::run_source`], the entry point an embedding application calls, and
+/// requires three things of a bad argument:
+///
+/// 1. the call comes back `Err`, so a caller can branch on it;
+/// 2. the error is a runtime error and names the builtin that could not answer,
+///    so a reader of the message knows which one to look at;
+/// 3. nothing was printed before the refusal, on either engine — a program that
+///    printed a line and *then* failed has not answered the question.
+///
+/// Point 3 is the reachability point of this phase in the negative direction:
+/// "it did not print the answer" and "it printed a wrong answer and then
+/// complained" are the same observation to a test that only counts lines.
+#[test]
+fn edge_a_builtin_that_cannot_answer_is_refused_by_the_library_not_answered_wrongly() {
+    for (source, name) in [
+        ("say sqrt(\"nine\")", "sqrt"),
+        ("say abs(\"three\")", "abs"),
+        ("say text.split(1, \",\")", "split"),
+        ("say nosuchfunction(1)", "nosuchfunction"),
+    ] {
+        let error = redblue::run_source(source)
+            .expect_err(&format!("`{source}` must be refused, not answered"));
+        assert!(
+            matches!(error, redblue::Error::Runtime(..)),
+            "`{source}` should fail at runtime, got: {error:?}"
+        );
+        assert!(
+            error.message().contains(name),
+            "`{source}` should name `{name}` in its refusal, got: {}",
+            error.message()
+        );
+
+        // The same program, asked of each engine directly, so the refusal is
+        // read from the run rather than from the library's plumbing.
+        let tokens = redblue::lexer::Lexer::tokenize(source)
+            .unwrap_or_else(|error| panic!("{source} should lex: {error:?}"));
+        let program = redblue::parser::parse(tokens)
+            .unwrap_or_else(|error| panic!("{source} should parse: {error:?}"));
+        let chunk = redblue::bytecode::compile_program(&program)
+            .unwrap_or_else(|error| panic!("{source} should compile: {error:?}"));
+
+        let (mut walker, walked) = redblue::run_isolated(&program);
+        let walker_error = walked.expect_err(&format!("`{source}` must be refused by the walker"));
+        assert_eq!(
+            walker_error.message(),
+            error.message(),
+            "`{source}` must be refused the same way by the library and by the walker"
+        );
+        let said_by_walker = walker.take_output();
+        assert!(
+            said_by_walker.is_empty(),
+            "`{source}` said {said_by_walker:?} before refusing"
+        );
+
+        let mut vm = BytecodeVm::new();
+        vm.set_echo(false);
+        let vm_error = vm
+            .run(&chunk)
+            .expect_err(&format!("`{source}` must be refused by the bytecode VM"));
+        assert_eq!(
+            vm_error.message(),
+            error.message(),
+            "`{source}` must be refused the same way by the library and by the bytecode VM"
+        );
+        let said_by_vm = vm.take_output();
+        assert!(
+            said_by_vm.is_empty(),
+            "`{source}` said {said_by_vm:?} before refusing"
         );
     }
 }

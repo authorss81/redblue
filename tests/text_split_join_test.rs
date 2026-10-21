@@ -768,25 +768,29 @@ fn a_wrongly_typed_split_argument_is_caught_by_try_catch_in_a_redblue_program() 
         "    set caught to yes\n",
         "end\n",
         "expect caught to be yes\n",
+        "caught\n",
     );
-    match redblue::run_source(source) {
-        Ok(()) => {}
-        Err(error) => panic!("a wrongly typed split must be caught, not fatal: {error:?}"),
-    }
-    // `run_source` answers `Result<(), Error>` and throws the program's value away,
-    // so `Ok(())` above says the program **ran** — and a failed `expect` is
-    // recorded rather than raised, so it does not even make the run fail. The
-    // `expect caught to be yes` in the program is the whole assertion and has to
-    // be read; without this line a `catch` that never caught anything passed.
+    // One run, and every answer it gives read: it **ran**, it ended on the flag
+    // its own `catch` set, and it said nothing.
+    //
+    // The `expect caught to be yes` at the top level is the program's own check,
+    // and a failed `expect` **fails the run**: `Expr::Expect` answers
+    // `Err(Error::Runtime(..))` (`src/interpreter.rs:2331`) and nothing here
+    // catches it, so the run coming back `Ok` already proves the `catch` fired.
+    // The value below is the second, independent reading of the same run — what
+    // the program *answered*, not whether it ran.
     let tokens = redblue::lexer::Lexer::tokenize(source).expect("the fixture lexes");
     let program = redblue::parser::parse(tokens).expect("the fixture parses");
     redblue::analyzer::analyze(&program).expect("the fixture analyzes");
     let (mut vm, outcome) = redblue::run_isolated(&program);
-    outcome.expect("the fixture runs");
-    assert!(
-        vm.take_expectation_failure().is_none(),
-        "`expect caught to be yes` failed, so the wrongly typed split was not \
-         caught by the program's own try"
+    let value = outcome.unwrap_or_else(|error| {
+        panic!("a wrongly typed split must be caught, not fatal: {error:?}")
+    });
+    assert_eq!(
+        value,
+        Value::YesNo(true),
+        "the program's `caught` flag must be `yes`: the wrongly typed split was \
+         not caught by the program's own try"
     );
     assert_eq!(
         vm.take_output(),

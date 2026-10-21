@@ -9,22 +9,31 @@
 //! So each one asserts the lines. The run itself goes through
 //! [`redblue::run_isolated`], which is the same lexer, parser, analyzer and VM
 //! `run_source` runs and which hands back the `Vm` — and `Vm::take_output` is how
-//! a caller reads what the program said. `run_source` is still covered: the
-//! helper below calls it first, so a program that no longer runs at all fails
-//! here for the reason it used to.
+//! a caller reads what the program said.
+//!
+//! The program is run **once**. `run_source` has no channel for the lines a
+//! test needs to read, so calling it as well would be a second execution of the
+//! same fixture — and the assertion would be about the second run's output
+//! while the fixture had been taken twice. A program that no longer runs at all
+//! still fails here, because the one run answers `Err`. `run_source`'s own
+//! entry point is covered where its answer matters:
+//! `tests/stdlib_module_docs_test.rs` requires it to come back `Err` for a
+//! builtin the library refuses.
 
 use redblue::lexer::Lexer;
 use redblue::run_isolated;
-use redblue::{analyzer, parser, run_source, Error, Value};
+use redblue::{analyzer, parser, Error, Value};
 
-/// Runs `source` the way `run_source` does and returns the lines it printed.
+/// Runs `source` once and returns the lines it printed.
+///
+/// The program goes through the whole pipeline — lexer, parser, analyzer, VM —
+/// and the lines come from the `Vm` that run hands back, so what is asserted is
+/// what *this* run said.
 ///
 /// Returns the `Result` rather than panicking, so a test can say which of the two
 /// things went wrong: a program that did not run, and a program that ran and said
 /// the wrong thing.
 fn printed(source: &str) -> Result<Vec<String>, Error> {
-    run_source(source)?;
-
     let tokens = Lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     analyzer::analyze(&program)?;
@@ -151,8 +160,8 @@ fn edge_the_value_a_program_ends_on_is_a_number_and_not_its_rendering() {
 ///
 /// Two shapes, because they are two different claims and `take_output` cannot tell
 /// them apart: a program that says one empty line (`say ""`) and a program that
-/// says nothing at all. Both answer an empty `Vec` of *lines*, and each is
-/// asserted on its own terms.
+/// says nothing at all. The first answers one line and that line is empty; the
+/// second answers no lines at all. Each is asserted on its own terms.
 #[test]
 fn edge_an_empty_answer_is_pinned_for_both_shapes_of_empty() {
     // One empty line: a line that is present and has nothing in it.
@@ -197,20 +206,15 @@ fn edge_a_program_that_says_something_differs_from_one_that_does_not() {
 
 /// A program that fails is a **failure**, not an empty answer.
 ///
-/// `run_source` is `Result<(), Error>` and the helper keeps that half, so the
-/// channel this phase is about has to be asserted from both sides: a program that
-/// runs and says something, and a program that does not run at all. A helper that
-/// turned a failure into an empty `Vec` would satisfy every "printed nothing"
-/// assertion in the suite.
+/// The helper answers `Result<Vec<String>, Error>`, so the channel this phase is
+/// about has to be asserted from both sides: a program that runs and says
+/// something, and a program that does not run at all. A helper that turned a
+/// failure into an empty `Vec` would satisfy every "printed nothing" assertion
+/// in the suite.
 #[test]
 fn edge_a_program_that_cannot_run_reports_a_failure_rather_than_no_output() {
-    let failure = printed("say nosuchfunction(1)");
-    let error = match failure {
-        Ok(lines) => {
-            panic!("`say nosuchfunction(1)` must be refused, and it printed {lines:?} instead")
-        }
-        Err(error) => error,
-    };
+    let error = printed("say nosuchfunction(1)")
+        .expect_err("`say nosuchfunction(1)` must be refused, and it must not print instead");
     assert!(
         error.message().contains("nosuchfunction"),
         "the refusal must name what it could not find, got: {}",

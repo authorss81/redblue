@@ -169,19 +169,24 @@ fn runaway_loop_is_catchable_from_inside_redblue() {
         "    set caught to yes\n",
         "end\n",
         "expect caught to be yes\n",
+        "caught\n",
     );
 
     let mut vm = Vm::with_max_iterations(100);
-    vm.run(&parse(source))
+    let value = vm
+        .run(&parse(source))
         .expect("the loop's RuntimeError must be catchable");
-    // The `expect` in the program is the assertion, and it is **not** the same as
-    // the run having succeeded: a failed `expect` is recorded and the run carries
-    // on. So the run's own success says nothing here and the recorded
-    // expectation is what has to be read.
-    assert!(
-        vm.take_expectation_failure().is_none(),
-        "`expect caught to be yes` failed, so the loop's RuntimeError was not \
-         catchable from inside the program"
+    // The `expect caught to be yes` at the top level is the program's own check,
+    // and a failed `expect` **fails the run**: `Expr::Expect` answers
+    // `Err(Error::Runtime(..))` (`src/interpreter.rs:2331`) and nothing here
+    // catches it, so the run coming back `Ok` already proves the `catch` fired.
+    // The value below is the second, independent reading of the same run — what
+    // the program *answered*, not whether it ran.
+    assert_eq!(
+        value,
+        redblue::Value::YesNo(true),
+        "the program's `caught` flag must be `yes`: the loop's RuntimeError was \
+         not catchable from inside the program"
     );
 }
 
@@ -191,46 +196,73 @@ fn runaway_loop_is_catchable_from_inside_redblue() {
 
 /// Edge: a loop that must not iterate at all is not an error, however small the
 /// cap. A cap of 1 still permits zero iterations.
+///
+/// The program ends on the variable the loop body would have changed, so the
+/// value the run hands back is the count of turns the loop took — zero, not
+/// merely "no error". A loop that ran one turn anyway would leave the variable
+/// changed, and the run would answer `1` where the answer must be `0`.
 #[test]
 fn edge_zero_iterations_is_allowed() {
     for (name, source) in [
-        ("repeat", "set n to 0\nrepeat 0 times\n    set n to 1\nend"),
+        (
+            "repeat",
+            "set n to 0\nrepeat 0 times\n    set n to 1\nend\nn",
+        ),
         (
             "for each",
-            "set n to 0\nfor each x in []\n    set n to 1\nend",
+            "set n to 0\nfor each x in []\n    set n to 1\nend\nn",
         ),
-        ("while", "set i to 0\nwhile i is 5\n    set i to i + 1\nend"),
+        (
+            "while",
+            "set i to 0\nwhile i is 5\n    set i to i + 1\nend\ni",
+        ),
     ] {
-        run_capped(source, 1).unwrap_or_else(|error| {
+        let value = run_capped(source, 1).unwrap_or_else(|error| {
             panic!(
                 "a zero-iteration {} loop must not spend budget: {:?}",
                 name, error
             )
         });
+        assert_eq!(
+            value,
+            redblue::Value::Number(0.0),
+            "a zero-iteration {} loop must not run its body at all",
+            name
+        );
     }
 }
 
 /// Edge: a loop that runs *exactly* the cap succeeds. An off-by-one that rejects
 /// `max` is the common way an iteration cap is written wrong.
+///
+/// The count the loop reached is the answer, not the absence of an error: a cap
+/// that stopped the loop one turn early would still succeed, and the variable
+/// would be one short of the cap.
 #[test]
 fn edge_exactly_max_iterations_succeeds() {
     for (name, source) in [
         (
             "repeat",
-            "set n to 0\nrepeat 10 times\n    set n to n + 1\nend",
+            "set n to 0\nrepeat 10 times\n    set n to n + 1\nend\nn",
         ),
         (
             "for each",
-            "set n to 0\nfor each x in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n    set n to x\nend",
+            "set n to 0\nfor each x in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n    set n to x\nend\nn",
         ),
         (
             "while",
-            "set i to 0\nwhile i is not 10\n    set i to i + 1\nend",
+            "set i to 0\nwhile i is not 10\n    set i to i + 1\nend\ni",
         ),
     ] {
-        run_capped(source, 10).unwrap_or_else(|error| {
+        let value = run_capped(source, 10).unwrap_or_else(|error| {
             panic!("exactly the cap must be allowed for {}: {:?}", name, error)
         });
+        assert_eq!(
+            value,
+            redblue::Value::Number(10.0),
+            "a {} loop must run exactly the cap's ten turns, not fewer",
+            name
+        );
     }
 }
 
@@ -351,15 +383,17 @@ fn edge_step_budget_is_not_spent_by_unentered_loops() {
         (
             "while",
             "set i to 5\nwhile i is 0\n    say \"never\"\nend",
-            "nothing",
+            Vec::<String>::new(),
         ),
         // An empty list, a loop over it, and a line after it that *does* run —
         // which is what proves the budget was not merely enough for the first
-        // statement and then spent.
+        // statement and then spent. The body says `never` as well, so the check
+        // below is the same one the `while` row gets: a body that ran at all
+        // would have printed it.
         (
             "for each",
-            "for each x in []\n    set n to 1\nend\nsay \"after\"",
-            "after",
+            "for each x in []\n    say \"never\"\nend\nsay \"after\"",
+            vec!["after".to_string()],
         ),
     ] {
         let mut vm = Vm::with_max_steps(4);
@@ -376,14 +410,11 @@ fn edge_step_budget_is_not_spent_by_unentered_loops() {
              would say so. It printed {printed:?}",
             name,
         );
-        if expected != "nothing" {
-            assert_eq!(
-                printed,
-                vec![expected.to_string()],
-                "the statement after an unentered {} loop must still run",
-                name,
-            );
-        }
+        assert_eq!(
+            printed, expected,
+            "an unentered {} loop must print exactly the lines written outside it",
+            name,
+        );
     }
 }
 
@@ -616,16 +647,26 @@ fn edge_count_beyond_i64_is_a_clean_error_not_a_panic() {
 /// Edge: a fractional count truncates to zero iterations and is not an error.
 /// The negative direction of the same boundary: `0..-5` is empty, not a run of
 /// five backwards.
+///
+/// The variable the body would have changed is the last statement, so the run
+/// answers the count of turns taken: zero. A count of `0.5` that ran one turn
+/// would leave the variable at `1`, and the answer would say so.
 #[test]
 fn edge_fractional_and_negative_counts_run_zero_times() {
     for count in ["0.5", "0", "-5"] {
         let source = format!(
-            "set n to 0\nrepeat {} times\n    set n to n + 1\nend",
+            "set n to 0\nrepeat {} times\n    set n to n + 1\nend\nn",
             count
         );
 
-        run_capped(&source, 5)
+        let value = run_capped(&source, 5)
             .unwrap_or_else(|error| panic!("count {} must run zero times: {:?}", count, error));
+        assert_eq!(
+            value,
+            redblue::Value::Number(0.0),
+            "count {} must run zero turns, not one",
+            count
+        );
     }
 }
 
@@ -698,23 +739,34 @@ fn edge_a_loop_that_does_run_prints_one_line_per_turn_in_order() {
 /// what it is.
 #[test]
 fn edge_a_loop_whose_body_says_nothing_still_runs_every_turn() {
+    // The first program says what the loop did: the body says nothing, and the
+    // count the loop reached is printed after it.
     let mut vm = Vm::with_max_iterations(5);
 
-    let outcome = vm
-        .run(&parse(
-            "set n to 0\nrepeat 4 times\n    set n to n + 1\nend\nsay n",
-        ))
-        .expect("four turns is inside a cap of five");
+    vm.run(&parse(
+        "set n to 0\nrepeat 4 times\n    set n to n + 1\nend\nsay n",
+    ))
+    .expect("four turns is inside a cap of five");
     assert_eq!(
         vm.take_output(),
         vec!["4".to_string()],
         "the body said nothing, but the loop still ran all four turns"
     );
-    // The value the program ended on, taken from the run itself rather than from
-    // its printing. A loop statement is worth `nothing` — not the value of the
-    // statement after it, and not the count it reached — so this pins that, and
-    // a loop that began answering with something else would be a change in the
-    // language's shape rather than in its numbers.
+
+    // The second program is the same loop and nothing else, so the program
+    // *ends on the loop*: the value the run hands back is the loop's own value
+    // and not the value of whatever statement followed it. A loop statement is
+    // worth `nothing` — not the count it reached, and not the value of a
+    // statement after it — so this pins that, and a loop that began answering
+    // with something else would be a change in the language's shape rather than
+    // in its numbers.
+    let mut vm = Vm::with_max_iterations(5);
+
+    let outcome = vm
+        .run(&parse(
+            "set n to 0\nrepeat 4 times\n    set n to n + 1\nend",
+        ))
+        .expect("four turns is inside a cap of five");
     assert_eq!(
         outcome,
         redblue::Value::Nothing,
