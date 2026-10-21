@@ -128,7 +128,21 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // previous round's entry is gone rather than left to go stale: `scan`
     // reports an acknowledgement naming a commit HEAD does not contain as
     // stale, and a stale entry is a failure.
-    ("1b5817859a8428a43e5ace66dacddf537f6d002c", "resume phase-084: adopt preserved work. Carries unreviewed code (+3696/-2, 6 files, none under src/ - the repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the phase's own suites tests/agent_permissions_test.rs and tests/report_markdown_test.rs, the acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. It replaces the `d23068b` entry this history does not contain: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
+    //
+    // The SHA below and the line counts in its reason were re-measured from
+    // `git show --numstat` of THAT commit in THIS history, not carried over
+    // from the previous round's entry.
+    //
+    // This entry is on `ACKNOWLEDGED` and DELIBERATELY not on `MEASURED`. The
+    // audit's requirement is that every unreviewed commit in the log carries
+    // an acknowledgement, and this commit is in the log, so it needs one.
+    // `MEASURED` asks a different question — "measured on a complete
+    // history" — and the delivery commit is not measured: it does not exist
+    // while the work that goes into it is being written, and the pipeline
+    // rebuilds it on the same parent on every round, so a SHA pinned there
+    // leaves `HEAD`'s ancestry the moment the next round lands and costs
+    // that round a second line for a commit nobody measured.
+    ("2f7e437f5f9cf46031457b80c0b292c8ff9bd139", "resume phase-084: adopt preserved work. Carries unreviewed code (+4719/-2, 6 files, none under src/ - the repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the phase's own suites tests/agent_permissions_test.rs and tests/report_markdown_test.rs, the acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. It replaces the `1b58178` entry this history does not contain: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -152,6 +166,21 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// Every SHA here is required to be present in the log this file reads. That is
 /// the half of the promise the other half does not make on its own: a list can
 /// satisfy itself by naming commits that no longer exist.
+///
+/// The delivery commit of the phase that owns this file is DELIBERATELY not
+/// on this list, though it is on [`ACKNOWLEDGED`]. The two lists answer
+/// different questions. `ACKNOWLEDGED` says "this commit is in the log and
+/// carries unreviewed work", and the audit needs an entry for every such
+/// commit — including the one this phase's own work arrived in, which the
+/// pipeline creates after the run that wrote the work. `MEASURED` says "this
+/// commit was MEASURED on a complete history", and the delivery commit is not
+/// one: it does not exist while the work is being written, and the pipeline
+/// re-creates it on the same parent on every round, so a SHA written here
+/// leaves `HEAD`'s ancestry the moment the next round lands. Pinning it here
+/// would make the next round pay for a commit nobody measured — and neither
+/// of the repairs the phase's own findings propose for the acknowledgement
+/// list (a commit-time dispatcher line, or a subject shape the selector
+/// misses) can repair a list that asserts the SHA's PRESENCE in the log.
 const MEASURED: &[(&str, &str)] = &[
     (
         "25e9b68d7529459ac0638f208d3e153681f80e32",
@@ -256,10 +285,6 @@ const MEASURED: &[(&str, &str)] = &[
     (
         "0647108eaf64d08d8df2f4a4338f9447ab1b4f35",
         "resume phase-062",
-    ),
-    (
-        "1b5817859a8428a43e5ace66dacddf537f6d002c",
-        "resume phase-084",
     ),
 ];
 

@@ -1,6 +1,6 @@
 # Phase 084 — findings for the auditor
 
-> **How to read the numbers in this file.** It is written over eight rounds,
+> **How to read the numbers in this file.** It is written over nine rounds,
 > and every section says which round wrote it — the newest is the last one.
 > A figure inside a section belongs to that round — the acknowledgement
 > treadmill was paid four times by round 2, six times by round 3 and nine
@@ -1031,3 +1031,280 @@ It added no test, changed nothing under `src/`, did not touch `opencode.json`,
 and did not touch the pipeline repo — round 7 had already committed the
 pipeline's half, and this round only checked it.
 
+
+## Round 9: `git add -N .` makes an untracked file look tracked (round 9)
+
+The gate's own diff step runs, before it measures anything:
+
+```
+git add -N . >/dev/null 2>&1 || true
+```
+
+`git add -N` is an *intent-to-add*: it records the path in the index with no
+content, so a brand-new file the agent wrote becomes visible to `git diff`
+without being staged. It is the right call for the reason the comment in
+`rbops/verify.sh` gives — `git diff <base>` compares the base tree to the
+working tree for **tracked** paths only, so an untracked test file would
+otherwise be invisible to the gate.
+
+It has a second effect that is worth writing down, because it is the kind of
+thing a test written against git gets wrong.
+
+**An intent-to-add path is indistinguishable from a tracked one by
+`git ls-files`.** Measured, in this checkout, on a scratch path:
+
+```
+$ printf 'x' > probe.json && git add -N probe.json
+$ git ls-files -s -- probe.json
+100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0	probe.json
+$ git ls-files --error-unmatch -- probe.json
+probe.json
+$ echo $?
+0
+$ git cat-file -e HEAD:probe.json
+fatal: path 'probe.json' exists on disk, but not in 'HEAD'
+```
+
+`git ls-files --error-unmatch` **exits 0** for a file that is not in the
+repository at all. A test that asserts "the shipped file is tracked" by that
+route passes for a file that no clone will ever contain — and the gate
+itself is what makes it look tracked, because the gate runs `git add -N .`
+before it measures the diff.
+
+The check that cannot be fooled is `git cat-file -e HEAD:<path>`: the path
+must be in the committed tree. `tests/agent_permissions_test.rs` now asserts
+**both** — the `ls-files` check for the index, the `cat-file` check for the
+commit — and the reason is written beside them:
+
+> `git ls-files` alone cannot carry that: the gate runs `git add -N .` before
+> it measures anything, and an intent-to-add entry makes an untracked file
+> look tracked. `git cat-file -e HEAD:<path>` cannot be fooled that way.
+
+**This is a finding about the gate, not about this phase**, and `rbops/` is
+not this phase's to touch — hard rule 1. It is recorded here for the auditor.
+A phase that ships a file the pipeline's agents must resolve out of — an
+`opencode.json`, an agent definition, a hook file — is subject to this: the
+gate will happily measure a diff over a file that is not in the repository,
+and any test that only asks git whether the path is known will agree with it.
+
+## Round 9: the eleventh payment of the acknowledgement treadmill (round 9)
+
+The tree arrived with **one red test**, and it was this phase's own
+acknowledgement audit:
+
+```
+$ cargo test --test unreviewed_work_ack_test
+unreviewed-work commits selected: 33 | acknowledged: 33 | unacknowledged: 1 | stale entries: 1
+ | UNACKNOWLEDGED: 2f7e437f5f9cf46031457b80c0b292c8ff9bd139	resume phase-084: adopt preserved work
+ | STALE: 1b5817859a8428a43e5ace66dacddf537f6d002c
+```
+
+The shape is the one round 6 measured and round 8 described: the pipeline
+re-creates the delivery commit on every round, rebuilt on the same parent
+(`b21821d`), so the SHA a round writes into `ACKNOWLEDGED` leaves `HEAD`'s
+ancestry the moment the next one lands. The list named the previous round's
+delivery (`1b58178`) and this history carries a different one (`2f7e437`).
+
+This round paid it: the entry now names `2f7e437`, and the line counts in
+its reason were **re-measured** from that commit rather than carried over
+from the entry it replaced:
+
+```
+$ git show --numstat --format="%h %p %s" 2f7e437
+2f7e437 b21821d resume phase-084: adopt preserved work
+
+30	0	opencode.json
+1033	0	phases/phase-084/FINDINGS.md
+1947	0	phases/phase-084/REPORT.md
+1219	0	tests/agent_permissions_test.rs
+453	0	tests/report_markdown_test.rs
+37	2	tests/unreviewed_work_ack_test.rs
+```
+
+The eleventh payment falls due to the next run, for the same reason the
+tenth did: the commit that will carry this delivery's work does not exist
+yet. The audit is right to insist — an entry pointing at nothing is how the
+list decays into a comment — and the cost of insisting is one line per
+round, paid by whoever inherits it.
+
+## Round 9: what this round did and did not do (round 9)
+
+**Did:** fix the one red test in the tree; add five tests that close the
+places where the shipped `opencode.json` could be present, correct, and still
+not be in the checkout the pipeline clones (untracked, ignored, a symlink);
+generalise the checker's refusal of a top-level `permission` block into an
+allow-list of top-level keys, so `instructions` — which is prepended to the
+system prompt of *every* agent in the project — cannot be added to the file
+either.
+
+**Did not:** touch `opencode.json` (the file earlier rounds shipped is the
+file that ships, and the live `opencode debug agent reviewer` measurement
+confirms the same 28 rules); touch anything under `src/`; touch the pipeline
+repo — the run's instruction was not to inspect it, so no claim is made about
+its current contents; weaken, delete or re-scope a gate or a test; add an
+`#[ignore]`, a `// skip` or an `allow(clippy::`.
+
+**One thing a reviewer should check:** the new
+`edge_the_shipped_config_must_be_tracked_and_committed_by_git` requires
+`opencode.json` to be in `HEAD`'s tree. That is true today — the file has
+been committed since the delivery that introduced it — and it stays true for
+every later phase that edits the file rather than deleting it. It is false
+exactly once: for a phase that introduces `opencode.json` for the first time
+and is gated before its delivery commit exists. That phase is not this one,
+and the requirement is the point of the test rather than an accident of it.
+
+## Round 10: the first review of round 9's delivery, and its five findings (round 10)
+
+The review of round 9's delivery returned **five findings — two MAJOR and
+three MINOR** — and all five are fixed in this round, the same way every
+earlier round has done it: no gate weakened, no test deleted, no threshold
+moved, no `#[ignore]`, no `// skip`, no `allow(clippy::`.
+
+### The two MAJORs, and what the schema says about the second one
+
+**MAJOR 1 — the allow-list let the reviewer be granted `read`.** The
+checker's allow-list was `REVIEWER_ALLOWED = ["read", "glob", "grep", "list"]`,
+and the accept branch of it said "these four may be `allow`". So
+`read: "allow"` on the reviewer passed every check in the suite — while this
+phase's own documentation has called that a **widening** since round 2,
+because opencode's default `read` rules ask about `.env` files
+(`read *.env ask`) and an agent-level `read: "allow"` is appended after them
+and wins the last-match. The suite had no test on either side of that
+branch: the only test that touched a `REVIEWER_ALLOWED` key reached
+`permission_action`'s error before the accept branch.
+
+The fix is to close the branch rather than to document it. `REVIEWER_ALLOWED`
+is gone. The reviewer's permission block must now declare **exactly** the
+eleven keys it must deny, and the four read-only keys are refused outright,
+in either direction — `read: "allow"` is the widening, and `read: "deny"`
+would take the reviewer's own job away. `check_reviewer_denies` (each of the
+eleven PRESENT and denying) and `check_no_grants_beyond` (every key present
+is one of the eleven, and denying) are the two halves of one rule.
+
+**MAJOR 2 — the per-agent checks stopped one level short of the top-level
+allow-list.** Round 9 made the top level exhaustive (`TOP_LEVEL_KEYS`,
+enforced by a loop), but the per-agent checks reached `mode` and `permission`
+and nothing else, and `check_agent_set` looked at names only. Every other
+key of `agent.reviewer` was accepted silently — and the published schema
+has one that matters.
+
+The schema, dumped from <https://opencode.ai/config.json> (the one the
+shipped file is written against), types `agent.<name>` as `AgentConfig`,
+whose properties are:
+
+```
+$ jq -r '."$defs".AgentConfig.properties | keys[]' /tmp/opencode/config-schema.json
+color
+description
+disable
+hidden
+maxSteps
+mode
+model
+options
+permission
+prompt
+steps
+temperature
+tools
+top_p
+variant
+```
+
+`prompt` is there, and it is a **string** — the agent's own prompt. A line
+in it is a line the reviewer reads as an instruction from the pipeline rather
+than from its own contract: the same reach the top-level `instructions` key
+has, one level down, and the top-level allow-list already refuses that.
+`tools` is the pre-`permission` way of switching a tool on for one agent
+(`@deprecated Use 'permission' field instead`, but still read, and it
+grants). The rest are not this file's business either.
+
+So the agent blocks are allow-listed now: `AGENT_KEYS = ["description",
+"mode", "permission"]`, and `check_agent_keys` refuses every other key, naming
+`prompt` and `tools` for what they are.
+
+### The three MINORs
+
+**MINOR 1 — `git_run` dropped stderr.** It returned stdout only, and the
+error message was built from that stdout, so every git failure read
+"failed with status N: " with no reason at all — the report's own paste
+showed it. `git_run` returns stderr now, and the message carries it:
+
+```
+$ git rm --cached --quiet opencode.json
+$ cargo test --test agent_permissions_test edge_the_shipped_config_must_be_tracked_and_committed_by_git
+`opencode.json` must be a path git tracks: `git ls-files --error-unmatch -- opencode.json` failed
+with status 1: error: pathspec 'opencode.json' did not match any file(s) known to git
+Did you forget to 'git add'?. A config that is only present in the working tree is not in the checkout the
+pipeline clones, and there `--agent reviewer` resolves to the global build agent.
+```
+
+The sibling file `tests/unreviewed_work_ack_test.rs` already did it this way.
+
+**MINOR 2 — a false sentence about the twelve failing tests.** The report
+said the twelve tests that failed under the `instructions` mutation were
+"exactly the tests that read the shipped file". They were not: twenty tests
+read the shipped file, and the eight that survived did not route through
+`check_document` (two called `check_reviewer_denies` and `check_mode`
+directly, six read the JSON themselves) or short-circuited earlier (the
+`default_agent` check comes before the top-level key loop). The sentence is
+restated, the number is re-measured against the suite as it stands, and the
+eleven that survived are now named with the reason each survived.
+
+**MINOR 3 — the SECOND hard-coded SHA list.** This is the one worth writing
+down, because the phase's own diagnosis of the acknowledgement treadmill
+never mentioned it.
+
+`tests/unreviewed_work_ack_test.rs` carries **two** lists. `ACKNOWLEDGED` is
+the audit's own: every commit in `HEAD`'s ancestry whose subject marks
+unreviewed work must be on it, and every entry must name a commit the log
+contains. `MEASURED` is a second list — "the commits measured on a complete
+history" — and every SHA in it must be **present** in `git log HEAD`.
+
+Round 9 pointed `MEASURED` at `2f7e437` as well, so the delivery commit was
+on both lists. The pipeline rebuilds the delivery commit on the same parent
+on every round, so that SHA leaves `HEAD`'s ancestry the moment the next
+round lands: the next round would have paid **two** lines for one commit
+instead of one. And neither of the two repairs this phase's own findings
+propose for the acknowledgement list — a commit-time dispatcher line, or a
+subject shape the selector misses — can repair a list that asserts the
+SHA's *presence* in the log. The finding was right that the proposed fixes
+do not reach it.
+
+**The fix: the delivery commit is off `MEASURED`, with the reason written
+beside the list.** The two lists answer different questions. `ACKNOWLEDGED`
+says "this commit is in the log and carries unreviewed work" — and the
+delivery commit is in the log, so it needs an entry there.
+`MEASURED` says "this commit was MEASURED on a complete history" — and the
+delivery commit was not measured: it does not exist while the work that goes
+into it is being written, and it is rebuilt every round. The next round now
+pays one line, for the acknowledgement, instead of two.
+
+### Round 10: what this round did and did not do (round 10)
+
+**Did:** replace the `REVIEWER_ALLOWED` accept branch with an exact-key rule
+for the reviewer's permission block; add the agent-level allow-list
+(`AGENT_KEYS`) and the check that enforces it, after reading the published
+schema's `AgentConfig` properties; make `git_run` carry git's own reason;
+correct the report's account of which tests fail under a top-level-key
+mutation, and re-measure it; take the delivery commit off `MEASURED` and
+write down why. Four tests came with those, and the suite grew from
+thirty-five tests in the file to thirty-nine.
+
+**Did not:** touch `opencode.json` (the file earlier rounds shipped is the
+file that ships, and the live `opencode debug agent reviewer` measurement
+confirms the same 28 rules); touch anything under `src/`; touch the pipeline
+repo — the run's instruction was not to inspect it, so no claim is made about
+its current contents; weaken, delete or re-scope a gate or a test; add an
+`#[ignore]`, a `// skip` or an `allow(clippy::).
+
+**One thing a reviewer should check:** the reviewer permission block is now
+required to declare exactly eleven keys, so the file cannot grow a
+read-only key for the reviewer even as a well-meant one. That is the
+contract this document has described since round 2 — the defaults are the
+safer answer, and an `ask` about a `.env` file is a request the pipeline
+cannot grant but a `read: "allow"` would re-allow outright. If opencode
+changes its default `read` rules to allow `.env` files outright, the
+reviewer's block will still say nothing about `read` and the file will be
+wrong — that is a gap about opencode's defaults, not about this file, and
+the live `opencode debug agent reviewer` measurement is what would show it.
