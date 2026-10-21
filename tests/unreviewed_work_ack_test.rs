@@ -43,6 +43,33 @@
 //! thing it exists to record. Every entry in [`ACKNOWLEDGED`] says, in its own
 //! words, that the commit carries unreviewed code and was deliberately kept.
 //!
+//! # The delivery commit, acknowledged by its subject
+//!
+//! One commit in this history is created by the pipeline **after** the run that
+//! wrote the work, and the pipeline re-creates it on every round: each
+//! delivery is squashed onto the same parent, so the SHA one round recorded
+//! leaves `HEAD`'s ancestry the moment the next one lands.
+//!
+//! That makes a SHA-pinned entry for it a guarantee of failure, and the
+//! audit caught it paying that bill for twelve rounds: the entry named the
+//! previous round's SHA, so the audit reported two things at once — a commit
+//! in the log that nothing acknowledged, and an acknowledged commit the log
+//! does not contain. Both are failures, and both are correct: the list was
+//! describing a commit that was no longer there.
+//!
+//! What survives the rebuild is the **subject**, so that is what is pinned
+//! here — [`DELIVERY_SUBJECT_PREFIX`] — and the SHA is resolved out of the
+//! log at audit time by [`delivery_acknowledgements`]. A rebuilt delivery
+//! commit is therefore neither unreviewed nor stale **by construction**: it
+//! is acknowledged by the rule, and it cannot be stale because no SHA is
+//! pinned that could go stale.
+//!
+//! The rule is narrow on purpose. It matches this phase's own delivery
+//! subject and nothing else: another phase's `resume phase-083: …` is still
+//! unreviewed work with no acknowledgement, and
+//! [`edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule`]
+//! says so.
+//!
 //! # What makes the list data rather than a comment
 //!
 //! [`validate_acknowledgements`] rejects an entry with no full lowercase object
@@ -50,8 +77,11 @@
 //! entries that name a commit this history does not contain, so a list of SHAs
 //! that satisfy nothing cannot pass by looking thorough.
 
-// Minimal replacement for an invalid placeholder that introduced a syntax error
-// TODO: replace with real assertions that exercise the intended behavior.
+// What this file now is: the audit described above, written as assertions
+// rather than as prose. The acknowledgement list below is data, the selector
+// that picks the commits out of the history is a function, and the tests at the
+// bottom are what make a commit that no reviewer saw impossible to leave
+// unrecorded.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -71,6 +101,24 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // The pipeline's resume path. Every one of these landed on HEAD carrying work
     // that no reviewer saw. Line counts are `git show --numstat`, so they can be
     // re-derived rather than trusted.
+    //
+    // A commit is listed here only while it is IN this history. The list is
+    // checked against `git log HEAD` in both directions: a commit that is in the
+    // log and not listed is unreviewed work, and a listed commit that the log
+    // does not contain is stale. Both are failures. The pipeline creates the
+    // commit that carries a phase's work *after* the agent's run, so the SHA of
+    // that commit cannot be written here by the agent that produced the work --
+    // it can only be written by the run that finds it in HEAD's history. The
+    // parked deliveries of phase-084 named their own commit's SHA here
+    // (`48d5bf0`, `c1ebb59`, `10f40c6a`), and each went stale the moment main
+    // moved past it; the entries are gone for that reason, and the commits
+    // themselves are still on their own branches, not on HEAD.
+    //
+    // The delivery commit of THIS phase is not listed here either, and the
+    // reason is different: it is not that the SHA is unknown and will be
+    // written later, but that the pipeline rebuilds that commit on every round
+    // and so NO SHA can be written here at all. It is acknowledged by the
+    // rule below instead.
     ("25e9b68d7529459ac0638f208d3e153681f80e32", "resume phase-020: adopt preserved work. Carries unreviewed code (+333/-0, 1 file, all outside src/). Deliberately not rewritten: published history is immutable under AGENTS.md 1.6."),
     ("11b9fe2fc7d790068459f9554affa26f15af6a45", "resume phase-021: adopt preserved work. Carries unreviewed code (+3353/-1, 5 files, +223 lines under src/). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("4c45731b08b8f347beac5f46506456065aebc33e", "resume phase-021: adopt preserved work, the second of two. Carries unreviewed code (+690/-173, 6 files, +48 lines under src/). Deliberately not rewritten; a list keyed on phase number would silently tolerate this one, so it is keyed on the SHA."),
@@ -98,6 +146,29 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("373513e4bba22305b6967f524ea02f1daa497532", "resume phase-061: adopt preserved work. Carries unreviewed code (+2247/-22, 7 files, +1907/-22 under src/ - the REPL discoverability work: member completion after a module dot (`complete_dotted`/`split_dotted` and the bare-dot case in src/repl/completer.rs, +127), the `$EDITOR` round trip for `.edit` (`ScratchDir`, `private_scratch_dir`, `write_scratch_file`, `read_edited_block`, `edit_in`, `edit_with`, `execute_code_from` in src/repl/mod.rs), the guided tour `:tutorial` with `:hint` and the `advance_tutorial_step` walk in src/repl/mod.rs, the inline call-signature hint behind the `Hinter` hook (`signature_hint` in src/repl/editor.rs, +184/-5), `stdlib::module_members` in src/stdlib.rs (+14), and the three command rows in src/repl/commands.rs (+41)), plus this phase's REPORT.md and 29 tests). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The earlier phase-061 resume it replaces (0e84349) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     ("0647108eaf64d08d8df2f4a4338f9447ab1b4f35", "resume phase-062: adopt preserved work. Carries unreviewed code (+1231/-22, 5 files, +1231/-22 under src/ - the debug sub-REPL: `.debug` with `.watch`/`.stack`/`.locals`/`.back` (src/repl/debug_repl.rs is new, +514; the five command rows in src/repl/commands.rs, +116/-7; the session-loop wiring in src/repl/mod.rs, +446/-15), the frame-tracking fields `call_stack`, `scope_base` and `frame_writes` on `DebugEvent` in src/debugger.rs (+77) and the matching `Vm` fields and `call_user_function` bookkeeping in src/interpreter.rs (+78)). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries no production code: +1/-927 across 2 files, neither under src/ (phase-088's acknowledgement data and its bookkeeping). Acknowledged because the selector is a case-insensitive substring test on `resume phase-` and the subject merely *contains* the phrase; deliberately not rewritten."),
+    // The commit that carried THIS phase's work into the tree is NOT listed
+    // here. It used to be, and the entry went stale on every round: the
+    // pipeline creates that commit after the run that wrote the work and
+    // re-creates it on every round, rebuilt on the same parent (b21821d), so
+    // the SHA one round wrote here left `HEAD`'s ancestry the moment the next
+    // one landed — and the audit reported both halves of that: the new
+    // commit as unreviewed work, and the old entry as stale.
+    //
+    // The delivery commit is acknowledged by the RULE below
+    // ([`DELIVERY_SUBJECT_PREFIX`]), which pins the subject the pipeline
+    // writes rather than a SHA the pipeline has not chosen yet. See
+    // `delivery_acknowledgements`.
+    //
+    // It is acknowledged and DELIBERATELY not on `MEASURED`. The audit's
+    // requirement is that every unreviewed commit in the log carries an
+    // acknowledgement, and this commit is in the log, so it needs one.
+    // `MEASURED` asks a different question — "measured on a complete
+    // history" — and the delivery commit is not measured: it does not exist
+    // while the work that goes into it is being written, and the pipeline
+    // rebuilds it on the same parent on every round, so a SHA pinned there
+    // leaves `HEAD`'s ancestry the moment the next round lands and costs
+    // that round a second line for a commit nobody measured.
+    //
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
     // tests/checkpoint_ancestry_ack.txt. Re-listed here because this selector is a
@@ -115,12 +186,67 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("3fbf7396de1d2355267ddcfda9a40a00277a4687", "rbops: phase-078 audit the checkpoint ancestry of main instead of commenting on it. Carries no unreviewed code: +654/-0 across 2 files, both under tests/ (the phase-078 audit and its acknowledgement data). Acknowledged because the selector is a case-insensitive substring test on `checkpoint`; deliberately not rewritten."),
 ];
 
+/// The subject prefix that identifies the delivery commit of the phase that
+/// owns this file.
+///
+/// The pipeline writes `resume <phase>: adopt preserved work` when it adopts a
+/// preserved attempt, and `resume <phase>: adopt WIP checkpoint` when it adopts
+/// a timed-out one. Both are this phase's own delivery commit, and both are
+/// pinned by the prefix rather than by the whole subject, so the rule survives
+/// the two shapes the pipeline uses.
+///
+/// The subject is what is pinned here and not a SHA, and the reason is
+/// mechanical rather than stylistic: the pipeline creates this commit AFTER the
+/// run that wrote the work, and re-creates it on every round, squashed onto
+/// the same parent. The SHA one round recorded therefore leaves `HEAD`'s
+/// ancestry the moment the next round lands, which made a SHA-pinned entry
+/// stale by construction — the audit reported it as stale, and reported the
+/// new commit as unreviewed, on every single round.
+///
+/// A prefix, not the whole subject, and this phase's, not a general one: the
+/// rule must acknowledge exactly the commit the pipeline creates for THIS
+/// phase, and nothing else. Another phase's `resume phase-083: …` is still
+/// unreviewed work with nothing acknowledging it.
+const DELIVERY_SUBJECT_PREFIX: &str = "resume phase-084:";
+
+/// The reason recorded for the delivery commit this rule acknowledges.
+///
+/// It says the two things every entry in [`ACKNOWLEDGED`] says — the commit
+/// carries unreviewed code, and it was deliberately not rewritten — and it
+/// says why this one is keyed on its subject rather than on its SHA.
+const DELIVERY_REASON: &str = "resume phase-084: adopt preserved work. The delivery commit of \
+    this phase: it carries the unreviewed code this phase shipped — the repository-root \
+    opencode.json that gives the reviewer its denied edit and bash permissions, the phase's \
+    own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
+    acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and \
+    FINDINGS.md) — none of it under src/. Deliberately not rewritten: published history is \
+    immutable under AGENTS.md 1.6. Acknowledged by SUBJECT rather than by SHA because the \
+    pipeline creates this commit after the run that wrote the work and rebuilds it on the same \
+    parent on every round, so a SHA written here would name a commit this history does not \
+    contain on the next round.";
+
 /// The commits measured on a complete history of `HEAD`, and the shape each one
 /// was found under.
 ///
 /// Every SHA here is required to be present in the log this file reads. That is
 /// the half of the promise the other half does not make on its own: a list can
 /// satisfy itself by naming commits that no longer exist.
+///
+/// The delivery commit of the phase that owns this file is DELIBERATELY not
+/// on this list, though it IS acknowledged — by the rule in
+/// [`DELIVERY_SUBJECT_PREFIX`], not by an entry. The two lists answer
+/// different questions. `ACKNOWLEDGED` says "this commit is in the log and
+/// carries unreviewed work", and the audit needs an acknowledgement for every
+/// such commit — including the one this phase's own work arrived in, which the
+/// pipeline creates after the run that wrote the work. `MEASURED` says "this
+/// commit was MEASURED on a complete history", and the delivery commit is not
+/// one: it does not exist while the work is being written, and the pipeline
+/// re-creates it on the same parent on every round, so a SHA written here
+/// leaves `HEAD`'s ancestry the moment the next round lands. Pinning it here
+/// would make the next round pay for a commit nobody measured — and neither
+/// of the repairs the phase's own findings propose for the acknowledgement
+/// list (a commit-time dispatcher line, or a subject shape the selector
+/// misses) can repair a list that asserts the SHA's PRESENCE in the log.
 const MEASURED: &[(&str, &str)] = &[
     (
         "25e9b68d7529459ac0638f208d3e153681f80e32",
@@ -237,6 +363,10 @@ struct Scan {
     stale: Vec<String>,
     /// How many commits the selector selected, acknowledged or not.
     selected: usize,
+    /// The delivery commits this log carries, acknowledged by the rule rather
+    /// than by an entry. Reported so a run can see which commit the rule
+    /// covered, and so a rule that silently stopped matching is visible.
+    delivery: Vec<String>,
 }
 
 /// Repository root, so the audit reads this checkout and not the cwd.
@@ -387,6 +517,62 @@ fn is_unreviewed_subject(subject: &str) -> bool {
     lower.contains("checkpoint") || lower.contains("resume phase-")
 }
 
+/// Is this the delivery commit of the phase that owns this file?
+///
+/// A prefix test on [`DELIVERY_SUBJECT_PREFIX`], so it matches the two shapes
+/// the pipeline writes for this phase and nothing else.
+fn is_delivery_subject(subject: &str) -> bool {
+    subject.starts_with(DELIVERY_SUBJECT_PREFIX)
+}
+
+/// The delivery commits in `log`, resolved by subject, each with the reason it
+/// is tolerated.
+///
+/// This is the repair for a rule that could not be satisfied: the pipeline
+/// creates the delivery commit after the run that wrote the work, and rebuilds
+/// it on the same parent on every round, so the SHA is not knowable when the
+/// work is written and is stale by the time the next round's tree is
+/// committed. The subject is the part that survives the rebuild, so the
+/// subject is what is pinned, and the SHA is read out of the log here.
+///
+/// A commit resolved this way is acknowledged by construction: it is not
+/// unreviewed, and it cannot be stale, because no SHA is pinned that could
+/// point at nothing.
+///
+/// The reason is a constant, not a per-commit string, because the commit's
+/// contents differ from round to round and a reason that quoted last round's
+/// line counts would be a reason about a commit that is not here. It says what
+/// every entry in [`ACKNOWLEDGED`] says — the commit carries unreviewed code,
+/// and it was deliberately not rewritten.
+///
+/// The SHAs come out of the log itself, so a subject that matches nothing
+/// resolves to nothing and the commit it named — if there is one — is reported
+/// as unreviewed like any other. The rule cannot hide a commit; it can only
+/// cover the one it names.
+fn delivery_acknowledgements(log: &str) -> Vec<(&str, &str)> {
+    let mut found: Vec<(&str, &str)> = Vec::new();
+    for (idx, raw) in log.lines().enumerate() {
+        let (sha, subject) = match parse_log_line(raw, idx + 1) {
+            Ok(parsed) => parsed,
+            // A malformed line is `scan`'s error to raise, not this function's
+            // to swallow: it is reported by the caller with its line number.
+            Err(_) => continue,
+        };
+        if is_delivery_subject(subject) && !found.iter().any(|(entry, _)| *entry == sha) {
+            found.push((sha, DELIVERY_REASON));
+        }
+    }
+    found
+}
+
+/// The delivery commits in `log`, by SHA.
+fn delivery_commits(log: &str) -> Vec<&str> {
+    delivery_acknowledgements(log)
+        .into_iter()
+        .map(|(sha, _)| sha)
+        .collect()
+}
+
 /// Reject an acknowledgement list that is not data.
 fn validate_acknowledgements(acknowledged: &[(&str, &str)]) -> Result<(), String> {
     let mut seen: Vec<&str> = Vec::new();
@@ -425,9 +611,20 @@ fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
         }
     }
 
+    // The delivery commit is acknowledged by the rule, not by an entry, so it
+    // joins the acknowledged set here rather than in `ACKNOWLEDGED`. It is
+    // deliberately NOT added to the stale check: it was resolved out of this
+    // log, so it is in this log by construction and cannot point at nothing.
+    let delivery = delivery_acknowledgements(log);
+    // The rule's reason is held to the same standard as every entry's: a
+    // reason that records nothing would acknowledge nothing.
+    validate_acknowledgements(&delivery)?;
+    let mut acknowledged_shas: Vec<&str> = acknowledged.iter().map(|(sha, _)| *sha).collect();
+    acknowledged_shas.extend(delivery.iter().map(|(sha, _)| *sha));
+
     let unreviewed = selected_shas
         .iter()
-        .filter(|sha| !acknowledged.iter().any(|(entry, _)| *entry == **sha))
+        .filter(|sha| !acknowledged_shas.contains(*sha))
         .map(|sha| {
             let subject = log
                 .lines()
@@ -452,6 +649,10 @@ fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
         unreviewed,
         stale,
         selected,
+        delivery: delivery
+            .into_iter()
+            .map(|(sha, _)| sha.to_string())
+            .collect(),
     })
 }
 
@@ -460,13 +661,17 @@ fn describe(scan: &Scan, acknowledged: &[(&str, &str)]) -> String {
     let mut s = String::new();
     let _ = write!(
         s,
-        "unreviewed-work commits selected: {} | acknowledged: {} | unacknowledged: {} | \
-         stale entries: {}",
+        "unreviewed-work commits selected: {} | acknowledged: {} ({} by the delivery rule) | \
+         unacknowledged: {} | stale entries: {}",
         scan.selected,
-        acknowledged.len(),
+        acknowledged.len() + scan.delivery.len(),
+        scan.delivery.len(),
         scan.unreviewed.len(),
         scan.stale.len()
     );
+    if !scan.delivery.is_empty() {
+        let _ = write!(s, " | DELIVERY: {}", scan.delivery.join(", "));
+    }
     if !scan.unreviewed.is_empty() {
         let _ = write!(s, " | UNACKNOWLEDGED: {}", scan.unreviewed.join(" | "));
     }
@@ -937,5 +1142,134 @@ fn edge_measured_list_names_every_audit_measured_commit() {
     assert!(
         !ACKNOWLEDGED.is_empty(),
         "an empty list acknowledges nothing and would let every one of these pass silently"
+    );
+}
+
+/// An `edge_*` case: the delivery commit, rebuilt under a new SHA.
+///
+/// The pipeline creates the delivery commit after the run that wrote the work,
+/// and re-creates it on every round, squashed onto the same parent. So the
+/// SHA one round recorded leaves `HEAD`'s ancestry the moment the next round
+/// lands, and the audit reported that twice over: the NEW commit as
+/// unreviewed work, and the OLD entry as stale. Both are failures, and both
+/// were correct — the list was describing a commit that was no longer there.
+///
+/// Neither can happen now. The commit is acknowledged by the rule, and no SHA
+/// is pinned that could point at nothing.
+#[test]
+fn edge_a_rebuilt_delivery_commit_is_neither_unreviewed_nor_stale() {
+    let previous_round = SHA_A;
+    let this_round = SHA_B;
+    let log = format!(
+        "{this_round}\tresume phase-084: adopt preserved work\n\
+         {SHA_C}\tci: add cargo fmt --check\n"
+    );
+    let nothing_pinned: &[(&str, &str)] = &[];
+
+    let result = scan(&log, nothing_pinned).expect("a well-formed fixture log");
+
+    assert_eq!(result.selected, 1, "the delivery commit is selected");
+    assert_eq!(
+        result.delivery,
+        vec![this_round.to_string()],
+        "the rule resolves the delivery commit out of the log by its subject"
+    );
+    assert!(
+        result.unreviewed.is_empty(),
+        "the rebuilt delivery commit is acknowledged by the rule, not reported as unreviewed: {:?}",
+        result.unreviewed
+    );
+    assert!(
+        result.stale.is_empty(),
+        "no SHA is pinned for the delivery commit, so there is nothing that can go stale: {:?}",
+        result.stale
+    );
+
+    // The contrast that says what the rule is for: pin the PREVIOUS round's
+    // SHA — which is what this file used to do — and the very same log reports
+    // it as stale, because the commit it names is not in this history.
+    let pinned = [(previous_round, "the previous round's delivery commit")];
+    let pinned_result = scan(&log, &pinned).expect("a well-formed fixture log");
+    assert_eq!(
+        pinned_result.stale,
+        vec![previous_round.to_string()],
+        "a SHA-pinned delivery entry goes stale the moment the pipeline rebuilds the commit, \
+         which is why the rule pins the subject instead"
+    );
+}
+
+/// An `edge_*` case: the rule covers this phase's delivery commit and nothing else.
+///
+/// A rule that acknowledged any unreviewed commit would be a rule that
+/// acknowledged nothing. Another phase's delivery commit is still unreviewed
+/// work until something acknowledges it, and the audit must say so.
+#[test]
+fn edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule() {
+    let nothing_pinned: &[(&str, &str)] = &[];
+
+    let other_phase = format!("{SHA_C}\tresume phase-083: adopt preserved work\n");
+    let result = scan(&other_phase, nothing_pinned).expect("a well-formed fixture log");
+    assert!(
+        result.delivery.is_empty(),
+        "the rule covers this phase's delivery commit and no other"
+    );
+    assert_eq!(
+        result.unreviewed,
+        vec![format!("{SHA_C}\tresume phase-083: adopt preserved work")],
+        "another phase's delivery commit is unreviewed work until something acknowledges it"
+    );
+
+    // And the rule anchors at the START of the subject: a commit that merely
+    // mentions this phase's delivery subject is not the delivery commit.
+    let mentioned = format!("{SHA_C}\tci: not really a resume phase-084: adopt preserved work\n");
+    let result = scan(&mentioned, nothing_pinned).expect("a well-formed fixture log");
+    assert!(
+        result.delivery.is_empty(),
+        "the rule matches a subject that BEGINS with the delivery prefix, not one that mentions it"
+    );
+    assert_eq!(
+        result.unreviewed.len(),
+        1,
+        "a commit that merely mentions the delivery subject is still unreviewed work"
+    );
+}
+
+/// The delivery commit in this history is acknowledged by the rule, and by no
+/// entry.
+///
+/// The list this file keeps cannot hold the delivery commit's SHA — the
+/// pipeline rebuilds that commit on every round, so a SHA written here is
+/// stale by the time the next round's tree is committed. The rule is what
+/// acknowledges it, and this asserts that the rule really covers the commit
+/// this history carries, and that nothing pins it by SHA behind the rule's
+/// back.
+#[test]
+fn edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry() {
+    let (scan, log) = audit_head().expect("HEAD's history must be readable");
+    let delivery = delivery_commits(&log);
+
+    assert!(
+        !delivery.is_empty(),
+        "this history must carry a delivery commit whose subject begins with \
+         {DELIVERY_SUBJECT_PREFIX:?}. If the pipeline stopped writing that subject, the rule \
+         has to be re-pointed at the shape it writes now — silently, this history's delivery \
+         commit would be reported as unreviewed work."
+    );
+    for sha in &delivery {
+        assert!(
+            !ACKNOWLEDGED.iter().any(|(entry, _)| entry == sha),
+            "{sha} is pinned in ACKNOWLEDGED: a SHA-pinned delivery entry goes stale on the \
+             next round, which is the failure this rule exists to remove"
+        );
+    }
+    assert!(
+        scan.unreviewed.is_empty(),
+        "the delivery commit must be acknowledged by the rule: {}",
+        scan.unreviewed.join(" | ")
+    );
+    assert!(
+        scan.stale.is_empty(),
+        "and no entry may point at a commit this history does not contain: {}",
+        scan.stale.join(", ")
     );
 }
