@@ -310,3 +310,92 @@ Two things worth the next phase knowing:
    up, so the copy has to be refreshed *before* the run if the table is to be
    read at all. This round copies it first, and the run then answers `PASS
    reported test count (1986) matches actual (1986)`.
+
+## 8. The gate can be run in this checkout, and this is how
+
+`rbops/verify.sh` resolves the manifest, the baseline and **the report** relative to
+`RBOPS_ROOT`, and the pipeline's copy of the report is one directory above the
+project. The dispatcher refreshes that copy from `phases/phase-088/REPORT.md` before
+the gate runs, so a run of the gate *inside* the project needs the same refresh
+done by hand — and the pipeline's copy is outside the project, where this phase is
+not allowed to write.
+
+So the refresh was done inside the project instead: the manifest, the baseline and
+this phase's report were copied to `target/tmp/rbops-root/` (a directory the
+project's own `.gitignore` already covers, `/target/`) and the gate was run with
+
+```
+RBOPS_ROOT="$PWD/target/tmp/rbops-root" RBOPS_BASE_REF=c6e9837 ../rbops/verify.sh phase-088
+```
+
+`RBOPS_BASE_REF=c6e9837` is the base the dispatcher captures for this phase — the
+commit before the preserved work was squashed onto `main` — so the diff the gate
+judges is the whole of the phase's change and not only the last round's.
+
+The verdict, in this tree, over this diff:
+
+```
+== report
+  PASS .../phases/phase-088/REPORT.md exists
+  PASS section: What changed
+  PASS section: Tests added
+  PASS section: Gates
+  PASS section: Known gaps
+  PASS report has at least one real evidence row
+
+== diff hygiene
+  PASS forbidden-path scan done
+  PASS no gate-weakening constructs added
+  PASS no scratch files
+  PASS diff substance: +3015 -74 (min +5)
+  PASS implementation touched tests/ (must_touch: tests/)
+
+== cargo fmt
+  PASS cargo fmt --check
+
+== cargo clippy
+  PASS cargo clippy -D warnings
+
+== cargo test
+  PASS cargo test: 1992 passed, 0 failed
+
+== doc tests
+  PASS runs: examples/files.rb
+  PASS runs: examples/fizzbuzz.rb
+  PASS runs: examples/formats.rb
+  PASS runs: examples/hello.rb
+  PASS runs: examples/random.rb
+  PASS runs: examples/test_arithmetic.rb
+  PASS runs: examples/time.rb
+  PASS runs: modules/MathUtils.rb
+  PASS runs: modules/SuiteKit.rb
+  PASS example sweep done
+
+== test policy
+  PASS failure-asserting test present: 30
+  PASS test quota met: 19 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 24
+  PASS no newly skipped tests
+
+== report honesty
+  PASS reported test count (1992) matches actual (1992)
+
+╔══════════════════════════════════════╗
+║ VERIFY PASS — phase-088                ║
+╚══════════════════════════════════════╝
+```
+
+Two things the next phase should know, both learned the hard way here:
+
+1. **The failure-assertion check counts the DIFF, not the tree.** It is
+   `git diff -U0 "$BASE_REF" -- '*.rs' '*.rb' | grep -cE '^\+.*(is_err|…)'`, so it
+   sees only the lines this phase added. A tree that has been green for four rounds
+   and a report that quotes that tree's numbers can still fail this one check when
+   the base is the phase's own delivery point rather than the phase's beginning.
+   The rule is not "the suite has a failure assertion somewhere" — it is "this
+   phase's diff has one".
+2. **`RBOPS_BASE_REF` defaults to `HEAD`**, which is the *worktree* diff when the
+   work is uncommitted and the *empty* diff when it is committed. A local run of
+   the gate without that variable set can therefore judge a different diff from the
+   one the pipeline judges. Set it to the base the dispatcher captured, or the
+   verdict is about something else.

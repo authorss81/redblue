@@ -250,7 +250,8 @@ const DELIVERY_REASON: &str = "resume phase-088: adopt preserved work. The deliv
     this phase: it carries the unreviewed code this phase shipped — the phase's own suites \
     (tests/stdlib_module_docs_test.rs, tests/loop_bounds_test.rs, tests/loop_control_test.rs, \
     tests/time_builtin_test.rs, tests/text_split_join_test.rs, tests/redblue_test.rs, \
-    tests/unless_test.rs, tests/failure_channel_test.rs and tests/phase_088_scanner_test.rs — \
+    tests/unless_test.rs, tests/failure_channel_test.rs, tests/phase_088_scanner_test.rs and \
+    tests/phase_088_value_contract_test.rs — \
     where the reachability-only assertions became assertions on the value the program answered, \
     and where the phase's own scanner gained a test of its own), the acknowledgement data in \
     tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md, FINDINGS.md, scan.py and \

@@ -44,6 +44,7 @@ numeric_edge_test.rs
 object_model_test.rs
 parser_hardening_test.rs
 phase_088_scanner_test.rs
+phase_088_value_contract_test.rs
 preflight_assert_failure.rs
 random_builtin_test.rs
 record_order_test.rs

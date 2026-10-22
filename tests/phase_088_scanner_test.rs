@@ -4,11 +4,11 @@
 //!
 //! # Why this file exists
 //!
-//! `phases/phase-088/scan.py` is hundreds of lines of new code that the phase
-//! put at the centre of its evidence, and **nothing in the repository ran it**.
-//! The only thing that depended on it was a number in a report, and a number
-//! that nothing checks can drift: the scanner could have been wrong about
-//! every test in the suite and the report would have carried on saying
+//! `phases/phase-088/scan.rs` is a lot of new code that the phase put at the
+//! centre of its evidence, and **nothing in the repository ran it**. The only
+//! thing that depended on it was a number in a report, and a number that
+//! nothing checks can drift: the scanner could have been wrong about every
+//! test in the suite and the report would have carried on saying
 //! "vacuous tests: 0".
 //!
 //! Worse, the scanner's own judgement was **unsound in the direction that
@@ -31,19 +31,34 @@
 //!    in the other direction.
 //! 3. **A comparison through a helper is not.** The helper step is what keeps
 //!    the scanner from reading five real tests as defects.
-//! 4. **The scanner follows `tests/common/`.** Its docstring says the
-//!    `tests/common/` helpers are read; this checks that they are, rather than
-//!    taking the docstring's word for it.
-//! 5. **This tree has no reachability-only test left.** The scan over the
+//! 4. **The scanner follows `tests/common/`.** Its docs say the `tests/common/`
+//!    helpers are read; this checks that they are, rather than taking the
+//!    docs' word for it.
+//! 5. **A refused program is not a reachability check.** `assert!(!result.is_ok())`
+//!    says the program was *refused*, which is a claim about what it
+//!    answered; the scanner must not read it as "the program ran" and name
+//!    the test vacuous.
+//! 6. **This tree has no reachability-only test left.** The scan over the
 //!    repository's own `tests/` directory must answer `vacuous tests: 0` —
 //!    the claim `REPORT.md` makes, checked by running the scanner rather than
 //!    by believing the report.
 //!
-//! # What the scanner needs
+//! # What the scanner needs — nothing
 //!
-//! Python 3. The scanner is a Python program and these tests run it, so a
-//! checkout without `python3` cannot verify this phase's evidence; the tests
-//! say so rather than passing quietly.
+//! The scanner is **this repository's own Rust**: the file below is included
+//! into this test binary, so the rules the tests check are the rules the
+//! published scanner implements. There is no interpreter to install, no
+//! subprocess to spawn, and no second toolchain to keep alive: a checkout
+//! without Python runs the whole suite, and the phase's evidence is checked on
+//! every machine rather than only on the ones that happen to have a script
+//! interpreter.
+//!
+//! The scanner is still a program an auditor can run on any tree:
+//!
+//! ```text
+//! rustc --edition 2021 phases/phase-088/scan.rs -o target/tmp/rbscan
+//! target/tmp/rbscan /tmp/base/tests
+//! ```
 //!
 //! # The fixtures and the repository's own test count
 //!
@@ -54,16 +69,18 @@
 //! `REPORT.md` reconciles its test count against — counts real tests and not
 //! the text of a fixture.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+#[path = "../phases/phase-088/scan.rs"]
+mod scan;
 
-/// The scanner this phase published.
-const SCANNER: &str = "phases/phase-088/scan.py";
+use std::fs;
+use std::path::PathBuf;
 
 /// The attribute a fixture test carries, written so that the repository's own
 /// count of `#[test]` functions does not count the fixture.
 const TEST_ATTRIBUTE: &str = "@TEST@";
+
+/// The file list the scan read, published so the next audit can check it.
+const SCANNED_FILES: &str = "phases/phase-088/scanned-files.txt";
 
 /// The repository root, so the scanner is run against this checkout and not
 /// against whatever directory the test happens to run in.
@@ -71,76 +88,13 @@ fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The python this checkout can run.
-fn python() -> String {
-    for candidate in ["python3", "python"] {
-        let works = Command::new(candidate)
-            .arg("-c")
-            .arg("print(1)")
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
-        if works {
-            return candidate.to_string();
-        }
-    }
-    panic!(
-        "the phase's scanner is a Python program, so verifying this phase's \
-         evidence needs python3 on PATH; neither `python3` nor `python` runs here"
-    );
-}
-
-/// What the scanner said: the vacuous tests it named, and the count it printed.
-#[derive(Debug, PartialEq, Eq)]
-struct Scan {
-    /// The tests it named, as `file:line\tname`.
-    named: Vec<String>,
-    /// The count on its `vacuous tests:` line.
-    count: usize,
-}
-
-/// Run the scanner over `root` and read what it said.
-fn scan(root: &Path) -> Scan {
-    let output = Command::new(python())
-        .arg(project_root().join(SCANNER))
-        .arg(root)
-        .output()
-        .unwrap_or_else(|error| panic!("could not run the scanner: {error}"));
-    assert!(
-        output.status.success(),
-        "the scanner must run cleanly over {}; it said: {}",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-
-    let mut named = Vec::new();
-    let mut count = None;
-    for line in stdout.lines() {
-        if let Some(rest) = line.strip_prefix("vacuous tests:") {
-            count =
-                Some(rest.trim().parse::<usize>().unwrap_or_else(|_| {
-                    panic!("the scanner printed an unreadable count: {line:?}")
-                }));
-            continue;
-        }
-        if line.starts_with("scanned ") || line.trim().is_empty() {
-            continue;
-        }
-        named.push(line.to_string());
-    }
-    let count = count.unwrap_or_else(|| {
-        panic!(
-            "the scanner printed no count over {}:\n{stdout}",
-            root.display()
-        )
-    });
-    assert_eq!(
-        named.len(),
-        count,
-        "the scanner's count must match the lines it named:\n{stdout}"
-    );
-    Scan { named, count }
+/// The names the scanner gave, without the line numbers it prints with them.
+fn names(result: &scan::Scan) -> Vec<String> {
+    result
+        .named
+        .iter()
+        .map(|(_, _, name)| name.clone())
+        .collect()
 }
 
 /// A directory of its own for one fixture, removed when the test is done.
@@ -240,13 +194,28 @@ fn edge_a_test_that_asserts_the_value_the_run_handed_back() {
 }
 "#;
 
-/// The names the scanner gave, without the line numbers it prints with them.
-fn names(scan: &Scan) -> Vec<String> {
-    scan.named
-        .iter()
-        .map(|entry| entry.split('\t').nth(1).unwrap_or(entry).to_string())
-        .collect()
+/// A refused program, and a program that ran — the two the scanner has to tell
+/// apart.
+///
+/// `assert!(result.is_ok())` says "the program ran" and nothing more, which is
+/// the shape this scan exists to find. `assert!(!result.is_ok())` says the
+/// program was **refused**, which is a claim about what it answered: a program
+/// that answered wrongly instead of refusing would fail that assertion. The
+/// scanner used to read the negated form as a reachability check too, and
+/// called the test vacuous.
+const REFUSAL_IS_NOT_REACHABILITY: &str = r#"
+@TEST@
+fn edge_a_program_that_was_refused_is_not_a_reachability_check() {
+    let result = run_source(src);
+    assert!(!result.is_ok(), "the program must be refused, not answered");
 }
+
+@TEST@
+fn edge_a_program_that_ran_is_a_reachability_check() {
+    let result = run_source(src);
+    assert!(result.is_ok(), "the program must run");
+}
+"#;
 
 /// A read that is never compared is vacuous, and a comparison is not.
 ///
@@ -259,20 +228,21 @@ fn edge_the_scanner_names_a_read_that_is_never_compared() {
     let fixture = Fixture::new("read-without-asserting");
     fixture.write("fixture_test.rs", READS_WITHOUT_ASSERTING);
 
-    let scan = scan(&fixture.root);
+    let result = scan::scan_directory(&fixture.root);
 
     assert_eq!(
-        scan.count, 1,
+        result.count(),
+        1,
         "exactly one of the two fixture tests is vacuous, and it is the one \
          that reads the output and asserts nothing:\n{:?}",
-        scan.named
+        result.named
     );
     assert_eq!(
-        names(&scan),
+        names(&result),
         vec!["edge_a_test_that_reads_the_output_and_never_asserts_on_it".to_string()],
         "the scanner must name the test that reads the output and never compares it, \
          and must not name the one that compares it:\n{:?}",
-        scan.named
+        result.named
     );
 }
 
@@ -287,13 +257,13 @@ fn edge_the_scanner_names_a_comparison_of_something_else() {
     let fixture = Fixture::new("asserts-something-else");
     fixture.write("fixture_test.rs", ASSERTS_SOMETHING_ELSE);
 
-    let scan = scan(&fixture.root);
+    let result = scan::scan_directory(&fixture.root);
 
     assert_eq!(
-        names(&scan),
+        names(&result),
         vec!["edge_a_test_that_asserts_something_the_program_never_said".to_string()],
         "a comparison the program never took part in is not an assertion about it:\n{:?}",
-        scan.named
+        result.named
     );
 }
 
@@ -308,12 +278,13 @@ fn edge_the_scanner_follows_a_helper_to_the_comparison() {
     let fixture = Fixture::new("helper");
     fixture.write("fixture_test.rs", COMPARES_THROUGH_A_HELPER);
 
-    let scan = scan(&fixture.root);
+    let result = scan::scan_directory(&fixture.root);
 
     assert_eq!(
-        scan.count, 0,
+        result.count(),
+        0,
         "a test that compares the output through a helper asserts the output:\n{:?}",
-        scan.named
+        result.named
     );
 }
 
@@ -327,21 +298,22 @@ fn edge_the_scanner_sees_the_value_the_run_handed_back() {
     let fixture = Fixture::new("value");
     fixture.write("fixture_test.rs", COMPARES_THE_VALUE);
 
-    let scan = scan(&fixture.root);
+    let result = scan::scan_directory(&fixture.root);
 
     assert_eq!(
-        scan.count, 0,
+        result.count(),
+        0,
         "a test that asserts the value the run handed back asserts the program's answer:\n{:?}",
-        scan.named
+        result.named
     );
 }
 
 /// The scanner follows the `tests/common/` helpers.
 ///
-/// Its docstring says they are read; this checks that they are, rather than
-/// taking the docstring's word for it. A test whose comparison lives in
-/// `tests/common/` is not a defect, and a scanner that cannot see the helper
-/// would report it as one.
+/// Its docs say they are read; this checks that they are, rather than taking
+/// the docs' word for it. A test whose comparison lives in `tests/common/` is
+/// not a defect, and a scanner that cannot see the helper would report it as
+/// one.
 #[test]
 fn edge_the_scanner_follows_the_common_helpers() {
     let fixture = Fixture::new("common");
@@ -371,13 +343,42 @@ fn edge_a_test_that_compares_the_output_through_a_common_helper() {
 "#,
     );
 
-    let scan = scan(&fixture.root);
+    let result = scan::scan_directory(&fixture.root);
 
     assert_eq!(
-        scan.count, 0,
+        result.count(),
+        0,
         "the scanner must follow a `tests/common/` helper to the comparison \
          inside it:\n{:?}",
-        scan.named
+        result.named
+    );
+}
+
+/// A refusal is not a reachability check.
+///
+/// `assert!(!result.is_ok())` asserts that the program was **refused**. That
+/// is a claim about what the program answered — a program that answered
+/// wrongly instead of refusing would fail the assertion — and the scanner's
+/// own rules say so: "a test that asserts a *failure* was produced is never
+/// mistaken for a vacuous one".
+///
+/// The rule used to be written as "an `assert!` whose condition contains
+/// `is_ok()` and none of `is_err()`, `==`, `!=`, `contains`, `matches`", which
+/// read the **negated** form as a reachability check as well, and so named a
+/// test that asserts a refusal as vacuous.
+#[test]
+fn edge_the_scanner_does_not_read_a_refusal_as_a_reachability_check() {
+    let fixture = Fixture::new("refusal");
+    fixture.write("fixture_test.rs", REFUSAL_IS_NOT_REACHABILITY);
+
+    let result = scan::scan_directory(&fixture.root);
+
+    assert_eq!(
+        names(&result),
+        vec!["edge_a_program_that_ran_is_a_reachability_check".to_string()],
+        "the scanner must name the test that only asks whether the program ran, \
+         and must not name the one that asserts the program was refused:\n{:?}",
+        result.named
     );
 }
 
@@ -388,12 +389,80 @@ fn edge_a_test_that_compares_the_output_through_a_common_helper() {
 /// directory must answer `vacuous tests: 0`.
 #[test]
 fn phase_088_has_no_reachability_only_test_left() {
-    let scan = scan(&project_root().join("tests"));
+    let root = project_root().join("tests");
+    let result = scan::scan_directory(&root);
 
     assert_eq!(
-        scan.count, 0,
+        result.count(),
+        0,
         "every test in this tree that runs a program must compare what the \
          program answered; the scanner named these:\n{:?}",
-        scan.named
+        result.named
     );
+}
+
+/// The count the scanner prints is the count it named.
+///
+/// The report quotes the scanner's own output, so the two have to agree: a
+/// scanner that printed a count its own lines do not add up to would make
+/// every quoted number a guess. The command line is driven here too, because
+/// that is the shape an auditor runs.
+#[test]
+fn edge_the_scanner_prints_the_count_it_named() {
+    let fixture = Fixture::new("printed-count");
+    fixture.write("fixture_test.rs", READS_WITHOUT_ASSERTING);
+
+    let result = scan::scan_directory(&fixture.root);
+    let printed = result.render(&fixture.root);
+
+    assert!(
+        printed.contains("scanned 1 files in "),
+        "the scanner must say how many files it read:\n{printed}"
+    );
+    assert!(
+        printed.contains("vacuous tests: 1"),
+        "the scanner must print the count of the tests it named:\n{printed}"
+    );
+    assert_eq!(
+        printed.lines().filter(|line| line.contains('\t')).count(),
+        result.count(),
+        "the printed count must be the number of lines the scanner named:\n{printed}"
+    );
+
+    let from_the_command_line = scan::run(&[fixture.root.display().to_string()])
+        .unwrap_or_else(|error| panic!("the scanner's command line must run: {error}"));
+    assert_eq!(
+        from_the_command_line, printed,
+        "the command line must print what the scan rendered"
+    );
+    let listed = scan::run(&["--list".to_string(), fixture.root.display().to_string()])
+        .unwrap_or_else(|error| panic!("the scanner's command line must run: {error}"));
+    assert_eq!(
+        listed, "fixture_test.rs",
+        "the file list must name the files the scan read"
+    );
+}
+
+/// The file list the scan read is published, and it is current.
+///
+/// `phases/phase-088/scanned-files.txt` is the list the scan read, published
+/// so that the next audit can see which files the number covers. A file
+/// listed there that no longer exists would make the list a claim about a
+/// tree that is not this one.
+#[test]
+fn edge_the_published_file_list_names_files_that_still_exist() {
+    let published = fs::read_to_string(project_root().join(SCANNED_FILES))
+        .unwrap_or_else(|error| panic!("{SCANNED_FILES} must be readable: {error}"));
+    let tests = project_root().join("tests");
+
+    for name in published
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        assert!(
+            tests.join(name).is_file(),
+            "the published file list names {name}, which is not a file in tests/ any more"
+        );
+    }
 }
