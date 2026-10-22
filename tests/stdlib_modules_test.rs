@@ -864,14 +864,32 @@ fn edge_json_control_characters_are_escaped_on_write() {
 }
 
 /// Non-ASCII text is written as itself: JSON is UTF-8 and an emoji needs no
-/// escape to survive.
+/// escape to survive. A character a terminal acts on is the exception: it is
+/// escaped so the document cannot reorder the line it is printed on, and still
+/// reads back as the character it came from.
 #[test]
 fn json_unicode_text_survives_stringify_unchanged() {
-    let label = "\u{1f389} \u{4e2d}\u{6587} \u{202b}e\u{301}";
+    let label = "\u{1f389} \u{4e2d}\u{6587} e\u{301}";
     assert_eq!(
         eval(&format!("json.stringify({})", redblue_text(label))),
         Value::Text(format!("\"{}\"", label)),
         "unicode text is written as itself"
+    );
+
+    let marked = "\u{202b}e\u{301}";
+    let written = eval(&format!("json.stringify({})", redblue_text(marked)));
+    assert_eq!(
+        written,
+        Value::Text("\"\\u202be\u{301}\"".to_string()),
+        "a terminal-active mark is written as a JSON escape"
+    );
+    assert_eq!(
+        eval(&format!(
+            "set text to {}\njson.parse(json.stringify(text))",
+            redblue_text(marked)
+        )),
+        Value::Text(marked.to_string()),
+        "and both the plain text and the escaped mark read back identical"
     );
     assert_eq!(
         eval(&format!(
@@ -879,7 +897,7 @@ fn json_unicode_text_survives_stringify_unchanged() {
             redblue_text(label)
         )),
         Value::Text(label.to_string()),
-        "and reads back identical"
+        "plain unicode text reads back identical too"
     );
 }
 
