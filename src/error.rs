@@ -324,6 +324,17 @@ fn display_width(line: &str, chars: usize) -> usize {
     line.chars().take(chars).map(char_cells).sum()
 }
 
+/// How many terminal cells `text` is drawn in.
+///
+/// The width of a text as a terminal draws it: a wide character is two cells, a
+/// combining mark is none. Exposed for the REPL's table renderer, whose
+/// columns are only aligned if the padding counts the same cells the terminal
+/// draws — a table padded by character count is a table whose CJK columns do
+/// not line up.
+pub(crate) fn text_cells(text: &str) -> usize {
+    text.chars().map(char_cells).sum()
+}
+
 /// One source line as it is drawn, and the cells that drawing took.
 ///
 /// At most [`MAX_DRAWN_CELLS`] cells of the line, with [`ELLIPSIS`] in place of
