@@ -17,8 +17,9 @@ use redblue::lexer::Lexer;
 use redblue::linter::lint;
 use redblue::lsp::diagnostics;
 use redblue::parser::{parse, Program};
+use redblue::run_isolated;
 use redblue::run_source_value;
-use redblue::{Error, Value};
+use redblue::{analyzer, Error, Value};
 
 fn lex_and_parse(source: &str) -> Result<Program, Error> {
     parse(Lexer::tokenize(source)?)
@@ -233,9 +234,20 @@ fn edge_unless_as_the_last_statement_in_a_file() {
             1,
             "the trailing `unless` should be parsed as one statement"
         );
-        assert!(
-            run_source_value(&source).is_ok(),
-            "`unless` ending at EOF with tail {tail:?} should run"
+        analyzer::analyze(&program).unwrap_or_else(|e| {
+            panic!("`unless` ending at EOF with tail {tail:?} should analyze: {e}")
+        });
+        let (mut vm, outcome) = run_isolated(&program);
+        outcome.unwrap_or_else(|e| {
+            panic!("`unless` ending at EOF with tail {tail:?} should run: {e}")
+        });
+        // The run says what its body said. A test that stopped at "it ran"
+        // would pass on a body that never ran, which is the whole question
+        // this row is about: the trailing `unless` has to *do* something.
+        assert_eq!(
+            vm.take_output(),
+            vec!["last".to_string()],
+            "`unless` ending at EOF with tail {tail:?} must still say what its body said"
         );
     }
 }
