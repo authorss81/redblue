@@ -63,8 +63,8 @@ SPEC.md:1231
 SPEC.md:1264
 SPEC.md:1335
 SPEC.md:1369
-SPEC.md:1398
-SPEC.md:1410
+SPEC.md:1413
+SPEC.md:1425
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:558

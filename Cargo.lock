@@ -771,6 +771,7 @@ dependencies = [
  "reqwest",
  "rustyline",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

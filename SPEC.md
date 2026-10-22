@@ -1379,6 +1379,21 @@ A text is written between double quotes, and a quote *inside* one is escaped
 There is no `formats` module. JSON and CSV are their own modules, spelled
 `json.*` and `csv.*`.
 
+The REPL's `.json` command prints the document `json.stringify` writes, byte
+for byte, so a program can reproduce what the reader is looking at. Both spell
+out the characters a terminal acts on — a right-to-left override, a zero-width
+mark, a C1 control — as JSON's own `\uXXXX` escape: the document cannot
+reorder the line it is printed on, and `json.parse` still reads the character
+back as the value it came from. The REPL's `.pretty` and `.table` commands are
+renderings, and they spell those characters out too.
+
+`json.stringify` refuses a function, a builtin or an object by name, because
+JSON has no literal for them and `null` would say "nothing" about a value that
+is not nothing. It also refuses a value nested more than 64 levels deep, with a
+catchable runtime error, rather than following the value into a stack overflow.
+A number that is not finite is still written as `null`, as above; no Redblue
+program can produce one.
+
 ### bytes
 
 ```redblue
