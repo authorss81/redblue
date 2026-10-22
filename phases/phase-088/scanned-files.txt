@@ -18,6 +18,7 @@ differential_test.rs
 discovery_test.rs
 doc_blocks_test.rs
 expect_test.rs
+failure_channel_test.rs
 for_range_test.rs
 formatter_test.rs
 function_literal_test.rs
@@ -42,6 +43,7 @@ module_system_test.rs
 numeric_edge_test.rs
 object_model_test.rs
 parser_hardening_test.rs
+phase_088_scanner_test.rs
 preflight_assert_failure.rs
 random_builtin_test.rs
 record_order_test.rs

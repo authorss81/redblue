@@ -363,6 +363,10 @@ fn edge_a_builtin_given_a_text_says_nothing_and_names_the_refusal() {
             .unwrap_or_else(|error| panic!("{source} should compile: {error:?}"));
 
         let (mut walker, walked) = redblue::run_isolated(&program);
+        assert!(
+            walked.is_err(),
+            "`{source}` must be refused by the walker: {walked:?}"
+        );
         let walker_error = walked.expect_err(&format!("`{source}` must be refused by the walker"));
         let said_by_walker = walker.take_output();
         assert!(
@@ -372,9 +376,13 @@ fn edge_a_builtin_given_a_text_says_nothing_and_names_the_refusal() {
 
         let mut vm = BytecodeVm::new();
         vm.set_echo(false);
-        let vm_error = vm
-            .run(&chunk)
-            .expect_err(&format!("`{source}` must be refused by the bytecode VM"));
+        let vm_result = vm.run(&chunk);
+        assert!(
+            vm_result.is_err(),
+            "`{source}` must be refused by the bytecode VM: {vm_result:?}"
+        );
+        let vm_error =
+            vm_result.expect_err(&format!("`{source}` must be refused by the bytecode VM"));
         let said_by_vm = vm.take_output();
         assert!(
             said_by_vm.is_empty(),
@@ -426,8 +434,12 @@ fn edge_a_builtin_that_cannot_answer_is_refused_by_the_library_not_answered_wron
         ("say text.split(1, \",\")", "split"),
         ("say nosuchfunction(1)", "nosuchfunction"),
     ] {
-        let error = redblue::run_source(source)
-            .expect_err(&format!("`{source}` must be refused, not answered"));
+        let result = redblue::run_source(source);
+        assert!(
+            result.is_err(),
+            "`{source}` must be refused, not answered: {result:?}"
+        );
+        let error = result.expect_err(&format!("`{source}` must be refused, not answered"));
         assert!(
             matches!(error, redblue::Error::Runtime(..)),
             "`{source}` should fail at runtime, got: {error:?}"
@@ -448,6 +460,10 @@ fn edge_a_builtin_that_cannot_answer_is_refused_by_the_library_not_answered_wron
             .unwrap_or_else(|error| panic!("{source} should compile: {error:?}"));
 
         let (mut walker, walked) = redblue::run_isolated(&program);
+        assert!(
+            walked.is_err(),
+            "`{source}` must be refused by the walker: {walked:?}"
+        );
         let walker_error = walked.expect_err(&format!("`{source}` must be refused by the walker"));
         assert_eq!(
             walker_error.message(),
@@ -462,9 +478,13 @@ fn edge_a_builtin_that_cannot_answer_is_refused_by_the_library_not_answered_wron
 
         let mut vm = BytecodeVm::new();
         vm.set_echo(false);
-        let vm_error = vm
-            .run(&chunk)
-            .expect_err(&format!("`{source}` must be refused by the bytecode VM"));
+        let vm_result = vm.run(&chunk);
+        assert!(
+            vm_result.is_err(),
+            "`{source}` must be refused by the bytecode VM: {vm_result:?}"
+        );
+        let vm_error =
+            vm_result.expect_err(&format!("`{source}` must be refused by the bytecode VM"));
         assert_eq!(
             vm_error.message(),
             error.message(),

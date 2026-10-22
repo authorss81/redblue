@@ -248,10 +248,13 @@ const DELIVERY_SUBJECT_PREFIX: &str = "resume phase-088:";
 /// says why this one is keyed on its subject rather than on its SHA.
 const DELIVERY_REASON: &str = "resume phase-088: adopt preserved work. The delivery commit of \
     this phase: it carries the unreviewed code this phase shipped — the phase's own suites \
-    (tests/stdlib_module_docs_test.rs, tests/loop_bounds_test.rs, tests/redblue_test.rs and \
-    tests/text_split_join_test.rs, where the reachability-only assertions became assertions on the \
-    value the program answered), the acknowledgement data in tests/unreviewed_work_ack_test.rs, \
-    and this phase's REPORT.md and FINDINGS.md) — none of it under src/. Deliberately not \
+    (tests/stdlib_module_docs_test.rs, tests/loop_bounds_test.rs, tests/loop_control_test.rs, \
+    tests/time_builtin_test.rs, tests/text_split_join_test.rs, tests/redblue_test.rs, \
+    tests/unless_test.rs, tests/failure_channel_test.rs and tests/phase_088_scanner_test.rs — \
+    where the reachability-only assertions became assertions on the value the program answered, \
+    and where the phase's own scanner gained a test of its own), the acknowledgement data in \
+    tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md, FINDINGS.md, scan.py and \
+    scanned-files.txt) — none of it under src/. Deliberately not \
     rewritten: published history is immutable under AGENTS.md 1.6. Acknowledged by SUBJECT rather \
     than by SHA because the pipeline creates this commit after the run that wrote the work and \
     rebuilds it on the same parent on every round, so a SHA written here would name a commit this \

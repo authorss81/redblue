@@ -14,9 +14,12 @@
 //! The program is run **once**. `run_source` has no channel for the lines a
 //! test needs to read, so calling it as well would be a second execution of the
 //! same fixture — and the assertion would be about the second run's output
-//! while the fixture had been taken twice. A program that no longer runs at all
-//! still fails here, because the one run answers `Err`. `run_source`'s own
-//! entry point is covered where its answer matters:
+//! while the fixture had been taken twice. Every fixture in this file is
+//! therefore taken exactly once: the lines and the value the program ended on
+//! are read out of the **same** run, by `printed_and_value`, so a test that
+//! wants both never pays for the fixture twice. A program that no longer runs
+//! at all still fails here, because the one run answers `Err`. `run_source`'s
+//! own entry point is covered where its answer matters:
 //! `tests/stdlib_module_docs_test.rs` requires it to come back `Err` for a
 //! builtin the library refuses.
 
@@ -24,22 +27,29 @@ use redblue::lexer::Lexer;
 use redblue::run_isolated;
 use redblue::{analyzer, parser, Error, Value};
 
-/// Runs `source` once and returns the lines it printed.
+/// Runs `source` once and returns the lines it printed and the value it ended on.
 ///
 /// The program goes through the whole pipeline — lexer, parser, analyzer, VM —
 /// and the lines come from the `Vm` that run hands back, so what is asserted is
-/// what *this* run said.
+/// what *this* run said. The value is what the same run answered, so a test
+/// that wants both reads both out of one execution.
 ///
 /// Returns the `Result` rather than panicking, so a test can say which of the two
 /// things went wrong: a program that did not run, and a program that ran and said
 /// the wrong thing.
-fn printed(source: &str) -> Result<Vec<String>, Error> {
+fn printed_and_value(source: &str) -> Result<(Vec<String>, Value), Error> {
     let tokens = Lexer::tokenize(source)?;
     let program = parser::parse(tokens)?;
     analyzer::analyze(&program)?;
     let (mut vm, outcome) = run_isolated(&program);
-    outcome?;
-    Ok(vm.take_output())
+    let value = outcome?;
+    Ok((vm.take_output(), value))
+}
+
+/// The lines `source` printed, or a failure naming it.
+#[track_caller]
+fn printed(source: &str) -> Result<Vec<String>, Error> {
+    printed_and_value(source).map(|(lines, _value)| lines)
 }
 
 /// The lines `source` printed, or a failure naming it.
@@ -125,14 +135,11 @@ fn edge_the_value_a_program_ends_on_is_a_number_and_not_its_rendering() {
         say x
         x
     "#;
-    assert_eq!(lines_of(source), vec!["10".to_string()]);
-
-    let tokens = Lexer::tokenize(source).expect("the fixture lexes");
-    let program = parser::parse(tokens).expect("the fixture parses");
-    analyzer::analyze(&program).expect("the fixture analyzes");
-    let (_, outcome) = run_isolated(&program);
+    let (lines, value) = printed_and_value(source)
+        .unwrap_or_else(|error| panic!("{source:?} should run: {error:?}"));
+    assert_eq!(lines, vec!["10".to_string()]);
     assert_eq!(
-        outcome.expect("the fixture runs"),
+        value,
         Value::Number(10.0),
         "the program's value is the number, not the text that renders as `10`"
     );
@@ -143,13 +150,11 @@ fn edge_the_value_a_program_ends_on_is_a_number_and_not_its_rendering() {
         say x
         x
     "#;
-    assert_eq!(lines_of(source), vec!["10".to_string()]);
-    let tokens = Lexer::tokenize(source).expect("the fixture lexes");
-    let program = parser::parse(tokens).expect("the fixture parses");
-    analyzer::analyze(&program).expect("the fixture analyzes");
-    let (_, outcome) = run_isolated(&program);
+    let (lines, value) = printed_and_value(source)
+        .unwrap_or_else(|error| panic!("{source:?} should run: {error:?}"));
+    assert_eq!(lines, vec!["10".to_string()]);
     assert_eq!(
-        outcome.expect("the fixture runs"),
+        value,
         Value::Text("10".to_string()),
         "`10` as text is not `10` as a number, even though both print alike"
     );
