@@ -1728,7 +1728,11 @@ fn parse_json_string(json: &str, span: Span) -> Result<String> {
 
 /// Escapes `text` for a JSON string body: the quote, the backslash and every
 /// control character that JSON requires be written as an escape.
-fn json_escape_text(text: &str) -> String {
+///
+/// `pub(crate)` because the REPL's own JSON printer writes the same document
+/// and must escape it the same way: two escapers would be two answers to what
+/// a text with a quote in it looks like in JSON.
+pub(crate) fn json_escape_text(text: &str) -> String {
     let mut result = String::from("\"");
     for c in text.chars() {
         match c {
@@ -1784,7 +1788,12 @@ fn split_json_elements(content: &str) -> Vec<&str> {
     split_json_pairs(content)
 }
 
-fn json_stringify(value: &Value) -> String {
+/// Writes `value` as JSON, on one line.
+///
+/// `pub(crate)` because the REPL's `.json` command prints the same document:
+/// one writer means the REPL and `json.stringify` cannot disagree about what
+/// a value looks like in JSON.
+pub(crate) fn json_stringify(value: &Value) -> String {
     match value {
         Value::Nothing => "null".to_string(),
         Value::YesNo(b) => {

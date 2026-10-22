@@ -79,7 +79,7 @@
 //! describing a commit that was no longer there.
 //!
 //! What survives the rebuild is the **subject**, so that is what is pinned
-//! here — [`DELIVERY_SUBJECT_PREFIX`] — and the SHA is resolved out of the
+//! here — [`DELIVERY_SUBJECT_PREFIXES`] — and the SHA is resolved out of the
 //! log at audit time by [`delivery_acknowledgements`]. A rebuilt delivery
 //! commit is therefore neither unreviewed nor stale **by construction**: it
 //! is acknowledged by the rule, and it cannot be stale because no SHA is
@@ -180,9 +180,18 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // commit as unreviewed work, and the old entry as stale.
     //
     // The delivery commit is acknowledged by the RULE below
-    // ([`DELIVERY_SUBJECT_PREFIX`]), which pins the subject the pipeline
+    // ([`DELIVERY_SUBJECT_PREFIXES`]), which pins the subject the pipeline
     // writes rather than a SHA the pipeline has not chosen yet. See
     // `delivery_acknowledgements`.
+    //
+    // The same is true of phase-063's delivery commit, and it is the second
+    // prefix the rule carries: phase-063's first delivery commit
+    // (`ba0a0db`) was pinned here by SHA, and the pipeline re-created it on
+    // the next round's `main` as `a31d067` — so the pinned SHA left
+    // `HEAD`'s ancestry and the audit reported it as stale while reporting
+    // the re-created commit as unreviewed. Both were failures, and both were
+    // correct. The rule covers the subject instead, and the SHA is not
+    // listed: it names a commit this history does not contain.
     //
     // It is acknowledged and DELIBERATELY not on `MEASURED`. The audit's
     // requirement is that every unreviewed commit in the log carries an
@@ -211,14 +220,14 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("3fbf7396de1d2355267ddcfda9a40a00277a4687", "rbops: phase-078 audit the checkpoint ancestry of main instead of commenting on it. Carries no unreviewed code: +654/-0 across 2 files, both under tests/ (the phase-078 audit and its acknowledgement data). Acknowledged because the selector is a case-insensitive substring test on `checkpoint`; deliberately not rewritten."),
 ];
 
-/// The subject prefix that identifies the delivery commit of the phase that
-/// owns this file.
+/// The subject prefixes that identify the delivery commits of the phases whose
+/// work is in flight.
 ///
 /// The pipeline writes `resume <phase>: adopt preserved work` when it adopts a
 /// preserved attempt, and `resume <phase>: adopt WIP checkpoint` when it adopts
-/// a timed-out one. Both are this phase's own delivery commit, and both are
-/// pinned by the prefix rather than by the whole subject, so the rule survives
-/// the two shapes the pipeline uses.
+/// a timed-out one. Both are the delivery commit of the phase they name, and
+/// both are pinned by the prefix rather than by the whole subject, so the rule
+/// survives the two shapes the pipeline uses.
 ///
 /// The subject is what is pinned here and not a SHA, and the reason is
 /// mechanical rather than stylistic: the pipeline creates this commit AFTER the
@@ -228,27 +237,44 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// stale by construction — the audit reported it as stale, and reported the
 /// new commit as unreviewed, on every single round.
 ///
-/// A prefix, not the whole subject, and this phase's, not a general one: the
-/// rule must acknowledge exactly the commit the pipeline creates for THIS
-/// phase, and nothing else. Another phase's `resume phase-083: …` is still
-/// unreviewed work with nothing acknowledging it.
-const DELIVERY_SUBJECT_PREFIX: &str = "resume phase-084:";
+/// A prefix, not the whole subject, and a named phase's, not a general one: the
+/// rule must acknowledge exactly the commits the pipeline creates for the
+/// phases in flight, and nothing else. Another phase's `resume phase-083: …` is
+/// still unreviewed work with nothing acknowledging it.
+///
+/// **Two phases are in flight at once**, so there are two prefixes. The
+/// pipeline keeps one recovery branch per phase and re-creates that phase's
+/// delivery commit on top of the current `main` on every round: phase-084's
+/// reviewer-permission work and phase-063's REPL printing trio are both in
+/// this history, both arrived in a delivery commit, and neither delivery
+/// commit's SHA is knowable while the work is being written. A list that named
+/// one of them by SHA went stale the moment the next round landed — which is
+/// exactly what happened to phase-063's first delivery commit
+/// (`ba0a0db`, re-created as `a31d067` on the next round's `main`).
+const DELIVERY_SUBJECT_PREFIXES: &[&str] = &["resume phase-084:", "resume phase-063:"];
 
-/// The reason recorded for the delivery commit this rule acknowledges.
+/// The reason recorded for the delivery commits this rule acknowledges.
 ///
 /// It says the two things every entry in [`ACKNOWLEDGED`] says — the commit
 /// carries unreviewed code, and it was deliberately not rewritten — and it
 /// says why this one is keyed on its subject rather than on its SHA.
-const DELIVERY_REASON: &str = "resume phase-084: adopt preserved work. The delivery commit of \
-    this phase: it carries the unreviewed code this phase shipped — the repository-root \
-    opencode.json that gives the reviewer its denied edit and bash permissions, the phase's \
-    own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
-    acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and \
-    FINDINGS.md) — none of it under src/. Deliberately not rewritten: published history is \
-    immutable under AGENTS.md 1.6. Acknowledged by SUBJECT rather than by SHA because the \
-    pipeline creates this commit after the run that wrote the work and rebuilds it on the same \
-    parent on every round, so a SHA written here would name a commit this history does not \
-    contain on the next round.";
+///
+/// One constant for both, because the commits' contents differ from round to
+/// round: a reason that quoted last round's line counts would be a reason
+/// about a commit that is not here. It names what each phase's delivery
+/// carried instead.
+const DELIVERY_REASON: &str = "resume phase-NNN: adopt preserved work. The delivery commit of a \
+    phase in flight: it carries the unreviewed code that phase shipped — for phase-084 the \
+    repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the \
+    phase's own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
+    acknowledgement data in tests/unreviewed_work_ack_test.rs, and the phase's REPORT.md and \
+    FINDINGS.md; for phase-063 the REPL printing trio `.pretty`/`.json`/`.table` (src/repl/render.rs \
+    is new, plus the three command rows in src/repl/commands.rs, the dispatch and answer methods in \
+    src/repl/mod.rs, the per-command refusal in src/repl/introspect.rs, and the phase's own tests) \
+    — Deliberately not rewritten: published history is immutable under AGENTS.md 1.6. Acknowledged by \
+    SUBJECT rather than by SHA because the pipeline creates this commit after the run that wrote the \
+    work and rebuilds it on the same parent on every round, so a SHA written here would name a commit \
+    this history does not contain on the next round.";
 
 /// The commits measured on a complete history of `HEAD`, and the shape each one
 /// was found under.
@@ -259,7 +285,7 @@ const DELIVERY_REASON: &str = "resume phase-084: adopt preserved work. The deliv
 ///
 /// The delivery commit of the phase that owns this file is DELIBERATELY not
 /// on this list, though it IS acknowledged — by the rule in
-/// [`DELIVERY_SUBJECT_PREFIX`], not by an entry. The two lists answer
+/// [`DELIVERY_SUBJECT_PREFIXES`], not by an entry. The two lists answer
 /// different questions. `ACKNOWLEDGED` says "this commit is in the log and
 /// carries unreviewed work", and the audit needs an acknowledgement for every
 /// such commit — including the one this phase's own work arrived in, which the
@@ -377,6 +403,10 @@ const MEASURED: &[(&str, &str)] = &[
         "0647108eaf64d08d8df2f4a4338f9447ab1b4f35",
         "resume phase-062",
     ),
+    // phase-063's delivery commit is NOT on this list, for the reason the
+    // delivery rule exists: the pipeline re-creates it on every round
+    // (`ba0a0db` became `a31d067`), so no SHA written here is present in the
+    // log of the next round, and `MEASURED` requires presence.
 ];
 
 /// Everything one pass over a log learns.
@@ -799,12 +829,14 @@ fn is_unreviewed_subject(subject: &str) -> bool {
     lower.contains("checkpoint") || lower.contains("resume phase-")
 }
 
-/// Is this the delivery commit of the phase that owns this file?
+/// Is this the delivery commit of a phase whose work is in flight?
 ///
-/// A prefix test on [`DELIVERY_SUBJECT_PREFIX`], so it matches the two shapes
-/// the pipeline writes for this phase and nothing else.
+/// A prefix test on [`DELIVERY_SUBJECT_PREFIXES`], so it matches the two shapes
+/// the pipeline writes for those phases and nothing else.
 fn is_delivery_subject(subject: &str) -> bool {
-    subject.starts_with(DELIVERY_SUBJECT_PREFIX)
+    DELIVERY_SUBJECT_PREFIXES
+        .iter()
+        .any(|prefix| subject.starts_with(prefix))
 }
 
 /// The delivery commits in `log`, resolved by subject, each with the reason it
@@ -1880,6 +1912,52 @@ fn edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule() {
     );
 }
 
+/// An `edge_*` case: the rule covers every phase whose delivery commit this
+/// history carries, and no other.
+///
+/// Two phases are in flight at once — phase-084 and phase-063 — and the
+/// pipeline re-creates each of their delivery commits on every round, so
+/// neither SHA can be written down: the entry that named phase-063's first
+/// delivery commit went stale the moment the pipeline re-created it. The
+/// subject is what survives the rebuild, so the rule carries one prefix per
+/// phase in flight — and it is a list, not a wildcard: a phase that is not in
+/// flight is still unreviewed work with nothing acknowledging it.
+#[test]
+fn edge_the_delivery_rule_covers_each_phase_in_flight_and_no_other() {
+    for prefix in DELIVERY_SUBJECT_PREFIXES {
+        for subject in [
+            format!("{prefix} adopt preserved work"),
+            format!("{prefix} adopt WIP checkpoint"),
+        ] {
+            let log = format!("{SHA_A}\t{subject}\n");
+            let result = scan(&log, &[]).expect("a well-formed fixture log");
+
+            assert_eq!(
+                result.delivery,
+                vec![SHA_A.to_string()],
+                "{subject:?} is the delivery commit of a phase in flight, so the rule covers it"
+            );
+            assert!(
+                result.unreviewed.is_empty(),
+                "and it is acknowledged by the rule rather than reported as unreviewed: {:?}",
+                result.unreviewed
+            );
+        }
+    }
+
+    let other_phase = format!("{SHA_A}\tresume phase-099: adopt preserved work\n");
+    let result = scan(&other_phase, &[]).expect("a well-formed fixture log");
+    assert!(
+        result.delivery.is_empty(),
+        "the rule covers the phases in flight and no other"
+    );
+    assert_eq!(
+        result.unreviewed.len(),
+        1,
+        "a phase that is not in flight is still unreviewed work"
+    );
+}
+
 /// The delivery commit in this history is acknowledged by the rule, and by no
 /// entry.
 ///
@@ -1896,8 +1974,8 @@ fn edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry() {
 
     assert!(
         !delivery.is_empty(),
-        "this history must carry a delivery commit whose subject begins with \
-         {DELIVERY_SUBJECT_PREFIX:?}. If the pipeline stopped writing that subject, the rule \
+        "this history must carry a delivery commit whose subject begins with one of \
+         {DELIVERY_SUBJECT_PREFIXES:?}. If the pipeline stopped writing those subjects, the rule \
          has to be re-pointed at the shape it writes now — silently, this history's delivery \
          commit would be reported as unreviewed work."
     );
