@@ -148,7 +148,10 @@ pub fn table(value: &Value) -> Result<String, String> {
     }
 
     let keys = keys_of(items);
-    let mut rows: Vec<Vec<String>> = vec![keys.clone()];
+    // The header row is spelled the way the cells are: a key may hold a line
+    // break, and a header row that broke in two would be a header row the
+    // reader could not read.
+    let mut rows: Vec<Vec<String>> = vec![keys.iter().map(|key| one_line(key)).collect()];
     for item in items.iter() {
         let mut row = Vec::with_capacity(keys.len());
         for key in &keys {
@@ -206,12 +209,16 @@ fn one_line(text: &str) -> String {
 }
 
 /// Lays `rows` out in columns, each as wide as its widest cell.
+///
+/// The width of a cell is the width a terminal draws it — a wide character is
+/// two cells, a combining mark is none — so a column of CJK text lines up
+/// with a column of ASCII text instead of drifting one cell per character.
 fn layout(rows: &[Vec<String>]) -> String {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     let mut widths = vec![0usize; columns];
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
-            let width = cell.chars().count();
+            let width = crate::error::text_cells(cell);
             if width > widths[index] {
                 widths[index] = width;
             }
@@ -229,7 +236,7 @@ fn layout(rows: &[Vec<String>]) -> String {
             // The last column is not padded: trailing spaces are noise, and a
             // row that ends in them is a row a reader cannot copy cleanly.
             if index + 1 < row.len() {
-                for _ in 0..widths[index] - cell.chars().count() {
+                for _ in 0..widths[index] - crate::error::text_cells(cell) {
                     line.push(' ');
                 }
             }
@@ -527,6 +534,71 @@ mod tests {
         assert_eq!(
             lines[1], "one\\ntwo",
             "the line break is spelled, not printed"
+        );
+    }
+
+    /// A **key** that holds a newline does the same: the header row is a row
+    /// like any other, and a header row that broke in two would be a header row
+    /// the reader could not read.
+    #[test]
+    fn edge_a_key_holding_a_newline_stays_on_one_line() {
+        let rows = Value::list(vec![record(vec![(
+            "one\ntwo",
+            Value::Text("a".to_string()),
+        )])]);
+
+        let shown = table(&rows).expect("a record is a table");
+        let lines = lines(&shown);
+
+        assert_eq!(lines.len(), 2, "a header row and one row");
+        assert_eq!(
+            lines[0], "one\\ntwo",
+            "the line break in the key is spelled, not printed"
+        );
+        assert_eq!(lines[1], "a", "and the row under it is a row");
+    }
+
+    /// A column of wide characters is padded by the cells a terminal draws, so
+    /// the columns still line up.
+    ///
+    /// A cell padded by its character count drifts one cell for every wide
+    /// character in it: "日本" is two characters and four cells, so a column
+    /// holding it and a column holding "ada" would not meet.
+    #[test]
+    fn edge_table_aligns_a_wide_character_column_by_the_cells_it_is_drawn_in() {
+        let rows = Value::list(vec![
+            record(vec![
+                ("name", Value::Text("日本".to_string())),
+                ("n", Value::Number(1.0)),
+            ]),
+            record(vec![
+                ("name", Value::Text("ada".to_string())),
+                ("n", Value::Number(2.0)),
+            ]),
+        ]);
+
+        let shown = table(&rows).expect("a list of records is a table");
+        let lines = lines(&shown);
+
+        assert_eq!(lines[0], "name  n", "the header row");
+        assert_eq!(
+            lines[1], "日本  1",
+            "the wide cell is padded by cells, not by characters"
+        );
+        assert_eq!(
+            lines[2], "ada   2",
+            "and the narrow cell is padded to the same width"
+        );
+
+        let column = |line: &str, cell: &str| {
+            let at = line.find(cell).expect("the cell is in the line");
+            crate::error::text_cells(&line[..at])
+        };
+        assert_eq!(
+            column(lines[1], "1"),
+            column(lines[2], "2"),
+            "the second column starts at the same cell in both rows: {:?}",
+            lines
         );
     }
 
