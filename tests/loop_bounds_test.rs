@@ -169,11 +169,25 @@ fn runaway_loop_is_catchable_from_inside_redblue() {
         "    set caught to yes\n",
         "end\n",
         "expect caught to be yes\n",
+        "caught\n",
     );
 
     let mut vm = Vm::with_max_iterations(100);
-    vm.run(&parse(source))
+    let value = vm
+        .run(&parse(source))
         .expect("the loop's RuntimeError must be catchable");
+    // The `expect caught to be yes` at the top level is the program's own check,
+    // and a failed `expect` **fails the run**: `Expr::Expect` answers
+    // `Err(Error::Runtime(..))` (`src/interpreter.rs:2331`) and nothing here
+    // catches it, so the run coming back `Ok` already proves the `catch` fired.
+    // The value below is the second, independent reading of the same run — what
+    // the program *answered*, not whether it ran.
+    assert_eq!(
+        value,
+        redblue::Value::YesNo(true),
+        "the program's `caught` flag must be `yes`: the loop's RuntimeError was \
+         not catchable from inside the program"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -182,46 +196,73 @@ fn runaway_loop_is_catchable_from_inside_redblue() {
 
 /// Edge: a loop that must not iterate at all is not an error, however small the
 /// cap. A cap of 1 still permits zero iterations.
+///
+/// The program ends on the variable the loop body would have changed, so the
+/// value the run hands back is the count of turns the loop took — zero, not
+/// merely "no error". A loop that ran one turn anyway would leave the variable
+/// changed, and the run would answer `1` where the answer must be `0`.
 #[test]
 fn edge_zero_iterations_is_allowed() {
     for (name, source) in [
-        ("repeat", "set n to 0\nrepeat 0 times\n    set n to 1\nend"),
+        (
+            "repeat",
+            "set n to 0\nrepeat 0 times\n    set n to 1\nend\nn",
+        ),
         (
             "for each",
-            "set n to 0\nfor each x in []\n    set n to 1\nend",
+            "set n to 0\nfor each x in []\n    set n to 1\nend\nn",
         ),
-        ("while", "set i to 0\nwhile i is 5\n    set i to i + 1\nend"),
+        (
+            "while",
+            "set i to 0\nwhile i is 5\n    set i to i + 1\nend\ni",
+        ),
     ] {
-        run_capped(source, 1).unwrap_or_else(|error| {
+        let value = run_capped(source, 1).unwrap_or_else(|error| {
             panic!(
                 "a zero-iteration {} loop must not spend budget: {:?}",
                 name, error
             )
         });
+        assert_eq!(
+            value,
+            redblue::Value::Number(0.0),
+            "a zero-iteration {} loop must not run its body at all",
+            name
+        );
     }
 }
 
 /// Edge: a loop that runs *exactly* the cap succeeds. An off-by-one that rejects
 /// `max` is the common way an iteration cap is written wrong.
+///
+/// The count the loop reached is the answer, not the absence of an error: a cap
+/// that stopped the loop one turn early would still succeed, and the variable
+/// would be one short of the cap.
 #[test]
 fn edge_exactly_max_iterations_succeeds() {
     for (name, source) in [
         (
             "repeat",
-            "set n to 0\nrepeat 10 times\n    set n to n + 1\nend",
+            "set n to 0\nrepeat 10 times\n    set n to n + 1\nend\nn",
         ),
         (
             "for each",
-            "set n to 0\nfor each x in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n    set n to x\nend",
+            "set n to 0\nfor each x in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n    set n to x\nend\nn",
         ),
         (
             "while",
-            "set i to 0\nwhile i is not 10\n    set i to i + 1\nend",
+            "set i to 0\nwhile i is not 10\n    set i to i + 1\nend\ni",
         ),
     ] {
-        run_capped(source, 10).unwrap_or_else(|error| {
+        let value = run_capped(source, 10).unwrap_or_else(|error| {
             panic!("exactly the cap must be allowed for {}: {:?}", name, error)
         });
+        assert_eq!(
+            value,
+            redblue::Value::Number(10.0),
+            "a {} loop must run exactly the cap's ten turns, not fewer",
+            name
+        );
     }
 }
 
@@ -271,10 +312,18 @@ fn edge_iteration_cap_applies_to_each_loop_form() {
 #[test]
 fn edge_nested_loops_each_get_the_full_cap() {
     let mut vm = Vm::with_max_iterations(10);
-    let program = parse("set n to 0\nfor each outer in [1, 2, 3]\n    for each inner in [1, 2, 3, 4]\n        set n to n + 1\n    end\nend");
+    let program = parse("set n to 0\nfor each outer in [1, 2, 3]\n    for each inner in [1, 2, 3, 4]\n        set n to n + 1\n    end\nend\nsay n");
 
     vm.run(&program)
         .expect("each loop stays inside the cap, so nesting must not double-charge");
+    // Twelve increments: 3 outer turns of 4 inner turns each. A cap charged once
+    // per program rather than once per loop would stop this part-way and fail
+    // below, which a "did not fail" assertion could not see.
+    assert_eq!(
+        vm.take_output(),
+        vec!["12".to_string()],
+        "3 outer turns of 4 inner turns must add up to 12"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -310,9 +359,16 @@ fn step_budget_does_not_fire_under_the_limit() {
     let mut vm = Vm::with_max_steps(10_000);
 
     vm.run(&parse(
-        "set n to 0\nrepeat 10 times\n    set n to n + 1\nend",
+        "set n to 0\nrepeat 10 times\n    set n to n + 1\nend\nsay n",
     ))
     .expect("a program inside the budget must run");
+    // Ten turns, one line, `10`. A budget that fired one turn early would fail
+    // this run, and "the run succeeded" would not have noticed.
+    assert_eq!(
+        vm.take_output(),
+        vec!["10".to_string()],
+        "a program inside the budget must run all ten turns untouched"
+    );
 }
 
 /// The budget counts steps actually taken, so a loop that is never entered
@@ -320,11 +376,24 @@ fn step_budget_does_not_fire_under_the_limit() {
 /// spend budget it never uses.
 #[test]
 fn edge_step_budget_is_not_spent_by_unentered_loops() {
-    for (name, source) in [
-        ("while", "set i to 5\nwhile i is 0\n    say \"never\"\nend"),
+    for (name, source, expected) in [
+        // `never` is the only line this program could print, and it must not be
+        // printed: the loop's condition is false on entry, so the body runs zero
+        // times.
+        (
+            "while",
+            "set i to 5\nwhile i is 0\n    say \"never\"\nend",
+            Vec::<String>::new(),
+        ),
+        // An empty list, a loop over it, and a line after it that *does* run —
+        // which is what proves the budget was not merely enough for the first
+        // statement and then spent. The body says `never` as well, so the check
+        // below is the same one the `while` row gets: a body that ran at all
+        // would have printed it.
         (
             "for each",
-            "set n to 0\nfor each x in []\n    set n to 1\nend",
+            "for each x in []\n    say \"never\"\nend\nsay \"after\"",
+            vec!["after".to_string()],
         ),
     ] {
         let mut vm = Vm::with_max_steps(4);
@@ -334,6 +403,18 @@ fn edge_step_budget_is_not_spent_by_unentered_loops() {
                 name, error
             )
         });
+        let printed = vm.take_output();
+        assert!(
+            !printed.iter().any(|line| line == "never"),
+            "an unentered {} loop must not run its body, and `never` is what \
+             would say so. It printed {printed:?}",
+            name,
+        );
+        assert_eq!(
+            printed, expected,
+            "an unentered {} loop must print exactly the lines written outside it",
+            name,
+        );
     }
 }
 
@@ -566,38 +647,131 @@ fn edge_count_beyond_i64_is_a_clean_error_not_a_panic() {
 /// Edge: a fractional count truncates to zero iterations and is not an error.
 /// The negative direction of the same boundary: `0..-5` is empty, not a run of
 /// five backwards.
+///
+/// The variable the body would have changed is the last statement, so the run
+/// answers the count of turns taken: zero. A count of `0.5` that ran one turn
+/// would leave the variable at `1`, and the answer would say so.
 #[test]
 fn edge_fractional_and_negative_counts_run_zero_times() {
     for count in ["0.5", "0", "-5"] {
         let source = format!(
-            "set n to 0\nrepeat {} times\n    set n to n + 1\nend",
+            "set n to 0\nrepeat {} times\n    set n to n + 1\nend\nn",
             count
         );
 
-        run_capped(&source, 5)
+        let value = run_capped(&source, 5)
             .unwrap_or_else(|error| panic!("count {} must run zero times: {:?}", count, error));
+        assert_eq!(
+            value,
+            redblue::Value::Number(0.0),
+            "count {} must run zero turns, not one",
+            count
+        );
     }
 }
 
 /// Edge: a count that is not a number is not a loop at all. This is the
 /// pre-existing behaviour and the cap must not change it into an error or a
 /// hang.
+///
+/// The literal `never` in the body is what makes the assertion possible: without
+/// a line only this run could print, "did not run" and "ran and said nothing" are
+/// the same observation, and a loop that ran its body zero times out of luck would
+/// pass. Reading the output is the difference between a reachability check and a
+/// claim about what the loop did.
 #[test]
 fn edge_type_mismatch_count_is_not_a_loop() {
     let mut vm = Vm::with_max_iterations(5);
 
     vm.run(&parse("repeat \"five\" times\n    say \"never\"\nend"))
         .expect("a text count is not a number, so the loop does not run");
+    assert_eq!(
+        vm.take_output(),
+        Vec::<String>::new(),
+        "a text count must not run the loop body, and `never` is what would say so"
+    );
 }
 
 /// Edge: `for each` over something that is not a list is likewise not a loop,
-/// and cannot be made into a hang by the cap.
+/// and cannot be made into a hang by the cap. Same `never`, same reason.
 #[test]
 fn edge_type_mismatch_iterable_is_not_a_loop() {
     let mut vm = Vm::with_max_iterations(5);
 
     vm.run(&parse("for each x in 5\n    say \"never\"\nend"))
         .expect("a number is not a list, so the loop does not run");
+    assert_eq!(
+        vm.take_output(),
+        Vec::<String>::new(),
+        "a number is not a list, so the body must not run, and `never` is what would say so"
+    );
+}
+
+/// A loop that runs must run **every** turn: the counterpart to the two tests
+/// above, which pin the zero-turn case.
+///
+/// Three turns of `repeat`, one line each, in order. A cap that stopped the loop
+/// after one turn, or that skipped a turn, or that ran it once too many, changes
+/// one of these three lines and fails — where the `never` tests could not tell a
+/// loop that ran nothing from a loop that was never reached.
+#[test]
+fn edge_a_loop_that_does_run_prints_one_line_per_turn_in_order() {
+    let mut vm = Vm::with_max_iterations(5);
+
+    vm.run(&parse(
+        "set n to 0\nrepeat 3 times\n    set n to n + 1\n    say n\nend",
+    ))
+    .expect("three turns is inside a cap of five");
+    assert_eq!(
+        vm.take_output(),
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "three turns must print 1, 2, 3 — one line per turn, in order"
+    );
+}
+
+/// A loop with nothing to print prints nothing, and that is not the same as a
+/// loop that did not run.
+///
+/// The empty-output row in its own right: `take_output` hands back an empty
+/// `Vec` for "the body ran and said nothing" and for "the body never ran", so a
+/// test that only checked emptiness could pass on a loop that had been skipped.
+/// This one proves the loop ran by counting it, and then proves that the count is
+/// what it is.
+#[test]
+fn edge_a_loop_whose_body_says_nothing_still_runs_every_turn() {
+    // The first program says what the loop did: the body says nothing, and the
+    // count the loop reached is printed after it.
+    let mut vm = Vm::with_max_iterations(5);
+
+    vm.run(&parse(
+        "set n to 0\nrepeat 4 times\n    set n to n + 1\nend\nsay n",
+    ))
+    .expect("four turns is inside a cap of five");
+    assert_eq!(
+        vm.take_output(),
+        vec!["4".to_string()],
+        "the body said nothing, but the loop still ran all four turns"
+    );
+
+    // The second program is the same loop and nothing else, so the program
+    // *ends on the loop*: the value the run hands back is the loop's own value
+    // and not the value of whatever statement followed it. A loop statement is
+    // worth `nothing` — not the count it reached, and not the value of a
+    // statement after it — so this pins that, and a loop that began answering
+    // with something else would be a change in the language's shape rather than
+    // in its numbers.
+    let mut vm = Vm::with_max_iterations(5);
+
+    let outcome = vm
+        .run(&parse(
+            "set n to 0\nrepeat 4 times\n    set n to n + 1\nend",
+        ))
+        .expect("four turns is inside a cap of five");
+    assert_eq!(
+        outcome,
+        redblue::Value::Nothing,
+        "a loop statement is worth nothing"
+    );
 }
 
 /// Edge: a loop nested inside a function that a loop calls is still bounded.
@@ -644,6 +818,7 @@ fn edge_deeply_nested_loops_terminate() {
     for _ in 0..depth {
         source.push_str("end\n");
     }
+    source.push_str("say n\n");
 
     let mut vm = Vm::with_max_iterations(5);
     vm.run(&parse(&source)).unwrap_or_else(|error| {
@@ -652,6 +827,16 @@ fn edge_deeply_nested_loops_terminate() {
             depth, error
         )
     });
+    // 2^16 = 65536 turns of the innermost statement. The count is what makes this
+    // a test of nesting rather than a test of "it stopped": a nesting bug that ran
+    // 2^15 times, or that ran the whole thing twice, prints a different number.
+    assert_eq!(
+        vm.take_output(),
+        vec!["65536".to_string()],
+        "{} levels of a 2-iteration loop must run 2^{} turns exactly",
+        depth,
+        depth
+    );
 }
 
 // ---------------------------------------------------------------------------
