@@ -1,5 +1,7 @@
 use std::fmt;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 /// The most terminal cells of one drawn source line.
 ///
 /// A drawn line is a line the reader can read, not the whole of an input file:
@@ -224,89 +226,41 @@ impl Error {
     }
 }
 
-/// Characters that take no cell of their own: combining marks, joiners,
-/// variation selectors, emoji skin tones, and control characters.
-///
-/// They are written into the line and occupy nothing on screen, so a caret past
-/// one of them must not step over a column it did not draw.
-const ZERO_WIDTH: &[(u32, u32)] = &[
-    (0x0300, 0x036F),
-    (0x0483, 0x0489),
-    (0x0591, 0x05BD),
-    (0x0610, 0x061A),
-    (0x064B, 0x065F),
-    (0x0670, 0x0670),
-    (0x06D6, 0x06DC),
-    (0x0730, 0x074A),
-    (0x07A6, 0x07B0),
-    (0x0900, 0x0903),
-    (0x093A, 0x094F),
-    (0x0951, 0x0957),
-    (0x1AB0, 0x1AFF),
-    (0x1DC0, 0x1DFF),
-    (0x200B, 0x200F),
-    (0x2028, 0x202E),
-    (0x2060, 0x2064),
-    (0x20D0, 0x20F0),
-    (0xFE00, 0xFE0F),
-    (0xFE20, 0xFE2F),
-    (0x1F3FB, 0x1F3FF),
-    (0xE0100, 0xE01EF),
-];
-
-/// Characters a terminal draws two cells wide: East Asian Wide and Fullwidth,
-/// and the emoji blocks.
-///
-/// Written as ranges rather than a dependency: this is the only place the
-/// renderer needs to know how wide a character is, and the ranges it needs are
-/// the ones a reader's line can actually contain.
-const WIDE: &[(u32, u32)] = &[
-    (0x1100, 0x115F),
-    (0x2E80, 0x303E),
-    (0x3041, 0x33FF),
-    (0x3400, 0x4DBF),
-    (0x4E00, 0x9FFF),
-    (0xA000, 0xA4CF),
-    (0xA960, 0xA97F),
-    (0xAC00, 0xD7A3),
-    (0xF900, 0xFAFF),
-    (0xFE10, 0xFE19),
-    (0xFE30, 0xFE6F),
-    (0xFF00, 0xFF60),
-    (0xFFE0, 0xFFE6),
-    (0x1F300, 0x1F64F),
-    (0x1F680, 0x1F6FF),
-    (0x1F900, 0x1F9FF),
-    (0x20000, 0x2FFFD),
-    (0x30000, 0x3FFFD),
-];
-
-/// Whether `code` falls in one of the inclusive ranges of `table`.
-fn in_ranges(code: u32, table: &[(u32, u32)]) -> bool {
-    table
-        .iter()
-        .any(|(first, last)| code >= *first && code <= *last)
-}
-
 /// How many terminal cells `c` is drawn in.
 ///
 /// A tab is one cell: where a tab stops is the terminal's tab stop, which a
 /// renderer cannot know, and one is the honest answer rather than a guess at
-/// eight.
+/// eight. Every other character is measured by [`unicode_width`], the same
+/// reference the table renderer uses: the hand-written ranges this replaced
+/// did not know every emoji (⭐, ✨, the regional indicators) and counted a
+/// variation selector as no cell, so a caret under one of them landed short.
 fn char_cells(c: char) -> usize {
     // Before the control check: a tab is a control character, and answering 0
     // for it would step the caret over a column that is on the line.
     if c == '\t' {
         return 1;
     }
-    let code = c as u32;
-    if c.is_control() || in_ranges(code, ZERO_WIDTH) {
-        0
-    } else if in_ranges(code, WIDE) {
-        2
-    } else {
-        1
+    UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// The terminal cells `text` is drawn in.
+///
+/// Measured as a string rather than as the sum of its characters: an emoji
+/// sequence is one glyph with the width of that glyph — a heart with a
+/// variation selector is two cells, not one — and only [`UnicodeWidthStr`]
+/// reads the sequence. A tab is still the one cell [`char_cells`] gives it,
+/// and a control character is still no cell at all.
+fn text_cells(text: &str) -> usize {
+    let mut cells = 0;
+    let mut visible = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\t' {
+            cells += 1;
+        } else if !c.is_control() {
+            visible.push(c);
+        }
     }
+    cells + UnicodeWidthStr::width(visible.as_str())
 }
 
 /// The terminal cells the first `chars` characters of `line` are drawn in.
@@ -321,18 +275,8 @@ fn char_cells(c: char) -> usize {
 /// Only the prefix is measured, and only up to the drawn limit: the whole
 /// point is that a caret is bounded by what is on screen.
 fn display_width(line: &str, chars: usize) -> usize {
-    line.chars().take(chars).map(char_cells).sum()
-}
-
-/// How many terminal cells `text` is drawn in.
-///
-/// The width of a text as a terminal draws it: a wide character is two cells, a
-/// combining mark is none. Exposed for the REPL's table renderer, whose
-/// columns are only aligned if the padding counts the same cells the terminal
-/// draws — a table padded by character count is a table whose CJK columns do
-/// not line up.
-pub(crate) fn text_cells(text: &str) -> usize {
-    text.chars().map(char_cells).sum()
+    let prefix: String = line.chars().take(chars).collect();
+    text_cells(&prefix)
 }
 
 /// One source line as it is drawn, and the cells that drawing took.
@@ -354,6 +298,11 @@ fn drawn_line(line: &str) -> (String, usize) {
         drawn.push(c);
         cells += width;
     }
+
+    // The loop above decides where to cut by character width, but the cells
+    // the kept text is drawn in are measured as a string: a sequence the loop
+    // counted as two characters may be one glyph two cells wide.
+    let cells = text_cells(&drawn);
 
     if cut {
         drawn.push(ELLIPSIS);
@@ -440,3 +389,45 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The error renderer measures a caret with `unicode-width`, so an emoji
+    /// the old hand-written table did not know is still two cells wide.
+    #[test]
+    fn edge_the_caret_counts_the_cells_a_terminal_draws() {
+        assert_eq!(display_width("⭐x", 1), 2, "U+2B50 is drawn two cells wide");
+        assert_eq!(display_width("✨x", 1), 2, "U+2728 is drawn two cells wide");
+        assert_eq!(
+            display_width("❤️x", 2),
+            2,
+            "a heart and its variation selector are one two-cell glyph"
+        );
+        assert_eq!(
+            display_width("👍🏻x", 2),
+            2,
+            "a face and its skin tone are one two-cell glyph"
+        );
+        assert_eq!(
+            display_width("🇺🇸x", 2),
+            2,
+            "a pair of regional indicators is one two-cell glyph"
+        );
+        assert_eq!(
+            display_width("\t⭐x", 2),
+            3,
+            "a tab is one cell and the star after it is two"
+        );
+    }
+
+    /// The drawn line's own cell count is measured the same way, so the caret
+    /// is not clamped below the cell it belongs on.
+    #[test]
+    fn edge_the_drawn_line_reports_the_glyph_it_draws() {
+        let (drawn, cells) = drawn_line("❤️x");
+        assert_eq!(drawn, "❤️x");
+        assert_eq!(cells, 3, "the heart is two cells and the x is one");
+    }
+}

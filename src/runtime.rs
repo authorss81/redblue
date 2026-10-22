@@ -1044,7 +1044,8 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            Ok(Some(Value::Text(json_stringify(&value))))
+            let text = json_stringify(&value).map_err(|message| Error::Limit(message, span))?;
+            Ok(Some(Value::Text(text)))
         }
         "csv_parse" => {
             let text = match args.first() {
@@ -1726,12 +1727,68 @@ fn parse_json_string(json: &str, span: Span) -> Result<String> {
     Ok(result)
 }
 
-/// Escapes `text` for a JSON string body: the quote, the backslash and every
-/// control character that JSON requires be written as an escape.
+/// Whether `c` is a character a terminal acts on rather than draws.
+///
+/// The C0 and C1 controls — the escape byte among them — and the format
+/// characters that move the cursor, reorder what follows them, or take no room
+/// at all while still changing what is around them. A text holding one is
+/// escaped by every writer that puts it on a terminal: a document a reader
+/// copies back into a program still holds the character, but a terminal cannot
+/// be made to act on it by merely looking at the document.
+pub(crate) fn mangles_terminal(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c as u32,
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
+}
+
+/// Appends `c` to `out` as one or two JSON `\uXXXX` escapes.
+///
+/// A character above the BMP needs a surrogate pair: JSON's escape names one
+/// UTF-16 code unit, so a tag character or any other astral format mark is
+/// written as the pair that reads back as the same character.
+fn push_json_unicode_escape(out: &mut String, c: char) {
+    let code = c as u32;
+    if code <= 0xFFFF {
+        out.push_str(&format!("\\u{:04x}", code));
+    } else {
+        let adjusted = code - 0x10000;
+        let high = 0xD800 + (adjusted >> 10);
+        let low = 0xDC00 + (adjusted & 0x3FF);
+        out.push_str(&format!("\\u{:04x}\\u{:04x}", high, low));
+    }
+}
+
+/// Escapes `text` for a JSON string body: the quote, the backslash, every
+/// control character that JSON requires be written as an escape, and every
+/// character a terminal acts on.
 ///
 /// `pub(crate)` because the REPL's own JSON printer writes the same document
 /// and must escape it the same way: two escapers would be two answers to what
-/// a text with a quote in it looks like in JSON.
+/// a text with a quote in it looks like in JSON. The terminal-active marks are
+/// escaped here rather than in the REPL so that `.json` and `json.stringify`
+/// remain one document — and neither of them can mangle a terminal.
 pub(crate) fn json_escape_text(text: &str) -> String {
     let mut result = String::from("\"");
     for c in text.chars() {
@@ -1743,13 +1800,8 @@ pub(crate) fn json_escape_text(text: &str) -> String {
             '\u{c}' => result.push_str("\\f"),
             '"' => result.push_str("\\\""),
             '\\' => result.push_str("\\\\"),
-            other => {
-                if (other as u32) < 0x20 {
-                    result.push_str(&format!("\\u{:04x}", other as u32));
-                } else {
-                    result.push(other);
-                }
-            }
+            other if mangles_terminal(other) => push_json_unicode_escape(&mut result, other),
+            other => result.push(other),
         }
     }
     result.push('"');
@@ -1788,13 +1840,38 @@ fn split_json_elements(content: &str) -> Vec<&str> {
     split_json_pairs(content)
 }
 
+/// The deepest nesting the language's JSON writer follows.
+///
+/// The same budget the parser allows a source expression. A value deeper than
+/// this can only have been built at runtime, and a writer that follows it
+/// frame by frame is a stack overflow — a fatal abort in Rust, not a catchable
+/// failure. `json.stringify` refuses it with [`Error::Limit`] instead.
+const MAX_JSON_DEPTH: usize = crate::parser::MAX_NESTING_DEPTH;
+
 /// Writes `value` as JSON, on one line.
 ///
 /// `pub(crate)` because the REPL's `.json` command prints the same document:
 /// one writer means the REPL and `json.stringify` cannot disagree about what
 /// a value looks like in JSON.
-pub(crate) fn json_stringify(value: &Value) -> String {
-    match value {
+///
+/// `Err` when the value nests past [`MAX_JSON_DEPTH`] or holds a function, a
+/// builtin or an object. JSON has no literal for the last three, and writing
+/// `null` for one would say "nothing" about a value that is not nothing. The
+/// language's caller turns the message into a catchable [`Error::Limit`]; the
+/// REPL's own renderer names the same cases itself.
+pub(crate) fn json_stringify(value: &Value) -> std::result::Result<String, String> {
+    json_stringify_at(value, 0)
+}
+
+/// Writes `value` as JSON, `depth` levels down.
+fn json_stringify_at(value: &Value, depth: usize) -> std::result::Result<String, String> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(format!(
+            "json.stringify cannot write a value that nests more than {MAX_JSON_DEPTH} levels deep"
+        ));
+    }
+
+    Ok(match value {
         Value::Nothing => "null".to_string(),
         Value::YesNo(b) => {
             if *b {
@@ -1817,20 +1894,37 @@ pub(crate) fn json_stringify(value: &Value) -> String {
         }
         Value::Text(s) => json_escape_text(s),
         Value::List(items) => {
-            let elements: Vec<String> = items.iter().map(json_stringify).collect();
-            format!("[{}]", elements.join(", "))
+            let mut out = String::from("[");
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&json_stringify_at(item, depth + 1)?);
+            }
+            out.push(']');
+            out
         }
         Value::Record(fields) => {
-            let pairs: Vec<String> = fields
-                .iter()
-                .map(|(k, v)| format!("{}: {}", json_escape_text(k), json_stringify(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
+            let mut out = String::from("{");
+            for (index, (key, field)) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&json_escape_text(key));
+                out.push_str(": ");
+                out.push_str(&json_stringify_at(field, depth + 1)?);
+            }
+            out.push('}');
+            out
         }
-        Value::Function(_) => "null".to_string(),
-        Value::Builtin(_) => "null".to_string(),
-        Value::Object(_, _) => "null".to_string(),
-    }
+        Value::Function(_) | Value::Builtin(_) | Value::Object(_, _) => {
+            return Err(format!(
+                "json.stringify has no JSON literal for a value of the kind `{}`, and `null` \
+                 would say 'nothing' about a value that is not nothing",
+                value.type_name()
+            ));
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1849,7 +1943,7 @@ mod tests {
             (f64::NEG_INFINITY, "negative infinity"),
         ] {
             assert_eq!(
-                json_stringify(&Value::Number(value)),
+                json_stringify(&Value::Number(value)).expect("a number is writable"),
                 "null",
                 "{} must be written as null, not as a JSON number",
                 what
@@ -1857,11 +1951,100 @@ mod tests {
         }
         // The widest finite numbers are numbers, and must not be nulled.
         for finite in [f64::MAX, f64::MIN, f64::MIN_POSITIVE, 0.0, -0.0, 1.5] {
-            let written = json_stringify(&Value::Number(finite));
+            let written =
+                json_stringify(&Value::Number(finite)).expect("a finite number is writable");
             assert_ne!(written, "null", "{} should still be written", finite);
         }
-        assert_eq!(json_stringify(&Value::Number(42.0)), "42");
-        assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
+        assert_eq!(
+            json_stringify(&Value::Number(42.0)).expect("a number is writable"),
+            "42"
+        );
+        assert_eq!(
+            json_stringify(&Value::Number(1.5)).expect("a number is writable"),
+            "1.5"
+        );
+    }
+
+    /// The language's writer refuses a value nested past its budget instead of
+    /// following it into a stack overflow.
+    #[test]
+    fn edge_json_stringify_refuses_a_value_nested_past_its_budget() {
+        let mut value = Value::Nothing;
+        for _ in 0..=MAX_JSON_DEPTH {
+            value = Value::list(vec![value]);
+        }
+
+        let refusal = json_stringify(&value)
+            .expect_err("a value past the JSON writer's budget must be refused");
+        assert!(
+            refusal.contains(&MAX_JSON_DEPTH.to_string()),
+            "the refusal names the budget, got {:?}",
+            refusal
+        );
+        assert!(
+            refusal.contains("nests"),
+            "the refusal says what was too deep, got {:?}",
+            refusal
+        );
+    }
+
+    /// JSON has no literal for a function, a builtin or an object, and `null`
+    /// is a lie about all three: it is what `nothing` is. The language's writer
+    /// refuses the document by name, exactly as the REPL's `.json` does.
+    #[test]
+    fn edge_json_stringify_refuses_a_value_with_no_json_literal() {
+        let function = Value::Function(crate::value::FunctionValue {
+            name: "f".to_string(),
+            params: Vec::new(),
+            body: crate::value::FunctionBody::Statements(std::sync::Arc::new(Vec::new())),
+            captured: std::sync::Arc::new(Vec::new()),
+        });
+        let builtin = Value::Builtin("print".to_string());
+        let object = Value::object("Thing".to_string(), crate::value::Fields::new());
+
+        for (value, kind) in [
+            (function, "function"),
+            (builtin, "builtin"),
+            (object, "object"),
+        ] {
+            let refusal =
+                json_stringify(&value).expect_err("a value with no JSON literal must be refused");
+            assert!(
+                refusal.contains(kind),
+                "the refusal names `{}`, got {:?}",
+                kind,
+                refusal
+            );
+            assert!(
+                refusal.contains("null"),
+                "the refusal says why `null` would be wrong, got {:?}",
+                refusal
+            );
+        }
+    }
+
+    /// The language's writer escapes the characters a terminal acts on, so a
+    /// document can be printed without reordering the line it is printed on.
+    #[test]
+    fn edge_json_stringify_escapes_the_characters_a_terminal_acts_on() {
+        for character in [
+            '\u{202e}', '\u{2028}', '\u{2029}', '\u{200b}', '\u{85}', '\u{61c}', '\u{feff}',
+        ] {
+            let written =
+                json_stringify(&Value::Text(character.to_string())).expect("a text is writable");
+            assert!(
+                !written.contains(character),
+                "U+{:04X} must not be written raw, got {:?}",
+                character as u32,
+                written
+            );
+            assert!(
+                written.contains("\\u"),
+                "U+{:04X} must be written as an escape, got {:?}",
+                character as u32,
+                written
+            );
+        }
     }
 
     /// A clock set before 1970 is the one host state that makes every clock

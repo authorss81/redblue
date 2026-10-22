@@ -235,6 +235,94 @@ fn edge_a_table_of_an_empty_list_says_so_and_does_not_panic() {
     );
 }
 
+/// A list of records that hold no keys at all is named too.
+///
+/// The list is not empty, so the empty list's answer is not the answer here —
+/// and a table with no columns is a blank line and says nothing at all, so a
+/// reader cannot tell it from a failure.
+#[test]
+fn edge_a_table_of_records_with_no_keys_says_so() {
+    let out = session(concat!(".table [{}]\n", ":quit\n"));
+
+    let answer = after_prompt(&out, 0);
+    assert!(
+        answer.to_lowercase().contains("no keys"),
+        "the records holding no keys are named\n--- actual ---\n{:?}",
+        answer
+    );
+    assert!(
+        !answer.trim().is_empty(),
+        "and the answer is not silence\n--- actual ---\n{:?}",
+        answer
+    );
+}
+
+/// The document `.json` prints is the document `json.stringify` writes.
+///
+/// This is the command's whole claim, and it is checked against the language's
+/// own writer inside a session: one value, printed twice, byte for byte the
+/// same.
+#[test]
+fn edge_the_json_a_session_prints_is_the_document_json_stringify_writes() {
+    let out = session(concat!(
+        "set v to { name: \"ada\", count: 3, ok: yes, missing: nothing, \
+         tags: [\"x\", \"y\"], nested: { a: [1, 2] } }\n",
+        ".json v\n",
+        "say json.stringify(v)\n",
+        ":quit\n"
+    ));
+
+    let printed = after_prompt(&out, 1);
+    let written = after_prompt(&out, 2);
+
+    assert_eq!(
+        printed.trim_end(),
+        written.trim_end(),
+        "the document the REPL printed is the document the language writes\n--- actual ---\n{:?}",
+        printed.escape_debug()
+    );
+}
+
+/// `.json` and `.pretty` both spell out the characters a terminal acts on, in
+/// JSON's own escape, so neither document can reorder the line it is printed
+/// on — and `.json` is still the document `json.stringify` writes.
+#[test]
+fn edge_the_json_document_escapes_the_marks_a_terminal_would_act_on() {
+    let out = session(concat!(
+        ".json \"\\u202e\"\n",
+        ".pretty \"\\u202e\"\n",
+        "say json.stringify(\"\\u202e\")\n",
+        ":quit\n"
+    ));
+
+    let document = after_prompt(&out, 0);
+    let rendering = after_prompt(&out, 1);
+    let written = after_prompt(&out, 2);
+
+    for (name, shown) in [
+        ("the document", document.as_str()),
+        ("the rendering", rendering.as_str()),
+    ] {
+        assert!(
+            !shown.contains('\u{202e}'),
+            "{} must not put the mark on the terminal raw\n--- actual ---\n{:?}",
+            name,
+            shown.escape_debug()
+        );
+        assert!(
+            shown.contains("\\u202e"),
+            "{} spells the mark out in JSON's own escape\n--- actual ---\n{:?}",
+            name,
+            shown.escape_debug()
+        );
+    }
+    assert_eq!(
+        document.trim_end(),
+        written.trim_end(),
+        "and `.json` is still byte for byte the document `json.stringify` writes"
+    );
+}
+
 /// A text written in another script, in a right-to-left script and in an
 /// emoji is printed as it is: the escapes are the language's, not the
 /// printer's.
@@ -437,5 +525,27 @@ fn edge_a_table_cell_shows_the_characters_a_terminal_draws_as_they_are() {
         !tabled.contains("\\\""),
         "and no backslash was put in front of the quote\n--- actual ---\n{:?}",
         tabled
+    );
+}
+
+/// A column holding an emoji is padded by the cells the emoji is drawn in, so
+/// the columns line up on the reader's screen.
+///
+/// An emoji is one character and two cells, so a column padded by characters
+/// drifts a cell for every emoji in it: the second column starts one cell
+/// further along in that row than in the others, and the table does not line
+/// up on the screen even though every row is the same length in characters.
+#[test]
+fn edge_a_table_column_holding_an_emoji_lines_up_on_the_screen() {
+    let out = session(concat!(
+        ".table [{ name: \"⭐\", n: 1 }, { name: \"ada\", n: 2 }]\n",
+        ":quit\n"
+    ));
+
+    assert_eq!(
+        after_prompt(&out, 0).trim_end(),
+        "name  n\n⭐    1\nada   2",
+        "the emoji cell is padded by the two cells it is drawn in\n--- actual ---\n{:?}",
+        after_prompt(&out, 0)
     );
 }

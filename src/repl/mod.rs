@@ -2051,6 +2051,11 @@ impl Repl {
     /// The same gates as `.type`, and for the same reasons: a question is a
     /// question, and printing a value must not change the world it is printed
     /// from. Only the shape of the answer differs.
+    ///
+    /// A rendering is drawn on a terminal, so this one spells out the
+    /// characters a terminal acts on — a right-to-left override, a zero-width
+    /// mark — in JSON's own escape: what it writes is still a document, and
+    /// the document still reads back as the value it came from.
     fn print_pretty(&mut self, code: &str) {
         match self.pretty_answer(code) {
             Ok(text) => println!("{}", text),
@@ -2075,6 +2080,13 @@ impl Repl {
     /// value JSON can hold. The three it cannot hold — a function, a builtin
     /// and an object — are refused by name rather than written as the `null`
     /// that means "nothing".
+    ///
+    /// **A document first and a terminal rendering second.** The characters a
+    /// terminal acts on are spelled out as JSON escapes — by the language's
+    /// own writer, so `.json` is still the document `json.stringify` writes,
+    /// byte for byte — and the document still reads back through `json.parse`
+    /// as the value it came from. `.pretty` and `.table` are the renderings,
+    /// and they spell those characters out too.
     fn print_json(&mut self, code: &str) {
         match self.json_answer(code) {
             Ok(text) => println!("{}", text),
@@ -5984,9 +5996,10 @@ mod tests {
         /// `text` as a Redblue text literal, so the language's own `json.parse`
         /// can read it back.
         ///
-        /// The five escapes a Redblue text literal carries, and nothing else —
-        /// a document the language cannot spell is a document the REPL must not
-        /// print.
+        /// The five escapes a Redblue text literal carries, and nothing else.
+        /// A `\uXXXX` in the document — which `.pretty` writes for a character
+        /// a terminal would act on — is carried by the backslash escape, so
+        /// what `json.parse` reads back is the character the document names.
         fn as_text_literal(text: &str) -> String {
             let mut out = String::from("\"");
             for c in text.chars() {
@@ -6053,6 +6066,44 @@ mod tests {
             let shown = repl
                 .pretty_answer("original")
                 .expect("a bound record is showable");
+            let literal = as_text_literal(&shown);
+            let line = format!("set read_back to json.parse({})", literal);
+            feed(&mut repl, &[line.as_str()]);
+
+            assert_eq!(
+                repl.lookup("read_back").cloned(),
+                repl.lookup("original").cloned(),
+                "the document the REPL printed reads back as the value it came from:\n{}",
+                shown
+            );
+        }
+
+        /// What `.pretty` shows reads back as the value it came from — even when
+        /// the value holds a character a terminal acts on.
+        ///
+        /// `.pretty` spells those characters out, in JSON's own escape, so what
+        /// it writes is still a document and the language's own `json.parse`
+        /// reads the character back. A rendering that spelled the mark out in
+        /// any other shape would write something the language cannot read.
+        #[test]
+        fn edge_pretty_of_a_text_a_terminal_would_mangle_reads_back_as_the_value() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set original to { text: \"a\\u202eb\" }"]);
+
+            let shown = repl
+                .pretty_answer("original")
+                .expect("a bound record is showable");
+            assert!(
+                !shown.contains('\u{202e}'),
+                "the mark does not reach the terminal raw:\n{}",
+                shown
+            );
+            assert!(
+                shown.contains("\\u202e"),
+                "and it is spelled out in JSON's own escape:\n{}",
+                shown
+            );
+
             let literal = as_text_literal(&shown);
             let line = format!("set read_back to json.parse({})", literal);
             feed(&mut repl, &[line.as_str()]);

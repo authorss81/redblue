@@ -91,6 +91,44 @@
 //! [`edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule`]
 //! says so.
 //!
+//! # The deviations the delivery rule carries
+//!
+//! [`DELIVERY_SUBJECT_PREFIXES`] is the rule that forgives a delivery commit,
+//! and a rule that forgives without saying what it forgives forgives anything.
+//! So it is held to two rules of its own:
+//!
+//! - **What it forgives is recorded from the commit itself.** The
+//!   acknowledgement carries the commit's own line counts and the paths it
+//!   touches, measured from the commit at audit time ([`measure_commit`],
+//!   [`delivery_reason`]), so the record of what unreviewed code is in the
+//!   tree is the tree's own record. A hand-written description of a round's
+//!   contents is a description of a commit that is no longer here, and the
+//!   omission that follows from it is exactly the failure this audit exists
+//!   to prevent.
+//! - **Every prefix names a phase, and the list is written down.** A phase
+//!   that is not in flight is still unreviewed work, and
+//!   [`edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule`]
+//!   says so.
+//!
+//! **phase-063's prefix is a deviation, and it is named here.** The rule
+//! judges unreviewed work, and phase-063 — the phase that wrote the work the
+//! second prefix names — added its own prefix to it, so the commit carrying
+//! its unreviewed code is forgiven by a rule it wrote. That is the cost of
+//! the rule, and it is written down rather than left to be found:
+//!
+//! - **phase-084** (`resume phase-084:`) — the delivery commit of the
+//!   reviewer-permission phase, which was in flight when the rule was
+//!   written. Its work is not this file's, and its prefix is here because its
+//!   commit is in this history.
+//! - **phase-063** (`resume phase-063:`) — **a deviation**: the phase that
+//!   added the prefix also wrote the work the commit carries. The measurement
+//!   above is the only thing that keeps that honest, which is why the
+//!   measurement is not optional.
+//!
+//! A prefix that is not for a phase in flight must be removed: the next
+//! phase's delivery commit is unreviewed work until something acknowledges
+//! it.
+//!
 //! # What makes the list data rather than a comment
 //!
 //! [`validate_acknowledgements`] rejects an entry with no full lowercase object
@@ -251,30 +289,134 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// one of them by SHA went stale the moment the next round landed — which is
 /// exactly what happened to phase-063's first delivery commit
 /// (`ba0a0db`, re-created as `a31d067` on the next round's `main`).
+///
+/// **phase-063's prefix is a deviation**, and the module docs say so at
+/// length: the phase that added the prefix also wrote the work the commit
+/// carries, so the commit is forgiven by a rule it wrote. The measurement in
+/// [`delivery_reason`] is what keeps that honest.
 const DELIVERY_SUBJECT_PREFIXES: &[&str] = &["resume phase-084:", "resume phase-063:"];
 
 /// The reason recorded for the delivery commits this rule acknowledges.
 ///
-/// It says the two things every entry in [`ACKNOWLEDGED`] says — the commit
-/// carries unreviewed code, and it was deliberately not rewritten — and it
-/// says why this one is keyed on its subject rather than on its SHA.
+/// The tail of it says the two things every entry in [`ACKNOWLEDGED`] says —
+/// the commit carries unreviewed code, and it was deliberately not rewritten
+/// — and it says why this one is keyed on its subject rather than on its SHA.
 ///
-/// One constant for both, because the commits' contents differ from round to
-/// round: a reason that quoted last round's line counts would be a reason
-/// about a commit that is not here. It names what each phase's delivery
-/// carried instead.
-const DELIVERY_REASON: &str = "resume phase-NNN: adopt preserved work. The delivery commit of a \
-    phase in flight: it carries the unreviewed code that phase shipped — for phase-084 the \
-    repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the \
-    phase's own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
-    acknowledgement data in tests/unreviewed_work_ack_test.rs, and the phase's REPORT.md and \
-    FINDINGS.md; for phase-063 the REPL printing trio `.pretty`/`.json`/`.table` (src/repl/render.rs \
-    is new, plus the three command rows in src/repl/commands.rs, the dispatch and answer methods in \
-    src/repl/mod.rs, the per-command refusal in src/repl/introspect.rs, and the phase's own tests) \
-    — Deliberately not rewritten: published history is immutable under AGENTS.md 1.6. Acknowledged by \
-    SUBJECT rather than by SHA because the pipeline creates this commit after the run that wrote the \
-    work and rebuilds it on the same parent on every round, so a SHA written here would name a commit \
-    this history does not contain on the next round.";
+/// What the commit *carries* is not written here: it is measured, at audit
+/// time, from the commit itself ([`delivery_reason`], [`measure_commit`]). A
+/// hand-written description of a round's contents is a description of a
+/// commit that is no longer here — the delivery commit is rebuilt on every
+/// round — and the omission that follows from that is exactly the failure
+/// this audit exists to prevent: a record of what unreviewed code is in the
+/// tree that no longer says so.
+const DELIVERY_REASON: &str = "Deliberately not rewritten: published history is immutable under \
+    AGENTS.md 1.6. Acknowledged by SUBJECT rather than by SHA because the pipeline creates this \
+    commit after the run that wrote the work and rebuilds it on the same parent on every round, \
+    so a SHA written here would name a commit this history does not contain on the next round.";
+
+/// What a commit carries, measured from the commit itself.
+///
+/// The line counts and the paths, read out of `git show --numstat`. Measured
+/// rather than written down, because a description of a round's contents is a
+/// description of a commit that is no longer here: the delivery commit is
+/// rebuilt on every round, so the numbers written by one round are about a
+/// commit the next round does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Carries {
+    /// How many files the commit touches.
+    files: usize,
+    /// How many lines it adds, over every file.
+    added: usize,
+    /// How many lines it removes, over every file.
+    deleted: usize,
+    /// How many lines it adds under `src/`.
+    src_added: usize,
+    /// How many lines it removes under `src/`.
+    src_deleted: usize,
+    /// The paths it touches.
+    paths: Vec<String>,
+}
+
+/// Measures what `sha` carries, or `None` when it cannot be measured.
+///
+/// `None` is the honest answer for a commit this repository does not hold —
+/// which is every commit in the fixtures below, and any commit of another
+/// repository. The reason then says that what the commit carries is not
+/// recorded, rather than inventing a number for it.
+fn measure_commit(sha: &str) -> Option<Carries> {
+    let output = Command::new("git")
+        .args(["show", "--numstat", "--format=", sha])
+        .current_dir(repo_root())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut carries = Carries {
+        files: 0,
+        added: 0,
+        deleted: 0,
+        src_added: 0,
+        src_deleted: 0,
+        paths: Vec::new(),
+    };
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let added = fields.next()?;
+        let deleted = fields.next()?;
+        let path = fields.next()?;
+        // A binary file is counted by git as `-`: it has no lines to add or
+        // remove, and `-` is not a number.
+        let added: usize = added.parse().unwrap_or(0);
+        let deleted: usize = deleted.parse().unwrap_or(0);
+        carries.files += 1;
+        carries.added += added;
+        carries.deleted += deleted;
+        if path.starts_with("src/") {
+            carries.src_added += added;
+            carries.src_deleted += deleted;
+        }
+        carries.paths.push(path.to_string());
+    }
+    if carries.files == 0 {
+        return None;
+    }
+    Some(carries)
+}
+
+/// The reason recorded for one delivery commit: what the rule says, and what
+/// the commit actually carries.
+///
+/// The second half is measured from the commit ([`measure_commit`]), so the
+/// record of what unreviewed code is in the tree is the tree's own record and
+/// not a description written by hand in a round that has been and gone. A
+/// commit that cannot be measured says so instead of saying nothing.
+fn delivery_reason(subject: &str, carries: Option<&Carries>) -> String {
+    let mut reason = format!(
+        "{subject}. The delivery commit of a phase in flight: it carries the unreviewed code \
+         that phase shipped"
+    );
+    match carries {
+        Some(carries) => reason.push_str(&format!(
+            " — measured from the commit itself: +{}/-{} across {} file(s) (+{}/-{} under \
+             src/): {}",
+            carries.added,
+            carries.deleted,
+            carries.files,
+            carries.src_added,
+            carries.src_deleted,
+            carries.paths.join(", ")
+        )),
+        None => reason.push_str(
+            " — and what it carries could not be measured here, because it is not a commit this \
+             repository holds",
+        ),
+    }
+    reason.push_str(". ");
+    reason.push_str(DELIVERY_REASON);
+    reason
+}
 
 /// The commits measured on a complete history of `HEAD`, and the shape each one
 /// was found under.
@@ -853,18 +995,17 @@ fn is_delivery_subject(subject: &str) -> bool {
 /// unreviewed, and it cannot be stale, because no SHA is pinned that could
 /// point at nothing.
 ///
-/// The reason is a constant, not a per-commit string, because the commit's
-/// contents differ from round to round and a reason that quoted last round's
-/// line counts would be a reason about a commit that is not here. It says what
-/// every entry in [`ACKNOWLEDGED`] says — the commit carries unreviewed code,
-/// and it was deliberately not rewritten.
+/// The reason is built from the commit itself — what it carries is measured
+/// from it, not described from memory — because the rule's cost is exactly
+/// what a hand-written reason costs: a reason about a commit that is no
+/// longer here says nothing about the one that is. See [`delivery_reason`].
 ///
 /// The SHAs come out of the log itself, so a subject that matches nothing
 /// resolves to nothing and the commit it named — if there is one — is reported
 /// as unreviewed like any other. The rule cannot hide a commit; it can only
 /// cover the one it names.
-fn delivery_acknowledgements(log: &str) -> Vec<(&str, &str)> {
-    let mut found: Vec<(&str, &str)> = Vec::new();
+fn delivery_acknowledgements(log: &str) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
     for (idx, raw) in log.lines().enumerate() {
         let (sha, subject) = match parse_log_line(raw, idx + 1) {
             Ok(parsed) => parsed,
@@ -872,15 +1013,16 @@ fn delivery_acknowledgements(log: &str) -> Vec<(&str, &str)> {
             // to swallow: it is reported by the caller with its line number.
             Err(_) => continue,
         };
-        if is_delivery_subject(subject) && !found.iter().any(|(entry, _)| *entry == sha) {
-            found.push((sha, DELIVERY_REASON));
+        if is_delivery_subject(subject) && !found.iter().any(|(entry, _)| entry == sha) {
+            let reason = delivery_reason(subject, measure_commit(sha).as_ref());
+            found.push((sha.to_string(), reason));
         }
     }
     found
 }
 
 /// The delivery commits in `log`, by SHA.
-fn delivery_commits(log: &str) -> Vec<&str> {
+fn delivery_commits(log: &str) -> Vec<String> {
     delivery_acknowledgements(log)
         .into_iter()
         .map(|(sha, _)| sha)
@@ -907,12 +1049,36 @@ fn validate_acknowledgements(acknowledged: &[(&str, &str)]) -> Result<(), String
     Ok(())
 }
 
+/// The same rule, over the delivery commits the subject rule resolved.
+///
+/// The delivery list holds owned strings (the reason is built from the commit
+/// it is about), so it is checked by the same rules and not by a second,
+/// looser one.
+fn validate_delivery_acknowledgements(delivery: &[(String, String)]) -> Result<(), String> {
+    let mut seen: Vec<&str> = Vec::new();
+    for (sha, reason) in delivery {
+        if !is_object_id(sha) {
+            return Err(format!(
+                "delivery acknowledgement {sha:?} is not a full lowercase object id"
+            ));
+        }
+        if reason.trim().is_empty() {
+            return Err(format!("delivery acknowledgement {sha} records no reason"));
+        }
+        if seen.contains(&sha.as_str()) {
+            return Err(format!("delivery acknowledgement {sha} is listed twice"));
+        }
+        seen.push(sha);
+    }
+    Ok(())
+}
+
 /// Select every unreviewed-work commit in `log` and report the ones with no
 /// acknowledgement, plus the entries that point at nothing.
 fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
     validate_acknowledgements(acknowledged)?;
 
-    let mut selected_shas: Vec<&str> = Vec::new();
+    let mut selected_shas: Vec<String> = Vec::new();
     let mut selected = 0usize;
     for (idx, raw) in log.lines().enumerate() {
         let (sha, subject) = parse_log_line(raw, idx + 1)?;
@@ -920,8 +1086,8 @@ fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
             continue;
         }
         selected += 1;
-        if !selected_shas.contains(&sha) {
-            selected_shas.push(sha);
+        if !selected_shas.iter().any(|held| held == sha) {
+            selected_shas.push(sha.to_string());
         }
     }
 
@@ -932,13 +1098,16 @@ fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
     let delivery = delivery_acknowledgements(log);
     // The rule's reason is held to the same standard as every entry's: a
     // reason that records nothing would acknowledge nothing.
-    validate_acknowledgements(&delivery)?;
-    let mut acknowledged_shas: Vec<&str> = acknowledged.iter().map(|(sha, _)| *sha).collect();
-    acknowledged_shas.extend(delivery.iter().map(|(sha, _)| *sha));
+    validate_delivery_acknowledgements(&delivery)?;
+    let mut acknowledged_shas: Vec<String> = acknowledged
+        .iter()
+        .map(|(sha, _)| sha.to_string())
+        .collect();
+    acknowledged_shas.extend(delivery.iter().map(|(sha, _)| sha.clone()));
 
     let unreviewed = selected_shas
         .iter()
-        .filter(|sha| !acknowledged_shas.contains(*sha))
+        .filter(|sha| !acknowledged_shas.iter().any(|entry| entry == *sha))
         .map(|sha| {
             let subject = log
                 .lines()
@@ -955,7 +1124,7 @@ fn scan(log: &str, acknowledged: &[(&str, &str)]) -> Result<Scan, String> {
     let stale = acknowledged
         .iter()
         .map(|(sha, _)| *sha)
-        .filter(|sha| !selected_shas.contains(sha))
+        .filter(|sha| !selected_shas.iter().any(|held| held.as_str() == *sha))
         .map(str::to_string)
         .collect();
 
@@ -1958,6 +2127,81 @@ fn edge_the_delivery_rule_covers_each_phase_in_flight_and_no_other() {
     );
 }
 
+/// An `edge_*` case: the acknowledgement records what the commit carries.
+///
+/// The delivery rule is the rule that forgives a commit, and a rule that
+/// forgives without saying what it forgives forgives anything. So the
+/// acknowledgement carries the commit's own line counts and the paths it
+/// touches, measured from the commit at audit time — and the measurement is
+/// checked against the commit here, so a reason that went back to describing
+/// a round's contents from memory would fail rather than quietly go stale.
+#[test]
+fn edge_the_delivery_acknowledgement_records_what_the_commit_carries() {
+    let (_, log) = audit_head().expect("HEAD's history must be readable");
+    let delivery = delivery_acknowledgements(&log);
+    assert!(
+        !delivery.is_empty(),
+        "this history must carry a delivery commit for the rule to acknowledge"
+    );
+
+    for (sha, reason) in &delivery {
+        assert!(
+            reason.contains("carries the unreviewed code"),
+            "{sha} is acknowledged as carrying unreviewed code: {reason}"
+        );
+        assert!(
+            reason.contains("Deliberately not rewritten"),
+            "{sha} says it was deliberately not rewritten: {reason}"
+        );
+        assert!(
+            reason.contains("Acknowledged by SUBJECT rather than by SHA"),
+            "{sha} says why it is keyed on its subject: {reason}"
+        );
+
+        let carries = measure_commit(sha).expect("a commit of this repository can be measured");
+        assert!(
+            reason.contains(&format!("+{}/-{}", carries.added, carries.deleted)),
+            "{sha} records the line counts the commit actually carries: {reason}"
+        );
+        assert!(
+            reason.contains(&format!("across {} file(s)", carries.files)),
+            "{sha} records how many files the commit touches: {reason}"
+        );
+        for path in &carries.paths {
+            assert!(
+                reason.contains(path),
+                "{sha} names {path}, one of the files the commit carries: {reason}"
+            );
+        }
+    }
+}
+
+/// An `edge_*` case: a commit that cannot be measured says so.
+///
+/// The measurement is of a commit in this repository. A commit that is not
+/// one — every fixture in this file — has no line counts to record, and the
+/// reason says that rather than inventing a number for it.
+#[test]
+fn edge_a_delivery_commit_that_cannot_be_measured_says_so() {
+    let log = format!("{SHA_A}\tresume phase-084: adopt preserved work\n");
+    let delivery = delivery_acknowledgements(&log);
+
+    assert_eq!(delivery.len(), 1, "the rule covers the commit");
+    let reason = &delivery[0].1;
+    assert!(
+        reason.contains("could not be measured"),
+        "the reason says that what it carries is not recorded: {reason}"
+    );
+    assert!(
+        !reason.contains("file(s)"),
+        "and it does not pretend to know the file count: {reason}"
+    );
+    assert!(
+        reason.contains("carries the unreviewed code"),
+        "while still saying the two things every acknowledgement says: {reason}"
+    );
+}
+
 /// The delivery commit in this history is acknowledged by the rule, and by no
 /// entry.
 ///
@@ -1981,7 +2225,7 @@ fn edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry() {
     );
     for sha in &delivery {
         assert!(
-            !ACKNOWLEDGED.iter().any(|(entry, _)| entry == sha),
+            !ACKNOWLEDGED.iter().any(|(entry, _)| *entry == sha.as_str()),
             "{sha} is pinned in ACKNOWLEDGED: a SHA-pinned delivery entry goes stale on the \
              next round, which is the failure this rule exists to remove"
         );

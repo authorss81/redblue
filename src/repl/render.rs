@@ -13,6 +13,17 @@
 //! JSON can hold, and a table cell holds what `say` would have printed for
 //! that value, escaped so that a terminal cannot be mangled by it.
 //!
+//! One difference is worth naming up front: **`.json` is a document, and
+//! `.pretty` and `.table` are renderings.** All three spell out the characters
+//! a terminal acts on — the escape byte, the C1 controls, the bidi and
+//! zero-width marks — rather than writing them out. `.json` uses the language's
+//! own escaper, so it is the document `json.stringify` writes, byte for byte,
+//! and a program can reproduce what the reader is looking at. `.pretty` keeps
+//! its escape in JSON's own shape too, so the document it writes still reads
+//! back through `json.parse` as the value it came from; `.table` uses its own
+//! spelling, because a cell is what `say` would have printed and not a
+//! document.
+//!
 //! Two things are this module's own, and both of them are refusals rather
 //! than renderings. A value nested past [`MAX_RENDER_DEPTH`] is refused by
 //! every renderer, the same way, because a printer that follows a value a
@@ -56,11 +67,19 @@ pub const MAX_RENDER_DEPTH: usize = 64;
 /// every value JSON can hold. `nothing` is `null`, and a number that is not
 /// finite is `null` as well: JSON has no literal for one.
 ///
+/// **A document first and a terminal rendering second.** The document is the
+/// language's own, byte for byte, so a program can reproduce what the reader
+/// is looking at. That is why the language's escaper spells out the characters
+/// a terminal acts on: a right-to-left override is written as a JSON escape,
+/// so it cannot reorder the line the document is printed on, and `json.parse`
+/// still reads the character back. [`.pretty`](pretty) and [`.table`](table)
+/// spell the same characters out in their own shapes.
+///
 /// `Err` in two cases, both of them a refusal to write a lie:
 ///
 /// - a value nested past [`MAX_RENDER_DEPTH`], which no document can hold;
 /// - a function, a builtin or an object, for which JSON has no literal.
-///   `null` is what the language's writer gives them, and `null` says
+///   The language's writer refuses those three as well, because `null` says
 ///   "nothing" — about a value that is not nothing.
 pub fn json(value: &Value) -> Result<String, String> {
     let mut out = String::new();
@@ -115,7 +134,7 @@ fn write_json(value: &Value, depth: usize, out: &mut String) -> Result<(), Strin
         // Everything else — a number, a text, a yes/no, `nothing` — is a leaf,
         // and a leaf is written by the language's own JSON writer so that the
         // escaping is the escaping `json.stringify` uses.
-        leaf => out.push_str(&crate::runtime::json_stringify(leaf)),
+        leaf => out.push_str(&crate::runtime::json_stringify(leaf)?),
     }
     Ok(())
 }
@@ -138,6 +157,13 @@ fn too_deep() -> String {
 /// back through `json.parse` as the value it came from — except for the three
 /// values JSON cannot hold, which are written the way the language writes
 /// them (`<function f>`) rather than as the `null` JSON would give them.
+///
+/// The one difference from [`json`] is the characters a terminal acts on: a
+/// text holding a right-to-left override or a zero-width mark has it spelled
+/// out, in JSON's own `\uXXXX` escape, so the document is still a document and
+/// the terminal is not reordered. `.json` is the language's own writer's
+/// document and changes nothing in it; this is a rendering, and a rendering is
+/// what the reader looks at.
 pub fn pretty(value: &Value) -> Result<String, String> {
     let mut out = String::new();
     write_pretty(value, 0, &mut out)?;
@@ -172,7 +198,7 @@ fn write_pretty(value: &Value, depth: usize, out: &mut String) -> Result<(), Str
             out.push_str("{\n");
             for (index, (key, field)) in fields.iter().enumerate() {
                 push_indent(depth + 1, out);
-                out.push_str(&crate::runtime::json_escape_text(key));
+                out.push_str(&json_text(key));
                 out.push_str(": ");
                 write_pretty(field, depth + 1, out)?;
                 if index + 1 < fields.len() {
@@ -191,12 +217,47 @@ fn write_pretty(value: &Value, depth: usize, out: &mut String) -> Result<(), Str
         Value::Function(_) | Value::Builtin(_) | Value::Object(_, _) => {
             out.push_str(&value.to_string());
         }
-        // Everything else — a number, a text, a yes/no, `nothing` — is a leaf,
-        // and a leaf is written by the language's own JSON writer so that the
+        // A text is written by the language's own JSON writer, with the
+        // characters a terminal acts on spelled out: the writer escapes what
+        // JSON must escape, and a right-to-left override or a zero-width mark
+        // is not one of them — a terminal acts on both of them, so a document
+        // that held one raw would reorder the line it was drawn on.
+        Value::Text(text) => out.push_str(&json_text(text)),
+        // Everything else — a number, a yes/no, `nothing` — is a leaf, and a
+        // leaf is written by the language's own JSON writer so that the
         // escaping is the escaping `json.stringify` uses.
-        leaf => out.push_str(&crate::runtime::json_stringify(leaf)),
+        leaf => out.push_str(&crate::runtime::json_stringify(leaf)?),
     }
     Ok(())
+}
+
+/// The text as a JSON string, with the characters a terminal acts on spelled
+/// out.
+///
+/// The language's own writer escapes what JSON must escape — the quote, the
+/// backslash, the line break — and the characters a terminal acts on: the C1
+/// controls, and the bidi and zero-width marks. A right-to-left override
+/// reorders the line it is on, and a zero-width mark takes no room at all
+/// while still changing what is around it, so neither is written raw.
+///
+/// The escape is JSON's own — `\uXXXX` — and not the table's `\u{XXXX}`: the
+/// document is still a document, so `json.parse` reads the character back and
+/// the value the document came from is the value that comes back.
+///
+/// `.json` uses the same escape because it is the document `json.stringify`
+/// writes, byte for byte. `.pretty` is a rendering too, and it asks the same
+/// escaper, so the two documents and the language's own writer cannot drift.
+fn json_text(text: &str) -> String {
+    let escaped = crate::runtime::json_escape_text(text);
+    let mut out = String::with_capacity(escaped.len());
+    for c in escaped.chars() {
+        if crate::runtime::mangles_terminal(c) {
+            out.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Pushes the indentation of `depth` levels.
@@ -243,6 +304,13 @@ pub fn table(value: &Value) -> Result<String, String> {
     }
 
     let keys = keys_of(items);
+    if keys.is_empty() {
+        // The list is not empty, but there is nothing to name: every record in
+        // it holds no key at all. An empty table would say nothing at all, and
+        // a reader cannot tell an empty table from a failure — so the case is
+        // named the way the empty list is named.
+        return Ok("The records hold no keys: there is nothing to name.\n".to_string());
+    }
     // The header row is spelled the way the cells are: a key may hold a line
     // break, and a header row that broke in two would be a header row the
     // reader could not read.
@@ -354,7 +422,7 @@ fn one_line(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            _ if mangles_the_terminal(c) => {
+            _ if crate::runtime::mangles_terminal(c) => {
                 out.push_str(&format!("\\u{{{:x}}}", c as u32));
             }
             _ => out.push(c),
@@ -363,25 +431,20 @@ fn one_line(text: &str) -> String {
     out
 }
 
-/// Whether `c` is a character a terminal acts on rather than draws.
+/// How many terminal cells `text` is drawn in.
 ///
-/// The C0 and C1 controls — the escape byte among them — and the bidi and
-/// zero-width marks: the ones that move the cursor, colour the rest of the
-/// row, reorder what follows them, or take no room at all while still
-/// changing what is around them.
+/// The width of a whole text as a terminal draws it: a wide character is two
+/// cells, a combining mark is none, and an emoji that is one glyph — a face
+/// with a skin tone, a heart with a variation selector — is the width of
+/// that one glyph rather than the sum of its characters.
 ///
-/// The ranges are the ones [`crate::error::text_cells`] counts as zero
-/// wide, plus the bidi isolates: a mark that is drawn in no cell is still
-/// drawn, and a row it reorders is a row the reader cannot read.
-fn mangles_the_terminal(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{200B}'..='\u{200F}'
-                | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
-        )
+/// [`unicode_width`] is the reference for that. The crate's own table of wide
+/// ranges belongs to the error renderer, and it counts characters one at a
+/// time, so an emoji it does not know is wide is one cell to it and two to
+/// the reader: a column padded by it drifts a cell for every emoji in it, and
+/// the column beside it starts further along in that row than in the others.
+fn cell_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
 }
 
 /// Lays `rows` out in columns, each as wide as its widest cell.
@@ -394,7 +457,7 @@ fn layout(rows: &[Vec<String>]) -> String {
     let mut widths = vec![0usize; columns];
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
-            let width = crate::error::text_cells(cell);
+            let width = cell_width(cell);
             if width > widths[index] {
                 widths[index] = width;
             }
@@ -419,7 +482,7 @@ fn layout(rows: &[Vec<String>]) -> String {
             // and the layout's own padding belongs between two columns, not
             // after the last one.
             if index + 1 < row.len() {
-                for _ in 0..widths[index] - crate::error::text_cells(cell) {
+                for _ in 0..widths[index] - cell_width(cell) {
                     line.push(' ');
                 }
             }
@@ -637,6 +700,13 @@ mod tests {
 
     /// A table names its keys once, in a header row, and lines the columns up
     /// under it.
+    ///
+    /// The columns line up because the widest cell sets the width of its
+    /// column — "bartholomew" is eleven cells wide, so the header's "name" is
+    /// padded to eleven and the second column starts at the same cell in every
+    /// row. The assertion below is about that: the strings are pinned, and so
+    /// is the cell the second column starts at, because a table whose rows
+    /// disagree about where a column starts is a table that does not line up.
     #[test]
     fn table_aligns_its_columns_under_one_header_row() {
         let rows = Value::list(vec![
@@ -657,6 +727,23 @@ mod tests {
         assert_eq!(lines[0], "name         age", "the keys are named once");
         assert_eq!(lines[1], "ada          36");
         assert_eq!(lines[2], "bartholomew  4");
+
+        let column = |line: &str, cell: &str| {
+            let at = line.find(cell).expect("the cell is in the line");
+            cell_width(&line[..at])
+        };
+        assert_eq!(
+            column(lines[0], "age"),
+            column(lines[1], "36"),
+            "the second column starts at the same cell in the header and the first row: {:?}",
+            lines
+        );
+        assert_eq!(
+            column(lines[1], "36"),
+            column(lines[2], "4"),
+            "and in the second row: {:?}",
+            lines
+        );
     }
 
     /// A record that does not hold one of the keys leaves that cell empty
@@ -708,6 +795,30 @@ mod tests {
         assert!(
             shown.to_lowercase().contains("empty"),
             "the empty list is named: {}",
+            shown
+        );
+    }
+
+    /// A list of records that hold no keys at all is named too.
+    ///
+    /// The empty list is named because a reader cannot tell an empty table
+    /// from a failure, and the same is true of a list whose every record is
+    /// empty: there are rows, and there is nothing to name them by. A table
+    /// with no columns is two blank lines and says nothing at all, so the case
+    /// is named the way the empty list is named.
+    #[test]
+    fn edge_a_table_of_records_with_no_keys_says_so() {
+        let rows = Value::list(vec![record(Vec::new()), record(Vec::new())]);
+
+        let shown = table(&rows).expect("a list of records with no keys is not an error");
+        assert!(
+            shown.to_lowercase().contains("no keys"),
+            "the records holding no keys are named: {:?}",
+            shown
+        );
+        assert!(
+            !shown.trim().is_empty(),
+            "and the answer is not silence: {:?}",
             shown
         );
     }
@@ -806,7 +917,7 @@ mod tests {
 
         let column = |line: &str, cell: &str| {
             let at = line.find(cell).expect("the cell is in the line");
-            crate::error::text_cells(&line[..at])
+            cell_width(&line[..at])
         };
         assert_eq!(
             column(lines[1], "1"),
@@ -1053,7 +1164,7 @@ mod tests {
         // row's second column starts where the first row's does.
         let column = |line: &str, cell: &str| {
             let at = line.find(cell).expect("the cell is in the line");
-            crate::error::text_cells(&line[..at])
+            cell_width(&line[..at])
         };
         assert_eq!(
             column(lines[1], "\\u{1b}[31mred"),
@@ -1084,6 +1195,92 @@ mod tests {
             lines[1], "He said \"hi\" — it's a\u{301}b",
             "the cell holds the text as the value holds it: {:?}",
             lines
+        );
+    }
+
+    /// A rendering is drawn on a terminal, so the characters a terminal acts
+    /// on are spelled out rather than written out.
+    ///
+    /// `.table` spells them out in its own shape (`\u{202e}`); `.pretty`
+    /// spells them out in JSON's own (`\u202e`), because `.pretty` writes a
+    /// document and a document has to stay a document: `json.parse` reads the
+    /// character back, so the value the document came from is the value that
+    /// comes back.
+    ///
+    /// The three families are all in the fixture — a bidi override, a
+    /// zero-width mark and a C1 control — because an assertion about a
+    /// character the fixture does not hold cannot fail, whatever the renderer
+    /// does with it.
+    #[test]
+    fn edge_pretty_spells_out_the_characters_a_terminal_would_mangle() {
+        let value = record(vec![(
+            "key\u{202e}",
+            Value::Text("text\u{200b}with\u{85}marks".to_string()),
+        )]);
+
+        let shown = pretty(&value).expect("a record is showable");
+
+        for raw in ['\u{202e}', '\u{200b}', '\u{85}'] {
+            assert!(
+                !shown.contains(raw),
+                "no character a terminal acts on reaches the terminal raw: {:?}",
+                shown
+            );
+        }
+        assert!(
+            shown.contains("\\u202e"),
+            "the key's right-to-left override is spelled out: {:?}",
+            shown
+        );
+        assert!(
+            shown.contains("\\u200b"),
+            "and the text's zero-width mark is: {:?}",
+            shown
+        );
+        assert!(
+            shown.contains("\\u0085"),
+            "and so is the C1 control: {:?}",
+            shown
+        );
+
+        let read: serde_json::Value =
+            serde_json::from_str(&shown).expect("the document is still valid JSON");
+        assert_eq!(
+            read,
+            serde_json::json!({ "key\u{202e}": "text\u{200b}with\u{85}marks" }),
+            "and the document still reads back as the value it came from: {:?}",
+            shown
+        );
+    }
+
+    /// `.json` is the document the language's own writer writes, byte for byte.
+    ///
+    /// The identity is the whole point of the command: a reader who copies the
+    /// document into a program gets the same document back. So it is checked
+    /// here, against the language's own writer, instead of being taken on
+    /// trust — and the characters a terminal acts on are left as they are,
+    /// because a document that differed from the one `json.stringify` writes
+    /// would be a document no program could produce.
+    #[test]
+    fn edge_the_json_document_is_the_language_s_own_writer_s_document() {
+        let value = record(vec![
+            ("name", Value::Text("ada".to_string())),
+            ("count", Value::Number(3.0)),
+            ("flag", Value::YesNo(true)),
+            ("missing", Value::Nothing),
+            (
+                "list",
+                Value::list(vec![Value::Number(1.0), Value::Text("x".to_string())]),
+            ),
+            ("nested", record(vec![("deep", Value::YesNo(false))])),
+        ]);
+
+        let written = json(&value).expect("a record is writable");
+
+        assert_eq!(
+            written,
+            crate::runtime::json_stringify(&value).expect("a record is writable"),
+            "the document is the one the language's own writer writes"
         );
     }
 
@@ -1171,6 +1368,172 @@ mod tests {
             !lines[2].ends_with("   "),
             "and the layout's own separator is not: {:?}",
             lines[2]
+        );
+    }
+
+    /// A column holding an emoji is padded by the cells the emoji is drawn in,
+    /// so the columns still line up.
+    ///
+    /// An emoji is one character and two cells, so a column padded by
+    /// characters drifts one cell for every emoji in it: the second column
+    /// starts one cell further along in that row than in the others, and the
+    /// reader sees a table that does not line up.
+    #[test]
+    fn edge_a_table_column_holding_an_emoji_is_padded_by_the_cells_it_is_drawn_in() {
+        let rows = Value::list(vec![
+            record(vec![
+                ("name", Value::Text("\u{2b50}".to_string())),
+                ("n", Value::Number(1.0)),
+            ]),
+            record(vec![
+                ("name", Value::Text("ada".to_string())),
+                ("n", Value::Number(2.0)),
+            ]),
+        ]);
+
+        let shown = table(&rows).expect("a list of records is a table");
+        let lines = lines(&shown);
+
+        assert_eq!(
+            lines[1], "\u{2b50}    1",
+            "the emoji is drawn in two cells, so it is padded by two: {:?}",
+            lines
+        );
+        assert_eq!(
+            lines[2], "ada   2",
+            "and the narrow cell is padded to the same width: {:?}",
+            lines
+        );
+
+        let column = |line: &str, cell: &str| {
+            let at = line.find(cell).expect("the cell is in the line");
+            cell_width(&line[..at])
+        };
+        assert_eq!(
+            column(lines[1], "1"),
+            column(lines[2], "2"),
+            "the second column starts at the same cell in both rows: {:?}",
+            lines
+        );
+    }
+
+    /// An emoji that is one glyph is padded by the width of that one glyph.
+    ///
+    /// A face with a skin tone and a heart with a variation selector are two
+    /// characters each, and a terminal draws each of them as one glyph two
+    /// cells wide. A column padded by characters counts them as four cells and
+    /// as two, so the column drifts by two cells for every one of them.
+    #[test]
+    fn edge_a_table_column_holding_an_emoji_glyph_is_padded_by_the_glyph_it_is_drawn_in() {
+        for (what, glyph) in [
+            ("a face with a skin tone", "\u{1f44d}\u{1f3fb}"),
+            ("a heart with a variation selector", "\u{2764}\u{fe0f}"),
+        ] {
+            let rows = Value::list(vec![
+                record(vec![
+                    ("name", Value::Text(glyph.to_string())),
+                    ("n", Value::Number(1.0)),
+                ]),
+                record(vec![
+                    ("name", Value::Text("ada".to_string())),
+                    ("n", Value::Number(2.0)),
+                ]),
+            ]);
+
+            let shown = table(&rows).expect("a list of records is a table");
+            let lines = lines(&shown);
+
+            let column = |line: &str, cell: &str| {
+                let at = line.find(cell).expect("the cell is in the line");
+                cell_width(&line[..at])
+            };
+            assert_eq!(
+                column(lines[1], "1"),
+                column(lines[2], "2"),
+                "{} is one glyph, so the columns still line up: {:?}",
+                what,
+                lines
+            );
+            assert_eq!(
+                cell_width(glyph),
+                2,
+                "{} is drawn in two cells: {:?}",
+                what,
+                glyph
+            );
+        }
+    }
+
+    /// A function inside a record is refused the way a function on its own is.
+    ///
+    /// The refusal is not the top of the document that is refused: the
+    /// document is walked until the value that cannot be written is found, and
+    /// the refusal names *that* value. A document that answered `null` about a
+    /// function nested in a record would be a document that lies about the
+    /// shape of the value it came from.
+    #[test]
+    fn edge_json_of_a_function_nested_in_a_record_is_refused_and_names_it() {
+        let value = record(vec![
+            ("name", Value::Text("ada".to_string())),
+            ("work", function("work")),
+        ]);
+
+        let outcome: Result<String, String> = json(&value);
+        assert!(
+            outcome.is_err(),
+            "a document holding a function is refused: {:?}",
+            outcome
+        );
+
+        let refusal = outcome.expect_err("a document holding a function is refused");
+        assert!(
+            refusal.starts_with("Error:"),
+            "and it is an error, not a document: {}",
+            refusal
+        );
+        assert!(
+            refusal.contains("function"),
+            "and it names the value it cannot write: {}",
+            refusal
+        );
+        assert_ne!(
+            refusal.trim(),
+            "null",
+            "and it does not answer `null` about it: {}",
+            refusal
+        );
+    }
+
+    /// A list that holds something that is not a record is refused, and the
+    /// refusal names the item and what it is.
+    ///
+    /// The kind is part of the message because the reader has to know *which*
+    /// item is the wrong one: a list of records with one text in it is a list
+    /// of records with a typo in it, and "item 2 is a text" says which one.
+    #[test]
+    fn edge_table_of_a_list_holding_a_text_is_refused_and_names_the_item() {
+        let rows = Value::list(vec![
+            record(vec![("name", Value::Text("ada".to_string()))]),
+            Value::Text("bob".to_string()),
+        ]);
+
+        let outcome: Result<String, String> = table(&rows);
+        assert!(
+            outcome.is_err(),
+            "a list holding a text is not a list of records: {:?}",
+            outcome
+        );
+
+        let refusal = outcome.expect_err("a list holding a text is refused");
+        assert!(
+            refusal.contains("item 2"),
+            "and it names the item that is not a record: {}",
+            refusal
+        );
+        assert!(
+            refusal.contains("text"),
+            "and it says what the item is: {}",
+            refusal
         );
     }
 }
