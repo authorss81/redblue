@@ -311,36 +311,73 @@ impl Value {
     }
 }
 
+/// The deepest nesting `Display` follows before naming the rest instead.
+///
+/// `Value::Display` is the language's own single-line writer: `say`, `print`
+/// and the session's `= value` answer all go through it. A value built at
+/// runtime can nest as deep as the heap allows, and a writer that follows it
+/// frame by frame is a stack overflow — a fatal abort in Rust, not a
+/// catchable failure. The limit is the parser's own nesting budget, so a value
+/// that could have been written as a literal is always written whole.
+const MAX_DISPLAY_DEPTH: usize = crate::parser::MAX_NESTING_DEPTH;
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::Nothing => write!(f, "nothing"),
-            Value::Number(n) => {
-                if let Some(text) = non_finite_display(*n) {
-                    write!(f, "{}", text)
-                } else if n.fract() == 0.0 && n.abs() <= MAX_EXACT_INT {
-                    write!(f, "{}", *n as i64)
-                } else {
-                    write!(f, "{}", n)
-                }
+        write_display(self, f, 0)
+    }
+}
+
+/// Writes `value` on one line, `depth` levels down.
+///
+/// Past [`MAX_DISPLAY_DEPTH`] the rest is named rather than followed: the
+/// marker is what remains of a value the writer will not walk, and it keeps
+/// the session alive instead of aborting on a value that was too deep to
+/// print.
+fn write_display(value: &Value, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
+    if depth > MAX_DISPLAY_DEPTH {
+        return write!(
+            f,
+            "<value nested more than {MAX_DISPLAY_DEPTH} levels deep>"
+        );
+    }
+
+    match value {
+        Value::Nothing => write!(f, "nothing"),
+        Value::Number(n) => {
+            if let Some(text) = non_finite_display(*n) {
+                write!(f, "{}", text)
+            } else if n.fract() == 0.0 && n.abs() <= MAX_EXACT_INT {
+                write!(f, "{}", *n as i64)
+            } else {
+                write!(f, "{}", n)
             }
-            Value::Text(s) => write!(f, "{}", s),
-            Value::YesNo(b) => write!(f, "{}", if *b { "yes" } else { "no" }),
-            Value::List(items) => {
-                let items: Vec<String> = items.iter().map(|v| v.to_string()).collect();
-                write!(f, "[{}]", items.join(", "))
-            }
-            Value::Record(fields) => {
-                let fields: Vec<String> = fields
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v))
-                    .collect();
-                write!(f, "{{{}}}", fields.join(", "))
-            }
-            Value::Function(function) => write!(f, "<function {}>", function.name),
-            Value::Builtin(name) => write!(f, "<builtin {}>", name),
-            Value::Object(_, _) => write!(f, "<object>"),
         }
+        Value::Text(s) => write!(f, "{}", s),
+        Value::YesNo(b) => write!(f, "{}", if *b { "yes" } else { "no" }),
+        Value::List(items) => {
+            write!(f, "[")?;
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    write!(f, ", ")?;
+                }
+                write_display(item, f, depth + 1)?;
+            }
+            write!(f, "]")
+        }
+        Value::Record(fields) => {
+            write!(f, "{{")?;
+            for (index, (key, field)) in fields.iter().enumerate() {
+                if index > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}: ", key)?;
+                write_display(field, f, depth + 1)?;
+            }
+            write!(f, "}}")
+        }
+        Value::Function(function) => write!(f, "<function {}>", function.name),
+        Value::Builtin(name) => write!(f, "<builtin {}>", name),
+        Value::Object(_, _) => write!(f, "<object>"),
     }
 }
 
@@ -383,5 +420,49 @@ impl Value {
             Value::Function(_) => true,
             Value::Builtin(_) => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Display` is the language's single-line writer. A value nested past its
+    /// budget names the rest instead of following it into a stack overflow, so
+    /// `say` and the session's `= value` answer survive a value built by a
+    /// runaway program.
+    #[test]
+    fn edge_display_of_a_deep_value_names_the_rest_and_does_not_overflow() {
+        let mut value = Value::Nothing;
+        for _ in 0..=MAX_DISPLAY_DEPTH {
+            value = Value::list(vec![value]);
+        }
+
+        let shown = value.to_string();
+        assert!(
+            shown.contains(&MAX_DISPLAY_DEPTH.to_string()),
+            "the marker names the budget, got {:?}",
+            shown
+        );
+        assert!(
+            shown.contains("nested"),
+            "the marker says what happened, got {:?}",
+            shown
+        );
+    }
+
+    /// A value that fits inside the budget is written whole and unchanged.
+    #[test]
+    fn edge_display_writes_a_value_inside_the_budget_whole() {
+        let value = Value::list(vec![
+            Value::Number(1.0),
+            Value::list(vec![Value::Text("two".to_string())]),
+            Value::record(Fields::from([
+                ("three".to_string(), Value::YesNo(true)),
+                ("four".to_string(), Value::Nothing),
+            ])),
+        ]);
+
+        assert_eq!(value.to_string(), "[1, [two], {three: yes, four: nothing}]");
     }
 }
