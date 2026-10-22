@@ -2041,7 +2041,7 @@ impl Repl {
     /// own `set` writes a global, and `uppercase` is a builtin rather than a
     /// statement.
     fn type_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
-        let value = self.value_answer(code, ":type")?;
+        let value = self.value_answer(code, ":type", introspect::Wording::Described)?;
         let definition = self.definition_of_expression(code);
         Ok(introspect::type_lines(&value, definition.as_ref()))
     }
@@ -2054,44 +2054,59 @@ impl Repl {
     fn print_pretty(&mut self, code: &str) {
         match self.pretty_answer(code) {
             Ok(text) => println!("{}", text),
-            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+            // `paint_diagnostic`, not a whole-string paint: a failure that
+            // arrives rendered carries the reader's own source line, and
+            // that line is left as they typed it. A one-line refusal has no
+            // gutter to be read from, so it is still painted whole.
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
         }
     }
 
     /// What `.pretty` has to show about `code`, or why it will not show it.
     fn pretty_answer(&mut self, code: &str) -> Result<String, String> {
-        let value = self.value_answer(code, ".pretty")?;
+        let value = self.value_answer(code, ".pretty", introspect::Wording::Shown)?;
         render::pretty(&value)
     }
 
     /// `.json <expression>` — the value as JSON, on one line.
     ///
     /// The document the language's own `json.stringify` writes, so what the
-    /// REPL shows and what a program produces are one document.
+    /// REPL shows and what a program produces are one document — for every
+    /// value JSON can hold. The three it cannot hold — a function, a builtin
+    /// and an object — are refused by name rather than written as the `null`
+    /// that means "nothing".
     fn print_json(&mut self, code: &str) {
         match self.json_answer(code) {
             Ok(text) => println!("{}", text),
-            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+            // `paint_diagnostic`, not a whole-string paint: a failure that
+            // arrives rendered carries the reader's own source line, and
+            // that line is left as they typed it. A one-line refusal has no
+            // gutter to be read from, so it is still painted whole.
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
         }
     }
 
     /// What `.json` has to show about `code`, or why it will not show it.
     fn json_answer(&mut self, code: &str) -> Result<String, String> {
-        let value = self.value_answer(code, ".json")?;
-        Ok(render::json(&value))
+        let value = self.value_answer(code, ".json", introspect::Wording::Shown)?;
+        render::json(&value)
     }
 
     /// `.table <expression>` — a list of records as aligned columns.
     fn print_table(&mut self, code: &str) {
         match self.table_answer(code) {
             Ok(text) => print!("{}", text),
-            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+            // `paint_diagnostic`, not a whole-string paint: a failure that
+            // arrives rendered carries the reader's own source line, and
+            // that line is left as they typed it. A one-line refusal has no
+            // gutter to be read from, so it is still painted whole.
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
         }
     }
 
     /// What `.table` has to show about `code`, or why it will not show it.
     fn table_answer(&mut self, code: &str) -> Result<String, String> {
-        let value = self.value_answer(code, ".table")?;
+        let value = self.value_answer(code, ".table", introspect::Wording::Shown)?;
         render::table(&value)
     }
 
@@ -2105,10 +2120,17 @@ impl Repl {
     /// 3. **It runs on a fork.** [`Repl::evaluate_for_question`].
     ///
     /// `command` is the name the refusal quotes, so a user who typed `.pretty`
-    /// is not told about `:type`.
-    fn value_answer(&mut self, code: &str, command: &str) -> Result<Value, String> {
+    /// is not told about `:type`, and `wording` is the wording that refusal
+    /// uses: `:type` describes a value and says so, the printing commands show
+    /// one and say so.
+    fn value_answer(
+        &mut self,
+        code: &str,
+        command: &str,
+        wording: introspect::Wording,
+    ) -> Result<Value, String> {
         let program = parse_only(code).map_err(|error| failure_line(&self.style, code, &error))?;
-        let expression = introspect::expression_of_for(&program, command)?;
+        let expression = introspect::expression_of_for(&program, command, wording)?;
         if let Some(call) = self.effectful_call_in(expression) {
             return Err(format!(
                 "Error: {command} is a question about a value, and {} does something outside \

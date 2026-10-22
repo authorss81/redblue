@@ -24,7 +24,18 @@ const PROMPT: &str = ">>> ";
 
 /// Pipes `input` into `rb` and returns what the session printed on stdout.
 fn session(input: &str) -> String {
+    session_with_env(input, &[])
+}
+
+/// Pipes `input` into `rb` with `env` set, and returns what the session
+/// printed on stdout.
+///
+/// The environment is the only way to reach the coloured path from outside the
+/// process: a pipe is not a terminal, so the session would paint nothing at
+/// all and a colour assertion would have nothing to assert about.
+fn session_with_env(input: &str, env: &[(&str, &str)]) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rb"));
+    command.envs(env.iter().copied());
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -243,14 +254,188 @@ fn edge_a_printed_text_keeps_its_own_script() {
     assert_eq!(
         read,
         serde_json::json!(["café", "日本語", "مرحبا", "🎉"]),
-        "every script survives the round trip\n--- actual ---\n{}",
-        out
+        "every script survives the round trip\n--- actual ---\n{out}"
     );
 
     let tabled = after_prompt(&out, 1);
     assert!(
         tabled.contains("日本語") && tabled.contains("ada"),
-        "and the table cell holds its text\n--- actual ---\n{}",
+        "and the table cell holds its text\n--- actual ---\n{out}"
+    );
+}
+
+/// A value nested past the renderers' budget is refused, and the session
+/// survives it.
+///
+/// This is the case that used to kill the process rather than answer: a
+/// hundred thousand levels of nesting is a value a session can build in a
+/// loop, and a renderer that follows it all the way down is a hundred
+/// thousand stack frames — which in Rust is a fatal abort, not a catchable
+/// panic. The session died instead of answering, and it died the same way for
+/// `.json` and for `.table` while `.pretty` refused the value cleanly.
+#[test]
+fn edge_a_value_nested_past_the_budget_is_refused_and_the_session_survives() {
+    let out = session(concat!(
+        "set xs to []\n",
+        "repeat 2000 times\n",
+        "    set xs to [xs]\n",
+        "end\n",
+        ".json xs\n",
+        ".table [{ deep: xs }]\n",
+        ".pretty 1 + 1\n",
+        ":quit\n"
+    ));
+
+    for (index, command) in [(2, ".json"), (3, ".table")] {
+        let answer = after_prompt(&out, index);
+        assert!(
+            answer.contains("Error:"),
+            "{} refuses a value nested past the budget\n--- actual ---\n{}",
+            command,
+            out
+        );
+        assert!(
+            answer.contains("64 levels deep"),
+            "{} names the budget it refused to go past\n--- actual ---\n{}",
+            command,
+            out
+        );
+    }
+
+    assert_eq!(
+        after_prompt(&out, 4).trim_end(),
+        "2",
+        "and the session goes on: the next command still answers\n--- actual ---\n{}",
         out
+    );
+}
+
+/// A cell holding something a terminal would act on is escaped rather than
+/// written out: an escape sequence that colours the rest of the row, a
+/// right-to-left override that reorders it.
+#[test]
+fn edge_a_table_cell_a_terminal_would_mangle_is_escaped_rather_than_written_out() {
+    let out = session(concat!(
+        ".table [{ name: \"\\u001b[31mred\" }, { name: \"ada\" }]\n",
+        ":quit\n"
+    ));
+
+    let tabled = after_prompt(&out, 0);
+    assert!(
+        !tabled.contains('\u{1b}'),
+        "no raw escape sequence reaches the terminal\n--- actual ---\n{:?}",
+        tabled
+    );
+    assert!(
+        tabled.contains("\\u{1b}"),
+        "the escape is spelled out instead\n--- actual ---\n{:?}",
+        tabled
+    );
+    assert!(
+        tabled.contains("ada"),
+        "and the other row is still there\n--- actual ---\n{:?}",
+        tabled
+    );
+}
+
+/// JSON has no literal for a function, so `.json` refuses one by name rather
+/// than answering `null` — which is what `nothing` is written as.
+#[test]
+fn edge_the_json_of_a_function_is_refused_and_not_null() {
+    let out = session(concat!(
+        "to f()\n",
+        "    return 1\n",
+        "end\n",
+        ".json f\n",
+        ".pretty f\n",
+        ":quit\n"
+    ));
+
+    let refused = after_prompt(&out, 1);
+    assert!(
+        refused.contains("Error:") && refused.contains("function"),
+        "the refusal names what JSON cannot hold\n--- actual ---\n{}",
+        out
+    );
+    assert!(
+        !refused.trim_end().ends_with("null"),
+        "and it does not answer `null`\n--- actual ---\n{}",
+        out
+    );
+
+    assert_eq!(
+        after_prompt(&out, 2).trim_end(),
+        "<function f>",
+        "and .pretty shows the function's own form\n--- actual ---\n{}",
+        out
+    );
+}
+
+/// A printing command answers a misspelling exactly as `:type` does.
+///
+/// The four share one refusal path: the same prefix, the same renderer and
+/// the same colour contract, so a line that does not parse is drawn the same
+/// way whichever command asked about it — the failure is painted, and the
+/// reader's own source line is left as they typed it.
+///
+/// A command that painted the whole refusal in one escape would answer a
+/// misspelling with a different picture of it from the one the reader gets
+/// everywhere else, and the difference would be in the escape bytes rather
+/// than in the words.
+#[test]
+fn edge_a_printing_command_answers_a_misspelling_exactly_as_type_does() {
+    let out = session_with_env(
+        concat!(
+            ":type 1 +\n",
+            ".pretty 1 +\n",
+            ".json 1 +\n",
+            ".table 1 +\n",
+            ":quit\n"
+        ),
+        &[("REDBLUE_COLOR", "always")],
+    );
+
+    let typed = after_prompt(&out, 0);
+    assert!(
+        typed.contains("Error:"),
+        "the line does not parse, and the refusal says so\n--- actual ---\n{}",
+        out
+    );
+    for index in 1..4 {
+        let answer = after_prompt(&out, index);
+        assert_eq!(
+            answer,
+            typed,
+            "the {}th printing command answers exactly as `:type` does\n--- actual ---\n{:?}",
+            index + 1,
+            out
+        );
+    }
+}
+
+/// A cell shows the characters a terminal draws as they are.
+///
+/// Only the characters a terminal acts on are spelled out. A quote, an
+/// apostrophe and a combining mark are drawn by every terminal there is, so
+/// a cell that spelled them out would show the reader a character the value
+/// does not hold — and the cell would no longer be what `say` would have
+/// printed.
+#[test]
+fn edge_a_table_cell_shows_the_characters_a_terminal_draws_as_they_are() {
+    let out = session(concat!(
+        ".table [{ name: \"He said \\\"hi\\\"\" }]\n",
+        ":quit\n"
+    ));
+
+    let tabled = after_prompt(&out, 0);
+    assert!(
+        tabled.contains("He said \"hi\""),
+        "the cell holds the text as the value holds it\n--- actual ---\n{:?}",
+        tabled
+    );
+    assert!(
+        !tabled.contains("\\\""),
+        "and no backslash was put in front of the quote\n--- actual ---\n{:?}",
+        tabled
     );
 }
