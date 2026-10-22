@@ -8,6 +8,7 @@ pub mod highlight;
 pub mod history;
 pub mod introspect;
 pub mod measure;
+pub mod render;
 pub mod style;
 pub mod transcript;
 
@@ -1091,6 +1092,18 @@ impl Repl {
                 self.print_type(&expression);
                 true
             }
+            ReplCommand::Pretty(expression) => {
+                self.print_pretty(&expression);
+                true
+            }
+            ReplCommand::Json(expression) => {
+                self.print_json(&expression);
+                true
+            }
+            ReplCommand::Table(expression) => {
+                self.print_table(&expression);
+                true
+            }
             ReplCommand::Doc(module) => {
                 self.print_module_doc(&module);
                 true
@@ -2028,18 +2041,104 @@ impl Repl {
     /// own `set` writes a global, and `uppercase` is a builtin rather than a
     /// statement.
     fn type_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
+        let value = self.value_answer(code, ":type", introspect::Wording::Described)?;
+        let definition = self.definition_of_expression(code);
+        Ok(introspect::type_lines(&value, definition.as_ref()))
+    }
+
+    /// `.pretty <expression>` — the value as an indented structure.
+    ///
+    /// The same gates as `.type`, and for the same reasons: a question is a
+    /// question, and printing a value must not change the world it is printed
+    /// from. Only the shape of the answer differs.
+    fn print_pretty(&mut self, code: &str) {
+        match self.pretty_answer(code) {
+            Ok(text) => println!("{}", text),
+            // `paint_diagnostic`, not a whole-string paint: a failure that
+            // arrives rendered carries the reader's own source line, and
+            // that line is left as they typed it. A one-line refusal has no
+            // gutter to be read from, so it is still painted whole.
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
+        }
+    }
+
+    /// What `.pretty` has to show about `code`, or why it will not show it.
+    fn pretty_answer(&mut self, code: &str) -> Result<String, String> {
+        let value = self.value_answer(code, ".pretty", introspect::Wording::Shown)?;
+        render::pretty(&value)
+    }
+
+    /// `.json <expression>` — the value as JSON, on one line.
+    ///
+    /// The document the language's own `json.stringify` writes, so what the
+    /// REPL shows and what a program produces are one document — for every
+    /// value JSON can hold. The three it cannot hold — a function, a builtin
+    /// and an object — are refused by name rather than written as the `null`
+    /// that means "nothing".
+    fn print_json(&mut self, code: &str) {
+        match self.json_answer(code) {
+            Ok(text) => println!("{}", text),
+            // `paint_diagnostic`, not a whole-string paint: a failure that
+            // arrives rendered carries the reader's own source line, and
+            // that line is left as they typed it. A one-line refusal has no
+            // gutter to be read from, so it is still painted whole.
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
+        }
+    }
+
+    /// What `.json` has to show about `code`, or why it will not show it.
+    fn json_answer(&mut self, code: &str) -> Result<String, String> {
+        let value = self.value_answer(code, ".json", introspect::Wording::Shown)?;
+        render::json(&value)
+    }
+
+    /// `.table <expression>` — a list of records as aligned columns.
+    fn print_table(&mut self, code: &str) {
+        match self.table_answer(code) {
+            Ok(text) => print!("{}", text),
+            // `paint_diagnostic`, not a whole-string paint: a failure that
+            // arrives rendered carries the reader's own source line, and
+            // that line is left as they typed it. A one-line refusal has no
+            // gutter to be read from, so it is still painted whole.
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
+        }
+    }
+
+    /// What `.table` has to show about `code`, or why it will not show it.
+    fn table_answer(&mut self, code: &str) -> Result<String, String> {
+        let value = self.value_answer(code, ".table", introspect::Wording::Shown)?;
+        render::table(&value)
+    }
+
+    /// The value `code` names, or why there is none to name.
+    ///
+    /// The three gates every question about a value goes through, in the order
+    /// each of them was needed:
+    ///
+    /// 1. **The program must be one expression.** [`introspect::expression_of_for`].
+    /// 2. **No call may leave the value system.** [`Repl::effectful_call_in`].
+    /// 3. **It runs on a fork.** [`Repl::evaluate_for_question`].
+    ///
+    /// `command` is the name the refusal quotes, so a user who typed `.pretty`
+    /// is not told about `:type`, and `wording` is the wording that refusal
+    /// uses: `:type` describes a value and says so, the printing commands show
+    /// one and say so.
+    fn value_answer(
+        &mut self,
+        code: &str,
+        command: &str,
+        wording: introspect::Wording,
+    ) -> Result<Value, String> {
         let program = parse_only(code).map_err(|error| failure_line(&self.style, code, &error))?;
-        let expression = introspect::expression_of(&program)?;
+        let expression = introspect::expression_of_for(&program, command, wording)?;
         if let Some(call) = self.effectful_call_in(expression) {
             return Err(format!(
-                "Error: :type is a question about a value, and {} does something outside \
+                "Error: {command} is a question about a value, and {} does something outside \
                  the value it answers — a question cannot undo it. `:sighelp {}` describes it.",
                 call, call
             ));
         }
-        let value = self.evaluate_for_question(&program, code)?;
-        let definition = self.definition_of_expression(code);
-        Ok(introspect::type_lines(&value, definition.as_ref()))
+        self.evaluate_for_question(&program, code)
     }
 
     /// The first call reachable from `expression` whose effects leave the value
@@ -5865,6 +5964,280 @@ mod tests {
                     completions
                 );
             }
+        }
+    }
+
+    /// The three ways a value can be printed.
+    ///
+    /// Before this phase every value the REPL printed went through one shape:
+    /// the single-line `Display` at `src/repl/mod.rs:402`. A two-hundred-element
+    /// list, a nested record and a list of records all came out as one
+    /// unreadable line, and there was no way to ask for JSON or for columns.
+    ///
+    /// These drive the session the way a user does: through the command
+    /// dispatcher, so a command that parses and is never dispatched fails here.
+    mod printing {
+        use super::{feed, Repl};
+        use crate::repl::commands::ReplCommand;
+        use crate::value::Value;
+
+        /// `text` as a Redblue text literal, so the language's own `json.parse`
+        /// can read it back.
+        ///
+        /// The five escapes a Redblue text literal carries, and nothing else —
+        /// a document the language cannot spell is a document the REPL must not
+        /// print.
+        fn as_text_literal(text: &str) -> String {
+            let mut out = String::from("\"");
+            for c in text.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    other => out.push(other),
+                }
+            }
+            out.push('"');
+            out
+        }
+
+        /// The three commands answer about a value the session never bound: the
+        /// argument is an expression, not a name.
+        #[test]
+        fn the_three_printing_commands_answer_about_an_expression() {
+            let mut repl = Repl::new();
+
+            let shown = repl
+                .pretty_answer("{ a: 1, b: [2, 3] }")
+                .expect("a record is showable");
+            assert_eq!(
+                shown, "{\n  \"a\": 1,\n  \"b\": [\n    2,\n    3\n  ]\n}",
+                "one level of indentation per level of nesting"
+            );
+
+            let written = repl
+                .json_answer("{ a: 1, b: [2, 3] }")
+                .expect("a record is writable");
+            assert_eq!(
+                written, "{\"a\": 1, \"b\": [2, 3]}",
+                "the document the language's own json.stringify writes"
+            );
+
+            let tabled = repl
+                .table_answer("[{ name: \"ada\", age: 36 }, { name: \"bob\" }]")
+                .expect("a list of records is a table");
+            assert_eq!(
+                tabled, "name  age\nada   36\nbob\n",
+                "a header row naming the keys, and one row per record"
+            );
+        }
+
+        /// What `.pretty` shows reads back as the value it came from.
+        ///
+        /// The round trip is through the language's own `json.parse`, not
+        /// through a second implementation of the same idea: a document the
+        /// language cannot read is not a document the REPL should print, and
+        /// only the language's reader can say so.
+        #[test]
+        fn pretty_output_reads_back_as_the_value_it_came_from() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "set original to { name: \"ada\", tags: [\"x\", \"y\"], meta: { ok: yes, n: 1 } }",
+                ],
+            );
+
+            let shown = repl
+                .pretty_answer("original")
+                .expect("a bound record is showable");
+            let literal = as_text_literal(&shown);
+            let line = format!("set read_back to json.parse({})", literal);
+            feed(&mut repl, &[line.as_str()]);
+
+            assert_eq!(
+                repl.lookup("read_back").cloned(),
+                repl.lookup("original").cloned(),
+                "the document the REPL printed reads back as the value it came from:\n{}",
+                shown
+            );
+        }
+
+        /// A printing command is a question about a value, and a program is not
+        /// a question: it is refused by name, and the session is left exactly as
+        /// the question found it.
+        #[test]
+        fn edge_a_printing_command_refuses_a_program_and_the_session_never_knows_it_happened() {
+            let mut repl = Repl::new();
+
+            for (command, refusal) in [
+                (
+                    ".pretty",
+                    repl.pretty_answer("set sneaky to 1")
+                        .expect_err("a program is not a value"),
+                ),
+                (
+                    ".json",
+                    repl.json_answer("say \"printed, not said\"")
+                        .expect_err("a program is not a value"),
+                ),
+                (
+                    ".table",
+                    repl.table_answer("import files")
+                        .expect_err("a program is not a value"),
+                ),
+            ] {
+                assert!(
+                    refusal.starts_with("Error:"),
+                    "{} is reported as the error it is: {}",
+                    command,
+                    refusal
+                );
+                assert!(
+                    refusal.contains(command),
+                    "{} names the command that refused it: {}",
+                    command,
+                    refusal
+                );
+            }
+
+            assert!(
+                repl.lookup("sneaky").is_none(),
+                "no name was bound by a command that refused to run"
+            );
+        }
+
+        /// Printing a value does not change the session. The question runs on a
+        /// fork, so a function that assigns writes nothing the session can see
+        /// — the half of the rule the static gates cannot reach.
+        #[test]
+        fn edge_a_printing_command_does_not_change_the_session() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "set counter to 1",
+                    "to bump()\n    set counter to counter + 1\n    return counter\nend",
+                ],
+            );
+
+            let shown = repl.pretty_answer("bump()").expect("a call is showable");
+
+            assert_eq!(shown, "2", "the value the call answered");
+            assert_eq!(
+                repl.lookup("counter").cloned(),
+                Some(Value::Number(1.0)),
+                "and the session's own counter is the one it had before the question"
+            );
+        }
+
+        /// Every new command is in `:help`, and offered by the completer: a
+        /// command that works and is neither documented nor completable is a
+        /// command nobody types.
+        #[test]
+        fn edge_help_names_the_three_printing_commands() {
+            let help = ReplCommand::help_lines().join("\n");
+
+            for command in ["pretty", "json", "table"] {
+                assert!(
+                    help.contains(&format!(":{}", command)),
+                    ":help names :{}: {}",
+                    command,
+                    help
+                );
+            }
+
+            let repl = Repl::new();
+            for command in ["pretty", "json", "table"] {
+                let completions = repl.complete(&format!(":{}", command));
+                assert!(
+                    completions.contains(&format!(":{}", command)),
+                    ":{} is completed: {:?}",
+                    command,
+                    completions
+                );
+            }
+        }
+
+        /// The three commands are dispatched as commands.
+        ///
+        /// A command that parses and is never dispatched is a command nobody
+        /// can use, and the parse test above cannot see it: the dispatcher is
+        /// a second place the three names are written down. So the line is
+        /// handed to the dispatcher itself here, and the one thing that tells
+        /// a command from source is checked — a line run as source binds `_`,
+        /// and a line run as a command binds nothing.
+        #[test]
+        fn the_three_printing_commands_are_dispatched_and_not_run_as_source() {
+            for command in [".pretty 1 + 1", ".json 1 + 1", ".table [{ a: 1 }]"] {
+                let mut repl = Repl::new();
+
+                assert!(
+                    repl.handle_command(command),
+                    "{} is a command, and the dispatcher consumes it",
+                    command
+                );
+                assert!(
+                    repl.lookup("_").is_none(),
+                    "{} is not run as source: a source line would have bound _",
+                    command
+                );
+            }
+        }
+
+        /// An expression that does not parse is refused as the failure it is.
+        ///
+        /// The three commands ask about a value, and a line that is not an
+        /// expression holds no value to ask about: the refusal says so rather
+        /// than printing nothing at all.
+        #[test]
+        fn edge_a_printing_command_of_a_line_that_does_not_parse_is_refused() {
+            let mut repl = Repl::new();
+
+            for (command, refusal) in [
+                (
+                    ".pretty",
+                    repl.pretty_answer("1 +")
+                        .expect_err("a line that does not parse is refused"),
+                ),
+                (
+                    ".json",
+                    repl.json_answer("[1, 2")
+                        .expect_err("a line that does not parse is refused"),
+                ),
+                (
+                    ".table",
+                    repl.table_answer("{ a: }")
+                        .expect_err("a line that does not parse is refused"),
+                ),
+            ] {
+                assert!(
+                    refusal.starts_with("Error:"),
+                    "{} refuses a line that does not parse, and says so: {}",
+                    command,
+                    refusal
+                );
+            }
+        }
+
+        /// A table of exactly one record is a table: a header row naming the
+        /// keys, and one row under it.
+        #[test]
+        fn edge_a_table_of_one_record_names_its_keys_once() {
+            let mut repl = Repl::new();
+
+            let shown = repl
+                .table_answer("[{ name: \"ada\", age: 36 }]")
+                .expect("one record is a table");
+            let lines: Vec<&str> = shown.trim_end_matches('\n').split('\n').collect();
+
+            assert_eq!(
+                lines,
+                vec!["name  age", "ada   36"],
+                "a header row and one row, and the key is named once"
+            );
         }
     }
 
