@@ -4,7 +4,7 @@
 //! particular is the kind of statement a future change to reference handling
 //! would falsify, and nothing else would notice.
 //!
-//! Everything here uses `strong_count` rather than a global drop counter,
+//! Everything here reads `strong_count` rather than a global drop counter,
 //! deliberately: cargo runs tests on parallel threads, so a shared atomic is a
 //! flake waiting to happen. Strong counts are per-value and thread-safe.
 //!
@@ -12,7 +12,9 @@
 //! `Send`, so an `Arc<Node>` is an `Arc` over a non-`Send` type and clippy is
 //! right to reject it. The `Arc` assertions about Redblue's own `Value` are
 //! unaffected — those are exactly the claims about the shipped representation,
-//! and they stay `Arc`.
+//! and they stay `Arc`, because that is what `src/value.rs` uses and the test is
+//! pinning that. The hand-built node cycle below is `Rc`, because it is never
+//! sent anywhere.
 
 use redblue::Value;
 use std::cell::RefCell;
@@ -21,6 +23,11 @@ use std::sync::Arc;
 
 /// A node that can point at another node — the shape a Redblue list-of-lists
 /// would take if the language had reference types.
+///
+/// `Rc`, not `Arc`: a node holds a `RefCell`, so it is `!Sync`, and an `Arc` of
+/// one would promise a thread-safety the shape does not have. Nothing here
+/// crosses a thread — each test builds its own cycle and drops it — and the
+/// strong-count semantics being pinned are identical.
 struct Node {
     peer: RefCell<Option<Rc<Node>>>,
 }
