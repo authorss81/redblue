@@ -309,3 +309,83 @@ fn edge_a_division_by_zero_is_refused_rather_than_answered() {
         "division by zero must be refused, not answered: {result:?}"
     );
 }
+
+/// The library's own entry point must refuse a program the language promises to
+/// reject, and the refusal must be a runtime error rather than a silent value.
+///
+/// The rest of this file reads the failure channel from the success side: what a
+/// program printed before it stopped. This test is the other direction — the
+/// program never runs to a value at all, and `run_source` has to hand back an
+/// `Err` naming what went wrong.
+#[test]
+fn edge_a_non_list_receiver_is_refused_by_the_library_entry_point() {
+    let result = redblue::run_source("set x to list.map(5, to_text)");
+    assert!(
+        result.is_err(),
+        "a non-list receiver must be refused, not answered: {result:?}"
+    );
+    let error = result.expect_err("the refusal was just asserted");
+    assert!(
+        matches!(error, Error::Runtime(..)),
+        "a non-list receiver must be a runtime refusal, got: {error:?}"
+    );
+}
+
+/// An index the list does not have is a refusal, not a value.
+///
+/// The empty list has no legal index, the singleton has exactly one, and one
+/// past the end is out of bounds on every list. Each of these must come back as
+/// a runtime error naming the index it was given rather than answering
+/// `nothing`, which is a value a list can legitimately hold.
+#[test]
+fn edge_an_out_of_bounds_index_is_refused_rather_than_answered() {
+    for (source, index) in [
+        ("[1, 2, 3][3]", "3"),
+        ("[1, 2, 3][999]", "999"),
+        ("[42][1]", "1"),
+        ("[][0]", "0"),
+    ] {
+        let result = redblue::run_source(source);
+        assert!(
+            result.is_err(),
+            "`{source}` must be refused, not answered: {result:?}"
+        );
+        let error = result.expect_err("the refusal was just asserted");
+        assert!(
+            matches!(error, Error::Runtime(..)),
+            "`{source}` must fail at runtime, got: {error:?}"
+        );
+        assert!(
+            error.message().contains("out of bounds"),
+            "`{source}` must say the index was out of bounds, got: {}",
+            error.message()
+        );
+        assert!(
+            error.message().contains(index),
+            "`{source}` must name the index `{index}`, got: {}",
+            error.message()
+        );
+    }
+}
+
+/// A program that is not a program is refused before anything runs.
+///
+/// The failures above are runtime refusals: the program was understood and then
+/// did something impossible. This one is refused earlier, by the parser, so the
+/// error is a different kind and nothing is printed first — an unclosed `end`
+/// must not be half-executed.
+#[test]
+fn edge_a_program_that_cannot_be_parsed_is_refused_before_it_says_anything() {
+    for source in ["if yes then\n    say \"never\"", "say (", "set x to"] {
+        let result = redblue::run_source(source);
+        assert!(
+            result.is_err(),
+            "`{source}` must be refused, not run: {result:?}"
+        );
+        let error = result.expect_err("the refusal was just asserted");
+        assert!(
+            matches!(error, Error::Parser(..)),
+            "`{source}` must fail in the parser, got: {error:?}"
+        );
+    }
+}
