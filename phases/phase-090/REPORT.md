@@ -9,7 +9,7 @@ attempt needed, and test/gate repairs carried in from the parked attempt.
 
 | File | Size | What |
 |---|---|---|
-| `SURVEY.md` | 408 lines (new) | the inventory, the 32-program sample, the top ten with a blocked Redblue program each, and every claim cited as `file:line` |
+| `SURVEY.md` | 416 lines (new) | the inventory, the 32-program sample, the top ten with a blocked Redblue program each, and every claim cited as `file:line` |
 | `tests/stdlib_gap_survey_test.rs` | 516 lines, new target | holds the survey to its citations, reconciles it with `stdlib::MODULES`/`BUILTIN_NAMES`, pins the ranking and the label/crate rule, and asserts the regex gap by running a program that uses it |
 
 The survey was updated in this round for line drift on `main`: `src/stdlib.rs:612`
@@ -137,23 +137,24 @@ that does not carry the claim, both fail `edge_every_citation…`.
 
 ## Gates
 
-Run in the order AGENTS.md §3.4 gives. Every row was executed in this round.
+Run in the order AGENTS.md §3.4 gives. The final run in this round executed
+every row after the resumed documentation edits.
 
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | **pass** — exit 0, no diff |
 | `cargo clippy --all-targets -- -D warnings` | **pass** — exit 0, no warnings (including the resolved `clippy::arc_with_non_send_sync` at `tests/memory_model_test.rs`) |
-| `cargo test --all-targets` | **pass** — exit 0, **1975 passed, 0 failed, 0 ignored**; log at `target/tmp/cargo_test_all.log` |
-| `../rbops/verify.sh phase-090` | **pass** — exit 0, `VERIFY PASS — phase-090`; manifest, report, diff hygiene, fmt, clippy, full cargo test, example sweep and test-policy checks all pass; log at `target/tmp/verify_phase090.log`. The test-policy rows warn that failure-assertion and test-quota rules are *not applicable* to a document phase. |
+| `cargo test --all-targets` | **pass** — exit 0, **1975 passed, 0 failed, 0 ignored**; log at `target/tmp/cargo_test_all_resume.log` |
+| `../rbops/verify.sh phase-090` | **pass** — exit 0, `VERIFY PASS — phase-090`; manifest, report, diff hygiene (+22 −13), fmt, clippy, full cargo test, example sweep and test-policy checks all pass; log at `target/tmp/verify_phase090_final.log`. The test-policy rows warn that failure-assertion and test-quota rules are *not applicable* to a document phase. |
 
-One warning in that gate is an artifact of an uncommitted report. `report honesty`
-reads a **committed** copy of this file, not the working tree: `HEAD` has no
-`phases/phase-090/REPORT.md` (the directory is new), while a checkpoint ref still
-holds the parked attempt's report, which claimed the six-test survey target. The
-warning therefore under-claims against the 1975-test full run even though this
-table states the real number. It disappears when the pipeline commits this report;
-nothing was adjusted to silence it. The phase-061 report records the same
-git-versus-working-tree behaviour.
+`report honesty` also passes: the committed copy and the full run both report
+1975 tests. The first gate run in this round saw a clean tree because the
+preserved work was already committed as `62109ba` ("resume phase-090: adopt
+preserved work"); it failed only the diff-hygiene rows ("no changed files
+detected against HEAD", "diff too small: +0 (min +5)"). This round adds no code:
+it re-runs the survey's own target, records that re-check in `SURVEY.md`, and
+leaves the documentation-only diff the gate requires. No `src/` file changed
+in this round.
 
 ## Edge-case matrix
 

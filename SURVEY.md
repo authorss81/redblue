@@ -406,3 +406,11 @@ of the sample, it needs no dependency, and two of its functions are already wire
 into the registry and answering nothing. Then rank 3 (record enumeration), which
 is the other half of every data program and whose current failure mode is a
 silent zero-iteration loop rather than an error.
+
+## Re-verification on resume
+
+This document was re-checked against the resumed tree. The registry counts and
+every `path:line` citation are re-tested by `tests/stdlib_gap_survey_test.rs`;
+that target is green on this tree. No count, rank or claim changed. Rank 2 keeps
+both line numbers the dispatched finding and the current tree need: `612` is
+`},` here, and the regex comment it meant now lives at `651`.
