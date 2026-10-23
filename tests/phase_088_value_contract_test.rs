@@ -511,3 +511,148 @@ fn edge_a_non_list_receiver_is_refused_by_both_engines() {
         "the bytecode VM must refuse a non-list receiver, got: {refused:?}"
     );
 }
+
+/// Parses a fixture for the three files below.
+fn parse_redirect(source: &str) -> parser::Program {
+    let tokens =
+        Lexer::tokenize(source).unwrap_or_else(|error| panic!("{source:?} should lex: {error:?}"));
+    parser::parse(tokens).unwrap_or_else(|error| panic!("{source:?} should parse: {error:?}"))
+}
+
+/// A builtin that cannot answer is refused by its **name**, by the library and
+/// by both engines, and says nothing before refusing.
+///
+/// `pow` is the builtin here rather than one of the six in
+/// `stdlib_module_docs_test.rs`, so this is a new refusal rather than the same
+/// one asserted twice. The failure is the subject: the test can only pass when
+/// the run comes back `Err`, and it would fail on a builtin that answered `0`,
+/// `nothing`, or a panic.
+#[test]
+fn edge_a_builtin_failure_is_named_by_each_engine() {
+    let source = "say pow(\"two\", 3)";
+
+    let result = redblue::run_source(source);
+    assert!(
+        result.is_err(),
+        "`{source}` must be refused, not answered: {result:?}"
+    );
+    let library_error = result.expect_err("the refusal was just asserted");
+    assert!(
+        matches!(library_error, redblue::Error::Runtime(..)),
+        "`{source}` must fail at runtime, got: {library_error:?}"
+    );
+    assert!(
+        library_error.message().contains("pow"),
+        "`{source}` must name the builtin, got: {}",
+        library_error.message()
+    );
+
+    let program = parse_redirect(source);
+
+    let (mut walker, walked) = run_isolated(&program);
+    assert!(walked.is_err(), "the walker must refuse `{source}`");
+    let walker_error = walked.expect_err("the refusal was just asserted");
+    assert_eq!(
+        walker_error.message(),
+        library_error.message(),
+        "the library and the walker must refuse `{source}` the same way"
+    );
+    assert!(
+        walker.take_output().is_empty(),
+        "the walker must say nothing before refusing `{source}`"
+    );
+
+    let chunk = redblue::bytecode::compile_program(&program).expect("the fixture compiles");
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    let vm_result = vm.run(&chunk);
+    assert!(vm_result.is_err(), "the bytecode VM must refuse `{source}`");
+    let vm_error = vm_result.expect_err("the refusal was just asserted");
+    assert_eq!(
+        vm_error.message(),
+        walker_error.message(),
+        "both engines must refuse `{source}` the same way"
+    );
+    assert!(
+        vm.take_output().is_empty(),
+        "the bytecode VM must say nothing before refusing `{source}`"
+    );
+}
+
+/// A loop body that must not run leaves the output empty on each engine.
+///
+/// The literal `never` in each body is what makes the assertion possible: a
+/// loop that ran even one turn would print it. Both zero-turn shapes are here —
+/// an explicit count of zero and an empty list — because they reach different
+/// loop instructions, and an empty output from one says nothing about the other.
+#[test]
+fn edge_a_loop_body_that_must_not_run_prints_nothing_on_each_engine() {
+    for source in [
+        "repeat 0 times\n    say \"never\"\nend",
+        "for each x in []\n    say \"never\"\nend",
+    ] {
+        let program = parse_redirect(source);
+
+        let (mut walker, walked) = run_isolated(&program);
+        walked.unwrap_or_else(|error| panic!("{source:?} must run: {error:?}"));
+        assert_eq!(
+            walker.take_output(),
+            Vec::<String>::new(),
+            "the walker must not run the body of {source:?}, and `never` is what would say so"
+        );
+
+        let chunk = redblue::bytecode::compile_program(&program).expect("the fixture compiles");
+        let mut vm = BytecodeVm::new();
+        vm.set_echo(false);
+        vm.run(&chunk)
+            .unwrap_or_else(|error| panic!("{source:?} must run: {error:?}"));
+        assert_eq!(
+            vm.take_output(),
+            Vec::<String>::new(),
+            "the bytecode VM must not run the body of {source:?}, and `never` is what would say so"
+        );
+    }
+}
+
+/// A program whose correct output is the empty string and one whose output is
+/// non-empty still answer the value they ended on.
+///
+/// The empty-output program is not a silencer: it says nothing and ends on
+/// `3`, so "printed nothing" and "answered the right thing" are read from the
+/// same run. The non-empty program prints exactly `3` and ends on the same
+/// value, so a `sqrt` that answered text, or a run whose output was dropped,
+/// changes one of the two assertions.
+#[test]
+fn edge_empty_and_non_empty_output_are_told_apart_by_their_values() {
+    let program = parse_redirect("set x to sqrt(9)\nsqrt(9)");
+    let (mut quiet_vm, quiet_outcome) = run_isolated(&program);
+    let quiet_value = quiet_outcome.unwrap_or_else(|error| panic!("the quiet program: {error:?}"));
+    assert_eq!(
+        quiet_vm.take_output(),
+        Vec::<String>::new(),
+        "the quiet program must print nothing"
+    );
+    assert_eq!(
+        quiet_value,
+        Value::Number(3.0),
+        "the quiet program must still answer the number its last expression is worth"
+    );
+
+    let program = parse_redirect("say sqrt(9)\nsqrt(9)");
+    let (mut said_vm, said_outcome) = run_isolated(&program);
+    let said_value = said_outcome.unwrap_or_else(|error| panic!("the talking program: {error:?}"));
+    assert_eq!(
+        said_vm.take_output(),
+        vec!["3".to_string()],
+        "the talking program must print exactly the answer"
+    );
+    assert_eq!(
+        said_value,
+        Value::Number(3.0),
+        "the talking program must answer the same number the quiet one did"
+    );
+    assert_eq!(
+        quiet_value, said_value,
+        "whether a program says its answer cannot change what the answer is"
+    );
+}
