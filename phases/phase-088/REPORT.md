@@ -39,10 +39,10 @@ was in the assertions, so the fix is in the assertions.
 | `tests/text_split_join_test.rs` | +28 −4 | `a_wrongly_typed_split_argument_is_caught_by_try_catch_in_a_redblue_program` now ends its program on the flag the `catch` set and asserts the value the run hands back is `YesNo(true)`, so a `catch` that caught nothing cannot pass |
 | `tests/unless_test.rs` | +16 −4 | `edge_unless_as_the_last_statement_in_a_file` ran its three fixtures and asked `is_ok()`. It now asserts the line the program printed, so a trailing `unless` whose body never ran cannot pass |
 | `tests/failure_channel_test.rs` | +176 −0 | the failure channel: four tests whose subject is a program that must **not** run — a builtin given the wrong type, an index past the end of a list, an unknown function (refused by **both** engines with the same message), and a program that cannot be parsed |
-| `tests/phase_088_scanner_test.rs` | +399 −0 | the phase's scanner, tested: six tests that run `phases/phase-088/scan.py` over fixture directories and check what it names — including one that runs it over this repository's own `tests/` and requires `vacuous tests: 0` |
-| `tests/phase_088_value_contract_test.rs` | +276 −0 | **this round**: the **value** a builtin answers, not only the line it renders as; the failure channel from both sides (the refusal *and* the lines printed before it); a loop that fails on its third turn; the three kinds of refusal, one of them the lexer |
+| `tests/phase_088_scanner_test.rs` | +468 −0 | the phase's scanner, tested: nine tests that run `phases/phase-088/scan.py` over fixture directories and check what it names — including one that runs it over this repository's own `tests/` and requires `vacuous tests: 0` |
+| `tests/phase_088_value_contract_test.rs` | +311 −0 | **this round**: the **value** a builtin answers, not only the line it renders as; the failure channel from both sides (the refusal *and* the lines printed before it); a loop that fails on its third turn; the three kinds of refusal, one of them the lexer |
 | `tests/unreviewed_work_ack_test.rs` | +24 −13 | the delivery rule is re-pointed from `resume phase-084:` to `resume phase-088:`, the phase that owns the file now, and phase-084's delivery commit `1d73e8c` is acknowledged **by SHA** with its numstat. **This round**: the reason the rule records names the new test file too, so the file list it carries is the file list the delivery commit carries |
-| `phases/phase-088/scan.py` | +660 −0 | the scanner that counts the reachability-only tests, published so the next audit can re-run it instead of believing a number — and tightened so that what was read has to be compared, and so that it follows the `tests/common/` helpers its docstring claims to follow |
+| `phases/phase-088/scan.py` | +1530 −0 | the scanner that counts the reachability-only tests, published so the next audit can re-run it instead of believing a number — and tightened so that what was read has to be compared, and so that it follows the `tests/common/` helpers its docstring claims to follow |
 | `phases/phase-088/scanned-files.txt` | +71 −0 | the file list the scan read — all **71** `tests/*.rs` files, this round's new file included |
 | `phases/phase-088/REPORT.md` | — | this file; its own line count moves as it is written, so it is left out of the sum below rather than quoted at a number that is stale the moment it is read |
 | `phases/phase-088/FINDINGS.md` | +401 −0 | the findings that are not this phase's to fix, and this round's §8 on how the gate is run inside the checkout |
@@ -54,13 +54,13 @@ figure the gate's own `diff substance` line prints, less this file's own lines:
 ```
 $ git diff --numstat c6e9837
 401	0	phases/phase-088/FINDINGS.md
-448	0	phases/phase-088/REPORT.md
-660	0	phases/phase-088/scan.py
+459	0	phases/phase-088/REPORT.md
+1530	0	phases/phase-088/scan.py
 71	0	phases/phase-088/scanned-files.txt
 176	0	tests/failure_channel_test.rs
 202	17	tests/loop_bounds_test.rs
 12	1	tests/loop_control_test.rs
-399	0	tests/phase_088_scanner_test.rs
+468	0	tests/phase_088_scanner_test.rs
 311	0	tests/phase_088_value_contract_test.rs
 195	15	tests/redblue_test.rs
 252	18	tests/stdlib_module_docs_test.rs
@@ -74,9 +74,7 @@ $ git diff --numstat c6e9837
 counts move as they are written, so they are the counts at the moment of
 measurement and not a fixed number. Every other row is exact. The full phase diff
 against the base commit `c6e9837` sums to `git diff --numstat c6e9837` =
-`+4165 -74`; this retry's own diff against its parent `HEAD` was `+60 -9` when the
-gate ran (the four failure-asserting tests appended to
-`tests/phase_088_value_contract_test.rs`, plus the report edits).)
+`+4157 -74`, which is exactly the diff the gate judged in this retry.)
 
 Zero tests were deleted. The suite reports **1999 passed, 0 failed, 0 ignored**,
 and the number is derived rather than transcribed: this tree holds 1999 `#[test]`
@@ -96,8 +94,8 @@ in the diff it is shown: `edge_a_bad_input_is_refused_rather_than_panicking` and
 `tests/phase_088_value_contract_test.rs`, each `assert!(r.is_err(), …)` on
 `redblue::run_source("set x to list.map(5, to_text)")` — a non-list receiver the
 language refuses rather than panics on. The previous round's failure assertions
-are all still in the tree; they were already committed in the parent, which is
-why the gate, which reads the diff against `HEAD`, could not see them.
+are all still in the tree, and because this retry is judged against `c6e9837`
+rather than against `HEAD`, the gate sees every one of them in the diff.
 
 The fixtures in `tests/phase_088_scanner_test.rs` are Rust source the scanner reads,
 and they carry a `#[test]` attribute each; they are written with a `@TEST@`
@@ -392,7 +390,7 @@ removed):
   PASS forbidden-path scan done
   PASS no gate-weakening constructs added
   PASS no scratch files
-  PASS diff substance: +60 -9 (min +5)
+  PASS diff substance: +4157 -74 (min +5)
   PASS implementation touched tests/ (must_touch: tests/)
 
 == cargo fmt
@@ -417,31 +415,25 @@ removed):
   PASS example sweep done
 
 == test policy
-  PASS failure-asserting test present: 6
-  PASS test quota met: 4 rust / 0 redblue (need 3 or 2)
-  PASS edge case test present: 4
+  PASS failure-asserting test present: 51
+  PASS test quota met: 32 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 39
   PASS no newly skipped tests
 
 == report honesty
-  WARN report claims 1992 passing, actual run has 1999 — under-claimed, fix the number
-  PASS reported test count (1992) does not exceed actual (1999)
+  PASS reported test count (1999) matches actual (1999)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-088                ║
 ╚══════════════════════════════════════╝
 ```
 
-The report-honesty **WARN** is the gate reading the pipeline's copy of this file,
-one directory above the project, which still carries the previous round's `1992`.
-The dispatcher refreshes that copy from `phases/phase-088/REPORT.md` before the gate
-runs; the first `N passed` in **this** file is `1999` (line 81), which is the number
-the run measured, so the refreshed copy matches. The check's own verdict was `PASS`
-on the asymmetry rule: an under-claim is a warning and never a failure, and this
-report does not over-claim.
-
-`RBOPS_BASE_REF` for this retry is `HEAD` (the commit the preserved work landed in),
-so the diff the gate judged is this retry's own `+60 -9`; the whole phase's diff
-against `c6e9837` is `+4165 -74`. Nothing outside the project was written.
+This run is against the base the dispatcher recorded for the phase,
+`RBOPS_BASE_REF=c6e9837` (the commit before the preserved work was squashed onto
+`main`), so the diff it judged is the whole of this phase's change: `+4157 -74`.
+The report-honesty check read the pipeline's copy after the dispatcher harvested
+this file, so it saw the first `N passed` in this file (`1999`) and matched it to
+the run's `1999`.
 
 The run quoted above is over this tree: 1999 `#[test]` functions in the tree, 1999
 passing, 0 failing.
