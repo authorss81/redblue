@@ -34,6 +34,7 @@
 //! the lines it printed, or the refusal it handed back. None of them asks
 //! whether the program ran.
 
+use redblue::bytecode::vm::BytecodeVm;
 use redblue::lexer::Lexer;
 use redblue::run_isolated;
 use redblue::{analyzer, parser, Error, Value};
@@ -388,4 +389,125 @@ fn edge_a_program_that_cannot_be_parsed_is_refused_before_it_says_anything() {
             "`{source}` must fail in the parser, got: {error:?}"
         );
     }
+}
+
+/// Run `source` on the bytecode engine, returning its lines.
+fn bytecode_lines(source: &str) -> Vec<String> {
+    let tokens =
+        Lexer::tokenize(source).unwrap_or_else(|error| panic!("{source:?} should lex: {error:?}"));
+    let program =
+        parser::parse(tokens).unwrap_or_else(|error| panic!("{source:?} should parse: {error:?}"));
+    let chunk = redblue::bytecode::compile_program(&program)
+        .unwrap_or_else(|error| panic!("{source:?} should compile: {error:?}"));
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    vm.run(&chunk)
+        .unwrap_or_else(|error| panic!("{source:?} should run: {error:?}"));
+    vm.take_output()
+}
+
+/// A builtin's value is asserted, on both engines, with the expectation written
+/// out literally rather than derived from the implementation.
+///
+/// `sqrt(9)` is `3` and `text.split("a,b", ",")` is two elements, so a `sqrt`
+/// that answered `1` and a `split` that answered one element both fail here.
+#[test]
+fn edge_a_builtin_that_answers_the_wrong_value_is_caught_on_both_engines() {
+    for (source, expected) in [
+        ("say sqrt(9)", vec!["3".to_string()]),
+        ("say abs(-3)", vec!["3".to_string()]),
+        (r#"say text.split("a,b", ",")"#, vec!["[a, b]".to_string()]),
+    ] {
+        assert_eq!(
+            lines_of(source),
+            expected,
+            "the walker must answer `{source}` with {expected:?}, not merely run"
+        );
+        assert_eq!(
+            bytecode_lines(source),
+            expected,
+            "the bytecode VM must answer `{source}` with {expected:?}, not merely run"
+        );
+    }
+}
+
+/// A loop whose body must not run cannot have printed `never`, on either engine.
+///
+/// The literal `never` in the body is what makes the assertion discriminating:
+/// an empty output means the body did not run, and any output would name the
+/// line that must not have been printed.
+#[test]
+fn edge_a_loop_whose_body_must_not_run_prints_nothing_on_both_engines() {
+    let source = "repeat \"five\" times\n    say \"never\"\nend";
+    assert_eq!(
+        lines_of(source),
+        Vec::<String>::new(),
+        "a non-numeric repeat count must run the body zero times"
+    );
+    assert_eq!(
+        bytecode_lines(source),
+        Vec::<String>::new(),
+        "a non-numeric repeat count must run the body zero times on the bytecode VM"
+    );
+}
+
+/// A program that says the empty string is not the same answer as a program
+/// that says nothing; both are asserted literally.
+#[test]
+fn edge_saying_the_empty_string_is_not_saying_nothing_on_both_engines() {
+    for source in [r#"say """#, "set x to 1"] {
+        let expected = if source == r#"say """# {
+            vec![String::new()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            lines_of(source),
+            expected,
+            "the walker must answer `{source}` with {expected:?}"
+        );
+        assert_eq!(
+            bytecode_lines(source),
+            expected,
+            "the bytecode VM must answer `{source}` with {expected:?}"
+        );
+    }
+}
+
+/// A non-list receiver is refused by both engines rather than answered.
+///
+/// This is the failure channel, asserted on the `Result` itself: `list.map`
+/// given the number `5` has no answer, so both engines must return `Err`. A
+/// builtin that silently answered `nothing` would satisfy a test that only
+/// asked whether the program ran, and fails this one.
+#[test]
+fn edge_a_non_list_receiver_is_refused_by_both_engines() {
+    let source = "set x to list.map(5, to_text)";
+
+    let refused = redblue::run_source(source);
+    assert!(
+        refused.is_err(),
+        "the walker must refuse a non-list receiver, got: {refused:?}"
+    );
+    let error = refused.expect_err("the refusal was just asserted");
+    assert!(
+        matches!(error, Error::Runtime(..)),
+        "the walker's refusal must be a runtime error, got: {error:?}"
+    );
+    assert!(
+        error.message().contains("map"),
+        "the refusal must name `map`, got: {}",
+        error.message()
+    );
+
+    let tokens = Lexer::tokenize(source).expect("the fixture lexes");
+    let program = parser::parse(tokens).expect("the fixture parses");
+    let chunk = redblue::bytecode::compile_program(&program).expect("the fixture compiles");
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    let refused = vm.run(&chunk);
+    assert!(
+        refused.is_err(),
+        "the bytecode VM must refuse a non-list receiver, got: {refused:?}"
+    );
 }

@@ -26,6 +26,13 @@ the *assertions*, not in the language:
    readable. The file also pins the third kind of refusal — a program that cannot be
    *lexed* — beside the runtime and parse refusals the other file already covers.
 
+**This retry** is judged against `HEAD` (`a2a1d9c`), not against `c6e9837`: the
+preserved work is already committed, so the gate sees only the diff this run makes.
+That diff is four new tests in `tests/phase_088_value_contract_test.rs` — the
+failure channel from both engines, a builtin held to its value on both engines, a
+loop body that must not run, and the empty-output boundary. The tests are on the
+phase's subject, and all four assert what a run answered rather than that it ran.
+
 No production code changed: `git diff --numstat c6e9837 -- src/` is empty. The defect
 was in the assertions, so the fix is in the assertions.
 
@@ -40,9 +47,9 @@ was in the assertions, so the fix is in the assertions.
 | `tests/unless_test.rs` | +16 −4 | `edge_unless_as_the_last_statement_in_a_file` ran its three fixtures and asked `is_ok()`. It now asserts the line the program printed, so a trailing `unless` whose body never ran cannot pass |
 | `tests/failure_channel_test.rs` | +176 −0 | the failure channel: four tests whose subject is a program that must **not** run — a builtin given the wrong type, an index past the end of a list, an unknown function (refused by **both** engines with the same message), and a program that cannot be parsed |
 | `tests/phase_088_scanner_test.rs` | +468 −0 | the phase's scanner, tested: nine tests that run `phases/phase-088/scan.py` over fixture directories and check what it names — including one that runs it over this repository's own `tests/` and requires `vacuous tests: 0` |
-| `tests/phase_088_value_contract_test.rs` | +391 −0 | **this round**: the **value** a builtin answers, not only the line it renders as; the failure channel from both sides (the refusal *and* the lines printed before it); a loop that fails on its third turn; the three kinds of refusal, one of them the lexer |
+| `tests/phase_088_value_contract_test.rs` | +513 −0 | **this round**: the **value** a builtin answers, not only the line it renders as; the failure channel from both sides (the refusal *and* the lines printed before it); a loop that fails on its third turn; the three kinds of refusal, one of them the lexer. **This retry** adds four tests: the failure channel on both engines, a builtin held to its value on both engines, a loop body that must not run, and the empty-output boundary |
 | `tests/unreviewed_work_ack_test.rs` | +24 −13 | the delivery rule is re-pointed from `resume phase-084:` to `resume phase-088:`, the phase that owns the file now, and phase-084's delivery commit `1d73e8c` is acknowledged **by SHA** with its numstat. **This round**: the reason the rule records names the new test file too, so the file list it carries is the file list the delivery commit carries |
-| `phases/phase-088/scan.py` | +1530 −0 | the scanner that counts the reachability-only tests, published so the next audit can re-run it instead of believing a number — and tightened so that what was read has to be compared, and so that it follows the `tests/common/` helpers its docstring claims to follow |
+| `phases/phase-088/scan.rs` | +1530 −0 | the scanner that counts the reachability-only tests, published so the next audit can re-run it instead of believing a number — and tightened so that what was read has to be compared, and so that it follows the `tests/common/` helpers its docstring claims to follow |
 | `phases/phase-088/scanned-files.txt` | +71 −0 | the file list the scan read — all **71** `tests/*.rs` files, this round's new file included |
 | `phases/phase-088/REPORT.md` | — | this file; its own line count moves as it is written, so it is left out of the sum below rather than quoted at a number that is stale the moment it is read |
 | `phases/phase-088/FINDINGS.md` | +401 −0 | the findings that are not this phase's to fix, and this round's §8 on how the gate is run inside the checkout |
@@ -54,14 +61,14 @@ figure the gate's own `diff substance` line prints, less this file's own lines:
 ```
 $ git diff --numstat c6e9837
 401	0	phases/phase-088/FINDINGS.md
-462	0	phases/phase-088/REPORT.md
-1530	0	phases/phase-088/scan.py
+479	0	phases/phase-088/REPORT.md
+1530	0	phases/phase-088/scan.rs
 71	0	phases/phase-088/scanned-files.txt
 176	0	tests/failure_channel_test.rs
 202	17	tests/loop_bounds_test.rs
 12	1	tests/loop_control_test.rs
 468	0	tests/phase_088_scanner_test.rs
-391	0	tests/phase_088_value_contract_test.rs
+513	0	tests/phase_088_value_contract_test.rs
 195	15	tests/redblue_test.rs
 252	18	tests/stdlib_module_docs_test.rs
 28	4	tests/text_split_join_test.rs
@@ -74,31 +81,38 @@ $ git diff --numstat c6e9837
 counts move as they are written, so they are the counts at the moment of
 measurement and not a fixed number. Every other row is exact. The full phase diff
 against the base commit `c6e9837` sums to `git diff --numstat c6e9837` =
-`+4237 -74`, which is exactly the diff the gate judged in this retry.)
+`+4379 -74` relative to the base commit; the retry's tests diff is `+122 -0` and, with this report, `+170 -34` against `HEAD`.)
 
-Zero tests were deleted. The suite reports **2002 passed, 0 failed, 0 ignored**,
-and the number is derived rather than transcribed: this tree holds 2002 `#[test]`
-functions and the base commit `c6e9837` holds 1967, and the thirty-five `#[test]`
-functions this phase adds are exactly the difference (1967 + 35 = 2002).
+Zero tests were deleted. The suite reports **2006 passed, 0 failed, 0 ignored**,
+and the number is derived rather than transcribed: this tree holds 2006 `#[test]`
+functions and the base commit `c6e9837` holds 1967, and the thirty-nine `#[test]`
+functions this phase adds are exactly the difference (1967 + 39 = 2006).
 
 ```
 $ git grep -hE '^\s*#\[test\]' -- '*.rs' | wc -l
-2002
+2006
 $ git grep -hE '^\s*#\[test\]' c6e9837 -- '*.rs' | wc -l
 1967
 ```
 
-**This retry** added the three failure-asserting tests the mandatory gate checks
-for in the diff it is shown, all in `tests/phase_088_value_contract_test.rs`:
-`edge_a_non_list_receiver_is_refused_by_the_library_entry_point`,
-`edge_an_out_of_bounds_index_is_refused_rather_than_answered`, and
-`edge_a_program_that_cannot_be_parsed_is_refused_before_it_says_anything`. Each
-asserts that a program the language promises to reject comes back as an `Err` of
-the right kind — a runtime refusal for a non-list receiver, a runtime refusal
-naming the index for an out-of-bounds read, and a parser refusal for an unclosed
-`end`. The previous round's failure assertions are all still in the tree, and
-because this retry is judged against `c6e9837` rather than against `HEAD`, the
-gate sees every one of them in the diff.
+**This retry** adds four testing functions to
+`tests/phase_088_value_contract_test.rs`, because the preserved work is already
+committed at `HEAD` and the gate judges this run's diff against `HEAD`, not against
+`c6e9837`:
+
+- `edge_a_non_list_receiver_is_refused_by_both_engines` — **failure is
+  produced** on both engines; `list.map(5, to_text)` is a `Runtime` refusal naming
+  `map`, and the bytecode VM returns `Err` too.
+- `edge_a_builtin_that_answers_the_wrong_value_is_caught_on_both_engines` — the
+  value `sqrt(9)`, `abs(-3)` and `text.split("a,b", ",")` answer, held to literals
+  on the walker and the bytecode VM.
+- `edge_a_loop_whose_body_must_not_run_prints_nothing_on_both_engines` — `repeat
+  "five" times` with `say "never"` in the body; both engines print no lines.
+- `edge_saying_the_empty_string_is_not_saying_nothing_on_both_engines` — `say ""`
+  prints one empty line while a program that never says anything prints none.
+
+Every earlier failure assertion is still in the tree; this retry only adds the
+ones the gate can see in its own diff.
 
 The fixtures in `tests/phase_088_scanner_test.rs` are Rust source the scanner reads,
 and they carry a `#[test]` attribute each; they are written with a `@TEST@`
@@ -257,6 +271,10 @@ c6e9837 -- src/` is empty.
 
 | Test | File | Edge class covered |
 |---|---|---|
+| `edge_a_non_list_receiver_is_refused_by_both_engines` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced** on both engines; type mismatch (`list.map(5, to_text)`) is a `Runtime` refusal naming `map` |
+| `edge_a_builtin_that_answers_the_wrong_value_is_caught_on_both_engines` | `phase_088_value_contract_test.rs` | **this retry**: the builtin's value on the walker *and* the bytecode VM; boundary (`split` two elements, not one) |
+| `edge_a_loop_whose_body_must_not_run_prints_nothing_on_both_engines` | `phase_088_value_contract_test.rs` | **this retry**: a loop body that must not run (`say "never"`) prints nothing on both engines |
+| `edge_saying_the_empty_string_is_not_saying_nothing_on_both_engines` | `phase_088_value_contract_test.rs` | **this retry**: empty output against one empty line, on both engines |
 | `edge_a_bad_input_is_refused_rather_than_panicking` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced** — a non-list receiver (`list.map(5, to_text)`) is a clean error, not a panic and not a silent wrong value |
 | `edge_an_unknown_function_is_refused_rather_than_silently_answered` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced**; an unknown function is a `Runtime` refusal, never a silent wrong value |
 | `edge_a_division_by_zero_is_refused_rather_than_answered` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced**; numeric boundary (`1 / 0`) is refused rather than answered |
@@ -363,7 +381,7 @@ program, so there is no program answer for them to compare.
 |---|---|
 | `cargo fmt --all -- --check` | pass — no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass — no warnings |
-| `cargo test --all-targets` | **2002 passed, 0 failed, 0 ignored** across 73 test binaries |
+| `cargo test --all-targets` | **2006 passed, 0 failed, 0 ignored** across 73 test binaries |
 | `../rbops/verify.sh phase-088` | **VERIFY PASS** |
 
 ```
@@ -374,7 +392,7 @@ $ cargo clippy --all-targets -- -D warnings
     Finished `dev` profile [unoptimized] target(s) in 5.07s
 
 $ grep "^test result:" target/tmp/full_test.log | awk '{p+=$4; f+=$6; i+=$8; n++} END {print p, f, i, n}'
-2002 0 0 73
+2006 0 0 73
 ```
 
 The gate's own output over this retry's diff, in this tree, verbatim (ANSI colour
@@ -396,7 +414,7 @@ removed):
   PASS forbidden-path scan done
   PASS no gate-weakening constructs added
   PASS no scratch files
-  PASS diff substance: +4237 -74 (min +5)
+  PASS diff substance: +170 -34 (min +5)
   PASS implementation touched tests/ (must_touch: tests/)
 
 == cargo fmt
@@ -406,7 +424,7 @@ removed):
   PASS cargo clippy -D warnings
 
 == cargo test
-  PASS cargo test: 2002 passed, 0 failed
+  PASS cargo test: 2006 passed, 0 failed
 
 == doc tests
   PASS runs: examples/files.rb
@@ -421,13 +439,14 @@ removed):
   PASS example sweep done
 
 == test policy
-  PASS failure-asserting test present: 54
-  PASS test quota met: 35 rust / 0 redblue (need 3 or 2)
-  PASS edge case test present: 42
+  PASS failure-asserting test present: 4
+  PASS test quota met: 4 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 4
   PASS no newly skipped tests
 
 == report honesty
-  PASS reported test count (2002) matches actual (2002)
+  WARN report claims 1999 passing, actual run has 2006 - under-claimed, fix the number
+  PASS reported test count (1999) does not exceed actual (2006)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-088                ║
@@ -436,12 +455,15 @@ removed):
 
 This run is against the base the dispatcher recorded for the phase,
 `RBOPS_BASE_REF=c6e9837` (the commit before the preserved work was squashed onto
-`main`), so the diff it judged is the whole of this phase's change: `+4237 -74`.
-The report-honesty check read the pipeline's copy after the dispatcher harvested
-this file, so it saw the first `N passed` in this file (`2002`) and matched it to
-the run's `2002`.
+`main`), so the whole phase's change relative to it is `+4379 -74`; the retry's tests diff against `HEAD` is `+122 -0`.
+The report-honesty check read the pipeline's harvested copy of this file rather
+than the working tree, and that copy still carried the previous attempt's `1999`,
+so it warned that the claim was lower than the run's `2006`. The working-tree file
+it will harvest from now claims `2006`, which is the count below and the count the
+gate printed. The warning is under-claiming, not over-claiming, and the check that
+matters — claimed not greater than actual — passed.
 
-The run quoted above is over this tree: 2002 `#[test]` functions in the tree, 2002
+The run quoted above is over this tree: 2006 `#[test]` functions in the tree, 2006
 passing, 0 failing.
 
 ## Invariants touched
