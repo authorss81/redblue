@@ -269,10 +269,20 @@ fn edge_a_sleep_no_clock_can_wait_is_a_catchable_error() {
 /// A sleep the clock can perform is not refused. `time.sleep(0)` is the
 /// boundary the refusals above sit against, and refusing it would reject a
 /// program that used to run.
+///
+/// The comparison is the *last statement*, so the run's answer is the `YesNo`
+/// it produced: the sleep was allowed, and it answered `nothing` — the shape
+/// `time.sleep` is documented to have. A sleep that was refused would answer an
+/// error instead, and one that began answering a number would answer
+/// `YesNo(false)` here.
 #[test]
 fn time_sleep_of_zero_seconds_is_accepted() {
-    match eval("set slept to time.sleep(0)") {
-        Ok(_) => {}
+    match eval("set slept to time.sleep(0)\nslept is nothing\n") {
+        Ok(Value::YesNo(true)) => {}
+        Ok(other) => panic!(
+            "a zero-second sleep must be allowed and answer nothing, got {:?}",
+            other
+        ),
         Err(e) => panic!("a zero-second sleep must be allowed, got {:?}", e),
     }
 }
