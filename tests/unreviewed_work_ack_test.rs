@@ -242,16 +242,17 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// phases in flight, and nothing else. Another phase's `resume phase-083: …` is
 /// still unreviewed work with nothing acknowledging it.
 ///
-/// **Two phases are in flight at once**, so there are two prefixes. The
+/// **The in-flight phases**, so there are three prefixes. The
 /// pipeline keeps one recovery branch per phase and re-creates that phase's
 /// delivery commit on top of the current `main` on every round: phase-084's
-/// reviewer-permission work and phase-063's REPL printing trio are both in
-/// this history, both arrived in a delivery commit, and neither delivery
-/// commit's SHA is knowable while the work is being written. A list that named
-/// one of them by SHA went stale the moment the next round landed — which is
-/// exactly what happened to phase-063's first delivery commit
-/// (`ba0a0db`, re-created as `a31d067` on the next round's `main`).
-const DELIVERY_SUBJECT_PREFIXES: &[&str] = &["resume phase-084:", "resume phase-063:"];
+/// reviewer-permission work, phase-063's REPL printing trio, and phase-088's
+/// value assertions are all in this history, arrived in a delivery commit,
+/// and none of their delivery commits' SHAs are knowable while the work is being written.
+const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
+    "resume phase-084:",
+    "resume phase-063:",
+    "resume phase-088:",
+];
 
 /// The reason recorded for the delivery commits this rule acknowledges.
 ///
@@ -259,7 +260,7 @@ const DELIVERY_SUBJECT_PREFIXES: &[&str] = &["resume phase-084:", "resume phase-
 /// carries unreviewed code, and it was deliberately not rewritten — and it
 /// says why this one is keyed on its subject rather than on its SHA.
 ///
-/// One constant for both, because the commits' contents differ from round to
+/// One constant for all, because the commits' contents differ from round to
 /// round: a reason that quoted last round's line counts would be a reason
 /// about a commit that is not here. It names what each phase's delivery
 /// carried instead.
@@ -270,7 +271,8 @@ const DELIVERY_REASON: &str = "resume phase-NNN: adopt preserved work. The deliv
     acknowledgement data in tests/unreviewed_work_ack_test.rs, and the phase's REPORT.md and \
     FINDINGS.md; for phase-063 the REPL printing trio `.pretty`/`.json`/`.table` (src/repl/render.rs \
     is new, plus the three command rows in src/repl/commands.rs, the dispatch and answer methods in \
-    src/repl/mod.rs, the per-command refusal in src/repl/introspect.rs, and the phase's own tests) \
+    src/repl/mod.rs, the per-command refusal in src/repl/introspect.rs, and the phase's own tests); \
+    for phase-088 the reachability-only assertion conversions to value contracts across 10 test suites \
     — Deliberately not rewritten: published history is immutable under AGENTS.md 1.6. Acknowledged by \
     SUBJECT rather than by SHA because the pipeline creates this commit after the run that wrote the \
     work and rebuilds it on the same parent on every round, so a SHA written here would name a commit \
@@ -1839,7 +1841,7 @@ fn edge_a_rebuilt_delivery_commit_is_neither_unreviewed_nor_stale() {
     let previous_round = SHA_A;
     let this_round = SHA_B;
     let log = format!(
-        "{this_round}\tresume phase-084: adopt preserved work\n\
+        "{this_round}\tresume phase-088: adopt preserved work\n\
          {SHA_C}\tci: add cargo fmt --check\n"
     );
     let nothing_pinned: &[(&str, &str)] = &[];
@@ -1899,7 +1901,7 @@ fn edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule() {
 
     // And the rule anchors at the START of the subject: a commit that merely
     // mentions this phase's delivery subject is not the delivery commit.
-    let mentioned = format!("{SHA_C}\tci: not really a resume phase-084: adopt preserved work\n");
+    let mentioned = format!("{SHA_C}\tci: not really a resume phase-088: adopt preserved work\n");
     let result = scan(&mentioned, nothing_pinned).expect("a well-formed fixture log");
     assert!(
         result.delivery.is_empty(),
