@@ -177,6 +177,117 @@ fn scratch_path(name: &str, extension: &str) -> PathBuf {
     path
 }
 
+/// `.reload` re-runs the file the last `:load` ran, so a session iterating on a
+/// file does not have to retype the path. Before this, `.reload` was the unknown
+/// word `reload` and the file ran once.
+#[test]
+fn reload_reruns_the_last_loaded_file_and_reproduces_its_output() {
+    let program = scratch_file("reload", "say \"RELOADED\"\n");
+
+    let s = session(&format!(":load {}\n.reload\n:quit\n", program.display()));
+    let _ = std::fs::remove_file(&program);
+
+    s.assert_exited_ok();
+    assert_eq!(
+        s.count_stdout("RELOADED"),
+        2,
+        "the file's output should appear once for :load and once for .reload\n--- actual ---\n{}",
+        s.stdout
+    );
+    s.assert_stdout_lacks("Unknown command 'reload'");
+}
+
+/// The other half of what `.reload` remembers: a file the last `:run` named is
+/// run again in a VM of its own, not loaded into the session. Reloading it as a
+/// `:load` would quietly change where its bindings land.
+#[test]
+fn reload_reruns_the_last_run_file_and_reproduces_its_output() {
+    let program = scratch_file("reload-run", "say \"RAN AGAIN\"\n");
+
+    let s = session(&format!(":run {}\n.reload\n:quit\n", program.display()));
+    let _ = std::fs::remove_file(&program);
+
+    s.assert_exited_ok();
+    assert_eq!(
+        s.count_stdout("RAN AGAIN"),
+        2,
+        "the file's output should appear once for :run and once for .reload\n--- actual ---\n{}",
+        s.stdout
+    );
+    assert_eq!(
+        s.count_stdout("executed successfully"),
+        2,
+        ":run and .reload are both runs of the file\n--- actual ---\n{}",
+        s.stdout
+    );
+}
+
+/// `.reload` before any file has been named has nothing to run, and says so by
+/// naming the command that gives it one instead of panicking on absent state.
+#[test]
+fn edge_reload_with_no_file_loaded_names_load() {
+    let s = session(".reload\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("nothing to reload")
+        .assert_stdout_contains(":load")
+        .assert_stdout_lacks("panicked");
+}
+
+/// The file `.reload` remembers can be gone by the time it is asked for. That is
+/// an I/O failure with a path in it, not a panic and not a reload of nothing.
+#[test]
+fn edge_reload_after_the_file_was_deleted_names_its_path() {
+    let program = scratch_file("reload-deleted", "say \"placeholder\"\n");
+    let path = program.display().to_string().replace('\\', "\\\\");
+    std::fs::write(&program, format!("files.delete(\"{path}\")\n"))
+        .expect("the self-deleting program should be writable");
+
+    let s = session(&format!(":load {}\n.reload\n:quit\n", program.display()));
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Could not load file:")
+        .assert_stdout_contains(&program.display().to_string())
+        .assert_stdout_lacks("panicked");
+}
+
+/// `.format` at a fresh prompt has no block to format and does nothing. The line
+/// after it still runs, which is what makes it a no-op rather than a crash.
+#[test]
+fn edge_format_with_an_empty_buffer_is_a_no_op() {
+    let s = session(".format\n2 + 3\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("= 5")
+        .assert_stdout_lacks("Error")
+        .assert_stdout_lacks("Usage: :format");
+}
+
+/// The toggle formats a line when it can read it, and leaves it alone when it
+/// cannot. The second half is the one that matters: a formatter error must not
+/// turn a malformed program into a silently accepted one.
+#[test]
+fn edge_format_toggle_leaves_a_line_the_formatter_rejects_to_fail() {
+    let s = session(".format on\nsay \"unclosed\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Format on entry: on.")
+        .assert_stdout_contains("Error")
+        .assert_stdout_lacks("= ");
+}
+
+/// A `.format` argument that is neither `on` nor `off` is a mistake, so it is
+/// reported as one and does not silently change how the next line runs.
+#[test]
+fn edge_format_with_an_invalid_argument_is_refused_and_the_session_goes_on() {
+    let s = session(".format sideways\n2 + 3\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Error: :format takes 'on' or 'off', not 'sideways'.")
+        .assert_stdout_contains("= 5")
+        .assert_stdout_lacks("Format on entry:");
+}
+
 #[test]
 fn repl_runs_commands_and_quits() {
     let s = session(":help\n:vars\n:funcs\n:history\n:quit\n");

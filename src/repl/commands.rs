@@ -29,6 +29,18 @@ pub enum ReplCommand {
     Export(Option<String>),
     Reset,
     Run(String),
+    /// Re-runs the file the last `:load` or `:run` named.
+    ///
+    /// The path was remembered by the command that read it, so a session
+    /// iterating on a file does not have to retype the path between runs.
+    Reload,
+    /// Formats the block this session is holding, or turns formatting every
+    /// entered line on or off.
+    ///
+    /// `Option` because `.format` on its own is a command with a job — format
+    /// the buffer — and `.format on|off` is the same command setting a session
+    /// preference, rather than a command typed incompletely.
+    Format(Option<String>),
     /// Opens the debug sub-REPL on an expression or a file, or — with no
     /// argument — on nothing at all, which is the empty session the sub-REPL
     /// commands are then asked against.
@@ -303,6 +315,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Run(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["reload"],
+        description: "Re-run the file the last :load or :run named",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Reload,
+    },
+    CommandSpec {
+        names: &["format"],
+        description: "Format the held block, or turn format-on-enter on/off",
+        usage: Some("<on|off>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Format(argument),
     },
     CommandSpec {
         names: &["debug"],
@@ -805,6 +833,7 @@ impl ReplCommand {
             | ReplCommand::Watch(value)
             | ReplCommand::Export(Some(value)) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
+            ReplCommand::Format(Some(value)) => Some(value.as_str()),
             _ => None,
         }
     }
@@ -866,6 +895,12 @@ mod tests {
             (":export session.md", "Export", "session.md"),
             (":reset", "Reset", ""),
             (":run prog.rb", "Run", "prog.rb"),
+            (":reload", "Reload", ""),
+            (".reload", "Reload", ""),
+            (":format", "Format", ""),
+            (".format", "Format", ""),
+            (":format on", "Format", "on"),
+            (".format off", "Format", "off"),
             (":debug", "Debug", ""),
             (".debug prog.rb", "Debug", "prog.rb"),
             (".watch x", "Watch", "x"),
@@ -942,6 +977,9 @@ mod tests {
                 // `.export` with a path carries it the same way; with none it
                 // carries nothing, which is the empty argument above.
                 ReplCommand::Export(Some(value)) => value.as_str(),
+                // `.format on|off` carries the word it was given; a bare
+                // `.format` carries nothing and falls to the empty argument.
+                ReplCommand::Format(Some(value)) => value.as_str(),
                 _ => "",
             };
             assert_eq!(

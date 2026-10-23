@@ -603,6 +603,18 @@ fn failure_line(style: &Style, code: &str, error: &Error) -> String {
     )
 }
 
+/// The file the last `:load` or `:run` named, and which way it was run.
+///
+/// The mode is part of what `.reload` has to remember: `:load` binds a file's
+/// declarations into this session, while `:run` runs the file in a VM of its
+/// own. Reloading a `:run` with `:load` would quietly change what the command
+/// did the first time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LastFile {
+    Loaded(String),
+    Ran(String),
+}
+
 pub struct Repl {
     vm: Vm,
     variables: HashMap<String, Value>,
@@ -631,6 +643,14 @@ pub struct Repl {
     /// sequences into a line editor is the editor's problem to measure, not
     /// something to hand it raw.
     prompt_format: String,
+    /// The file `.reload` re-runs, or `None` until a `:load` or `:run` names one.
+    last_file: Option<LastFile>,
+    /// Whether each entered source line is formatted before it runs.
+    ///
+    /// A session preference rather than session state: `:reset` forgets the
+    /// bindings, and a user who turned formatting on did not ask to have it
+    /// turned off by a reset.
+    format_on_entry: bool,
     /// Where each name this session bound was written, for `.type` and `.which`.
     ///
     /// The VM knows *that* a name is bound and the session knows *where* it was
@@ -682,6 +702,8 @@ impl Repl {
             debug_repl: None,
             style: Style::detect(),
             prompt_format: DEFAULT_PROMPT.to_string(),
+            last_file: None,
+            format_on_entry: false,
             definitions: HashMap::new(),
             transcript: Transcript::new(),
             last_output: Vec::new(),
@@ -1043,6 +1065,14 @@ impl Repl {
                 self.run_file(&path);
                 true
             }
+            ReplCommand::Reload => {
+                self.reload_file();
+                true
+            }
+            ReplCommand::Format(argument) => {
+                self.format_command(argument.as_deref());
+                true
+            }
             ReplCommand::Debug(argument) => {
                 for answer in self.enter_debug(&argument) {
                     println!("{}", answer);
@@ -1191,7 +1221,12 @@ impl Repl {
     /// it in, and what stops a stray `end` from swallowing the rest of the
     /// session.
     fn execute_line(&mut self, input: &str) {
-        self.multiline_buffer.push(input.to_string());
+        let input = if self.format_on_entry {
+            Self::format_entered_line(input)
+        } else {
+            input.to_string()
+        };
+        self.multiline_buffer.push(input);
         let buffered = self.multiline_buffer.join("\n");
         if Self::exceeds_block_limits(self.multiline_buffer.len(), buffered.len()) {
             self.report_buffered_block_too_large();
@@ -1208,6 +1243,99 @@ impl Repl {
         // failed and a caret under it; a line the user typed has nothing to add
         // to that and nowhere else to put it.
         let _ = self.execute_code(&code);
+    }
+
+    /// `line` as the formatter writes it, or `line` unchanged when the formatter
+    /// cannot read it.
+    ///
+    /// The fallback is what keeps the toggle from changing what the session
+    /// accepts: a line the formatter rejects is still run exactly as it was
+    /// typed, and so still fails with the same error it would with the toggle
+    /// off. Formatting is a convenience, not a gate.
+    fn format_entered_line(line: &str) -> String {
+        match crate::formatter::format(line) {
+            Ok(formatted) => formatted.trim_end_matches(['\r', '\n']).to_string(),
+            Err(_) => line.to_string(),
+        }
+    }
+
+    /// `.format`: formats the block the session is holding, and prints the
+    /// canonical form without running any of it.
+    ///
+    /// An empty buffer is a no-op rather than an error: at a fresh prompt there
+    /// is simply nothing to format, which is the same answer the command would
+    /// give after a block was run.
+    fn format_buffer(&mut self) -> Result<Option<String>, String> {
+        if self.multiline_buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let code = self.multiline_buffer.join("\n");
+        let formatted = crate::formatter::format(&code)?;
+        let formatted = formatted.trim_end_matches(['\r', '\n']).to_string();
+        self.multiline_buffer = formatted.lines().map(str::to_string).collect();
+        Ok(Some(formatted))
+    }
+
+    /// Dispatches `.format`: no argument formats the held block, `on` and `off`
+    /// set the format-on-enter preference.
+    fn format_command(&mut self, argument: Option<&str>) {
+        match argument {
+            None => match self.format_buffer() {
+                Ok(Some(formatted)) => println!("{formatted}"),
+                Ok(None) => {}
+                Err(error) => println!(
+                    "{}",
+                    self.style.paint(
+                        Paint::Error,
+                        &format!("Error: could not format the buffer: {error}")
+                    )
+                ),
+            },
+            Some(word) if word.eq_ignore_ascii_case("on") => {
+                self.format_on_entry = true;
+                println!("Format on entry: on.");
+            }
+            Some(word) if word.eq_ignore_ascii_case("off") => {
+                self.format_on_entry = false;
+                println!("Format on entry: off.");
+            }
+            Some(word) => println!(
+                "{}",
+                self.style.paint(
+                    Paint::Error,
+                    &format!(
+                        "Error: :format takes 'on' or 'off', not '{word}'. \
+                         Usage: :format [on|off]"
+                    )
+                )
+            ),
+        }
+    }
+
+    /// `.reload`: runs the file the last `:load` or `:run` named, the same way
+    /// that command ran it.
+    ///
+    /// A session that never named a file has nothing to reload, and saying so by
+    /// naming `:load` is the answer: `.reload` is a shortcut through a command
+    /// the user has not used yet, not a command with an empty path.
+    fn reload_file(&mut self) {
+        let Some(last) = self.last_file.clone() else {
+            println!(
+                "{}",
+                self.style.paint(
+                    Paint::Error,
+                    "Error: .reload has nothing to reload: no file has been loaded \
+                     with :load <filename> or :run <filename>."
+                )
+            );
+            return;
+        };
+
+        match last {
+            LastFile::Loaded(path) => self.load_file(&path),
+            LastFile::Ran(path) => self.run_file(&path),
+        }
     }
 
     /// Forgets everything the session has done: its bindings, its last result,
@@ -1243,6 +1371,7 @@ impl Repl {
         self.vm = Vm::new();
         self.variables.clear();
         self.definitions.clear();
+        self.last_file = None;
         self.multiline_buffer.clear();
         self.in_multiline = false;
         self.tutorial_step = None;
@@ -1742,11 +1871,12 @@ impl Repl {
         let source = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(e) => {
-                println!("Could not load file: {}", e);
+                println!("Could not load file: {}: {}", path, e);
                 return;
             }
         };
 
+        self.last_file = Some(LastFile::Loaded(path.to_string()));
         println!("Loaded {} bytes from '{}'.", source.len(), path);
         // The path, not `<session>`: a name this file binds is reported by
         // `.which` as `path:line`, which is a place the user can open. A file
@@ -1866,10 +1996,11 @@ impl Repl {
         (replayed, skipped)
     }
 
-    fn run_file(&self, path: &str) {
+    fn run_file(&mut self, path: &str) {
+        self.last_file = Some(LastFile::Ran(path.to_string()));
         match crate::run_file(path) {
             Ok(_) => println!("File '{}' executed successfully.", path),
-            Err(e) => println!("Error running file: {}", e),
+            Err(e) => println!("Error running file '{}': {}", path, e),
         }
     }
 
@@ -4238,6 +4369,92 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `.format` prints the block the session is holding in canonical form and
+    /// keeps it in the buffer: formatting is not running it.
+    ///
+    /// The buffer is set directly because a complete block typed at a prompt is
+    /// run the moment its `end` arrives; the command has to work on a block the
+    /// session is holding for whatever reason.
+    #[test]
+    fn format_prints_the_canonical_block_without_running_it() {
+        let mut repl = Repl::new();
+        repl.multiline_buffer = vec!["set   x    to   1".to_string()];
+
+        assert!(repl.handle_command(".format"));
+
+        assert_eq!(
+            repl.multiline_buffer,
+            vec!["set x to 1".to_string()],
+            "the buffer is the canonical form, not the text that was typed"
+        );
+        assert_eq!(
+            repl.lookup("x"),
+            None,
+            "formatting printed the block; it did not run it"
+        );
+    }
+
+    /// At a fresh prompt there is no block to format. A no-op is the answer;
+    /// reporting an empty buffer as a failure would make `.format` at the wrong
+    /// moment look like a broken command.
+    #[test]
+    fn edge_format_with_an_empty_buffer_is_a_no_op() {
+        let mut repl = Repl::new();
+
+        assert!(repl.handle_command(".format"));
+
+        assert!(
+            repl.multiline_buffer.is_empty(),
+            "there was no block, so there is still no block: {:?}",
+            repl.multiline_buffer
+        );
+        assert_eq!(repl.lookup("_"), None, "and nothing ran");
+    }
+
+    /// Format-on-enter is a session preference, so a reset leaves it alone. Both
+    /// sides are asserted: an on session keeps formatting, and an off session
+    /// keeps the line exactly as typed.
+    #[test]
+    fn edge_format_on_entry_survives_reset_on_both_sides() {
+        let mut repl = Repl::new();
+
+        assert!(repl.handle_command(".format on"));
+        repl.execute_line("set   x    to   1");
+        assert_eq!(
+            repl.definitions
+                .get("x")
+                .map(|definition| &definition.source),
+            Some(&"set x to 1".to_string()),
+            "with the toggle on, the entered line ran in canonical form"
+        );
+
+        assert!(repl.handle_command(":reset"));
+        assert!(repl.format_on_entry, "a reset is not a preference change");
+        repl.execute_line("set   y    to   2");
+        assert_eq!(
+            repl.definitions
+                .get("y")
+                .map(|definition| &definition.source),
+            Some(&"set y to 2".to_string()),
+            "the preference still applies to lines typed after the reset"
+        );
+
+        assert!(repl.handle_command(".format off"));
+        assert!(repl.handle_command(":reset"));
+        assert!(
+            !repl.format_on_entry,
+            "and an off preference survives it too"
+        );
+        repl.execute_line("set   z    to   3");
+        assert_eq!(
+            repl.definitions
+                .get("z")
+                .map(|definition| &definition.source),
+            Some(&"set   z    to   3".to_string()),
+            "with the toggle off, the line ran exactly as it was typed"
+        );
     }
 
     /// `:vars` is a listing, and a listing whose order changes from one session
