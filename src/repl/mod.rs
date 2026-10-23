@@ -4396,6 +4396,65 @@ mod tests {
         );
     }
 
+    /// A buffer the formatter cannot read is left exactly as it was: `.format`
+    /// reports the failure and never silently rewrites or runs the block.
+    #[test]
+    fn edge_format_rejected_buffer_is_left_unchanged() {
+        let mut repl = Repl::new();
+        repl.multiline_buffer = vec!["set   x    to".to_string()];
+        let before = repl.multiline_buffer.clone();
+
+        assert!(repl.handle_command(".format"));
+
+        assert_eq!(
+            repl.multiline_buffer, before,
+            "a rejected buffer is not rewritten: {:?}",
+            repl.multiline_buffer
+        );
+        assert_eq!(repl.lookup("x"), None, "and nothing was run");
+
+        let r = repl.execute_code("say \"unclosed");
+        assert!(r.is_err(), "a malformed program is still a failure");
+    }
+
+    /// With the toggle off, an entered line runs exactly as typed, spaces and
+    /// all: formatting is opt-in and never rewrites a line the user did not ask
+    /// to have rewritten.
+    #[test]
+    fn edge_format_on_entry_off_executes_the_line_verbatim() {
+        let mut repl = Repl::new();
+
+        repl.execute_line("set   x    to   1");
+
+        assert_eq!(
+            repl.definitions
+                .get("x")
+                .map(|definition| &definition.source),
+            Some(&"set   x    to   1".to_string()),
+            "the line ran verbatim because formatting was off"
+        );
+        assert_eq!(repl.lookup("x"), Some(&Value::Number(1.0)));
+    }
+
+    /// `.reload` with no file ever loaded has no path to re-run and leaves the
+    /// session's remembered file absent rather than panicking on missing state.
+    #[test]
+    fn edge_reload_with_no_file_loaded_leaves_state_absent() {
+        let mut repl = Repl::new();
+
+        assert!(repl.last_file.is_none(), "nothing loaded yet");
+
+        assert!(
+            repl.handle_command(".reload"),
+            ".reload is a recognised command"
+        );
+
+        assert!(
+            repl.last_file.is_none(),
+            "with no file there is still no file to reload"
+        );
+    }
+
     /// At a fresh prompt there is no block to format. A no-op is the answer;
     /// reporting an empty buffer as a failure would make `.format` at the wrong
     /// moment look like a broken command.
