@@ -79,7 +79,7 @@
 //! describing a commit that was no longer there.
 //!
 //! What survives the rebuild is the **subject**, so that is what is pinned
-//! here — [`DELIVERY_SUBJECT_PREFIX`] — and the SHA is resolved out of the
+//! here — [`DELIVERY_SUBJECT_PREFIXES`] — and the SHA is resolved out of the
 //! log at audit time by [`delivery_acknowledgements`]. A rebuilt delivery
 //! commit is therefore neither unreviewed nor stale **by construction**: it
 //! is acknowledged by the rule, and it cannot be stale because no SHA is
@@ -170,7 +170,11 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("b48189aa679e0f4df60f5cd5d10a4894d77bc3f7", "resume phase-059: adopt preserved work. Carries unreviewed code (+1321/-85, 22 files, +897/-61 under src/ - REPL failures are now drawn through `Error::render` against the session buffer: `render_error`, `paint_diagnostic` and `is_caret_line` in src/repl/mod.rs, the cell-accurate drawing (`char_cells`, `display_width`, `render_single`, `render_range`) and its two bounds (`MAX_DRAWN_CELLS`, `MAX_DRAWN_LINES`) in src/error.rs, `Expr::Variable(String, Span)` in src/parser.rs and `name_position` in src/analyzer.rs so the caret lands on the name rather than the statement, plus 16 tests and this phase's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The earlier phase-059 resume it replaces (8389c5a) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     ("373513e4bba22305b6967f524ea02f1daa497532", "resume phase-061: adopt preserved work. Carries unreviewed code (+2247/-22, 7 files, +1907/-22 under src/ - the REPL discoverability work: member completion after a module dot (`complete_dotted`/`split_dotted` and the bare-dot case in src/repl/completer.rs, +127), the `$EDITOR` round trip for `.edit` (`ScratchDir`, `private_scratch_dir`, `write_scratch_file`, `read_edited_block`, `edit_in`, `edit_with`, `execute_code_from` in src/repl/mod.rs), the guided tour `:tutorial` with `:hint` and the `advance_tutorial_step` walk in src/repl/mod.rs, the inline call-signature hint behind the `Hinter` hook (`signature_hint` in src/repl/editor.rs, +184/-5), `stdlib::module_members` in src/stdlib.rs (+14), and the three command rows in src/repl/commands.rs (+41)), plus this phase's REPORT.md and 29 tests). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The earlier phase-061 resume it replaces (0e84349) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     ("0647108eaf64d08d8df2f4a4338f9447ab1b4f35", "resume phase-062: adopt preserved work. Carries unreviewed code (+1231/-22, 5 files, +1231/-22 under src/ - the debug sub-REPL: `.debug` with `.watch`/`.stack`/`.locals`/`.back` (src/repl/debug_repl.rs is new, +514; the five command rows in src/repl/commands.rs, +116/-7; the session-loop wiring in src/repl/mod.rs, +446/-15), the frame-tracking fields `call_stack`, `scope_base` and `frame_writes` on `DebugEvent` in src/debugger.rs (+77) and the matching `Vm` fields and `call_user_function` bookkeeping in src/interpreter.rs (+78)). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
-    ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries no production code: +1/-927 across 2 files, neither under src/ (phase-088's acknowledgement data and its bookkeeping). Acknowledged because the selector is a case-insensitive substring test on `resume phase-` and the subject merely *contains* the phrase; deliberately not rewritten."),
+    ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Selected because the selector is a case-insensitive substring test and this subject contains `resume phase-`. It carries the opposite of what its subject claims: it truncated tests/unreviewed_work_ack_test.rs from 927 lines to the literal text `<the file content updated>` (+1/-927, 1 file), destroying thirteen tests including twelve `edge_*` and the audit they exist to run. The truncation was caused by a tool that wrote a placeholder over the file instead of appending one line. Acknowledged rather than rewritten - AGENTS.md 1.6 forbids rewriting published history - and the content was restored from e008f0b, the last commit that held it, in phase-090."),
+    // Phase 090's delivery commit is rebuilt by the pipeline on every round, so it
+    // is acknowledged by the SUBJECT rule (DELIVERY_SUBJECT_PREFIXES) rather than
+    // by a SHA-pinned entry — see the tests at the end of this file. Not listed
+    // here for the same reason phase-084's delivery commit is not.
     // The commit that carried THIS phase's work into the tree is NOT listed
     // here. It used to be, and the entry went stale on every round: the
     // pipeline creates that commit after the run that wrote the work and
@@ -180,7 +184,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     // commit as unreviewed work, and the old entry as stale.
     //
     // The delivery commit is acknowledged by the RULE below
-    // ([`DELIVERY_SUBJECT_PREFIX`]), which pins the subject the pipeline
+    // ([`DELIVERY_SUBJECT_PREFIXES`]), which pins the subject the pipeline
     // writes rather than a SHA the pipeline has not chosen yet. See
     // `delivery_acknowledgements`.
     //
@@ -228,27 +232,30 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// stale by construction — the audit reported it as stale, and reported the
 /// new commit as unreviewed, on every single round.
 ///
-/// A prefix, not the whole subject, and this phase's, not a general one: the
-/// rule must acknowledge exactly the commit the pipeline creates for THIS
-/// phase, and nothing else. Another phase's `resume phase-083: …` is still
-/// unreviewed work with nothing acknowledging it.
-const DELIVERY_SUBJECT_PREFIX: &str = "resume phase-084:";
+/// Prefixes, not whole subjects, and only for phases whose delivery commit is
+/// still rebuilt around `HEAD`: the rule must acknowledge exactly the commits
+/// the pipeline creates for those phases, and nothing else. Another phase's
+/// `resume phase-083: …` is still unreviewed work with nothing acknowledging
+/// it.
+///
+/// `phase-084` was the phase that introduced the rule; its delivery commit is
+/// still in `HEAD`'s ancestry. `phase-090` is the phase that owns this file
+/// now, and its delivery commit is rebuilt the same way, so both prefixes are
+/// kept rather than replacing one with the other.
+const DELIVERY_SUBJECT_PREFIXES: &[&str] = &["resume phase-084:", "resume phase-090:"];
 
-/// The reason recorded for the delivery commit this rule acknowledges.
+/// The reason recorded for the delivery commits this rule acknowledges.
 ///
 /// It says the two things every entry in [`ACKNOWLEDGED`] says — the commit
 /// carries unreviewed code, and it was deliberately not rewritten — and it
-/// says why this one is keyed on its subject rather than on its SHA.
-const DELIVERY_REASON: &str = "resume phase-084: adopt preserved work. The delivery commit of \
-    this phase: it carries the unreviewed code this phase shipped — the repository-root \
-    opencode.json that gives the reviewer its denied edit and bash permissions, the phase's \
-    own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
-    acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and \
-    FINDINGS.md) — none of it under src/. Deliberately not rewritten: published history is \
-    immutable under AGENTS.md 1.6. Acknowledged by SUBJECT rather than by SHA because the \
-    pipeline creates this commit after the run that wrote the work and rebuilds it on the same \
-    parent on every round, so a SHA written here would name a commit this history does not \
-    contain on the next round.";
+/// says why these are keyed on their subject rather than on their SHA.
+const DELIVERY_REASON: &str = "resume phase-NNN: adopt preserved work. The delivery commit of \
+    a phase whose work is being adopted: it carries the unreviewed code that phase shipped, \
+    and the reviewer never saw it. Deliberately not rewritten: published history is immutable \
+    under AGENTS.md 1.6. Acknowledged by SUBJECT rather than by SHA because the pipeline \
+    creates this commit after the run that wrote the work and rebuilds it on the same parent \
+    on every round, so a SHA written here would name a commit this history does not contain on \
+    the next round.";
 
 /// The commits measured on a complete history of `HEAD`, and the shape each one
 /// was found under.
@@ -259,7 +266,7 @@ const DELIVERY_REASON: &str = "resume phase-084: adopt preserved work. The deliv
 ///
 /// The delivery commit of the phase that owns this file is DELIBERATELY not
 /// on this list, though it IS acknowledged — by the rule in
-/// [`DELIVERY_SUBJECT_PREFIX`], not by an entry. The two lists answer
+/// [`DELIVERY_SUBJECT_PREFIXES`], not by an entry. The two lists answer
 /// different questions. `ACKNOWLEDGED` says "this commit is in the log and
 /// carries unreviewed work", and the audit needs an acknowledgement for every
 /// such commit — including the one this phase's own work arrived in, which the
@@ -801,10 +808,12 @@ fn is_unreviewed_subject(subject: &str) -> bool {
 
 /// Is this the delivery commit of the phase that owns this file?
 ///
-/// A prefix test on [`DELIVERY_SUBJECT_PREFIX`], so it matches the two shapes
+/// A prefix test on [`DELIVERY_SUBJECT_PREFIXES`], so it matches the two shapes
 /// the pipeline writes for this phase and nothing else.
 fn is_delivery_subject(subject: &str) -> bool {
-    subject.starts_with(DELIVERY_SUBJECT_PREFIX)
+    DELIVERY_SUBJECT_PREFIXES
+        .iter()
+        .any(|prefix| subject.starts_with(prefix))
 }
 
 /// The delivery commits in `log`, resolved by subject, each with the reason it
@@ -1897,7 +1906,7 @@ fn edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry() {
     assert!(
         !delivery.is_empty(),
         "this history must carry a delivery commit whose subject begins with \
-         {DELIVERY_SUBJECT_PREFIX:?}. If the pipeline stopped writing that subject, the rule \
+         {DELIVERY_SUBJECT_PREFIXES:?}. If the pipeline stopped writing that subject, the rule \
          has to be re-pointed at the shape it writes now — silently, this history's delivery \
          commit would be reported as unreviewed work."
     );
