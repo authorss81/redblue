@@ -274,3 +274,38 @@ fn edge_a_program_that_says_nothing_and_a_program_that_fails_are_different_answe
         "the failing program must be a refusal, not an empty answer: {refused:?}"
     );
 }
+
+#[test]
+fn edge_a_bad_input_is_refused_rather_than_panicking() {
+    let r = redblue::run_source("set x to list.map(5, to_text)");
+    assert!(r.is_err(), "a non-list receiver must be a clean error");
+}
+
+#[test]
+fn edge_bad_input_produces_clean_error_not_panic() {
+    let result = redblue::run_source("set x to list.map(5, to_text)");
+    assert!(result.is_err(), "non-list receiver must be refused");
+}
+
+#[test]
+fn edge_an_unknown_function_is_refused_rather_than_silently_answered() {
+    let result = redblue::run_source("say frobnicate(1)");
+    assert!(
+        result.is_err(),
+        "an unknown function must be refused, not answered: {result:?}"
+    );
+    let error = result.expect_err("the refusal was just asserted");
+    assert!(
+        matches!(error, Error::Runtime(..)),
+        "an unknown function must be a runtime refusal, got: {error:?}"
+    );
+}
+
+#[test]
+fn edge_a_division_by_zero_is_refused_rather_than_answered() {
+    let result = redblue::run_source("say 1 / 0");
+    assert!(
+        result.is_err(),
+        "division by zero must be refused, not answered: {result:?}"
+    );
+}

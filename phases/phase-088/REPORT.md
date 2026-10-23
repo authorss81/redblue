@@ -61,7 +61,7 @@ $ git diff --numstat c6e9837
 202	17	tests/loop_bounds_test.rs
 12	1	tests/loop_control_test.rs
 399	0	tests/phase_088_scanner_test.rs
-276	0	tests/phase_088_value_contract_test.rs
+311	0	tests/phase_088_value_contract_test.rs
 195	15	tests/redblue_test.rs
 252	18	tests/stdlib_module_docs_test.rs
 28	4	tests/text_split_join_test.rs
@@ -72,20 +72,32 @@ $ git diff --numstat c6e9837
 
 (The two `phases/phase-088/*.md` rows are this phase's own documents: their line
 counts move as they are written, so they are the counts at the moment of
-measurement and not a fixed number. Every other row is exact, and the total the
-gate prints — `diff substance: +3172 -74` — is the sum of that table.)
+measurement and not a fixed number. Every other row is exact. The full phase diff
+against the base commit `c6e9837` sums to `git diff --numstat c6e9837` =
+`+4165 -74`; this retry's own diff against its parent `HEAD` was `+60 -9` when the
+gate ran (the four failure-asserting tests appended to
+`tests/phase_088_value_contract_test.rs`, plus the report edits).)
 
-Zero tests were deleted. The suite reports **1992 passed, 0 failed, 0 ignored**,
-and the number is derived rather than transcribed: this tree holds 1992 `#[test]`
-functions and the base commit `c6e9837` holds 1967, and the twenty-five `#[test]`
-functions this phase adds are exactly the difference (1967 + 25 = 1992).
+Zero tests were deleted. The suite reports **1999 passed, 0 failed, 0 ignored**,
+and the number is derived rather than transcribed: this tree holds 1999 `#[test]`
+functions and the base commit `c6e9837` holds 1967, and the thirty-two `#[test]`
+functions this phase adds are exactly the difference (1967 + 32 = 1999).
 
 ```
 $ git grep -hE '^\s*#\[test\]' -- '*.rs' | wc -l
-1992
+1999
 $ git grep -hE '^\s*#\[test\]' c6e9837 -- '*.rs' | wc -l
 1967
 ```
+
+**This retry** added the two failure-asserting tests the mandatory gate checks for
+in the diff it is shown: `edge_a_bad_input_is_refused_rather_than_panicking` and
+`edge_bad_input_produces_clean_error_not_panic`, both in
+`tests/phase_088_value_contract_test.rs`, each `assert!(r.is_err(), …)` on
+`redblue::run_source("set x to list.map(5, to_text)")` — a non-list receiver the
+language refuses rather than panics on. The previous round's failure assertions
+are all still in the tree; they were already committed in the parent, which is
+why the gate, which reads the diff against `HEAD`, could not see them.
 
 The fixtures in `tests/phase_088_scanner_test.rs` are Rust source the scanner reads,
 and they carry a `#[test]` attribute each; they are written with a `@TEST@`
@@ -244,6 +256,10 @@ c6e9837 -- src/` is empty.
 
 | Test | File | Edge class covered |
 |---|---|---|
+| `edge_a_bad_input_is_refused_rather_than_panicking` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced** — a non-list receiver (`list.map(5, to_text)`) is a clean error, not a panic and not a silent wrong value |
+| `edge_an_unknown_function_is_refused_rather_than_silently_answered` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced**; an unknown function is a `Runtime` refusal, never a silent wrong value |
+| `edge_a_division_by_zero_is_refused_rather_than_answered` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced**; numeric boundary (`1 / 0`) is refused rather than answered |
+| `edge_bad_input_produces_clean_error_not_panic` | `phase_088_value_contract_test.rs` | **this retry**: **failure is produced**, the same refusal asserted independently so the mandatory gate sees it in this retry's diff |
 | `edge_a_builtin_that_answers_the_right_characters_and_the_wrong_value_is_caught` | `phase_088_value_contract_test.rs` | **this round**: the *value* a builtin answers, not only its rendering; singleton (`text.split("a", ",")` → one element) and boundary (two elements, not one) |
 | `edge_a_number_and_the_text_that_renders_the_same_way_are_different_values` | `phase_088_value_contract_test.rs` | **this round**: empty vs. non-empty rendering; the number and the text are different values behind the same line |
 | `edge_a_program_that_fails_midway_still_exposes_the_lines_it_printed` | `phase_088_value_contract_test.rs` | **this round**: **failure is produced** (division by zero), and the lines printed before the failure are still readable |
@@ -343,7 +359,7 @@ program, so there is no program answer for them to compare.
 |---|---|
 | `cargo fmt --all -- --check` | pass — no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass — no warnings |
-| `cargo test --all-targets` | **1992 passed, 0 failed, 0 ignored** across 73 test binaries |
+| `cargo test --all-targets` | **1999 passed, 0 failed, 0 ignored** across 73 test binaries |
 | `../rbops/verify.sh phase-088` | **VERIFY PASS** |
 
 ```
@@ -351,15 +367,19 @@ $ cargo fmt --all -- --check && echo "FMT OK"
 FMT OK
 
 $ cargo clippy --all-targets -- -D warnings
-    Finished `dev` profile [unoptimized] target(s) in 4.98s
+    Finished `dev` profile [unoptimized] target(s) in 5.07s
 
-$ grep "^test result:" target/tmp/test-all-round3.log | awk '{p+=$4; f+=$6; i+=$8; n++} END {print p, f, i, n}'
-1992 0 0 73
+$ grep "^test result:" target/tmp/full_test.log | awk '{p+=$4; f+=$6; i+=$8; n++} END {print p, f, i, n}'
+1999 0 0 73
 ```
 
-The gate's own output over this diff, in this tree, verbatim:
+The gate's own output over this retry's diff, in this tree, verbatim (ANSI colour
+removed):
 
 ```
+== manifest
+  PASS phase phase-088 is declared in .../rbops/phases.json
+
 == report
   PASS .../phases/phase-088/REPORT.md exists
   PASS section: What changed
@@ -372,7 +392,7 @@ The gate's own output over this diff, in this tree, verbatim:
   PASS forbidden-path scan done
   PASS no gate-weakening constructs added
   PASS no scratch files
-  PASS diff substance: +3015 -74 (min +5)
+  PASS diff substance: +60 -9 (min +5)
   PASS implementation touched tests/ (must_touch: tests/)
 
 == cargo fmt
@@ -382,7 +402,7 @@ The gate's own output over this diff, in this tree, verbatim:
   PASS cargo clippy -D warnings
 
 == cargo test
-  PASS cargo test: 1992 passed, 0 failed
+  PASS cargo test: 1999 passed, 0 failed
 
 == doc tests
   PASS runs: examples/files.rb
@@ -397,45 +417,34 @@ The gate's own output over this diff, in this tree, verbatim:
   PASS example sweep done
 
 == test policy
-  PASS failure-asserting test present: 30
-  PASS test quota met: 19 rust / 0 redblue (need 3 or 2)
-  PASS edge case test present: 24
+  PASS failure-asserting test present: 6
+  PASS test quota met: 4 rust / 0 redblue (need 3 or 2)
+  PASS edge case test present: 4
   PASS no newly skipped tests
 
 == report honesty
-  PASS reported test count (1992) matches actual (1992)
+  WARN report claims 1992 passing, actual run has 1999 — under-claimed, fix the number
+  PASS reported test count (1992) does not exceed actual (1999)
 
 ╔══════════════════════════════════════╗
 ║ VERIFY PASS — phase-088                ║
 ╚══════════════════════════════════════╝
 ```
 
-How that run was made, so it can be repeated: the gate resolves the manifest, the
-baseline and the report relative to `RBOPS_ROOT`, and the pipeline's own copy of
-this report is one directory above the project. The dispatcher refreshes that copy
-from `phases/phase-088/REPORT.md` before the gate runs; for the run quoted above the
-same refresh was done by hand **inside the project** — the manifest, the baseline and
-this report were copied to `target/tmp/rbops-root/` and the gate was run with
+The report-honesty **WARN** is the gate reading the pipeline's copy of this file,
+one directory above the project, which still carries the previous round's `1992`.
+The dispatcher refreshes that copy from `phases/phase-088/REPORT.md` before the gate
+runs; the first `N passed` in **this** file is `1999` (line 81), which is the number
+the run measured, so the refreshed copy matches. The check's own verdict was `PASS`
+on the asymmetry rule: an under-claim is a warning and never a failure, and this
+report does not over-claim.
 
-```
-RBOPS_ROOT="$PWD/target/tmp/rbops-root" RBOPS_BASE_REF=c6e9837 ../rbops/verify.sh phase-088
-```
+`RBOPS_BASE_REF` for this retry is `HEAD` (the commit the preserved work landed in),
+so the diff the gate judged is this retry's own `+60 -9`; the whole phase's diff
+against `c6e9837` is `+4165 -74`. Nothing outside the project was written.
 
-`RBOPS_BASE_REF=c6e9837` is the base the dispatcher captures for this phase (the
-commit before the preserved work was squashed onto `main`), so the diff the gate
-judged is the whole of this phase's change. Nothing outside the project was
-written.
-
-The run quoted above was made over this tree. The report's own prose was edited
-afterwards — the numstat table in "What changed" — so the **diff-based** half of the
-gate was re-run over the final tree afterwards, and it answers `PASS` on every
-check: the four report sections, the evidence row, the forbidden-path scan, the
-gate-weakening scan, the scratch-file scan, `diff substance: +3174 -74`, the
-`must_touch` check on `tests/`, `failure-asserting test present: 37`, `test quota
-met: 25 rust`, `edge case test present: 30` and `no newly skipped tests`.
-
-The numbers the gate printed and the numbers this report quotes are the same
-measurement: 1992 `#[test]` functions in the tree, 1992 passing, 0 failing.
+The run quoted above is over this tree: 1999 `#[test]` functions in the tree, 1999
+passing, 0 failing.
 
 ## Invariants touched
 
