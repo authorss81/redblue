@@ -70,6 +70,21 @@ pub enum ReplCommand {
     /// The argument is an *expression*, not a name: `.type [1, 2]` is a question
     /// about a value that no session has ever bound.
     Type(String),
+    /// Prints a value as an indented structure — one level of indentation per
+    /// level of nesting.
+    ///
+    /// The argument is an *expression*, like [`ReplCommand::Type`]'s: what is
+    /// being asked about is a value, and a value need not be one the session
+    /// ever bound.
+    Pretty(String),
+    /// Prints a value as JSON.
+    ///
+    /// The same value the language's own `json.stringify` writes, so what the
+    /// REPL shows and what a program can produce are one document.
+    Json(String),
+    /// Prints a list of records as aligned columns, one header row naming the
+    /// keys and one row per record.
+    Table(String),
     /// Lists what a module exposes, from the registry rather than from prose.
     Doc(String),
     /// Says where a name comes from: a builtin, this session, a module member, or
@@ -400,6 +415,30 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Type(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["pretty"],
+        description: "Print a value as an indented structure",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Pretty(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["json"],
+        description: "Print a value as JSON",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Json(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["table"],
+        description: "Print a list of records as aligned columns",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Table(argument.unwrap_or_default()),
     },
     CommandSpec {
         names: &["doc"],
@@ -748,6 +787,9 @@ impl ReplCommand {
             | ReplCommand::Run(value)
             | ReplCommand::Inspect(value)
             | ReplCommand::Type(value)
+            | ReplCommand::Pretty(value)
+            | ReplCommand::Json(value)
+            | ReplCommand::Table(value)
             | ReplCommand::Doc(value)
             | ReplCommand::Which(value)
             | ReplCommand::Sighelp(value)
@@ -848,6 +890,12 @@ mod tests {
             (":i x", "Inspect", "x"),
             (":ast 1 + 1", "Ast", "1 + 1"),
             (":tokens 1 + 1", "Tokens", "1 + 1"),
+            (".pretty [1, 2]", "Pretty", "[1, 2]"),
+            (":pretty { a: 1 }", "Pretty", "{ a: 1 }"),
+            (".json rows", "Json", "rows"),
+            (":json { a: 1 }", "Json", "{ a: 1 }"),
+            (".table rows", "Table", "rows"),
+            (":table people", "Table", "people"),
             (":example", "Example", ""),
             (":examples", "Example", ""),
             // `:prompt` is the one command whose argument may be left out and the
@@ -882,6 +930,9 @@ mod tests {
                 | ReplCommand::Break(value)
                 | ReplCommand::Debug(value)
                 | ReplCommand::Watch(value)
+                | ReplCommand::Pretty(value)
+                | ReplCommand::Json(value)
+                | ReplCommand::Table(value)
                 | ReplCommand::Delete(value) => value.as_str(),
                 // The two `Prompt` shapes are told apart by the variant itself:
                 // `Prompt(None)` is a command that restores the default and falls
@@ -899,6 +950,55 @@ mod tests {
                 input, argument
             );
         }
+    }
+
+    /// The three ways a value can be printed, as the words a user types them.
+    ///
+    /// `.pretty`, `.json` and `.table` did not parse at all before this phase:
+    /// the REPL answered "Unknown command 'pretty'" to each of them, and every
+    /// value it printed went through the one single-line `Display` — so a
+    /// two-hundred-element list, a nested record and a list of records all came
+    /// out as one unreadable line, with no way to ask for JSON or for columns.
+    ///
+    /// The argument is the whole remainder, like every other command's: the
+    /// expression is a question, and a question is rarely one word.
+    #[test]
+    fn the_three_printing_commands_parse() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            (".pretty [1, 2]", "Pretty", "[1, 2]"),
+            (":pretty { a: 1 }", "Pretty", "{ a: 1 }"),
+            (".json rows", "Json", "rows"),
+            (":json { a: 1 }", "Json", "{ a: 1 }"),
+            (".table rows", "Table", "rows"),
+            (":table people", "Table", "people"),
+        ];
+
+        for (input, expected, argument) in cases {
+            let parsed = ReplCommand::parse(input);
+            let rendered = format!("{:?}", parsed);
+            let variant = rendered.split(['(', ' ']).next().unwrap_or_default();
+            assert_eq!(
+                variant, expected,
+                "parsing {:?} should give {}",
+                input, expected
+            );
+            assert_eq!(
+                parsed.argument_text(),
+                Some(argument),
+                "parsing {:?} should carry the argument {:?}",
+                input,
+                argument
+            );
+        }
+
+        assert_eq!(
+            ReplCommand::parse(".pretty"),
+            ReplCommand::MissingArgument {
+                command: "pretty",
+                usage: "<expression>"
+            },
+            "a printing command with nothing to print is a command missing its argument"
+        );
     }
 
     /// The four questions the REPL could not answer about code, as commands.

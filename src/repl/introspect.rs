@@ -317,24 +317,76 @@ fn shape_of(value: &Value) -> String {
 /// `x + 1`, `files.read("a.rb")`. Anything else is named back to the user, with
 /// the keyword they wrote, rather than being run and then reported about.
 pub fn expression_of(program: &Program) -> Result<&Expr, String> {
+    expression_of_for(program, ":type", Wording::Described)
+}
+
+/// The wording a refusal uses for the expression it wants.
+///
+/// Two, because the commands are not all the same command: `:type`
+/// *describes* a value and has said so in every refusal it has ever given,
+/// and the printing commands *show* one.
+///
+/// `:type`'s wording is not this module's to change. It is the text an
+/// existing command answers with, and a command that changes what it says
+/// without saying so is a command that changed under the user — so the
+/// wording is pinned by a test, and the printing commands bring their own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Wording {
+    /// `:type`'s own wording: the expression you want *described*.
+    Described,
+    /// The printing commands' wording: the expression you want *shown*.
+    Shown,
+}
+
+impl Wording {
+    /// The verb in its past participle: "the expression you want described".
+    fn participle(self) -> &'static str {
+        match self {
+            Wording::Described => "described",
+            Wording::Shown => "shown",
+        }
+    }
+
+    /// The verb in its infinitive: "was given nothing to describe".
+    fn infinitive(self) -> &'static str {
+        match self {
+            Wording::Described => "describe",
+            Wording::Shown => "show",
+        }
+    }
+}
+
+/// The one expression a command will evaluate, or why it refuses the program.
+///
+/// [`expression_of`] with the command's own name in the refusal, so a user who
+/// typed `.pretty` is not told about `:type` — the same rule, told to the
+/// person who has to read it.
+pub fn expression_of_for<'a>(
+    program: &'a Program,
+    command: &str,
+    wording: Wording,
+) -> Result<&'a Expr, String> {
     match program.statements.as_slice() {
         [Stmt {
             statement: Statement::Expr(expr),
             ..
         }] => Ok(expr),
         [Stmt { statement, .. }] => Err(format!(
-            "Error: :type is a question about a value, and `{}` is a statement. \
-             Type the expression you want described, or run the statement as a line.",
-            statement_keyword(statement)
+            "Error: {command} is a question about a value, and `{}` is a statement. \
+             Type the expression you want {}, or run the statement as a line.",
+            statement_keyword(statement),
+            wording.participle(),
         )),
-        [] => Err(
-            "Error: :type was given nothing to describe. Type the expression you want described."
-                .to_string(),
-        ),
+        [] => Err(format!(
+            "Error: {command} was given nothing to {}. Type the expression you want {}.",
+            wording.infinitive(),
+            wording.participle(),
+        )),
         statements => Err(format!(
-            "Error: :type is a question about one value, and this is {} statement(s). \
-             Type the expression you want described, or run the lines as a program.",
-            statements.len()
+            "Error: {command} is a question about one value, and this is {} statement(s). \
+             Type the expression you want {}, or run the lines as a program.",
+            statements.len(),
+            wording.participle(),
         )),
     }
 }
@@ -663,8 +715,8 @@ fn receiver_name(expression: &Expr) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        calls_in, calls_in_body, classify, doc_lines, expression_of, sighelp_lines, type_lines,
-        which_lines, Call, Definition, Origin,
+        calls_in, calls_in_body, classify, doc_lines, expression_of, expression_of_for,
+        sighelp_lines, type_lines, which_lines, Call, Definition, Origin, Wording,
     };
     use crate::parser::{Parser, Stmt};
     use crate::stdlib;
@@ -857,6 +909,68 @@ mod tests {
         assert!(
             expression_of(&program("")).is_err(),
             "an empty program is not an expression, it is nothing to describe"
+        );
+    }
+
+    /// `:type`'s refusal is the text an existing command answers with, and it
+    /// is pinned here word for word.
+    ///
+    /// A wording change to an existing command is a change to what every user
+    /// of that command sees, and it is not a change the language notices: the
+    /// refusal is a string, and a string that changes shape changes nothing
+    /// that a test would fail on. So the three refusals are written out here,
+    /// and a command that wants different words has to say so in the open.
+    #[test]
+    fn edge_the_type_refusal_keeps_the_wording_it_has_always_had() {
+        let refusal = expression_of(&program("set x to 1"))
+            .expect_err("a statement is not a question about a value");
+        assert_eq!(
+            refusal,
+            "Error: :type is a question about a value, and `set` is a statement. \
+             Type the expression you want described, or run the statement as a line.",
+            ":type's refusal for a statement is unchanged"
+        );
+
+        let refusal =
+            expression_of(&program("")).expect_err("an empty program is not an expression");
+        assert_eq!(
+            refusal,
+            "Error: :type was given nothing to describe. \
+             Type the expression you want described.",
+            ":type's refusal for nothing at all is unchanged"
+        );
+
+        let refusal = expression_of(&program("set x to 1\nset y to 2"))
+            .expect_err("two statements are two values");
+        assert_eq!(
+            refusal,
+            "Error: :type is a question about one value, and this is 2 statement(s). \
+             Type the expression you want described, or run the lines as a program.",
+            ":type's refusal for a program is unchanged"
+        );
+    }
+
+    /// The printing commands are not `:type`, and their refusal says so — both
+    /// in the command it names and in the words it uses.
+    #[test]
+    fn edge_a_printing_command_refusal_names_its_own_command_and_its_own_words() {
+        let refusal = expression_of_for(&program("set x to 1"), ".pretty", Wording::Shown)
+            .expect_err("a statement is not a question about a value");
+
+        assert!(
+            refusal.contains(".pretty"),
+            "the refusal names the command the user typed: {}",
+            refusal
+        );
+        assert!(
+            refusal.contains("shown"),
+            "and the printing commands show, where :type describes: {}",
+            refusal
+        );
+        assert!(
+            !refusal.contains(":type"),
+            "and it does not mention another command: {}",
+            refusal
         );
     }
 
