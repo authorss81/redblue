@@ -171,6 +171,13 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("373513e4bba22305b6967f524ea02f1daa497532", "resume phase-061: adopt preserved work. Carries unreviewed code (+2247/-22, 7 files, +1907/-22 under src/ - the REPL discoverability work: member completion after a module dot (`complete_dotted`/`split_dotted` and the bare-dot case in src/repl/completer.rs, +127), the `$EDITOR` round trip for `.edit` (`ScratchDir`, `private_scratch_dir`, `write_scratch_file`, `read_edited_block`, `edit_in`, `edit_with`, `execute_code_from` in src/repl/mod.rs), the guided tour `:tutorial` with `:hint` and the `advance_tutorial_step` walk in src/repl/mod.rs, the inline call-signature hint behind the `Hinter` hook (`signature_hint` in src/repl/editor.rs, +184/-5), `stdlib::module_members` in src/stdlib.rs (+14), and the three command rows in src/repl/commands.rs (+41)), plus this phase's REPORT.md and 29 tests). Deliberately not rewritten; kept so HEAD's ancestry stays intact. The earlier phase-061 resume it replaces (0e84349) is not an ancestor of HEAD, so it is not listed: `scan` reports an acknowledgement naming a commit HEAD does not contain as stale, and a stale entry is a failure."),
     ("0647108eaf64d08d8df2f4a4338f9447ab1b4f35", "resume phase-062: adopt preserved work. Carries unreviewed code (+1231/-22, 5 files, +1231/-22 under src/ - the debug sub-REPL: `.debug` with `.watch`/`.stack`/`.locals`/`.back` (src/repl/debug_repl.rs is new, +514; the five command rows in src/repl/commands.rs, +116/-7; the session-loop wiring in src/repl/mod.rs, +446/-15), the frame-tracking fields `call_stack`, `scope_base` and `frame_writes` on `DebugEvent` in src/debugger.rs (+77) and the matching `Vm` fields and `call_user_function` bookkeeping in src/interpreter.rs (+78)). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries no production code: +1/-927 across 2 files, neither under src/ (phase-088's acknowledgement data and its bookkeeping). Acknowledged because the selector is a case-insensitive substring test on `resume phase-` and the subject merely *contains* the phrase; deliberately not rewritten."),
+    // The delivery commit of the phase that owned this file before this one.
+    // It was acknowledged by the delivery RULE while phase-084 owned the file;
+    // the rule now points at phase-088, the phase that owns it, so this commit
+    // is acknowledged here by SHA instead. It is an ancestor of HEAD and stays
+    // one, so the entry cannot go stale the way a re-created delivery commit's
+    // SHA would.
+    ("1d73e8ce1d40bcbefc4fc736a3c13f81b69e5f21", "resume phase-084: adopt preserved work. Carries unreviewed code (+7103/-55, 7 files, +0/-0 under src/ - the repository-root opencode.json, phase-084's own suites tests/agent_permissions_test.rs and tests/report_markdown_test.rs, the checkpoint-ancestry audit in tests/checkpoint_ancestry_test.rs, the acknowledgement data in tests/unreviewed_work_ack_test.rs, and phase-084's REPORT.md and FINDINGS.md). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     // The commit that carried THIS phase's work into the tree is NOT listed
     // here. It used to be, and the entry went stale on every round: the
     // pipeline creates that commit after the run that wrote the work and
@@ -232,23 +239,27 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// rule must acknowledge exactly the commit the pipeline creates for THIS
 /// phase, and nothing else. Another phase's `resume phase-083: …` is still
 /// unreviewed work with nothing acknowledging it.
-const DELIVERY_SUBJECT_PREFIX: &str = "resume phase-084:";
+const DELIVERY_SUBJECT_PREFIX: &str = "resume phase-088:";
 
 /// The reason recorded for the delivery commit this rule acknowledges.
 ///
 /// It says the two things every entry in [`ACKNOWLEDGED`] says — the commit
 /// carries unreviewed code, and it was deliberately not rewritten — and it
 /// says why this one is keyed on its subject rather than on its SHA.
-const DELIVERY_REASON: &str = "resume phase-084: adopt preserved work. The delivery commit of \
-    this phase: it carries the unreviewed code this phase shipped — the repository-root \
-    opencode.json that gives the reviewer its denied edit and bash permissions, the phase's \
-    own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
-    acknowledgement data in tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md and \
-    FINDINGS.md) — none of it under src/. Deliberately not rewritten: published history is \
-    immutable under AGENTS.md 1.6. Acknowledged by SUBJECT rather than by SHA because the \
-    pipeline creates this commit after the run that wrote the work and rebuilds it on the same \
-    parent on every round, so a SHA written here would name a commit this history does not \
-    contain on the next round.";
+const DELIVERY_REASON: &str = "resume phase-088: adopt preserved work. The delivery commit of \
+    this phase: it carries the unreviewed code this phase shipped — the phase's own suites \
+    (tests/stdlib_module_docs_test.rs, tests/loop_bounds_test.rs, tests/loop_control_test.rs, \
+    tests/time_builtin_test.rs, tests/text_split_join_test.rs, tests/redblue_test.rs, \
+    tests/unless_test.rs, tests/failure_channel_test.rs, tests/phase_088_scanner_test.rs and \
+    tests/phase_088_value_contract_test.rs — \
+    where the reachability-only assertions became assertions on the value the program answered, \
+    and where the phase's own scanner gained a test of its own), the acknowledgement data in \
+    tests/unreviewed_work_ack_test.rs, and this phase's REPORT.md, FINDINGS.md, scan.py and \
+    scanned-files.txt) — none of it under src/. Deliberately not \
+    rewritten: published history is immutable under AGENTS.md 1.6. Acknowledged by SUBJECT rather \
+    than by SHA because the pipeline creates this commit after the run that wrote the work and \
+    rebuilds it on the same parent on every round, so a SHA written here would name a commit this \
+    history does not contain on the next round.";
 
 /// The commits measured on a complete history of `HEAD`, and the shape each one
 /// was found under.
@@ -1807,7 +1818,7 @@ fn edge_a_rebuilt_delivery_commit_is_neither_unreviewed_nor_stale() {
     let previous_round = SHA_A;
     let this_round = SHA_B;
     let log = format!(
-        "{this_round}\tresume phase-084: adopt preserved work\n\
+        "{this_round}\tresume phase-088: adopt preserved work\n\
          {SHA_C}\tci: add cargo fmt --check\n"
     );
     let nothing_pinned: &[(&str, &str)] = &[];
@@ -1867,7 +1878,7 @@ fn edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule() {
 
     // And the rule anchors at the START of the subject: a commit that merely
     // mentions this phase's delivery subject is not the delivery commit.
-    let mentioned = format!("{SHA_C}\tci: not really a resume phase-084: adopt preserved work\n");
+    let mentioned = format!("{SHA_C}\tci: not really a resume phase-088: adopt preserved work\n");
     let result = scan(&mentioned, nothing_pinned).expect("a well-formed fixture log");
     assert!(
         result.delivery.is_empty(),

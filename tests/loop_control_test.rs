@@ -482,6 +482,11 @@ fn edge_skip_on_the_final_iteration_of_a_for_each() {
 /// The iteration budget: a `break` must stop the loop rather than run it to the
 /// cap, so a loop with a hundred turns and a cap of two succeeds. This is the
 /// accounting rule — a broken-out-of turn is charged, and no more.
+///
+/// The program ends on the variable the body changes, so the answer is the
+/// number of turns the loop actually took: one. A `break` that was ignored
+/// would leave the loop running to the cap — or to the end of the list — and
+/// the count would be more than one.
 #[test]
 fn edge_a_break_stops_the_loop_before_the_iteration_cap() {
     let source = concat!(
@@ -490,14 +495,20 @@ fn edge_a_break_stops_the_loop_before_the_iteration_cap() {
         "    set n to n + 1\n",
         "    break\n",
         "end\n",
+        "n\n",
     );
 
-    run_capped(source, 2).unwrap_or_else(|error| {
+    let value = run_capped(source, 2).unwrap_or_else(|error| {
         panic!(
             "a break must end the loop instead of spending the whole cap: {:?}",
             error
         )
     });
+    assert_eq!(
+        value,
+        Value::Number(1.0),
+        "the break must stop the loop after its first turn, not after the cap"
+    );
 }
 
 /// The same rule from the other side: a `skip` is a turn like any other, so
