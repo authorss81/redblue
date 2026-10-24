@@ -920,6 +920,16 @@ impl BytecodeVm {
         self.echo = echo;
     }
 
+    /// Seeds a binding the program may read without running anything first.
+    ///
+    /// A REPL session's names live in its tree-walking VM, and `.compare` has to
+    /// let the bytecode side read the same expression. This copies one of them
+    /// in, so neither VM reads the other's table: the seed is a value, and a
+    /// program that assigns to it writes its own copy.
+    pub(crate) fn seed_binding(&mut self, name: &str, value: Value) {
+        self.globals.insert(name.to_string(), value);
+    }
+
     /// Takes the structured failure from the most recent failed `expect`, so a
     /// caller can report expected and actual values rather than only a message.
     pub fn take_expectation_failure(

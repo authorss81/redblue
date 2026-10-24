@@ -2069,3 +2069,20 @@ fn edge_unicode_alias_name_and_macro_line_round_trip() {
         s.stdout
     );
 }
+
+/// `.compare` is a command the prompt answers, and its verdict is the word, not
+/// only the two values it shows.
+///
+/// The values alone could pass a session that printed one engine twice; the
+/// `AGREE` line is printed only after both engines were asked and their answers
+/// compared, so this asserts on the verdict as well as on what it compares.
+#[test]
+fn compare_runs_both_engines_and_reports_agreement() {
+    let s = session(".compare 1 + 2\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("tree-walker: 3")
+        .assert_stdout_contains("bytecode:")
+        .assert_stdout_contains("AGREE")
+        .assert_stdout_lacks("Unknown command 'compare'");
+}

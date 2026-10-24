@@ -1652,6 +1652,10 @@ impl Repl {
                 self.print_asm(&expr);
                 true
             }
+            ReplCommand::Compare(program) => {
+                self.print_compare(&program);
+                true
+            }
             ReplCommand::Example => {
                 self.show_examples();
                 true
@@ -3323,6 +3327,122 @@ impl Repl {
         self.print_code_answer("asm", code, bytecode_view::asm_lines(code));
     }
 
+    /// `.compare <expression>` — run the same program on both engines and say
+    /// whether they answered alike.
+    ///
+    /// The session runs one engine, so this is the only way to ask the question
+    /// at the prompt. Both sides are run on copies: the tree-walker on
+    /// [`Vm::fork`], the bytecode VM on a fresh VM seeded with the session's
+    /// readable bindings. Neither can bind a name, print a `say`, or leave a
+    /// value in the session it was asked from.
+    ///
+    /// The comparison covers output as well as the final value, because `say`
+    /// is part of what a program does. A failure is compared with its position,
+    /// which is the one thing the two engines are known to differ on — a
+    /// bytecode instruction carries a line and no column — so `.compare` can
+    /// report DIFFER for a program both engines refuse for the same reason.
+    fn print_compare(&self, code: &str) {
+        match self.compare_answer(code) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
+        }
+    }
+
+    /// What `.compare` has to say about `code`, or the refusal that stopped it
+    /// before either engine ran.
+    ///
+    /// The frontend runs once, against the session's own names, and the bytecode
+    /// is compiled from that same tree. A program that does not parse, fails the
+    /// analyzer, or cannot be compiled is reported here once — comparing two
+    /// absences would say AGREE about a program neither engine ran.
+    fn compare_answer(&self, code: &str) -> Result<Vec<String>, String> {
+        let code = code.trim();
+        if code.is_empty() {
+            return Err("Error: .compare needs an expression to run.".to_string());
+        }
+        let program = parse_only(code).map_err(|error| failure_line(&self.style, code, &error))?;
+        analyzer::analyze_with_bound_names(&program, &self.session_names())
+            .map_err(|error| failure_line(&self.style, code, &error))?;
+        let chunk = crate::bytecode::compile_program(&program)
+            .map_err(|error| failure_line(&self.style, code, &error))?;
+
+        let mut walked = self.vm.fork();
+        let walked_result = walked.run_quietly(&program);
+        let walked_said = walked.take_output();
+
+        let mut compiled = crate::bytecode::vm::BytecodeVm::new_in(self.vm.root());
+        compiled.set_echo(false);
+        for (name, value) in self.session_bindings() {
+            compiled.seed_binding(&name, value);
+        }
+        let compiled_result = compiled.run(&chunk);
+        let compiled_said = compiled.take_output();
+
+        let agree = Self::comparison_key(&walked_result, &walked_said)
+            == Self::comparison_key(&compiled_result, &compiled_said);
+
+        let mut lines = vec![format!(
+            "  tree-walker: {}",
+            Self::comparison_answer_text(&walked_result)
+        )];
+        if !walked_said.is_empty() {
+            lines.push("  tree-walker said:".to_string());
+            lines.extend(walked_said.iter().map(|line| format!("    {line}")));
+        }
+        lines.push(format!(
+            "  bytecode:    {}",
+            Self::comparison_answer_text(&compiled_result)
+        ));
+        if !compiled_said.is_empty() {
+            lines.push("  bytecode said:".to_string());
+            lines.extend(compiled_said.iter().map(|line| format!("    {line}")));
+        }
+        lines.push(if agree {
+            "  AGREE".to_string()
+        } else {
+            "  DIFFER".to_string()
+        });
+        Ok(lines)
+    }
+
+    /// The answer one engine gave, as the line `.compare` prints beside it.
+    ///
+    /// Values use the language's own rendering so the two sides read the same
+    /// way the prompt would show them. Failures name their kind, their message
+    /// and — when the engine could place them — their line and column, because
+    /// the position is half of what `.compare` is for.
+    fn comparison_answer_text(result: &Result<Value, Error>) -> String {
+        match result {
+            Ok(value) => value.to_string(),
+            Err(error) => match error.span() {
+                Some(span) => format!("Error: {}: {} (at {span})", error.label(), error.message()),
+                None => format!("Error: {}: {}", error.label(), error.message()),
+            },
+        }
+    }
+
+    /// The canonical form two engine answers are compared by.
+    ///
+    /// `Debug` rather than `Display` for a value: `5` and `"5"` print alike, and
+    /// a comparison that called those two answers the same would be comparing
+    /// how a value reads rather than what it is. Output is part of the key for
+    /// the same reason — a program that said different things did different
+    /// things even when it ended on the same value.
+    fn comparison_key(result: &Result<Value, Error>, said: &[String]) -> String {
+        let answer = match result {
+            Ok(value) => format!("value:{value:?}"),
+            Err(error) => match error.span() {
+                Some(span) => format!("error:{}:{} at {span}", error.label(), error.message()),
+                None => format!("error:{}:{}", error.label(), error.message()),
+            },
+        };
+        format!("{said:?}\n{answer}")
+    }
+
     /// Prints the header naming what was asked about, then the listing or the
     /// refusal.
     ///
@@ -3748,6 +3868,243 @@ mod tests {
         for _ in 0..count {
             repl.history.push(line.to_string());
             repl.execute_line(line);
+        }
+    }
+
+    /// `.compare`, driven through the answer the command prints.
+    ///
+    /// The command is read-only by construction: the tree-walker runs on a
+    /// fork and the bytecode VM on a fresh VM seeded from the session. Each
+    /// test here pins one half of what makes that worth having — that the two
+    /// values are both shown, that a real difference is called one, that a
+    /// failing program does not become "agreement about nothing", and that no
+    /// side effect reaches the session it was asked from.
+    mod comparison {
+        use super::{feed, Repl};
+
+        #[test]
+        fn compare_prints_both_values_and_agree() {
+            let repl = Repl::new();
+
+            let answer = repl
+                .compare_answer("1 + 2")
+                .expect("both engines can run arithmetic");
+            let joined = answer.join("\n");
+
+            assert!(
+                answer.iter().any(|line| line.contains("tree-walker: 3")),
+                "the tree-walker's value is printed: {joined}"
+            );
+            assert!(
+                answer
+                    .iter()
+                    .any(|line| line.contains("bytecode:") && line.ends_with('3')),
+                "the bytecode VM's value is printed beside it: {joined}"
+            );
+            assert!(
+                answer.iter().any(|line| line.trim() == "AGREE"),
+                "and the verdict word is its own line, so printing one side twice                  cannot pass this test: {joined}"
+            );
+        }
+
+        #[test]
+        fn edge_compare_reports_differ_when_one_engine_places_a_failure_elsewhere() {
+            // The two engines genuinely disagree here: the failure inside a
+            // function is placed at the call by the tree-walker, while a
+            // bytecode instruction carries a line and no column.
+            // `tests/common/vm.rs` calls that a format limit rather than a
+            // divergence; `.compare` names it, because the whole point of
+            // asking is to see it.
+            let repl = Repl::new();
+
+            let answer = repl
+                .compare_answer("to f(n)\n    give back sqrt(\"x\")\nend\nsay f(1)")
+                .expect("the program compiles and both engines run it");
+            let joined = answer.join("\n");
+
+            assert!(
+                answer.iter().any(|line| line.trim() == "DIFFER"),
+                "a difference is named as one: {joined}"
+            );
+            assert_eq!(
+                joined
+                    .matches("sqrt was called with arguments it cannot use")
+                    .count(),
+                2,
+                "both failures are named, one per engine: {joined}"
+            );
+            assert!(
+                joined.contains("2:10") && joined.contains("2:1"),
+                "the difference is the position: the tree-walker names the call's \
+                 column and a bytecode instruction cannot: {joined}"
+            );
+        }
+
+        #[test]
+        fn edge_compare_with_no_argument_is_a_usage_error() {
+            use crate::repl::commands::ReplCommand;
+
+            assert_eq!(
+                ReplCommand::parse(".compare"),
+                ReplCommand::MissingArgument {
+                    command: "compare",
+                    usage: "<expression>"
+                },
+                "a bare .compare says what it needs instead of running an empty program"
+            );
+
+            let repl = Repl::new();
+            let refusal = repl
+                .compare_answer("   ")
+                .expect_err("nothing to compare is not an agreement");
+            assert!(
+                refusal.contains(".compare needs an expression"),
+                "the refusal names the command and what is missing: {refusal}"
+            );
+        }
+
+        #[test]
+        fn edge_compare_leaves_the_session_vm_and_its_bindings_untouched() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set counter to 7"]);
+            let before = repl.session_bindings();
+
+            let answer = repl
+                .compare_answer("counter + 1")
+                .expect("both engines can read the session's binding");
+            assert!(
+                answer.iter().any(|line| line.trim() == "AGREE"),
+                "the seeded bytecode side reads the same value: {:?}",
+                answer
+            );
+
+            assert_eq!(
+                repl.session_bindings(),
+                before,
+                "the comparison did not bind, rebind or add a name in the session"
+            );
+            assert_eq!(
+                repl.lookup("counter").map(ToString::to_string),
+                Some("7".to_string()),
+                "and the name it read still holds what it held"
+            );
+        }
+
+        #[test]
+        fn edge_compare_runs_a_side_effect_once_on_each_engine() {
+            let repl = Repl::new();
+
+            let answer = repl
+                .compare_answer("say \"tick\"")
+                .expect("both engines can say one line");
+            let joined = answer.join("\n");
+
+            assert!(
+                answer.iter().any(|line| line == "  tree-walker said:"),
+                "the tree-walker's output is attributed to it: {joined}"
+            );
+            assert!(
+                answer.iter().any(|line| line == "  bytecode said:"),
+                "and so is the bytecode VM's: {joined}"
+            );
+            assert_eq!(
+                answer.iter().filter(|line| line.trim() == "tick").count(),
+                2,
+                "one output line per engine, so the effect was never doubled: {joined}"
+            );
+            assert_eq!(
+                joined.matches("tick").count(),
+                2,
+                "and the program's text is not echoed back as if it had said it: {joined}"
+            );
+            assert!(
+                repl.last_output.is_empty(),
+                "the session's own last output is still empty: {:?}",
+                repl.last_output
+            );
+        }
+
+        #[test]
+        fn edge_compare_reports_a_compile_failure_once() {
+            let repl = Repl::new();
+
+            let refusal = repl
+                .compare_answer("1 +")
+                .expect_err("a program that does not parse cannot be compared");
+            assert!(
+                refusal.contains("ParserError"),
+                "the compile error is reported, not an absence on each side: {refusal}"
+            );
+            assert_eq!(
+                refusal
+                    .lines()
+                    .filter(|line| line.starts_with("Error:"))
+                    .count(),
+                1,
+                "and it is reported once: {refusal}"
+            );
+            assert!(
+                !refusal.contains("AGREE") && !refusal.contains("DIFFER"),
+                "nothing was compared, so there is no verdict: {refusal}"
+            );
+        }
+
+        #[test]
+        fn edge_compare_agrees_on_unicode_nesting_and_a_numeric_boundary() {
+            let repl = Repl::new();
+
+            for (program, needle) in [
+                // Unicode, including a combining mark and an emoji, through a
+                // nested list and record: the two engines render the same value.
+                (r#"[["héllo 😀", { 鍵: ["e\u0301", 1] }]]"#, "😀"),
+                // A numeric boundary neither engine can answer as a value: the
+                // failure is compared too, and both place it on line 1.
+                ("1 / 0", "Division by zero"),
+            ] {
+                let answer = repl
+                    .compare_answer(program)
+                    .unwrap_or_else(|error| panic!("{program:?} must be compared: {error}"));
+                let joined = answer.join("\n");
+
+                assert!(
+                    answer.iter().any(|line| line.trim() == "AGREE"),
+                    "{program:?} agreed on both engines: {joined}"
+                );
+                assert!(
+                    joined.contains(needle),
+                    "{program:?} names {needle:?} in its answer: {joined}"
+                );
+            }
+        }
+
+        #[test]
+        fn edge_compare_runs_a_ten_kilobyte_program_on_both_engines() {
+            let script = format!(
+                "set payload to \"{}\"\ntext.length(payload)",
+                "a".repeat(10 * 1024)
+            );
+            assert!(
+                script.len() >= 10 * 1024,
+                "the fixture is the size the edge asks for: {} bytes",
+                script.len()
+            );
+            let repl = Repl::new();
+
+            let answer = repl
+                .compare_answer(&script)
+                .expect("a ten-kilobyte program is still a program");
+            let joined = answer.join("\n");
+
+            assert!(
+                answer.iter().any(|line| line.trim() == "AGREE"),
+                "both engines finished and answered the same thing: {joined}"
+            );
+            assert!(
+                answer
+                    .iter()
+                    .any(|line| line.contains("tree-walker: 10240")),
+                "and the value is the one the program computes: {joined}"
+            );
         }
     }
 

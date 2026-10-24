@@ -120,6 +120,12 @@ pub enum ReplCommand {
     Bytecode(String),
     /// The same chunk, annotated: constants table and a comment per instruction.
     Asm(String),
+    /// Runs a program on both engines and says whether they answered alike.
+    ///
+    /// The argument is a program, not a name: `.compare 1 + 2` is a question
+    /// about code the session has not bound, and `.compare say 1` is a question
+    /// about what running it does on each engine.
+    Compare(String),
     Example,
     /// The guided tour: a numbered set of steps, each with code to run.
     ///
@@ -556,6 +562,14 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Asm(argument.unwrap_or_default()),
     },
     CommandSpec {
+        names: &["compare"],
+        description: "Run a program on both engines and say AGREE or DIFFER",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Compare(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["example", "examples"],
         description: "Show example code",
         usage: None,
@@ -858,6 +872,7 @@ impl ReplCommand {
             | ReplCommand::Tokens(value)
             | ReplCommand::Bytecode(value)
             | ReplCommand::Asm(value)
+            | ReplCommand::Compare(value)
             | ReplCommand::Break(value)
             | ReplCommand::Delete(value)
             | ReplCommand::Debug(value)
@@ -958,6 +973,8 @@ mod tests {
             (":i x", "Inspect", "x"),
             (":ast 1 + 1", "Ast", "1 + 1"),
             (":tokens 1 + 1", "Tokens", "1 + 1"),
+            (".compare 1 + 2", "Compare", "1 + 2"),
+            (":compare say 1", "Compare", "say 1"),
             (".pretty [1, 2]", "Pretty", "[1, 2]"),
             (":pretty { a: 1 }", "Pretty", "{ a: 1 }"),
             (".json rows", "Json", "rows"),
@@ -1013,6 +1030,7 @@ mod tests {
                 | ReplCommand::Ast(value)
                 | ReplCommand::Tokens(value)
                 | ReplCommand::Break(value)
+                | ReplCommand::Compare(value)
                 | ReplCommand::Debug(value)
                 | ReplCommand::Watch(value)
                 | ReplCommand::Pretty(value)
