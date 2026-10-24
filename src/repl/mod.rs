@@ -42,6 +42,12 @@ use crate::value::{CapturedScope, FunctionBody, Value};
 /// anything the user would go looking for.
 const HISTORY_LIMIT: usize = 1000;
 
+/// The shortest keyword `.search` will accept.
+///
+/// One character is not a search: it matches most of the registry and every
+/// other history line, which is a dump with a heading rather than an answer.
+const MIN_SEARCH_KEYWORD: usize = 2;
+
 /// The most binding changes `.undo` can walk back.
 ///
 /// A step holds a copy of the session's bindings, so an unbounded stack is a
@@ -1810,6 +1816,10 @@ impl Repl {
             }
             ReplCommand::Sighelp(name) => {
                 self.print_sighelp(&name);
+                true
+            }
+            ReplCommand::Search(keyword) => {
+                self.print_search(&keyword);
                 true
             }
             ReplCommand::Time(expression) => {
@@ -3780,6 +3790,162 @@ impl Repl {
         self.variables
             .get(name)
             .or_else(|| self.vm.user_value(name))
+    }
+
+    /// `.search <keyword>` — every place a keyword appears in what the session
+    /// can see, with the source named on each hit.
+    ///
+    /// The four sources are the ones a lookup used to need four tools for: the
+    /// registry's shapes (what `.sighelp` reads), the help text (what `:help`
+    /// prints), this session's bindings (what `:vars` lists) and its history.
+    /// Searching reads them and nothing else: no hit is executed, bound or moved
+    /// to the front of anything.
+    fn print_search(&self, keyword: &str) {
+        match self.search_answer(keyword) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+        }
+    }
+
+    /// What `.search` has to say, or why it refuses the keyword.
+    ///
+    /// Every hit carries its source, and the whole answer is ordered by how
+    /// closely the query names the thing: an exact name first, a name the query
+    /// starts, then a match anywhere in the text. A keyword that matches nothing
+    /// names each source as empty rather than printing a blank page, because "I
+    /// looked here and found nothing" is the answer to "where is it?".
+    fn search_answer(&self, keyword: &str) -> Result<Vec<String>, String> {
+        let keyword = keyword.trim();
+        if keyword.is_empty() {
+            return Err("Usage: .search <keyword>".to_string());
+        }
+        let query = keyword.to_lowercase();
+        if query.chars().count() < MIN_SEARCH_KEYWORD {
+            return Err(format!(
+                "Error: .search needs at least {} characters; '{}' is too short.",
+                MIN_SEARCH_KEYWORD, keyword
+            ));
+        }
+
+        struct Hit {
+            rank: u8,
+            source: &'static str,
+            text: String,
+        }
+
+        let mut hits = Vec::new();
+
+        for (name, shape) in stdlib::BUILTIN_SIGNATURES {
+            let lower_name = name.to_lowercase();
+            let lower_shape = shape.to_lowercase();
+            let rank = if lower_name == query {
+                0
+            } else if lower_name.starts_with(&query) {
+                1
+            } else if lower_shape.contains(&query) {
+                2
+            } else {
+                continue;
+            };
+            hits.push(Hit {
+                rank,
+                source: "builtin",
+                text: format!("{} — {}", name, shape.replace('\n', "; ")),
+            });
+        }
+
+        for line in ReplCommand::help_lines() {
+            let lower = line.to_lowercase();
+            let rank = if lower.contains(&format!(":{} ", query))
+                || lower.contains(&format!(":{},", query))
+            {
+                0
+            } else if lower.contains(&format!(":{}", query)) {
+                1
+            } else if lower.contains(&query) {
+                2
+            } else {
+                continue;
+            };
+            hits.push(Hit {
+                rank,
+                source: "help",
+                text: line.trim().to_string(),
+            });
+        }
+
+        for (name, value) in self.session_bindings() {
+            let lower_name = name.to_lowercase();
+            let rendered = format!("{} = {}", name, value);
+            let rank = if lower_name == query {
+                0
+            } else if lower_name.starts_with(&query) {
+                1
+            } else if rendered.to_lowercase().contains(&query) {
+                2
+            } else {
+                continue;
+            };
+            hits.push(Hit {
+                rank,
+                source: "binding",
+                text: rendered,
+            });
+        }
+
+        for index in 0..self.history.len() {
+            let Some(entry) = self.history.get(index) else {
+                continue;
+            };
+            // The line being run is already in the history by the time this
+            // command sees it. It is the search itself, not something the search
+            // found, and counting it would make every query match at least once —
+            // including the one that is supposed to name each source as empty.
+            if index + 1 == self.history.len()
+                && matches!(
+                    ReplCommand::parse(entry),
+                    ReplCommand::Search(ref found) if found.trim().eq_ignore_ascii_case(keyword)
+                )
+            {
+                continue;
+            }
+            let lower = entry.to_lowercase();
+            let trimmed = lower.trim();
+            let rank = if trimmed == query {
+                0
+            } else if trimmed.starts_with(&query) {
+                1
+            } else if lower.contains(&query) {
+                2
+            } else {
+                continue;
+            };
+            hits.push(Hit {
+                rank,
+                source: "history",
+                text: format!("{:4}  {}", index + 1, entry),
+            });
+        }
+
+        if hits.is_empty() {
+            let mut lines = vec![format!("No matches for '{}'.", keyword)];
+            for source in ["builtin", "help", "binding", "history"] {
+                lines.push(format!("  [{}] (no matches)", source));
+            }
+            return Ok(lines);
+        }
+
+        hits.sort_by_key(|hit| hit.rank);
+        let mut lines = vec![format!("Search results for '{}':", keyword)];
+        lines.extend(
+            hits.into_iter()
+                .map(|hit| format!("  [{}] {}", hit.source, hit.text)),
+        );
+        Ok(lines)
     }
 
     /// `:time <expression> [n times]` — wall time, and the mean of the runs.
@@ -7940,6 +8106,242 @@ mod tests {
                     completions
                 );
             }
+        }
+    }
+
+    /// `.search` — one keyword, four sources, each hit labelled.
+    ///
+    /// The sources are the four the finding names: the registry's shapes,
+    /// `:help`, the session's bindings and its history. These drive the answer
+    /// the command prints, so a source that goes dark fails here rather than
+    /// looking like a clean search with fewer results.
+    mod search {
+        use super::{feed, Repl};
+        use crate::repl::commands::ReplCommand;
+
+        #[test]
+        fn search_finds_each_source_and_labels_it() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set splitter to 1", "say \"split\""]);
+
+            let answer = repl
+                .search_answer("split")
+                .expect("a keyword two characters long is a search");
+            let joined = answer.join("\n");
+
+            assert!(
+                joined.contains("[builtin] split — split(text, separator)"),
+                "the builtin and the shape .sighelp reads are one hit: {joined}"
+            );
+            assert!(
+                joined.contains("[binding] splitter = 1"),
+                "the session binding is found: {joined}"
+            );
+            assert!(
+                joined.contains("[history]") && joined.contains("say \"split\""),
+                "the history line is found: {joined}"
+            );
+        }
+
+        #[test]
+        fn search_finds_the_help_text_too() {
+            let repl = Repl::new();
+
+            let answer = repl
+                .search_answer("sighelp")
+                .expect("a command name is a searchable word");
+            let joined = answer.join("\n");
+
+            assert!(
+                joined.contains("[help]") && joined.contains(":sighelp"),
+                "the help line that documents .sighelp is a hit: {joined}"
+            );
+        }
+
+        /// Exact-name hits come before hits that only contain the keyword, in
+        /// one fixed query that has both: `split` is a builtin and `splitter` is
+        /// a binding.
+        #[test]
+        fn search_ranks_an_exact_name_above_a_substring() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set splitter to 1"]);
+
+            let answer = repl
+                .search_answer("split")
+                .expect("both kinds of hit are present");
+            let joined = answer.join("\n");
+            let exact = joined
+                .find("[builtin] split —")
+                .expect("the exact builtin name is a hit");
+            let substring = joined
+                .find("[binding] splitter = 1")
+                .expect("the longer binding name is a hit");
+
+            assert!(
+                exact < substring,
+                "the exact name is listed first:\n{joined}"
+            );
+        }
+
+        #[test]
+        fn search_history_hits_show_the_number_that_recalls_them() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set alpha to 1", "say \"alpha\""]);
+
+            let answer = repl
+                .search_answer("alpha")
+                .expect("the word is in two history lines");
+            let joined = answer.join("\n");
+
+            assert!(
+                joined.contains("1  set alpha to 1"),
+                "the first history line carries its 1-based number: {joined}"
+            );
+            assert!(
+                joined.contains("2  say \"alpha\""),
+                "the second history line carries its own number: {joined}"
+            );
+        }
+
+        /// A keyword that matches nothing names every source as empty. A blank
+        /// page would leave the reader unable to tell "no match" from "the
+        /// command broke".
+        #[test]
+        fn edge_search_with_no_matches_names_each_empty_source() {
+            let mut repl = Repl::new();
+            // The line being run is in the history before the command sees it.
+            // It is the search, not a result, and must not make `zzzz` match.
+            repl.history.push(".search zzzz".to_string());
+
+            let answer = repl
+                .search_answer("zzzz")
+                .expect("no matches is an answer, not a failure");
+            let joined = answer.join("\n");
+
+            assert_eq!(answer[0], "No matches for 'zzzz'.");
+            for source in ["builtin", "help", "binding", "history"] {
+                assert!(
+                    joined.contains(&format!("[{}] (no matches)", source)),
+                    "{} is named as empty: {joined}",
+                    source
+                );
+            }
+        }
+
+        /// One character is refused with the minimum stated, so a single letter
+        /// never dumps the registry and the history.
+        #[test]
+        fn edge_search_refuses_a_one_character_keyword_and_bare_search() {
+            let repl = Repl::new();
+
+            let refusal = repl
+                .search_answer("x")
+                .expect_err("a one-character keyword is too short to search");
+            assert!(
+                refusal.contains("at least 2") && refusal.contains("'x' is too short"),
+                "the refusal states the minimum and the word: {refusal}"
+            );
+
+            assert_eq!(
+                ReplCommand::parse(".search"),
+                ReplCommand::MissingArgument {
+                    command: "search",
+                    usage: "<keyword>"
+                },
+                "a bare .search says what it needs instead of dumping every source"
+            );
+            assert!(
+                repl.search_answer("   ").is_err(),
+                "whitespace is no keyword either"
+            );
+        }
+
+        /// Regex-significant characters are text, not a pattern: `.*` finds the
+        /// line that literally contains it and not every line, and `[1` is a
+        /// search rather than an invalid pattern.
+        #[test]
+        fn edge_search_treats_regex_characters_literally() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "set star to \"a.*b\"",
+                    "set plain to \"aZZb\"",
+                    "set bracket to \"[1, 2]\"",
+                ],
+            );
+
+            let star = repl
+                .search_answer(".*")
+                .expect("a dot and a star are two characters")
+                .join("\n");
+            assert!(
+                star.contains("set star to \"a.*b\""),
+                "the literal .* is found: {star}"
+            );
+            assert!(
+                !star.contains("set plain to \"aZZb\""),
+                "and it is not a pattern that matches everything: {star}"
+            );
+
+            let bracket = repl
+                .search_answer("[1")
+                .expect("an unmatched bracket is still a keyword")
+                .join("\n");
+            assert!(
+                bracket.contains("set bracket to \"[1, 2]\""),
+                "a bracket is matched literally rather than parsed: {bracket}"
+            );
+        }
+
+        /// Searching reads; it does not run, bind, reorder or overwrite.
+        #[test]
+        fn edge_search_leaves_the_session_exactly_as_it_was() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set counter to 7", "say \"counter\""]);
+
+            let bindings = repl.session_bindings();
+            let history: Vec<String> = (0..repl.history.len())
+                .filter_map(|index| repl.history.get(index).cloned())
+                .collect();
+            let output = repl.last_output.clone();
+
+            let _ = repl
+                .search_answer("counter")
+                .expect("the word is in the session");
+
+            assert_eq!(
+                repl.session_bindings(),
+                bindings,
+                "searching bound nothing and rebound nothing"
+            );
+            assert_eq!(
+                (0..repl.history.len())
+                    .filter_map(|index| repl.history.get(index).cloned())
+                    .collect::<Vec<String>>(),
+                history,
+                "searching did not reorder or rewrite the history"
+            );
+            assert_eq!(
+                repl.last_output, output,
+                "searching ran nothing, so the last output is untouched"
+            );
+        }
+
+        #[test]
+        fn edge_search_is_case_insensitive_and_carries_unicode() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set greeting to \"héllo 😀\""]);
+
+            let answer = repl
+                .search_answer("HÉLLO")
+                .expect("case does not change whether a name matches")
+                .join("\n");
+
+            assert!(
+                answer.contains("[binding] greeting = héllo 😀"),
+                "the unicode binding is found and printed unchanged: {answer}"
+            );
         }
     }
 
