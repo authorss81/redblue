@@ -138,6 +138,13 @@ pub enum ReplCommand {
     Which(String),
     /// The shape of a call — its parameters and what it answers.
     Sighelp(String),
+    /// Finds a keyword across builtin shapes, the help text, this session's
+    /// bindings and its history.
+    ///
+    /// The argument is a keyword, not a name: `.search split` answers with every
+    /// place `split` appears, which is the question `.which`, `.sighelp` and
+    /// `:history` each answer only one quarter of.
+    Search(String),
     /// Runs an expression N times against the session and reports wall time.
     ///
     /// The argument is the measurement, not a name: `.time 1 + 1` is a question
@@ -627,6 +634,14 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Sighelp(argument.unwrap_or_default()),
     },
     CommandSpec {
+        names: &["search"],
+        description: "Search builtins, help, bindings and history for a keyword",
+        usage: Some("<keyword>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Search(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["time"],
         description: "Time an expression over N runs, in wall time",
         usage: Some("<expression> [n times]"),
@@ -995,6 +1010,7 @@ impl ReplCommand {
             | ReplCommand::Doc(value)
             | ReplCommand::Which(value)
             | ReplCommand::Sighelp(value)
+            | ReplCommand::Search(value)
             | ReplCommand::Time(value)
             | ReplCommand::Bench(value)
             | ReplCommand::Ast(value)
@@ -1258,6 +1274,8 @@ mod tests {
             (".which nosuchname", "Which", "nosuchname"),
             (":sighelp split", "Sighelp", "split"),
             (":sighelp say", "Sighelp", "say"),
+            (".search split", "Search", "split"),
+            (":search help", "Search", "help"),
         ];
 
         for (input, expected, argument) in cases {
@@ -1544,6 +1562,15 @@ mod tests {
                 line
             );
         }
+    }
+
+    /// `.search` is a command, not a word the user mistyped.
+    #[test]
+    fn search_is_a_command_and_not_a_typo() {
+        assert!(
+            !matches!(ReplCommand::parse(".search split"), ReplCommand::Unknown(_)),
+            ".search has to reach a command; it is the one place a keyword is looked up"
+        );
     }
 
     /// Plain source is not a mistyped command. Conflating the two made the REPL
