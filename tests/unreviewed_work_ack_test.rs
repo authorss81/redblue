@@ -249,6 +249,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// value assertions are all in this history, arrived in a delivery commit,
 /// and none of their delivery commits' SHAs are knowable while the work is being written.
 const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
+    "resume phase-068:",
     "resume phase-084:",
     "resume phase-063:",
     "resume phase-088:",

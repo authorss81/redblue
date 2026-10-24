@@ -821,6 +821,20 @@ pub struct Repl {
     redo_stack: VecDeque<UndoStep>,
 }
 
+/// `path` as a session rooted at `dir` means it: a leading `~` expanded, an
+/// absolute path unchanged, a relative one under `dir`.
+///
+/// Shared with the debug sub-REPL so `.debug <file>` reads exactly where
+/// `:load` would, including the home-directory shorthand.
+fn resolve_path_against(dir: &Path, path: &str) -> PathBuf {
+    let path = Repl::expand_tilde_with_home(path, Repl::home_directory().as_deref());
+    if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    }
+}
+
 impl Repl {
     pub fn new() -> Self {
         Self {
@@ -857,6 +871,12 @@ impl Repl {
     /// builtins, the REPL's commands, and every name this session has bound.
     pub fn complete(&self, word: &str) -> Vec<String> {
         self.completer.complete_with(word, &self.completion_names())
+    }
+
+    /// What TAB offers for the path argument at `pos`, resolved against the
+    /// session directory — the same place `:load` and its siblings read.
+    pub fn path_completion(&self, line: &str, pos: usize) -> Option<(usize, Vec<String>)> {
+        self.completer.complete_path(&self.cwd, line, pos)
     }
 
     /// Every name a completion could offer from the live session: the REPL's own
@@ -927,9 +947,11 @@ impl Repl {
         }
 
         let names: SessionNames = Rc::new(RefCell::new(Vec::new()));
-        let mut source = editor::line_source(Rc::clone(&names), self.style);
+        let dir: editor::SessionDir = Rc::new(RefCell::new(self.cwd.clone()));
+        let mut source =
+            editor::line_source_with_dir(Rc::clone(&names), Rc::clone(&dir), self.style);
         self.restore_history(&*source);
-        let end = self.session_loop(&mut *source, &names);
+        let end = self.session_loop_with_dir(&mut *source, &names, &dir);
         if let Err(error) = source.flush_history() {
             eprintln!(
                 "{}",
@@ -967,6 +989,19 @@ impl Repl {
         source: &mut S,
         names: &SessionNames,
     ) -> SessionEnd {
+        let dir: editor::SessionDir = Rc::new(RefCell::new(self.cwd.clone()));
+        self.session_loop_with_dir(source, names, &dir)
+    }
+
+    /// [`session_loop`](Self::session_loop) with the directory TAB completes
+    /// against shared with the editor, so `.cd` moves what the next prompt
+    /// offers along with what the next relative file argument means.
+    pub fn session_loop_with_dir<S: LineSource + ?Sized>(
+        &mut self,
+        source: &mut S,
+        names: &SessionNames,
+        dir: &editor::SessionDir,
+    ) -> SessionEnd {
         loop {
             if !self.running {
                 return SessionEnd::Quit;
@@ -977,8 +1012,10 @@ impl Repl {
             // The editor completes against the names the session has bound and
             // the commands it has defined, and it cannot be lent them while they
             // are being borrowed to read a line, so it is given a snapshot
-            // refreshed here.
+            // refreshed here. The directory is refreshed alongside them: a
+            // `.cd` on the previous line moved where a relative path points.
             *names.borrow_mut() = self.completion_names();
+            *dir.borrow_mut() = self.cwd.clone();
 
             let line = match source.read_line(&prompt) {
                 Ok(Line::Text(text)) => text,
@@ -2781,7 +2818,7 @@ impl Repl {
 
     /// The directory the process started in, which is where a fresh session is.
     fn process_directory() -> PathBuf {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        editor::process_directory()
     }
 
     /// The user's home directory, when the host has one.
@@ -2816,12 +2853,7 @@ impl Repl {
     /// `path` as this session means it: a leading `~` expanded, an absolute path
     /// unchanged, a relative one under the session's working directory.
     fn resolve_path(&self, path: &str) -> PathBuf {
-        let path = Self::expand_tilde_with_home(path, Self::home_directory().as_deref());
-        if path.is_absolute() {
-            path
-        } else {
-            self.cwd.join(path)
-        }
+        resolve_path_against(&self.cwd, path)
     }
 
     /// Removes `.` and `..` from `path` without resolving symlinks.
@@ -5026,6 +5058,32 @@ mod tests {
         assert!(
             answers.iter().any(|line| line == "= 42"),
             "the file was read and run, not parsed as an expression; it answered:\n{}",
+            answers.join("\n")
+        );
+    }
+
+    /// `.debug <relative file>` reads where the session reads, not where the
+    /// process happens to be: the file below exists only in the directory the
+    /// session moved to, so finding it at all proves the resolution.
+    #[test]
+    fn edge_debug_resolves_a_relative_file_against_the_session_directory() {
+        let dir = scratch_dir("debug-relative");
+        std::fs::write(
+            dir.join("relative-probe.rb"),
+            "set from_debug to 68\nfrom_debug\n",
+        )
+        .expect("the scratch file should be writable");
+
+        let mut repl = Repl::new();
+        repl.change_directory(&dir.display().to_string())
+            .expect("the scratch directory exists");
+
+        let answers = repl.debug_session(&[".debug relative-probe.rb", ".back"]);
+
+        assert!(
+            answers.iter().any(|line| line == "= 68"),
+            "the relative file was read from the session directory and run; it \
+             answered:\n{}",
             answers.join("\n")
         );
     }
@@ -11186,6 +11244,77 @@ mod tests {
             assert!(
                 names.contains(&"file.txt".to_string()),
                 "and a file carries none: {names:?}"
+            );
+        }
+
+        /// `.cd` moves TAB as well as `:load`: a path argument is completed
+        /// against the place the session would read it from, not the process
+        /// directory the editor started in.
+        #[test]
+        fn edge_path_completion_follows_the_session_directory_after_cd() {
+            let dir = scratch_dir("cd-completion");
+            std::fs::write(dir.join("only-here.rb"), "set here to 68\n")
+                .expect("the scratch file should be writable");
+
+            let mut repl = Repl::new();
+            feed(&mut repl, &[&format!(".cd {}", dir.display())]);
+
+            let (_, offered) = repl
+                .path_completion(":load only-", ":load only-".len())
+                .expect("the argument of :load is a path completion");
+
+            assert!(
+                offered.contains(&"only-here.rb".to_string()),
+                "TAB offers the file where the session would load it: {offered:?}"
+            );
+            assert!(
+                !offered.iter().any(|name| name == ":save" || name == "say"),
+                "and it offers no language vocabulary in a filename argument: {offered:?}"
+            );
+        }
+
+        /// A directory that does not exist offers nothing, rather than falling
+        /// back to the process directory or failing with a panic.
+        #[test]
+        fn edge_path_completion_in_a_missing_directory_offers_nothing() {
+            let dir = scratch_dir("cd-completion-missing");
+            let mut repl = Repl::new();
+            repl.change_directory(&dir.display().to_string())
+                .expect("the scratch directory exists before it is removed");
+            std::fs::remove_dir_all(&dir).expect("the scratch directory is removable");
+
+            assert!(
+                repl.path_completion(":load x", ":load x".len())
+                    .expect("the argument of :load is a path completion")
+                    .1
+                    .is_empty(),
+                "a session pointing at a missing directory completes nothing"
+            );
+        }
+
+        /// `.cd` to a regular file is refused by name and leaves the session
+        /// where it was, rather than storing a path no file argument can read.
+        #[test]
+        fn edge_change_directory_refuses_a_regular_file_and_names_it() {
+            let dir = scratch_dir("cd-file");
+            let file = dir.join("not-a-directory.txt");
+            std::fs::write(&file, "x").expect("the scratch file should be writable");
+
+            let mut repl = Repl::new();
+            let before = repl.session_directory().to_path_buf();
+            let result = repl.change_directory(&file.display().to_string());
+
+            assert!(result.is_err(), "a regular file is not a directory");
+            assert!(
+                result
+                    .expect_err("the refusal is an error, not a silent move")
+                    .contains("not-a-directory.txt"),
+                "the refusal names the file it could not enter"
+            );
+            assert_eq!(
+                repl.session_directory(),
+                before,
+                "and the session directory is unchanged"
             );
         }
     }

@@ -767,6 +767,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "indexmap",
+ "libc",
  "regex",
  "reqwest",
  "rustyline",

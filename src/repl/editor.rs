@@ -242,12 +242,29 @@ fn line_from(result: Result<String, ReadlineError>) -> io::Result<Line> {
 /// it between lines.
 pub type SessionNames = Rc<RefCell<Vec<String>>>;
 
+/// The directory a session completes paths against, shared with its editor.
+///
+/// The session, not the process, decides where a relative file argument points
+/// after `.cd`; TAB has to ask the same place or it offers a tree the command
+/// will not read. Refreshed between lines for the same reason the names are.
+pub type SessionDir = Rc<RefCell<PathBuf>>;
+
+/// The directory a session starts completing against: the process was started
+/// here, and a session that has not moved means "here".
+pub fn process_directory() -> PathBuf {
+    match std::env::current_dir() {
+        Ok(directory) => directory,
+        Err(_) => Path::new(".").to_path_buf(),
+    }
+}
+
 /// Completes a line against the language's vocabulary and the names a live
 /// session has bound.
 #[derive(Clone)]
 struct SessionCompleter {
     completer: ReplCompleter,
     names: SessionNames,
+    dir: SessionDir,
     /// How to draw the line being typed, and what each class of it wears.
     style: Style,
     theme: Theme,
@@ -324,7 +341,9 @@ impl Completer for SessionCompleter {
         // A filename first, where the line is the argument of a command that
         // takes one: the vocabulary has no business answering `:load sr`, and
         // this is the only place the filesystem is read at all.
-        if let Some((path_start, candidates)) = self.completer.complete_path(line, pos) {
+        if let Some((path_start, candidates)) =
+            self.completer.complete_path(&self.dir.borrow(), line, pos)
+        {
             return Ok((path_start, candidates));
         }
         Ok((
@@ -419,9 +438,25 @@ impl EditSource {
         history_path: Option<PathBuf>,
         style: Style,
     ) -> io::Result<Self> {
+        let dir: SessionDir = Rc::new(RefCell::new(process_directory()));
+        Self::with_completion_dir(names, dir, history_path, style)
+    }
+
+    /// Opens an editor whose path completion follows `dir`, the session's own
+    /// working directory rather than the process's.
+    ///
+    /// Shared rather than copied so `.cd` between two lines moves TAB at the
+    /// next prompt without rebuilding the editor.
+    pub fn with_completion_dir(
+        names: SessionNames,
+        dir: SessionDir,
+        history_path: Option<PathBuf>,
+        style: Style,
+    ) -> io::Result<Self> {
         let completer = SessionCompleter {
             completer: ReplCompleter::new(),
             names,
+            dir,
             style,
             theme: Theme::standard(),
         };
@@ -560,8 +595,19 @@ impl LineSource for EditSource {
 /// typed token by token, and it does paint its prompt, because a prompt is
 /// display text that both readers draw through the session's [`Style`].
 pub fn line_source(names: SessionNames, style: Style) -> Box<dyn LineSource> {
+    let dir: SessionDir = Rc::new(RefCell::new(process_directory()));
+    line_source_with_dir(names, dir, style)
+}
+
+/// [`line_source`] for a session that already owns the directory TAB completes
+/// against, so `.cd` moves what the next prompt offers.
+pub fn line_source_with_dir(
+    names: SessionNames,
+    dir: SessionDir,
+    style: Style,
+) -> Box<dyn LineSource> {
     if io::stdin().is_terminal() {
-        match EditSource::with_style(names, default_history_path(), style) {
+        match EditSource::with_completion_dir(names, dir, default_history_path(), style) {
             Ok(editor) => return Box::new(editor),
             Err(error) => eprintln!(
                 "Warning: no line editor ({}); reading lines without one",
@@ -982,7 +1028,10 @@ mod tests {
         let offered = source.complete(":load s", 7);
         assert_eq!(
             offered,
-            crate::repl::completer::complete_path_in(&std::env::current_dir().unwrap(), "s"),
+            crate::repl::completer::complete_path_in(
+                &std::env::current_dir().expect("the process has a working directory"),
+                "s",
+            ),
             "a path argument is answered by the filesystem and by nothing else, \
              so the members a module offers here are not offered: {offered:?}"
         );
@@ -1281,5 +1330,43 @@ mod tests {
              nothing is offered for it"
             );
         }
+    }
+
+    /// TAB reads the session's directory through the shared handle, so a `.cd`
+    /// between two lines moves what the next prompt offers without rebuilding
+    /// the editor.
+    #[test]
+    fn edge_path_completion_follows_the_shared_session_directory() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp/repl-editor");
+        let dir = root.join(scratch_name("completion-cwd"));
+        fs::create_dir_all(&dir).expect("the scratch directory should be creatable");
+        fs::write(dir.join("only-in-the-session.rb"), "set x to 1\n")
+            .expect("the scratch file should be writable");
+
+        let session_dir = Rc::new(RefCell::new(root.clone()));
+        let source = EditSource::with_completion_dir(
+            live_names(&[]),
+            Rc::clone(&session_dir),
+            None,
+            Style::forced(false),
+        )
+        .expect("an editor with no history is openable");
+
+        assert!(
+            !source
+                .complete(":load only-in", 13)
+                .iter()
+                .any(|name| name == "only-in-the-session.rb"),
+            "before the session moves, the file in the other directory is not offered"
+        );
+
+        *session_dir.borrow_mut() = dir.clone();
+
+        let offered = source.complete(":load only-in", 13);
+        assert!(
+            offered.contains(&"only-in-the-session.rb".to_string()),
+            "after the session moves, TAB offers the file in the session directory: \
+             {offered:?}"
+        );
     }
 }

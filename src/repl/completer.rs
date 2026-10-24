@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::commands;
 
@@ -409,18 +409,15 @@ impl ReplCompleter {
     /// The completion rather than the candidates alone, because the offset is half
     /// of the answer: rustyline replaces from there, so a candidate that did not
     /// come with the place it starts would replace the command word too.
-    pub fn complete_path(&self, line: &str, pos: usize) -> Option<(usize, Vec<String>)> {
+    pub fn complete_path(
+        &self,
+        dir: &Path,
+        line: &str,
+        pos: usize,
+    ) -> Option<(usize, Vec<String>)> {
         let (start, fragment) = path_argument(line, pos)?;
-        Some((start, complete_path_in(&current_dir(), fragment)))
+        Some((start, complete_path_in(dir, fragment)))
     }
-}
-
-/// The directory a session completes paths against.
-///
-/// A function so that the answer is one place: the process's working directory,
-/// which is where a user typing `:load ` means "here".
-fn current_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 #[cfg(test)]

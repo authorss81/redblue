@@ -14,6 +14,7 @@
 //! report, not an error in the run.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::analyzer;
@@ -120,12 +121,16 @@ pub struct DebugRepl {
     /// The sub-REPL's own `_`, kept here so the parent's last result is never
     /// written to by anything the sub-REPL runs.
     variables: HashMap<String, Value>,
+    /// The session directory relative file arguments are resolved against.
+    cwd: PathBuf,
 }
 
 impl DebugRepl {
     /// A sub-REPL over `vm` — a [`Vm::fork`] of the parent's — with the hook
-    /// that observes every statement it runs already attached.
-    pub(super) fn new(mut vm: Vm, style: Style) -> Self {
+    /// that observes every statement it runs already attached, and with the
+    /// session directory the parent's file commands already use, so `.debug
+    /// <relative file>` reads the same place `:load` would.
+    pub(super) fn with_dir(mut vm: Vm, style: Style, cwd: PathBuf) -> Self {
         // The watcher's own VM: bindings are overwritten at every step (see
         // [`Vm::observe_bindings`]), and it is told it is answering a question
         // so an effectful builtin — `files.write`, `network.post` — is refused
@@ -170,6 +175,7 @@ impl DebugRepl {
             buffer: Vec::new(),
             style,
             variables: HashMap::new(),
+            cwd,
         }
     }
 
@@ -403,9 +409,10 @@ impl DebugRepl {
     /// A file that cannot be read is one error line: the run failed, and the
     /// session that asked for it is still a session.
     pub(super) fn run_file(&mut self, path: &str) -> Vec<String> {
-        match read_source(path) {
+        let resolved = super::resolve_path_against(&self.cwd, path);
+        match read_file(&resolved) {
             Ok(source) => self.run(&source, path),
-            Err(message) => vec![format!("Error: {}", message)],
+            Err(error) => vec![format!("Error: {}", cannot_read(path, &error))],
         }
     }
 
@@ -431,12 +438,13 @@ impl DebugRepl {
 /// looks like: the sub-REPL reports it and carries on, and a test that watches
 /// a file which is not there asserts the failure itself rather than the
 /// wording of a message.
+#[cfg(test)]
 pub(super) fn read_source(path: &str) -> Result<String, String> {
-    read_file(path).map_err(|error| cannot_read(path, &error))
+    read_file(Path::new(path)).map_err(|error| cannot_read(path, &error))
 }
 
 /// The source of the file `path` names, or the failure the filesystem gave.
-fn read_file(path: &str) -> Result<String, std::io::Error> {
+fn read_file(path: &Path) -> Result<String, std::io::Error> {
     std::fs::read_to_string(path)
 }
 
@@ -612,7 +620,11 @@ impl Repl {
         if self.debug_repl.is_some() {
             return vec![ALREADY_IN_SESSION.to_string()];
         }
-        self.debug_repl = Some(DebugRepl::new(self.vm.fork(), self.style));
+        self.debug_repl = Some(DebugRepl::with_dir(
+            self.vm.fork(),
+            self.style,
+            self.cwd.clone(),
+        ));
         let mut answers = vec![BANNER.to_string()];
         if !argument.trim().is_empty() {
             answers.extend(self.run_debug_argument(argument));
@@ -660,7 +672,7 @@ impl Repl {
     /// parent prompt both opens one and runs the file in it.
     fn run_debug_argument(&mut self, argument: &str) -> Vec<String> {
         let argument = argument.trim();
-        match read_argument(argument) {
+        match read_argument(argument, &self.cwd) {
             Argument::File(source, name) => self.run_in_debug(&source, &name),
             Argument::Unreadable(message) => vec![format!("Error: {}", message)],
             Argument::Code => self.run_in_debug(argument, SESSION_FILE),
@@ -714,8 +726,9 @@ enum Argument {
 /// because it is there and holds no readable source — a directory, a file this
 /// process may not open — is a file the user meant and cannot have, and says
 /// so rather than being run as code.
-fn read_argument(argument: &str) -> Argument {
-    match read_file(argument) {
+fn read_argument(argument: &str, dir: &Path) -> Argument {
+    let resolved = super::resolve_path_against(dir, argument);
+    match read_file(&resolved) {
         Ok(source) => Argument::File(source, argument.to_string()),
         Err(error) => {
             if argument.ends_with(".rb") || is_there_but_not_readable(&error) {
@@ -800,7 +813,11 @@ mod tests {
     fn the_watch_scratch_resolves_an_import_where_the_program_resolves_it() {
         let dir = directory_with_a_probe_module();
         let vm = Vm::new_in(&dir);
-        let repl = DebugRepl::new(vm, Style::detect());
+        let repl = DebugRepl::with_dir(
+            vm,
+            Style::detect(),
+            crate::repl::editor::process_directory(),
+        );
 
         let mut state = lock(&repl.state);
         let source = "import Probe\nset answer to Probe.probe()\n";
@@ -825,7 +842,11 @@ mod tests {
     fn the_watch_scratch_and_the_program_share_one_root() {
         let dir = directory_with_a_probe_module();
         let vm = Vm::new_in(&dir);
-        let repl = DebugRepl::new(vm, Style::detect());
+        let repl = DebugRepl::with_dir(
+            vm,
+            Style::detect(),
+            crate::repl::editor::process_directory(),
+        );
 
         let state = lock(&repl.state);
         assert_eq!(
