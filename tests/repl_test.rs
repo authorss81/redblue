@@ -2164,3 +2164,44 @@ fn compare_runs_both_engines_and_reports_agreement() {
         .assert_stdout_contains("AGREE")
         .assert_stdout_lacks("Unknown command 'compare'");
 }
+
+/// `!cmd` runs in the host shell, shows what the command said, and reports the
+/// command's own exit status — including the failing one, which is not the
+/// REPL's error format.
+#[test]
+fn shell_escape_shows_command_output_and_exit_code() {
+    let s = session("!echo hi\n!exit 3\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("hi")
+        .assert_stdout_contains("exit code: 0")
+        .assert_stdout_contains("exit code: 3")
+        .assert_stdout_lacks("AnalyzerError");
+}
+
+/// `.pipe` sends `_` to a command's stdin, and `.cd`/`.pwd`/`.ls` move and show
+/// one session directory that `:load` also resolves against.
+///
+/// `sort` is used as the receiving command because it exists on every host this
+/// runs on (`cat` does not exist on Windows), so the test exercises the same
+/// pipe path there rather than being skipped.
+#[test]
+fn edge_pipe_cd_and_ls_use_the_session_directory() {
+    let dir = scratch_dir().join("phase068-cd");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the scratch directory should be creatable");
+    std::fs::write(dir.join("loaded.rb"), "set loaded_from_cd to 68\n")
+        .expect("the scratch file should be writable");
+
+    let input = format!(
+        "set payload to \"through-the-pipe\"\npayload\n.pipe sort\n.cd {}\n.pwd\n.ls\n:load loaded.rb\n:inspect loaded_from_cd\n:quit\n",
+        dir.display()
+    );
+    let s = session(&input);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("through-the-pipe")
+        .assert_stdout_contains("phase068-cd")
+        .assert_stdout_contains("loaded.rb")
+        .assert_stdout_contains("loaded_from_cd");
+}
