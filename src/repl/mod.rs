@@ -29,17 +29,29 @@ pub use transcript::Transcript;
 use crate::analyzer;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
 use crate::error::Error;
-use crate::interpreter::Vm;
+use crate::interpreter::{CallContext, Vm};
 use crate::lexer::{Lexer, TokenKind};
 use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
 use crate::repl::style::{strip_escapes, Paint, Style};
 use crate::stdlib;
-use crate::value::{FunctionBody, Value};
+use crate::value::{CapturedScope, FunctionBody, Value};
 
 /// How many lines a session keeps before the oldest is dropped. A terminal
 /// scrollback holds far more, so a session that outgrows this has already lost
 /// anything the user would go looking for.
 const HISTORY_LIMIT: usize = 1000;
+
+/// The most binding changes `.undo` can walk back.
+///
+/// A step holds a copy of the session's bindings, so an unbounded stack is a
+/// copy of the session per keystroke. Fifty is far more than a user retries by
+/// hand and small enough that the copies cannot grow without bound; past it the
+/// oldest step is dropped and the session says so rather than quietly keeping a
+/// shorter history than it promised.
+const MAX_UNDO: usize = 50;
+
+/// The most named checkpoints one session may hold, for the same reason.
+const MAX_CHECKPOINTS: usize = 64;
 
 /// The most lines a block may hold before the session stops waiting for its
 /// `end`.
@@ -657,6 +669,53 @@ enum LastFile {
     Ran(String),
 }
 
+/// One copy of everything a checkpoint restores.
+///
+/// The VM owns the names a program bound; `variables` owns the last result (`_`)
+/// the session shows; `definitions` owns where each name was written. A snapshot
+/// is all three at one moment, so restoring it cannot leave `.which` pointing at
+/// a line the restored bindings never came from. The rest is the session around
+/// those bindings — its shortcuts, its tour, its file and its transcript — which
+/// an ordinary source line leaves alone but a checkpoint has to bring back too.
+#[derive(Clone)]
+struct SessionSnapshot {
+    globals: HashMap<String, Value>,
+    locals: Vec<CapturedScope>,
+    context: CallContext,
+    variables: HashMap<String, Value>,
+    definitions: HashMap<String, Definition>,
+    aliases: HashMap<String, String>,
+    macros: HashMap<String, Vec<String>>,
+    macro_recording: Option<(String, Vec<String>)>,
+    tutorial_step: Option<usize>,
+    tutorial_typed: Vec<String>,
+    last_file: Option<LastFile>,
+    format_on_entry: bool,
+    transcript: Transcript,
+}
+
+/// One step on the undo or redo stack.
+///
+/// A source line only changes bindings, so undoing it puts back only the
+/// bindings; a checkpoint restore can have changed every part of the session,
+/// so undoing *it* has to put all of them back. `full` is which of the two the
+/// step was, rather than comparing snapshots after the fact: an alias made
+/// after the line would otherwise disappear when the line was undone.
+#[derive(Clone)]
+struct UndoStep {
+    snapshot: SessionSnapshot,
+    full: bool,
+}
+
+/// One named in-memory checkpoint: the state it saved and how long the history
+/// was when it was taken.
+#[derive(Clone)]
+struct Checkpoint {
+    name: String,
+    snapshot: SessionSnapshot,
+    history_len: usize,
+}
+
 pub struct Repl {
     vm: Vm,
     variables: HashMap<String, Value>,
@@ -741,6 +800,17 @@ pub struct Repl {
     /// recording" is a state the stop command has to report, and a session whose
     /// recording was reset would otherwise stop a recording that is not there.
     macro_recording: Option<(String, Vec<String>)>,
+    /// The named snapshots this session has taken, in creation order.
+    ///
+    /// A vector rather than a map because `.sessions` promises creation order,
+    /// and a map's iteration order is not a result.
+    checkpoints: Vec<Checkpoint>,
+    /// Which checkpoint was most recently saved or restored, for `.sessions`.
+    current_checkpoint: Option<String>,
+    /// The states `.undo` can walk back to, oldest first.
+    undo_stack: VecDeque<UndoStep>,
+    /// The states `.redo` can walk forward to, oldest first.
+    redo_stack: VecDeque<UndoStep>,
 }
 
 impl Repl {
@@ -767,6 +837,10 @@ impl Repl {
             aliases: HashMap::new(),
             macros: HashMap::new(),
             macro_recording: None,
+            checkpoints: Vec::new(),
+            current_checkpoint: None,
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
         }
     }
 
@@ -1532,7 +1606,45 @@ impl Repl {
                 true
             }
             ReplCommand::Restore(path) => {
-                self.restore_session(&path);
+                // The one word with two destinations: the dot spelling is the
+                // in-memory checkpoint, the colon spelling is the saved file.
+                // The help text states that split once, and dispatch is the
+                // only place that has to know it.
+                if input.trim_start().starts_with(commands::ALT_SIGIL) {
+                    match self.restore_checkpoint(&path) {
+                        Ok(()) => println!("Restored checkpoint '{}'.", path.trim()),
+                        Err(message) => {
+                            println!("{}", self.style.paint(Paint::Error, &message))
+                        }
+                    }
+                } else {
+                    self.restore_session(&path);
+                }
+                true
+            }
+            ReplCommand::Checkpoint(name) => {
+                match self.create_checkpoint(&name) {
+                    Ok(()) => println!("Checkpoint '{}' saved.", name.trim()),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
+                true
+            }
+            ReplCommand::Sessions => {
+                println!("{}", self.checkpoint_listing());
+                true
+            }
+            ReplCommand::Undo => {
+                match self.undo_binding() {
+                    Ok(()) => println!("Undid one change."),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
+                true
+            }
+            ReplCommand::Redo => {
+                match self.redo_binding() {
+                    Ok(()) => println!("Redid one change."),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
                 true
             }
             ReplCommand::Export(path) => {
@@ -1870,10 +1982,241 @@ impl Repl {
         self.in_multiline = false;
         self.tutorial_step = None;
         self.tutorial_typed.clear();
+        // A reset forgets the checkpoints and the undo history too: a checkpoint
+        // of bindings the session no longer has would restore a state the reset
+        // was asked to remove.
+        self.checkpoints.clear();
+        self.current_checkpoint = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         // The transcript with them: an export of a session that had forgotten the
         // lines it ran would claim a session that no longer exists ran them.
         self.transcript.clear();
         println!("REPL state reset.");
+    }
+
+    /// Captures the state every binding command can change, and the session
+    /// state a checkpoint promises to restore with it.
+    fn snapshot_state(&self) -> SessionSnapshot {
+        let (locals, globals) = self.vm.current_bindings();
+        SessionSnapshot {
+            globals: globals.clone(),
+            locals: locals.to_vec(),
+            context: self.vm.call_context().clone(),
+            variables: self.variables.clone(),
+            definitions: self.definitions.clone(),
+            aliases: self.aliases.clone(),
+            macros: self.macros.clone(),
+            macro_recording: self.macro_recording.clone(),
+            tutorial_step: self.tutorial_step,
+            tutorial_typed: self.tutorial_typed.clone(),
+            last_file: self.last_file.clone(),
+            format_on_entry: self.format_on_entry,
+            transcript: self.transcript.clone(),
+        }
+    }
+
+    /// Whether two snapshots differ in anything a user can read as a binding.
+    ///
+    /// The context is left out on purpose: it changes only alongside a name in
+    /// `globals` (an import publishes one), and comparing the syntax trees it
+    /// holds would make every compare walk a module's whole program.
+    fn bindings_changed(before: &SessionSnapshot, after: &SessionSnapshot) -> bool {
+        before.globals != after.globals
+            || before.locals != after.locals
+            || before.variables != after.variables
+            || before.definitions != after.definitions
+    }
+
+    /// Puts the bindings, last result and definitions of `snapshot` back.
+    fn apply_bindings(&mut self, snapshot: &SessionSnapshot) {
+        self.vm
+            .observe_bindings(&snapshot.locals, &snapshot.globals);
+        self.vm.observe_context(&snapshot.context);
+        self.variables = snapshot.variables.clone();
+        self.definitions = snapshot.definitions.clone();
+    }
+
+    /// Puts a whole snapshot back: its bindings and the session state a
+    /// checkpoint saved alongside them.
+    fn apply_snapshot(&mut self, snapshot: &SessionSnapshot) {
+        self.apply_bindings(snapshot);
+        self.aliases = snapshot.aliases.clone();
+        self.macros = snapshot.macros.clone();
+        self.macro_recording = snapshot.macro_recording.clone();
+        self.tutorial_step = snapshot.tutorial_step;
+        self.tutorial_typed = snapshot.tutorial_typed.clone();
+        self.last_file = snapshot.last_file.clone();
+        self.format_on_entry = snapshot.format_on_entry;
+        self.transcript = snapshot.transcript.clone();
+    }
+
+    /// Marks the checkpoint whose bindings the session is showing, or clears
+    /// the marker when the state is not one of them.
+    ///
+    /// Saving or restoring a checkpoint is not the only way the current bindings
+    /// can move away from it: an undo, a redo and an ordinary line all can, and
+    /// a listing that kept pointing at the checkpoint they left would be
+    /// describing a state the session is no longer in.
+    fn refresh_current_checkpoint(&mut self) {
+        let current = self.snapshot_state();
+        self.current_checkpoint = self
+            .checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| !Self::bindings_changed(&checkpoint.snapshot, &current))
+            .map(|checkpoint| checkpoint.name.clone());
+    }
+
+    /// Records `before` as the step `.undo` walks back to, dropping the oldest
+    /// step once the stack is full and clearing a redo history the new change
+    /// has invalidated.
+    fn record_undo(&mut self, before: SessionSnapshot, full: bool) {
+        if !self.redo_stack.is_empty() {
+            self.redo_stack.clear();
+            println!("Redo history cleared by a new change.");
+        }
+        if self.undo_stack.len() >= MAX_UNDO {
+            self.undo_stack.pop_front();
+            println!(
+                "Undo history is full ({} steps); the oldest step was dropped.",
+                MAX_UNDO
+            );
+        }
+        self.undo_stack.push_back(UndoStep {
+            snapshot: before,
+            full,
+        });
+    }
+
+    /// `.checkpoint <name>`: saves the current state under `name`.
+    fn create_checkpoint(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Error: .checkpoint needs a name. Usage: .checkpoint <name>".to_string());
+        }
+        if self
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.name == name)
+        {
+            return Err(format!(
+                "Error: a checkpoint named '{}' already exists; the old one was kept.",
+                name
+            ));
+        }
+        if self.checkpoints.len() >= MAX_CHECKPOINTS {
+            let dropped = self.checkpoints.remove(0);
+            println!(
+                concat!(
+                    "Checkpoint history is full ({} checkpoints); the oldest checkpoint ",
+                    "'{}' was dropped."
+                ),
+                MAX_CHECKPOINTS, dropped.name
+            );
+        }
+        let snapshot = self.snapshot_state();
+        let history_len = self.history.len();
+        self.checkpoints.push(Checkpoint {
+            name: name.to_string(),
+            snapshot,
+            history_len,
+        });
+        self.current_checkpoint = Some(name.to_string());
+        Ok(())
+    }
+
+    /// `.restore <name>`: returns to a checkpoint this session made.
+    ///
+    /// The restore itself is a binding change, so it is undoable: the state it
+    /// replaced is pushed onto the undo stack before the checkpoint is applied.
+    fn restore_checkpoint(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        let Some(checkpoint) = self
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.name == name)
+            .cloned()
+        else {
+            return Err(format!(
+                concat!(
+                    "Error: no checkpoint named '{}'. Use .sessions to list this session's ",
+                    "checkpoints; :restore <filename> reads a saved history file instead."
+                ),
+                name
+            ));
+        };
+
+        let before = self.snapshot_state();
+        self.record_undo(before, true);
+        self.apply_snapshot(&checkpoint.snapshot);
+        self.history.truncate(checkpoint.history_len);
+        self.current_checkpoint = Some(checkpoint.name);
+        Ok(())
+    }
+
+    /// `.sessions`: the checkpoints in creation order, current one marked.
+    fn checkpoint_listing(&self) -> String {
+        if self.checkpoints.is_empty() {
+            return "No checkpoints in this session.".to_string();
+        }
+        let mut lines = vec!["Checkpoints:".to_string()];
+        for checkpoint in &self.checkpoints {
+            let marker = if self.current_checkpoint.as_deref() == Some(checkpoint.name.as_str()) {
+                "*"
+            } else {
+                " "
+            };
+            lines.push(format!("  {} {}", marker, checkpoint.name));
+        }
+        lines.join("\n")
+    }
+
+    /// `.undo`: steps one binding change back.
+    ///
+    /// An empty stack is a named empty, not a panic and not a silent no-op: the
+    /// user asked to go back and there is nowhere to go.
+    fn undo_binding(&mut self) -> Result<(), String> {
+        let Some(step) = self.undo_stack.pop_back() else {
+            return Err("Nothing to undo.".to_string());
+        };
+        let current = self.snapshot_state();
+        if self.redo_stack.len() >= MAX_UNDO {
+            self.redo_stack.pop_front();
+        }
+        self.redo_stack.push_back(UndoStep {
+            snapshot: current,
+            full: step.full,
+        });
+        if step.full {
+            self.apply_snapshot(&step.snapshot);
+        } else {
+            self.apply_bindings(&step.snapshot);
+        }
+        self.refresh_current_checkpoint();
+        Ok(())
+    }
+
+    /// `.redo`: steps one undone binding change forward again.
+    fn redo_binding(&mut self) -> Result<(), String> {
+        let Some(step) = self.redo_stack.pop_back() else {
+            return Err("Nothing to redo.".to_string());
+        };
+        let current = self.snapshot_state();
+        if self.undo_stack.len() >= MAX_UNDO {
+            self.undo_stack.pop_front();
+        }
+        self.undo_stack.push_back(UndoStep {
+            snapshot: current,
+            full: step.full,
+        });
+        if step.full {
+            self.apply_snapshot(&step.snapshot);
+        } else {
+            self.apply_bindings(&step.snapshot);
+        }
+        self.refresh_current_checkpoint();
+        Ok(())
     }
 
     /// Whether a buffer of `bytes` over `lines` is too much for a block the user
@@ -1980,6 +2323,10 @@ impl Repl {
         // A line that fails to parse never reaches the VM, so the output of the
         // line before it has to be out of the way before the next line starts.
         self.last_output.clear();
+        // What the bindings looked like before this line, so a line that changes
+        // one is a step `.undo` can walk back to. Taken even when the run fails:
+        // a half-run line can have bound something before it failed.
+        let before = self.snapshot_state();
         let result = self.run_code(code);
         // What the program said, whatever path it left by. Taken before the
         // `= value` line is added, so the transcript records the program's own
@@ -2004,6 +2351,12 @@ impl Repl {
                 Err(rendered)
             }
         };
+        // Recorded before the transcript so the undo step is the state the line
+        // started from, not the state it left behind.
+        if Self::bindings_changed(&before, &self.snapshot_state()) {
+            self.record_undo(before, false);
+            self.refresh_current_checkpoint();
+        }
         // A step of the tour is taken by running it, so this is where the tour
         // moves — and only here, where the run is known to have worked.
         if outcome.is_ok() {
@@ -9901,6 +10254,379 @@ mod tests {
                     painted[0].escape_debug()
                 );
             }
+        }
+    }
+
+    /// `.checkpoint`, `.restore`, `.sessions`, `.undo` and `.redo`: the session's
+    /// own memory.
+    ///
+    /// The family is driven through [`feed`] where it is a source line, and
+    /// through its own methods where the assertion is about the answer or the
+    /// bindings rather than about stdout. `.restore` is the one word with two
+    /// destinations, so the parse and the split are covered in `commands` and at
+    /// the dispatch boundary in `tests/repl_test.rs`.
+    mod session_memory {
+        use super::{feed, Repl};
+        use crate::repl::{LastFile, MAX_CHECKPOINTS, MAX_UNDO};
+        use crate::value::Value;
+
+        fn number(value: f64) -> Value {
+            Value::Number(value)
+        }
+
+        /// A checkpoint is the whole state: the name, the last result and the
+        /// history position all come back exactly, not just the binding map.
+        #[test]
+        fn checkpoint_restore_brings_back_bindings_last_result_and_history_position() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1", "40 + 2"]);
+            repl.create_checkpoint("a")
+                .expect("a fresh name is a checkpoint");
+            let position = repl.history.len();
+
+            feed(&mut repl, &["set x to 9", "1 + 1"]);
+            assert_eq!(repl.lookup("x"), Some(&number(9.0)));
+
+            repl.restore_checkpoint("a")
+                .expect("the checkpoint this session made is restorable");
+
+            assert_eq!(
+                repl.lookup("x"),
+                Some(&number(1.0)),
+                "the binding is the value it had at the checkpoint"
+            );
+            assert_eq!(
+                repl.lookup("_"),
+                Some(&number(42.0)),
+                "and so is the last result, which is session state too"
+            );
+            assert_eq!(
+                repl.history.len(),
+                position,
+                "the history is back at the position the checkpoint captured"
+            );
+        }
+
+        /// A checkpoint is the whole session, not only the bindings: the
+        /// shortcuts, the tour, the file `.reload` would use, the format
+        /// preference and the transcript all come back with it.
+        #[test]
+        fn edge_restore_brings_back_the_whole_session_state() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1"]);
+            repl.transcript.clear();
+            repl.aliases
+                .insert("hi".to_string(), "say \"hi\"".to_string());
+            repl.macros
+                .insert("m".to_string(), vec!["set y to 1".to_string()]);
+            repl.macro_recording = Some(("pending".to_string(), vec!["set z to 1".to_string()]));
+            repl.tutorial_step = Some(2);
+            repl.tutorial_typed = vec!["set x to 1".to_string()];
+            repl.last_file = Some(LastFile::Loaded("first.rb".to_string()));
+            repl.format_on_entry = true;
+            repl.transcript
+                .record("first".to_string(), vec!["= 1".to_string()]);
+            repl.create_checkpoint("whole")
+                .expect("a fresh name is a checkpoint");
+
+            feed(&mut repl, &["set x to 9"]);
+            repl.aliases.clear();
+            repl.macros.clear();
+            repl.macro_recording = None;
+            repl.tutorial_step = None;
+            repl.tutorial_typed.clear();
+            repl.last_file = Some(LastFile::Ran("second.rb".to_string()));
+            repl.format_on_entry = false;
+            repl.transcript.record("second".to_string(), Vec::new());
+
+            repl.restore_checkpoint("whole")
+                .expect("the checkpoint is restorable");
+
+            assert_eq!(
+                repl.aliases.get("hi").map(String::as_str),
+                Some("say \"hi\""),
+                "the aliases are the ones the checkpoint held"
+            );
+            assert_eq!(
+                repl.macros.get("m"),
+                Some(&vec!["set y to 1".to_string()]),
+                "and so are the macros"
+            );
+            assert_eq!(
+                repl.macro_recording,
+                Some(("pending".to_string(), vec!["set z to 1".to_string()])),
+                "a recording in progress is session state too"
+            );
+            assert_eq!(repl.tutorial_step, Some(2), "the tour is back where it was");
+            assert_eq!(
+                repl.tutorial_typed,
+                vec!["set x to 1".to_string()],
+                "with the lines typed at that step"
+            );
+            assert_eq!(
+                repl.last_file,
+                Some(LastFile::Loaded("first.rb".to_string())),
+                "so `.reload` names the file the checkpoint was taken with"
+            );
+            assert!(repl.format_on_entry, "and the format preference came back");
+            let inputs: Vec<&str> = repl
+                .transcript
+                .exchanges()
+                .iter()
+                .map(|exchange| exchange.input.as_str())
+                .collect();
+            assert_eq!(
+                inputs,
+                vec!["first"],
+                "the transcript stops at the checkpoint, not after it"
+            );
+        }
+
+        /// An empty undo stack is a named empty, and one `set` is one step in
+        /// both directions — `.redo` brings back exactly what `.undo` removed.
+        #[test]
+        fn edge_undo_after_one_set_removes_exactly_it_and_redo_brings_it_back() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 7"]);
+
+            repl.undo_binding().expect("one change is one step back");
+            assert_eq!(repl.lookup("x"), None, "the binding the set made is gone");
+            assert!(
+                repl.undo_binding().is_err(),
+                "an empty undo stack is a named empty, never a panic"
+            );
+            assert!(
+                repl.redo_binding().is_ok(),
+                "the failed second undo did not eat the redo step"
+            );
+            assert_eq!(
+                repl.lookup("x"),
+                Some(&number(7.0)),
+                "redo puts back exactly the binding undo removed"
+            );
+        }
+
+        /// A duplicate name is refused and the old checkpoint is kept: a silent
+        /// overwrite would lose the state the user was counting on.
+        #[test]
+        fn edge_duplicate_checkpoint_name_is_refused_and_the_old_one_is_kept() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1"]);
+            repl.create_checkpoint("a").expect("the first save works");
+            feed(&mut repl, &["set x to 9"]);
+
+            let refusal = repl
+                .create_checkpoint("a")
+                .expect_err("a name may name only one checkpoint");
+            assert!(
+                refusal.contains("already exists") && refusal.contains("old one was kept"),
+                "the refusal says why and what happened to the old one: {refusal}"
+            );
+
+            repl.restore_checkpoint("a")
+                .expect("the old checkpoint is still there");
+            assert_eq!(
+                repl.lookup("x"),
+                Some(&number(1.0)),
+                "and it holds the state it was saved with, not the newer one"
+            );
+        }
+
+        /// A name this session never saved is an error, and it leaves the session
+        /// exactly as it was.
+        #[test]
+        fn edge_restore_of_an_unknown_checkpoint_is_an_error_and_changes_nothing() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1"]);
+
+            let refusal = repl
+                .restore_checkpoint("missing")
+                .expect_err("there is no checkpoint by that name");
+            assert!(
+                refusal.contains("no checkpoint named 'missing'"),
+                "the refusal names the checkpoint it could not find: {refusal}"
+            );
+            assert_eq!(
+                repl.lookup("x"),
+                Some(&number(1.0)),
+                "a refused restore does not touch the bindings"
+            );
+        }
+
+        /// The undo stack is bounded: the oldest step is dropped and the session
+        /// says so, rather than growing a copy of the bindings per keystroke.
+        #[test]
+        fn edge_undo_history_is_bounded_and_drops_the_oldest_step() {
+            let mut repl = Repl::new();
+            for index in 0..=MAX_UNDO {
+                feed(&mut repl, &[&format!("set v{} to {}", index, index)]);
+            }
+
+            assert_eq!(
+                repl.undo_stack.len(),
+                MAX_UNDO,
+                "the stack never grows past its bound"
+            );
+            for _ in 0..MAX_UNDO {
+                repl.undo_binding()
+                    .expect("every step the bounded stack holds is walkable");
+            }
+            assert_eq!(
+                repl.lookup("v0"),
+                Some(&number(0.0)),
+                "the oldest step was dropped, so the first set cannot be undone"
+            );
+            assert_eq!(
+                repl.lookup("v1"),
+                None,
+                "the surviving history starts one step after the oldest"
+            );
+        }
+
+        /// `.sessions` is a listing in creation order, and it marks the current
+        /// checkpoint rather than printing a blank table when there is none.
+        #[test]
+        fn edge_sessions_lists_creation_order_and_marks_the_current_checkpoint() {
+            let mut repl = Repl::new();
+            assert_eq!(
+                repl.checkpoint_listing(),
+                "No checkpoints in this session.",
+                "an empty session says so rather than printing a blank table"
+            );
+
+            repl.create_checkpoint("a").expect("the first save works");
+            repl.create_checkpoint("b")
+                .expect("a second name is a second save");
+            let listing = repl.checkpoint_listing();
+            let first = listing.find(" a").expect("a is listed");
+            let second = listing.find(" b").expect("b is listed");
+            assert!(
+                first < second,
+                "the listing is in creation order: {listing}"
+            );
+            assert!(
+                listing.contains("* b"),
+                "the most recently saved checkpoint is current: {listing}"
+            );
+
+            repl.restore_checkpoint("a")
+                .expect("a saved checkpoint is restorable");
+            assert!(
+                repl.checkpoint_listing().contains("* a"),
+                "restoring a checkpoint makes it current: {}",
+                repl.checkpoint_listing()
+            );
+        }
+
+        /// The checkpoint list is bounded like the undo stack: the oldest is
+        /// dropped and the session says so, rather than refusing the new one.
+        #[test]
+        fn edge_checkpoint_history_is_bounded_and_drops_the_oldest_checkpoint() {
+            let mut repl = Repl::new();
+            for index in 0..=MAX_CHECKPOINTS {
+                repl.create_checkpoint(&format!("c{index}"))
+                    .expect("a checkpoint within the bound is saved");
+            }
+
+            assert_eq!(
+                repl.checkpoints.len(),
+                MAX_CHECKPOINTS,
+                "the list never grows past its bound"
+            );
+            let listing = repl.checkpoint_listing();
+            assert!(
+                !listing.lines().any(|line| line.trim() == "c0"),
+                "the oldest checkpoint was dropped: {listing}"
+            );
+            assert!(
+                listing.lines().any(|line| line.trim() == "c1"),
+                "the one after it is still there: {listing}"
+            );
+            let current = format!("* c{MAX_CHECKPOINTS}");
+            assert!(
+                listing.lines().any(|line| line.trim() == current),
+                "and the new checkpoint is current: {listing}"
+            );
+        }
+
+        /// Undoing a restore moves the bindings away from the checkpoint that
+        /// restore marked, so `.sessions` has to mark whichever checkpoint the
+        /// undo actually put back — not the one the restore left.
+        #[test]
+        fn edge_undo_after_restore_marks_the_checkpoint_whose_bindings_are_current() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1"]);
+            repl.create_checkpoint("a").expect("the first save works");
+            feed(&mut repl, &["set x to 2"]);
+            repl.create_checkpoint("b")
+                .expect("a second name is a second save");
+
+            repl.restore_checkpoint("a")
+                .expect("a saved checkpoint is restorable");
+            assert!(repl.checkpoint_listing().contains("* a"));
+
+            repl.undo_binding()
+                .expect("the restore is one undoable step");
+            assert_eq!(
+                repl.lookup("x"),
+                Some(&number(2.0)),
+                "undo puts back the state the restore replaced"
+            );
+            let listing = repl.checkpoint_listing();
+            assert!(
+                listing.contains("* b"),
+                "the marker follows the bindings back to b: {listing}"
+            );
+            assert!(
+                !listing.contains("* a"),
+                "and no longer claims a is current: {listing}"
+            );
+        }
+
+        /// A change after an undo clears the redo history, and the next `.redo`
+        /// says there is nothing to redo instead of replaying a state that no
+        /// longer follows from the session.
+        #[test]
+        fn edge_redo_after_a_new_change_is_cleared() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1"]);
+            repl.undo_binding().expect("the set can be undone");
+
+            feed(&mut repl, &["set y to 2"]);
+            let refusal = repl
+                .redo_binding()
+                .expect_err("a new change invalidates the redo history");
+            assert!(
+                refusal.contains("Nothing to redo"),
+                "the failure is a named empty: {refusal}"
+            );
+            assert_eq!(
+                repl.lookup("y"),
+                Some(&number(2.0)),
+                "the new change is still there"
+            );
+            assert_eq!(
+                repl.lookup("x"),
+                None,
+                "and the undone binding was not silently replayed"
+            );
+        }
+
+        /// The help text states the file/memory split once, in the line for the
+        /// one word that has two destinations.
+        #[test]
+        fn edge_help_states_the_file_and_memory_restore_split() {
+            let help = crate::repl::commands::ReplCommand::help_lines().join("\n");
+
+            assert!(help.contains(":restore"), "the file half is named: {help}");
+            assert!(
+                help.contains(".restore <name>"),
+                "the memory half is named with the dot sigil: {help}"
+            );
+            assert!(
+                help.contains("saved session file") && help.contains("in-memory checkpoint"),
+                "and the line says which is which: {help}"
+            );
         }
     }
 }

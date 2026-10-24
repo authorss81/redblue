@@ -19,7 +19,26 @@ pub enum ReplCommand {
     ///
     /// The other half of `:save`, which had no half: a saved file could not be
     /// loaded by any REPL path, so the round trip existed only in unit tests.
+    ///
+    /// The dot spelling of this same word is the in-memory half: `.restore
+    /// <name>` restores a checkpoint this session made, while `:restore <file>`
+    /// reads a saved history file. The two never share storage, and the split is
+    /// stated once in the help text rather than repeated on every line.
     Restore(String),
+    /// Saves the session's bindings, last result and history position under a
+    /// name this session can return to.
+    ///
+    /// A checkpoint is session state and nothing else: it is never a file, never
+    /// committed, and dies with the session.
+    Checkpoint(String),
+    /// Lists the checkpoints this session holds, in creation order, marking the
+    /// current one.
+    Sessions,
+    /// Steps one binding change back, to the state before the last source line
+    /// that changed anything.
+    Undo,
+    /// Steps one undone binding change forward again.
+    Redo,
     /// Writes the session — every line it ran, what each line said, and what
     /// failed — as Markdown, to `path` or to stdout when given nothing.
     ///
@@ -307,11 +326,46 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["restore", "r"],
-        description: "Restore a saved session",
+        description: concat!(
+            "Restore a saved session file (:restore) or ",
+            "an in-memory checkpoint (.restore <name>)",
+        ),
         usage: Some(FILE_USAGE),
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Restore(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["checkpoint"],
+        description: "Save the session's bindings and last result under a name",
+        usage: Some("<name>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Checkpoint(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["sessions"],
+        description: "List this session's checkpoints, marking the current one",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Sessions,
+    },
+    CommandSpec {
+        names: &["undo"],
+        description: "Step one binding change back",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Undo,
+    },
+    CommandSpec {
+        names: &["redo"],
+        description: "Step one undone binding change forward again",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Redo,
     },
     CommandSpec {
         names: &["reset"],
@@ -830,6 +884,12 @@ impl ReplCommand {
     /// offering paths to a line that cannot take one.
     pub fn takes_a_file_path(input: &str) -> bool {
         let input = input.trim_start();
+        // `.restore <name>` is the memory half of the word: its argument is a
+        // checkpoint name, and offering the filesystem for it would be offering
+        // paths to a command that never opens one.
+        if input.starts_with(ALT_SIGIL) && command_word(input) == "restore" {
+            return false;
+        }
         input.starts_with(SIGILS)
             && spec_for(input).is_some_and(|spec| spec.usage == Some(FILE_USAGE))
     }
@@ -857,6 +917,7 @@ impl ReplCommand {
             ReplCommand::Load(value)
             | ReplCommand::Save(value)
             | ReplCommand::Restore(value)
+            | ReplCommand::Checkpoint(value)
             | ReplCommand::Run(value)
             | ReplCommand::Inspect(value)
             | ReplCommand::Type(value)
@@ -1679,5 +1740,40 @@ mod tests {
                 "{command:?} is or is not a command whose argument is a path"
             );
         }
+    }
+
+    /// The session-memory family parses, and the one word with two destinations
+    /// keeps one variant: the sigil is the distinction, and dispatch is where it
+    /// is read.
+    #[test]
+    fn edge_session_memory_commands_parse() {
+        assert_eq!(
+            ReplCommand::parse(".checkpoint a"),
+            ReplCommand::Checkpoint("a".to_string())
+        );
+        assert_eq!(ReplCommand::parse(":sessions"), ReplCommand::Sessions);
+        assert_eq!(ReplCommand::parse(".undo"), ReplCommand::Undo);
+        assert_eq!(ReplCommand::parse(":redo"), ReplCommand::Redo);
+        assert_eq!(
+            ReplCommand::parse(".restore a"),
+            ReplCommand::Restore("a".to_string()),
+            "the dot spelling parses to the same variant as :restore; dispatch              reads the sigil and chooses the memory half"
+        );
+        assert_eq!(
+            ReplCommand::parse(".checkpoint"),
+            ReplCommand::MissingArgument {
+                command: "checkpoint",
+                usage: "<name>"
+            },
+            "a checkpoint with no name is a command missing its argument"
+        );
+        assert!(
+            !ReplCommand::takes_a_file_path(".restore a"),
+            "a checkpoint name is not a path, so TAB does not offer the filesystem"
+        );
+        assert!(
+            ReplCommand::takes_a_file_path(":restore saved.txt"),
+            "the file half still takes a path"
+        );
     }
 }

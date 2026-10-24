@@ -67,6 +67,19 @@ impl ReplHistory {
         self.history.clear();
     }
 
+    /// Drops entries until the history is `len` long, for a checkpoint that
+    /// saved the position it had reached.
+    ///
+    /// Asking for a length at or beyond what the history holds is a no-op, not
+    /// an error: the only caller is a restore, and a checkpoint taken before a
+    /// history that has since been bounded to a smaller size can name a position
+    /// this history can no longer reach.
+    pub fn truncate(&mut self, len: usize) {
+        while self.history.len() > len {
+            self.history.pop_back();
+        }
+    }
+
     /// Writes the history to `path`, one entry per line — the format
     /// [`ReplHistory::load_from_file`] reads back.
     ///

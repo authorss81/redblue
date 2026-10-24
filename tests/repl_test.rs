@@ -774,6 +774,84 @@ fn edge_restore_of_a_missing_path_reports_the_failure() {
         .assert_stdout_contains("     1  set kept to 1");
 }
 
+/// A checkpoint is the whole session, not just the binding map: `.restore`
+/// brings back the value a name had and the last result `_` that was showing,
+/// and `.sessions` lists it as the current checkpoint.
+#[test]
+fn checkpoint_restore_brings_back_bindings_and_last_result_end_to_end() {
+    let s = session(
+        "set x to 1\n\
+         40 + 2\n\
+         .checkpoint a\n\
+         set x to 9\n\
+         1 + 1\n\
+         .restore a\n\
+         say \"x={x}\"\n\
+         .sessions\n\
+         :quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Checkpoint 'a' saved.")
+        .assert_stdout_contains("Restored checkpoint 'a'.")
+        .assert_stdout_contains("= 42")
+        .assert_stdout_contains("x=1")
+        .assert_stdout_contains("* a");
+}
+
+/// An empty undo or redo stack is a named empty, and a session with no
+/// checkpoints says so rather than printing a blank table.
+#[test]
+fn edge_undo_and_redo_and_sessions_with_nothing_to_show_say_so() {
+    let s = session(".undo\n.redo\n.sessions\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Nothing to undo.")
+        .assert_stdout_contains("Nothing to redo.")
+        .assert_stdout_contains("No checkpoints in this session.");
+}
+
+/// A change after an undo clears the redo history, and the session states that
+/// rather than letting a stale `.redo` replay a state that no longer follows.
+#[test]
+fn edge_redo_after_a_new_change_reports_that_the_redo_history_was_cleared() {
+    let s = session("set x to 1\n.undo\nset y to 2\n.redo\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Redo history cleared by a new change.")
+        .assert_stdout_contains("Nothing to redo.");
+}
+
+/// The dot spelling of `.restore` is the in-memory checkpoint; the colon
+/// spelling is still the saved session file. The two do not fall through into
+/// each other, which is what the help text's one sentence promises.
+#[test]
+fn edge_dot_restore_of_an_unknown_name_is_a_checkpoint_error_not_a_file_error() {
+    let s = session(".restore missing\n:restore missing-file\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("no checkpoint named 'missing'")
+        .assert_stdout_contains("Could not restore session:")
+        .assert_stdout_lacks("Unknown command 'restore'");
+}
+
+/// The undo stack is bounded in the running session too, and the drop is
+/// stated: a user who walks back past the bound is told which step is gone.
+#[test]
+fn edge_undo_past_its_bound_drops_the_oldest_step_with_a_notice() {
+    let mut input = String::new();
+    for index in 0..=50 {
+        input.push_str(&format!("set v{} to {}\n", index, index));
+    }
+    input.push_str(".undo\n:quit\n");
+
+    let s = session(&input);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Undo history is full (50 steps); the oldest step was dropped.")
+        .assert_stdout_contains("Undid one change.");
+}
+
 /// A block whose `end` never arrives is a pipe that will never close. The buffer
 /// grew without limit, so the process grew until it was killed; past the limit the
 /// session drops the block, says so, and goes back to reading lines.
