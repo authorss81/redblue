@@ -214,7 +214,17 @@ impl ReplCompleter {
         }
 
         for name in names {
-            if sigil.is_none() && name.to_lowercase().starts_with(&word_lower) {
+            // A name carrying the canonical sigil is a user command — an alias
+            // this session defined — rather than a binding. It is offered only
+            // when the user began a command word, and offered back with the
+            // sigil they typed, the same rule the built-in commands follow.
+            if let Some(command) = name.strip_prefix(':') {
+                if (sigil.is_some() || word.is_empty())
+                    && command.to_lowercase().starts_with(&word_lower)
+                {
+                    matches.push(format!("{command_sigil}{command}"));
+                }
+            } else if sigil.is_none() && name.to_lowercase().starts_with(&word_lower) {
                 matches.push(name.clone());
             }
         }

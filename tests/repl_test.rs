@@ -1821,3 +1821,251 @@ fn edge_a_session_that_ran_a_crlf_file_exports_and_reads_back() {
         "the file is one block however its lines were terminated:\n{document}"
     );
 }
+
+/// `.alias ll :vars` is a short name for a command, and running it produces the
+/// same output as the command it names — diffed against a session that typed the
+/// command itself, not eyeballed.
+#[test]
+fn alias_shortcut_matches_the_command_it_names() {
+    let aliased = session(".alias ll :vars\nsay \"ALIAS-MARK\"\nll\nsay \"ALIAS-END\"\n:quit\n");
+    let direct = session("say \"ALIAS-MARK\"\n:vars\nsay \"ALIAS-END\"\n:quit\n");
+
+    aliased
+        .assert_exited_ok()
+        .assert_stdout_contains("No variables defined.");
+    direct
+        .assert_exited_ok()
+        .assert_stdout_contains("No variables defined.");
+    assert_eq!(
+        between(&aliased.stdout, "ALIAS-MARK", "ALIAS-END"),
+        between(&direct.stdout, "ALIAS-MARK", "ALIAS-END"),
+        "an alias is the command it names, output for output\n--- aliased ---\n{}\n--- direct ---\n{}",
+        aliased.stdout, direct.stdout
+    );
+}
+
+/// The text between two markers in a transcript, used to compare what a command
+/// said without comparing the prompts of the lines that set the comparison up.
+fn between<'a>(transcript: &'a str, start: &str, end: &str) -> &'a str {
+    let after = transcript
+        .split_once(start)
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
+    after.split_once(end).map(|(body, _)| body).unwrap_or("")
+}
+
+/// A macro is a sequence recorded once and replayed by name. The replay is the
+/// same three lines run again, so its transcript is byte-for-byte the transcript
+/// of typing them.
+#[test]
+fn macro_replays_three_recorded_lines_with_identical_output() {
+    let recorded = session(
+        ".macro start trio\nsay \"MACRO-MARK\"\nsay \"ONE\"\nsay \"TWO\"\nsay \"THREE\"\nsay \"MACRO-END\"\n.macro\n.macro run trio\n:quit\n",
+    );
+    let direct = session(
+        "say \"MACRO-MARK\"\nsay \"ONE\"\nsay \"TWO\"\nsay \"THREE\"\nsay \"MACRO-END\"\n:quit\n",
+    );
+
+    recorded.assert_exited_ok();
+    direct.assert_exited_ok();
+    assert_eq!(
+        between(&recorded.stdout, "MACRO-MARK", "MACRO-END"),
+        between(&direct.stdout, "MACRO-MARK", "MACRO-END"),
+        "a macro replay is the lines it recorded, in order, with the same output\n--- recorded ---\n{}\n--- direct ---\n{}",
+        recorded.stdout, direct.stdout
+    );
+}
+
+/// Two aliases that name each other are a cycle, not a command. The definition
+/// that would close the loop is refused, and the session never follows it.
+#[test]
+fn edge_alias_cycle_is_refused_without_looping() {
+    let s = session(".alias a b\n.alias b a\na\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("cycle")
+        .assert_stdout_lacks("stack overflow");
+}
+
+/// `.alias` with nothing after it asks what aliases exist. A session with none
+/// says so by name rather than printing an empty list with no explanation.
+#[test]
+fn edge_alias_with_no_arguments_lists_the_empty_table() {
+    let empty = session(".alias\n:quit\n");
+    empty
+        .assert_exited_ok()
+        .assert_stdout_contains("No aliases defined.");
+
+    let filled = session(".alias ll :vars\n.alias\n:quit\n");
+    filled
+        .assert_exited_ok()
+        .assert_stdout_contains(":ll")
+        .assert_stdout_contains(":vars");
+}
+
+/// A recording is a property of the session, not of the bindings: `:reset`
+/// forgets what was bound but not that a macro was being recorded.
+#[test]
+fn edge_macro_recording_survives_reset_while_bindings_do_not() {
+    let s = session(".macro start keep\nset x to 1\n:reset\n:vars\n.macro\n.macro list\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("REPL state reset.")
+        .assert_stdout_contains("No variables defined.")
+        .assert_stdout_contains("keep")
+        .assert_stdout_contains("3 line(s)");
+}
+
+/// Stopping a macro when nothing is being recorded is a command typed
+/// incompletely, and it says so instead of silently doing nothing.
+#[test]
+fn edge_macro_without_a_recording_is_a_usage_error() {
+    let s = session(".macro\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Error:")
+        .assert_stdout_contains("Usage: .macro");
+}
+
+/// `:save` writes the session, and the session includes the aliases and macros
+/// the user defined. `:restore` brings both back in a session that never saw
+/// them typed.
+#[test]
+fn edge_save_and_restore_round_trip_aliases_and_macros() {
+    let saved = scratch_path("alias-macro-session", "txt");
+
+    let first = session(&format!(
+        ".alias ll :vars\n.macro start replay\nsay \"SAVED BY MACRO\"\n.macro\n:save {}\n:quit\n",
+        saved.display()
+    ));
+    first
+        .assert_exited_ok()
+        .assert_stdout_contains("Session saved to");
+
+    let second = session(&format!(
+        ":restore {}\nll\n.macro run replay\n:help\n:quit\n",
+        saved.display()
+    ));
+    let _ = std::fs::remove_file(&saved);
+
+    second
+        .assert_exited_ok()
+        .assert_stdout_contains("No variables defined.")
+        .assert_stdout_contains("SAVED BY MACRO")
+        .assert_stdout_contains(":ll")
+        .assert_stdout_contains("replay");
+}
+
+/// A saved session a user edited by hand can hold a record that no longer makes
+/// sense. The restore says which record it skipped, instead of losing it in
+/// silence, and still loads the records around it.
+#[test]
+fn edge_restore_warns_about_malformed_saved_state_and_loads_the_rest() {
+    let saved = scratch_path("malformed-session-state", "txt");
+    std::fs::write(
+        &saved,
+        "#!redblue-session-state\n\
+         alias good :vars\n\
+         alias broken\n\
+         macro bad notanumber\n\
+         macro short 2\n\
+         only one line\n",
+    )
+    .expect("the malformed session file should be writable");
+
+    let s = session(&format!(":restore {}\ngood\n:quit\n", saved.display()));
+    let _ = std::fs::remove_file(&saved);
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Warning: saved alias 'broken' has no command; skipped.")
+        .assert_stdout_contains(
+            "Warning: saved macro 'bad' has a malformed line count 'notanumber'",
+        )
+        .assert_stdout_contains("Warning: saved macro 'short' is truncated")
+        .assert_stdout_contains("No variables defined.");
+}
+
+/// The sigil is what lets an alias take arguments: `:ll extra` expands, while a
+/// bare `ll extra` is Redblue source. The help text says so, and this pins both
+/// halves of that rule.
+#[test]
+fn edge_bare_alias_with_an_argument_is_source_not_an_alias_call() {
+    let s = session(".alias ll :vars\nll extra\n:ll extra\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Unknown variable 'll'")
+        .assert_stdout_contains("No variables defined.");
+}
+
+/// An unknown `.macro` sub-command is a typo in the sub-command, not the name of
+/// a macro to replay. The usage error names the word that was not understood.
+#[test]
+fn edge_unknown_macro_subcommand_is_a_usage_error_not_a_macro_name() {
+    let s = session(".macro statr foo\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("unknown .macro subcommand 'statr'")
+        .assert_stdout_lacks("no macro named 'statr foo'");
+}
+
+/// An alias may name another alias. The chain is followed to the command at the
+/// end, and the output is that command's output.
+#[test]
+fn edge_alias_to_alias_resolves_to_the_command_at_the_end() {
+    let chained = session(
+        ".alias vv :vars\n.alias aa vv\nsay \"CHAIN-MARK\"\naa\nsay \"CHAIN-END\"\n:quit\n",
+    );
+    let direct = session("say \"CHAIN-MARK\"\n:vars\nsay \"CHAIN-END\"\n:quit\n");
+
+    chained
+        .assert_exited_ok()
+        .assert_stdout_contains("No variables defined.");
+    direct
+        .assert_exited_ok()
+        .assert_stdout_contains("No variables defined.");
+    assert_eq!(
+        between(&chained.stdout, "CHAIN-MARK", "CHAIN-END"),
+        between(&direct.stdout, "CHAIN-MARK", "CHAIN-END"),
+        "an alias of an alias reaches the command at the end of the chain\n--- chained ---\n{}\n--- direct ---\n{}",
+        chained.stdout, direct.stdout
+    );
+}
+
+/// A user alias may not take a built-in command's word. The refusal names the
+/// collision, and the built-in still means what it did.
+#[test]
+fn edge_alias_colliding_with_a_builtin_is_refused() {
+    let s = session(".alias :vars :help\n:vars\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("built-in command")
+        .assert_stdout_contains("No variables defined.");
+}
+
+/// Running a macro that was never recorded is a clean error naming the missing
+/// macro, not a panic or a silently empty replay.
+#[test]
+fn edge_macro_run_of_an_unknown_name_is_an_error() {
+    let s = session(".macro run nosuchmacro\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("no macro named 'nosuchmacro'");
+}
+
+/// User names and recorded lines are text, and a non-ASCII alias name or a macro
+/// line with an emoji is stored and replayed byte-for-byte.
+#[test]
+fn edge_unicode_alias_name_and_macro_line_round_trip() {
+    let s = session(
+        ".alias café :vars\ncafé\n.macro start unicode\nsay \"héllo 😀\"\n.macro\n.macro run unicode\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("No variables defined.");
+    assert_eq!(
+        s.count_stdout("héllo 😀"),
+        2,
+        "the macro line is replayed with its Unicode intact\n{}",
+        s.stdout
+    );
+}

@@ -145,6 +145,21 @@ pub enum ReplCommand {
     /// a command missing its argument: it is the one that puts the prompt back.
     /// The table still declares a usage so `:help` names what the argument is.
     Prompt(Option<String>),
+    /// A user-named shortcut for a command, or — with no argument — the list of
+    /// the shortcuts this session holds.
+    ///
+    /// The argument is the whole remainder, `<name> <command>`, so a shortcut can
+    /// stand for a command that itself takes an argument. `Option` because a bare
+    /// `.alias` is a question ("what aliases are there?") rather than a command
+    /// typed incompletely.
+    Alias(Option<String>),
+    /// Records, stops recording, lists, or replays a macro — the session's own
+    /// named sequence of lines.
+    ///
+    /// A bare `.macro` is the stop command while a recording is in progress, and
+    /// a usage error when none is. `Option` for that reason: the argument is the
+    /// sub-command, and the empty one is meaningful.
+    Macro(Option<String>),
     /// A command that was recognised but not given what it needs.
     ///
     /// Not [`ReplCommand::Unknown`]: the command *is* known, its argument is
@@ -580,6 +595,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         verbatim_argument: false,
         build: |_| ReplCommand::Edit,
     },
+    CommandSpec {
+        names: &["alias"],
+        description: "Define a shortcut (:name takes arguments; bare name stands alone) or list",
+        usage: Some("<name> <command>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Alias(argument),
+    },
+    CommandSpec {
+        names: &["macro"],
+        description: "Record, stop, list, or replay a named sequence of lines",
+        usage: Some("start <name> | stop | list | run <name>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Macro(argument),
+    },
 ];
 
 /// The command word `input` names, with its sigil off.
@@ -833,6 +864,8 @@ impl ReplCommand {
             | ReplCommand::Watch(value)
             | ReplCommand::Export(Some(value)) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
+            ReplCommand::Alias(Some(value)) => Some(value.as_str()),
+            ReplCommand::Macro(Some(value)) => Some(value.as_str()),
             ReplCommand::Format(Some(value)) => Some(value.as_str()),
             _ => None,
         }
@@ -942,6 +975,23 @@ mod tests {
             (":prompt", "Prompt", ""),
             (":prompt   ", "Prompt", ""),
             (":prompt rb> ", "Prompt", "rb> "),
+            // `.alias` with nothing after it lists the table, which is a
+            // question the command answers rather than an argument it is
+            // missing. With an argument it carries the whole `<name> <command>`
+            // remainder, because the command it stands for may take one too.
+            (":alias", "Alias", ""),
+            (".alias", "Alias", ""),
+            (":alias ll :vars", "Alias", "ll :vars"),
+            (".alias ll :vars", "Alias", "ll :vars"),
+            // `.macro` with no argument is the stop command while a recording is
+            // in progress, so it is the other command whose argument may be
+            // left out. Its sub-commands carry their own words and names.
+            (":macro", "Macro", ""),
+            (".macro", "Macro", ""),
+            (":macro start trio", "Macro", "start trio"),
+            (".macro stop", "Macro", "stop"),
+            (":macro list", "Macro", "list"),
+            (":macro run trio", "Macro", "run trio"),
         ];
 
         for (input, expected, argument) in cases {
@@ -980,6 +1030,9 @@ mod tests {
                 // `.format on|off` carries the word it was given; a bare
                 // `.format` carries nothing and falls to the empty argument.
                 ReplCommand::Format(Some(value)) => value.as_str(),
+                // The alias and macro remainders are carried whole, so a
+                // shortcut to `:load a b.rb` keeps the path with the space in it.
+                ReplCommand::Alias(Some(value)) | ReplCommand::Macro(Some(value)) => value.as_str(),
                 _ => "",
             };
             assert_eq!(

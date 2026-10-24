@@ -108,6 +108,48 @@ const MAX_PROMPT_BYTES: usize = 1024;
 /// is a scroll back through the editor's history looking for it.
 const REPEAT: &str = "!!";
 
+/// The most aliases one session may hold.
+///
+/// Aliases are session state and live as long as the session does, so an
+/// unbounded table is an unbounded allocation a pipe of `.alias` lines could
+/// drive. A few hundred is far more than a person can remember; the cap is the
+/// point at which the session says so instead of growing silently.
+const MAX_ALIASES: usize = 256;
+
+/// The most macros one session may hold, for the same reason as [`MAX_ALIASES`].
+const MAX_MACROS: usize = 256;
+
+/// The most lines one macro may record.
+///
+/// A recording collects one line per prompt, so without a bound a session could
+/// grow a macro until the process ran out of memory. The cap matches
+/// [`MAX_BLOCK_LINES`]: past it the recording is stored and stopped, and the
+/// line that reached the cap is still run normally.
+const MAX_MACRO_LINES: usize = 500;
+
+/// The line that separates a saved session's history from the aliases and macros
+/// it carried.
+///
+/// `:save` wrote one history line per line and nothing else, so a session's own
+/// shortcuts could not survive the file. The marker is written only when there is
+/// state to write, which keeps an ordinary saved session byte-for-byte what it
+/// was, and it is read back by [`Repl::restore_session`] before the history is
+/// loaded so it never becomes a line the user appears to have typed.
+const SESSION_STATE_MARKER: &str = "#!redblue-session-state";
+
+/// What a saved session's state section held, and the records that could not be
+/// read back.
+///
+/// A struct rather than a tuple because the warnings are as much a result as the
+/// two tables: a restore that returned them only by side effect would hide the
+/// choice of where to print them from the function that parses.
+#[derive(Default)]
+struct SessionState {
+    aliases: HashMap<String, String>,
+    macros: HashMap<String, Vec<String>>,
+    warnings: Vec<String>,
+}
+
 /// The answers a debugger prompt takes, and what each one asks the VM to do.
 ///
 /// Read in [`debug_stop`]. Every word is also reachable with a sigil, because
@@ -686,6 +728,19 @@ pub struct Repl {
     /// session runs each as it is typed — so neither of them is step one of the
     /// tour, and the two of them together are.
     tutorial_typed: Vec<String>,
+    /// The user's own command shortcuts: a name to the command text it stands
+    /// for. Session state, not language state — the language has no word for
+    /// either half, which is why they live here rather than in the VM.
+    aliases: HashMap<String, String>,
+    /// The named sequences this session has recorded, each a list of the lines
+    /// between `.macro start <name>` and `.macro`.
+    macros: HashMap<String, Vec<String>>,
+    /// The macro being recorded, while one is: its name and the lines so far.
+    ///
+    /// `Option` rather than an empty list under a sentinel name because "not
+    /// recording" is a state the stop command has to report, and a session whose
+    /// recording was reset would otherwise stop a recording that is not there.
+    macro_recording: Option<(String, Vec<String>)>,
 }
 
 impl Repl {
@@ -709,13 +764,16 @@ impl Repl {
             last_output: Vec::new(),
             tutorial_step: None,
             tutorial_typed: Vec::new(),
+            aliases: HashMap::new(),
+            macros: HashMap::new(),
+            macro_recording: None,
         }
     }
 
     /// Completes `word` against the session: the language's own keywords and
     /// builtins, the REPL's commands, and every name this session has bound.
     pub fn complete(&self, word: &str) -> Vec<String> {
-        self.completer.complete_with(word, &self.session_names())
+        self.completer.complete_with(word, &self.completion_names())
     }
 
     /// Every name a completion could offer from the live session: the REPL's own
@@ -734,6 +792,23 @@ impl Repl {
         if let Some(debug) = &self.debug_repl {
             names.extend(debug.session_names());
         }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The names completion may offer: the session's bindings plus the commands
+    /// this session itself defined.
+    ///
+    /// An alias is a command word, so it is carried with the canonical sigil and
+    /// completed only where a command word is; a macro is replayed by name after
+    /// `.macro run`, so its name is a bare word like a variable. The analyzer is
+    /// given [`Repl::session_names`] instead, because neither is a language
+    /// binding: a program saying `mymacro` must still be an unknown variable.
+    fn completion_names(&self) -> Vec<String> {
+        let mut names = self.session_names();
+        names.extend(self.aliases.keys().map(|name| format!(":{name}")));
+        names.extend(self.macros.keys().cloned());
         names.sort();
         names.dedup();
         names
@@ -816,10 +891,11 @@ impl Repl {
 
             let prompt = self.prompt_for_next_line();
 
-            // The editor completes against the names the session has bound, and
-            // it cannot be lent them while they are being borrowed to read a
-            // line, so it is given a snapshot refreshed here.
-            *names.borrow_mut() = self.session_names();
+            // The editor completes against the names the session has bound and
+            // the commands it has defined, and it cannot be lent them while they
+            // are being borrowed to read a line, so it is given a snapshot
+            // refreshed here.
+            *names.borrow_mut() = self.completion_names();
 
             let line = match source.read_line(&prompt) {
                 Ok(Line::Text(text)) => text,
@@ -888,6 +964,38 @@ impl Repl {
             };
             self.history.push(recorded.to_string());
 
+            // A line typed while a macro is being recorded is part of that macro,
+            // with one exception: the `.macro` that stops the recording is the
+            // control, not the content. The start command is not here because the
+            // recording does not exist until that command is dispatched below.
+            if self.macro_recording.is_some() && !Self::is_macro_stop(input) {
+                let at_limit = self
+                    .macro_recording
+                    .as_ref()
+                    .is_some_and(|(_, lines)| lines.len() >= MAX_MACRO_LINES);
+                if at_limit {
+                    let name = self
+                        .macro_recording
+                        .as_ref()
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_default();
+                    println!(
+                        "{}",
+                        self.style.paint(
+                            Paint::Error,
+                            &format!(
+                                "Error: macro '{name}' reached the maximum of \
+                                 {MAX_MACRO_LINES} lines; recording stopped and \
+                                 the macro stored."
+                            )
+                        )
+                    );
+                    let _ = self.stop_macro();
+                } else if let Some((_, lines)) = self.macro_recording.as_mut() {
+                    lines.push(recorded.to_string());
+                }
+            }
+
             // `!!` is a line like any other as far as the history is concerned —
             // it was typed, and `:history` should show it — but what runs is the
             // line before it, dispatched the same way, so `!!` over a command
@@ -906,7 +1014,15 @@ impl Repl {
             };
 
             let dispatched = if input == REPEAT { &expanded } else { typed };
-            if self.handle_command(dispatched) {
+            let alias_target = match self.expand_alias_line(dispatched) {
+                Ok(target) => target,
+                Err(message) => {
+                    println!("{}", self.style.paint(Paint::Error, &message));
+                    continue;
+                }
+            };
+            let command_line = alias_target.as_deref().unwrap_or(dispatched);
+            if self.handle_command(command_line) {
                 continue;
             }
 
@@ -1002,6 +1118,372 @@ impl Repl {
                  this session's history."
             )
         })
+    }
+
+    /// Whether `input` is the `.macro` (or `.macro stop`) that ends a recording.
+    ///
+    /// Asked before the line is put in the macro, so a macro cannot contain the
+    /// command that stopped it being written.
+    fn is_macro_stop(input: &str) -> bool {
+        match ReplCommand::parse(input) {
+            ReplCommand::Macro(None) => true,
+            ReplCommand::Macro(Some(argument)) => argument.trim().eq_ignore_ascii_case("stop"),
+            _ => false,
+        }
+    }
+
+    /// A command text's first word without its sigil, and the rest after it.
+    ///
+    /// Used both to find the alias a value names and to keep the argument the
+    /// value carried, so a shortcut can stand for `:load file.rb` and not only
+    /// for a command with no argument.
+    fn alias_words(value: &str) -> (&str, &str) {
+        let value = value.trim_start();
+        let (word, rest) = match value.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim_start()),
+            None => (value, ""),
+        };
+        (word.strip_prefix(commands::SIGILS).unwrap_or(word), rest)
+    }
+
+    /// Whether defining `name` as `value` would close a loop of aliases.
+    ///
+    /// Checked at definition time rather than only at dispatch, because the
+    /// second half of `a -> b`, `b -> a` is the moment the user can be told the
+    /// two names have no command between them. Dispatch still guards the walk,
+    /// since a file or an older session may carry a loop this session never saw
+    /// being defined.
+    fn alias_cycle(&self, name: &str, value: &str) -> bool {
+        let mut current = Self::alias_words(value).0.to_string();
+        let mut seen = HashSet::new();
+        loop {
+            if current == name {
+                return true;
+            }
+            if !seen.insert(current.clone()) {
+                return true;
+            }
+            match self.aliases.get(&current) {
+                Some(next) => current = Self::alias_words(next).0.to_string(),
+                None => return false,
+            }
+        }
+    }
+
+    /// Follows `name` through any aliases it names, returning the command text at
+    /// the end of the chain.
+    ///
+    /// One level is not enough: `.alias b :vars` then `.alias a b` is a shortcut
+    /// to a shortcut, and `a` has to reach `vars`. `seen` is the guard that makes
+    /// a loop an error rather than a hang.
+    fn resolve_alias(&self, name: &str, seen: &mut HashSet<String>) -> Result<String, String> {
+        if !seen.insert(name.to_string()) {
+            return Err(format!(
+                "Error: the aliases form a cycle at '{name}'; no command is reached."
+            ));
+        }
+        let value = self
+            .aliases
+            .get(name)
+            .ok_or_else(|| format!("Error: '{name}' is not an alias this session holds."))?;
+        let (word, rest) = Self::alias_words(value);
+        if self.aliases.contains_key(word) {
+            let resolved = self.resolve_alias(word, seen)?;
+            Ok(if rest.is_empty() {
+                resolved
+            } else {
+                format!("{resolved} {rest}")
+            })
+        } else {
+            Ok(value.clone())
+        }
+    }
+
+    /// Puts the canonical sigil in front of a command word that was written
+    /// without one, so a bare alias target reaches the command table.
+    fn with_command_sigil(text: &str) -> String {
+        let text = text.trim_start();
+        let (word, _) = match text.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest),
+            None => (text, ""),
+        };
+        if word.starts_with(commands::SIGILS) {
+            return text.to_string();
+        }
+        if ReplCommand::bare_names().iter().any(|name| name == word) {
+            format!(":{text}")
+        } else {
+            text.to_string()
+        }
+    }
+
+    /// The command a line names through the user's aliases, or `None` when the
+    /// line is not an alias.
+    ///
+    /// A line with a sigil may carry an argument after the alias (`:ll extra`);
+    /// a line without one is an alias only when the whole line is the name, so a
+    /// source line beginning with a name that happens to be an alias — `ll + 1`
+    /// — is still source and not a command.
+    fn expand_alias_line(&self, input: &str) -> Result<Option<String>, String> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Ok(None);
+        }
+        let (word, rest) = match input.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim_start()),
+            None => (input, ""),
+        };
+        let has_sigil = word.starts_with(commands::SIGILS);
+        let name = word.strip_prefix(commands::SIGILS).unwrap_or(word);
+        if !self.aliases.contains_key(name) {
+            return Ok(None);
+        }
+        if !has_sigil && !rest.is_empty() {
+            return Ok(None);
+        }
+        let mut seen = HashSet::new();
+        let resolved = self.resolve_alias(name, &mut seen)?;
+        let expanded = if rest.is_empty() {
+            resolved
+        } else {
+            format!("{resolved} {rest}")
+        };
+        Ok(Some(Self::with_command_sigil(&expanded)))
+    }
+
+    /// Defines a shortcut from `<name> <command>`, or says why it will not.
+    ///
+    /// A name that is already a built-in command is refused rather than allowed
+    /// to shadow it: `:help` would then name a word that means something else,
+    /// and every existing script of the user's hands would change meaning. A
+    /// redefinition of the session's own alias is allowed, because that is how a
+    /// shortcut is corrected.
+    fn define_alias(&mut self, argument: &str) -> Result<(), String> {
+        let argument = argument.trim();
+        let (name, value) = match argument.split_once(char::is_whitespace) {
+            Some((name, value)) => (name, value.trim()),
+            None => {
+                return Err(
+                    "Error: .alias needs a name and the command it stands for.                      Usage: .alias <name> <command>"
+                        .to_string(),
+                )
+            }
+        };
+        let name = name.strip_prefix(commands::SIGILS).unwrap_or(name);
+        if name.is_empty() || name.contains([':', '.']) {
+            return Err(format!(
+                "Error: '{name}' is not a usable alias name.                  Usage: .alias <name> <command>"
+            ));
+        }
+        if value.is_empty() {
+            return Err(
+                "Error: .alias needs the command the name stands for.                  Usage: .alias <name> <command>"
+                    .to_string(),
+            );
+        }
+        // The cycle is checked before the collision because a name can be both:
+        // `b` is the built-in short form of `:break`, and `.alias a b` followed
+        // by `.alias b a` is a loop first. Naming the loop is the answer that
+        // tells the user what to change; naming the collision would suggest a
+        // different name fixes it, which it does not.
+        if self.alias_cycle(name, value) {
+            return Err(format!(
+                "Error: .alias {name} {value} would create a cycle of aliases; no command is reached."
+            ));
+        }
+        if ReplCommand::bare_names()
+            .iter()
+            .any(|builtin| builtin.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "Error: '{name}' is already a built-in command; an alias may not shadow it. Pick another name."
+            ));
+        }
+        if !self.aliases.contains_key(name) && self.aliases.len() >= MAX_ALIASES {
+            return Err(format!(
+                "Error: this session already holds the maximum of {MAX_ALIASES} aliases; no new alias can be added."
+            ));
+        }
+        self.aliases.insert(name.to_string(), value.to_string());
+        Ok(())
+    }
+
+    /// The `.alias` command: define one, or list the ones this session holds.
+    fn alias_command(&mut self, argument: Option<&str>) {
+        let Some(argument) = argument else {
+            self.print_aliases();
+            return;
+        };
+        if let Err(message) = self.define_alias(argument) {
+            println!("{}", self.style.paint(Paint::Error, &message));
+        }
+    }
+
+    /// The `:help`/`.alias` listing, in name order and naming the empty table.
+    fn print_aliases(&self) {
+        if self.aliases.is_empty() {
+            println!("No aliases defined.");
+            return;
+        }
+        println!("Aliases:");
+        let mut aliases: Vec<(&String, &String)> = self.aliases.iter().collect();
+        aliases.sort_by(|left, right| left.0.cmp(right.0));
+        for (name, value) in aliases {
+            println!("  :{} = {}", name, value);
+        }
+    }
+
+    /// The `.macro` command: start, stop, list, or replay.
+    ///
+    /// A bare `.macro` is the stop command while a recording is in progress,
+    /// which is the second half of `.macro start <name>`; with nothing being
+    /// recorded there is no recording to stop and it is a usage error, not a
+    /// silent success.
+    fn macro_command(&mut self, argument: Option<&str>) {
+        let Some(argument) = argument else {
+            if let Err(message) = self.stop_macro() {
+                println!("{}", self.style.paint(Paint::Error, &message));
+            }
+            return;
+        };
+        let argument = argument.trim();
+        let (word, rest) = match argument.split_once(char::is_whitespace) {
+            Some((word, rest)) => (word, rest.trim()),
+            None => (argument, ""),
+        };
+        match word.to_ascii_lowercase().as_str() {
+            "start" => {
+                if let Err(message) = self.start_macro(rest) {
+                    println!("{}", self.style.paint(Paint::Error, &message));
+                }
+            }
+            "stop" => {
+                if let Err(message) = self.stop_macro() {
+                    println!("{}", self.style.paint(Paint::Error, &message));
+                }
+            }
+            "list" | "ls" => self.print_macros(),
+            "run" | "play" => {
+                if rest.is_empty() {
+                    println!(
+                        "{}",
+                        self.style.paint(
+                            Paint::Error,
+                            "Error: .macro run needs a macro name.                              Usage: .macro run <name>"
+                        )
+                    );
+                } else {
+                    self.run_macro(rest);
+                }
+            }
+            _ => {
+                println!(
+                    "{}",
+                    self.style.paint(
+                        Paint::Error,
+                        &format!(
+                            "Error: unknown .macro subcommand '{word}'.                              Usage: .macro start <name> | .macro stop | .macro list | .macro run <name>"
+                        )
+                    )
+                );
+            }
+        }
+    }
+
+    /// Starts recording `name`, or says why it will not.
+    fn start_macro(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() || name.split_whitespace().count() != 1 {
+            return Err(
+                "Error: .macro start needs one name. Usage: .macro start <name>".to_string(),
+            );
+        }
+        if let Some((recording, _)) = &self.macro_recording {
+            return Err(format!(
+                "Error: already recording macro '{recording}'; stop it with                  .macro before starting another."
+            ));
+        }
+        if !self.macros.contains_key(name) && self.macros.len() >= MAX_MACROS {
+            return Err(format!(
+                "Error: this session already holds the maximum of {MAX_MACROS} macros; no new macro can be added."
+            ));
+        }
+        self.macro_recording = Some((name.to_string(), Vec::new()));
+        Ok(())
+    }
+
+    /// Stops the recording in progress, storing it under the name it was started
+    /// with. A session that is not recording has nothing to stop.
+    fn stop_macro(&mut self) -> Result<(), String> {
+        let Some((name, lines)) = self.macro_recording.take() else {
+            return Err(
+                "Error: .macro is not recording. Usage: .macro start <name> |                  .macro stop | .macro list | .macro run <name>"
+                    .to_string(),
+            );
+        };
+        self.macros.insert(name, lines);
+        Ok(())
+    }
+
+    /// The `.macro list` listing, in name order and naming the empty table.
+    fn print_macros(&self) {
+        if self.macros.is_empty() {
+            println!("No macros defined.");
+            return;
+        }
+        println!("Macros:");
+        let mut macros: Vec<(&String, &Vec<String>)> = self.macros.iter().collect();
+        macros.sort_by(|left, right| left.0.cmp(right.0));
+        for (name, lines) in macros {
+            println!("  {} ({} line(s))", name, lines.len());
+        }
+    }
+
+    /// Replays a recorded macro line by line, the way the read loop would have
+    /// run them.
+    ///
+    /// The recording in progress is set aside for the duration, so a macro run
+    /// while another is being recorded does not become part of that recording.
+    fn run_macro(&mut self, name: &str) {
+        let Some(lines) = self.macros.get(name).cloned() else {
+            println!(
+                "{}",
+                self.style.paint(
+                    Paint::Error,
+                    &format!("Error: no macro named '{name}'. Usage: .macro list")
+                )
+            );
+            return;
+        };
+        let recording = self.macro_recording.take();
+        for line in &lines {
+            self.replay_macro_line(line);
+        }
+        self.macro_recording = recording;
+    }
+
+    /// One line of a macro, dispatched exactly as a typed line would be.
+    fn replay_macro_line(&mut self, line: &str) {
+        let input = line.trim();
+        if input.is_empty() {
+            return;
+        }
+        // The trimmed form answers "is there a line" and "is it an alias"; the
+        // dispatched command keeps the trailing whitespace the recording kept,
+        // for the one command whose argument is display text (`:prompt rb> `).
+        let typed = line.trim_start();
+        let alias_target = match self.expand_alias_line(typed) {
+            Ok(target) => target,
+            Err(message) => {
+                println!("{}", self.style.paint(Paint::Error, &message));
+                return;
+            }
+        };
+        let command_line = alias_target.as_deref().unwrap_or(typed);
+        if self.handle_command(command_line) {
+            return;
+        }
+        self.execute_line(line);
     }
 
     /// Runs one command line, returning whether `input` was a command rather
@@ -1195,6 +1677,14 @@ impl Repl {
                 if let Err(message) = self.set_prompt_format(argument) {
                     println!("{}", self.style.paint(Paint::Error, &message));
                 }
+                true
+            }
+            ReplCommand::Alias(argument) => {
+                self.alias_command(argument.as_deref());
+                true
+            }
+            ReplCommand::Macro(argument) => {
+                self.macro_command(argument.as_deref());
                 true
             }
             ReplCommand::NotACommand => false,
@@ -1765,6 +2255,10 @@ impl Repl {
              — {alt}quit is :quit."
         );
         println!();
+        self.print_aliases();
+        println!();
+        self.print_macros();
+        println!();
         println!("Quick Reference:");
         for (caption, source) in QUICK_REFERENCE {
             println!("  // {}", caption);
@@ -1889,7 +2383,40 @@ impl Repl {
     /// format [`ReplHistory::load_from_file`] reads back — and read back by
     /// [`Repl::restore_session`], which is what made the round trip one.
     fn save_session(&self, path: &str) {
-        match self.history.save_to_file(path) {
+        let mut document = String::new();
+        for index in 0..self.history.len() {
+            if let Some(entry) = self.history.get(index) {
+                document.push_str(entry);
+                document.push('\n');
+            }
+        }
+
+        // Only a session carrying aliases or macros gets a state section. A
+        // session without them writes exactly the history file it always did,
+        // which is what keeps an existing saved session readable and its line
+        // count unchanged.
+        if !self.aliases.is_empty() || !self.macros.is_empty() {
+            document.push_str(SESSION_STATE_MARKER);
+            document.push('\n');
+
+            let mut aliases: Vec<(&String, &String)> = self.aliases.iter().collect();
+            aliases.sort_by(|left, right| left.0.cmp(right.0));
+            for (name, value) in aliases {
+                document.push_str(&format!("alias {name} {value}\n"));
+            }
+
+            let mut macros: Vec<(&String, &Vec<String>)> = self.macros.iter().collect();
+            macros.sort_by(|left, right| left.0.cmp(right.0));
+            for (name, lines) in macros {
+                document.push_str(&format!("macro {name} {}\n", lines.len()));
+                for line in lines {
+                    document.push_str(line);
+                    document.push('\n');
+                }
+            }
+        }
+
+        match std::fs::write(path, document) {
             Ok(()) => println!(
                 "Session saved to '{}' ({} line(s)).",
                 path,
@@ -1946,10 +2473,24 @@ impl Repl {
     /// lines were back and the state they had made was not, which is the half
     /// `:restore` was named for.
     fn restore_session(&mut self, path: &str) {
+        let document = match std::fs::read_to_string(path) {
+            Ok(document) => document,
+            Err(e) => {
+                println!("Could not restore session: {}", e);
+                return;
+            }
+        };
+
+        // The state section, when there is one, is after the marker. The history
+        // is what came before it, so the marker and the records after it are not
+        // loaded as lines the user appears to have typed.
+        let (history_text, state_text) = Self::split_session_state(&document);
+
         let mut restored = ReplHistory::new(HISTORY_LIMIT);
-        if let Err(e) = restored.load_from_file(path) {
-            println!("Could not restore session: {}", e);
-            return;
+        for line in history_text.lines() {
+            if !line.trim().is_empty() {
+                restored.push(line.to_string());
+            }
         }
 
         let lines: Vec<String> = (0..restored.len())
@@ -1957,6 +2498,13 @@ impl Repl {
             .collect();
         let restored_lines = lines.len();
         self.history = restored;
+
+        let restored = Self::parse_session_state(state_text);
+        for warning in restored.warnings {
+            println!("{}", warning);
+        }
+        self.aliases = restored.aliases;
+        self.macros = restored.macros;
 
         let (replayed, skipped) = self.replay(&lines);
         println!("Restored {} line(s) from '{}'", restored_lines, path);
@@ -1966,6 +2514,123 @@ impl Repl {
                 replayed, skipped
             );
         }
+    }
+
+    /// Splits a saved document at the state marker, which is only a marker when
+    /// it begins a line.
+    ///
+    /// A history line that happens to contain the marker text is still a history
+    /// line; the section starts at the marker that stands on its own.
+    fn split_session_state(document: &str) -> (&str, &str) {
+        let marker = SESSION_STATE_MARKER;
+        if let Some(rest) = document.strip_prefix(marker) {
+            return ("", rest.strip_prefix('\n').unwrap_or(rest));
+        }
+        let at_line_start = format!("\n{marker}");
+        if let Some(at) = document.find(&at_line_start) {
+            let history = &document[..=at];
+            let rest = &document[at + at_line_start.len()..];
+            return (history, rest.strip_prefix('\n').unwrap_or(rest));
+        }
+        (document, "")
+    }
+
+    /// Reads the aliases and macros [`Repl::save_session`] wrote after the state
+    /// marker.
+    ///
+    /// A macro record is its name, its line count, and then that many raw lines,
+    /// so a recorded line may hold anything a line can hold. A malformed record
+    /// is skipped rather than panicking on a file a user could have edited — and
+    /// it is reported, because a session that silently loses a shortcut is worse
+    /// than one that says the file was damaged.
+    fn parse_session_state(state: &str) -> SessionState {
+        let mut parsed = SessionState::default();
+        let mut lines = state.lines();
+
+        while let Some(line) = lines.next() {
+            if let Some(rest) = line.strip_prefix("alias ") {
+                let (name, value) = match rest.split_once(char::is_whitespace) {
+                    Some((name, value)) => (name, value),
+                    None => (rest, ""),
+                };
+                if name.is_empty() {
+                    parsed.warnings.push(format!(
+                        "Warning: malformed saved alias record '{line}'; skipped."
+                    ));
+                    continue;
+                }
+                let value = value.trim();
+                if value.is_empty() {
+                    parsed.warnings.push(format!(
+                        "Warning: saved alias '{name}' has no command; skipped."
+                    ));
+                    continue;
+                }
+                if !parsed.aliases.contains_key(name) && parsed.aliases.len() >= MAX_ALIASES {
+                    parsed.warnings.push(format!(
+                        "Warning: saved alias '{name}' skipped; this session holds at most \
+                         {MAX_ALIASES} aliases."
+                    ));
+                    continue;
+                }
+                parsed.aliases.insert(name.to_string(), value.to_string());
+            } else if let Some(rest) = line.strip_prefix("macro ") {
+                let Some((name, count)) = rest.split_once(char::is_whitespace) else {
+                    parsed.warnings.push(format!(
+                        "Warning: malformed saved macro record '{line}'; skipped."
+                    ));
+                    continue;
+                };
+                if name.is_empty() {
+                    parsed.warnings.push(format!(
+                        "Warning: malformed saved macro record '{line}'; skipped."
+                    ));
+                    continue;
+                }
+                let count_text = count.trim();
+                let Ok(count) = count_text.parse::<usize>() else {
+                    parsed.warnings.push(format!(
+                        "Warning: saved macro '{name}' has a malformed line count \
+                         '{count_text}'; skipped."
+                    ));
+                    continue;
+                };
+                let over_line_cap = count > MAX_MACRO_LINES;
+                let mut body = Vec::with_capacity(count.min(MAX_MACRO_LINES));
+                let mut found = 0;
+                let mut truncated = false;
+                for _ in 0..count {
+                    let Some(recorded) = lines.next() else {
+                        truncated = true;
+                        break;
+                    };
+                    found += 1;
+                    if !over_line_cap {
+                        body.push(recorded.to_string());
+                    }
+                }
+                if truncated {
+                    parsed.warnings.push(format!(
+                        "Warning: saved macro '{name}' is truncated (expected {count} line(s), \
+                         found {found}); skipped."
+                    ));
+                } else if over_line_cap {
+                    parsed.warnings.push(format!(
+                        "Warning: saved macro '{name}' skipped; a macro may hold at most \
+                         {MAX_MACRO_LINES} lines and this one records {count}."
+                    ));
+                } else if !parsed.macros.contains_key(name) && parsed.macros.len() >= MAX_MACROS {
+                    parsed.warnings.push(format!(
+                        "Warning: saved macro '{name}' skipped; this session holds at most \
+                         {MAX_MACROS} macros."
+                    ));
+                } else {
+                    parsed.macros.insert(name.to_string(), body);
+                }
+            }
+        }
+
+        parsed
     }
 
     /// Runs `lines` in this session in the order they were typed, as the read
@@ -4263,6 +4928,120 @@ mod tests {
             matches.contains(&"to".to_string()),
             "the keyword of the same name is offered too: {:?}",
             matches
+        );
+    }
+
+    /// TAB knows the commands this session defined as well as the ones it was
+    /// born with: an alias is a command word, and a macro is a name `.macro run`
+    /// takes.
+    #[test]
+    fn edge_module_completion_offers_session_aliases_and_macro_names() {
+        let mut repl = Repl::new();
+        assert!(repl.handle_command(".alias ll :vars"));
+        assert!(repl.handle_command(".macro start trio"));
+        assert!(repl.handle_command(".macro"));
+
+        assert!(
+            repl.complete(":l").contains(&":ll".to_string()),
+            "an alias completes under the sigil the user typed: {:?}",
+            repl.complete(":l")
+        );
+        assert!(
+            repl.complete(".l").contains(&".ll".to_string()),
+            "and under the other sigil too: {:?}",
+            repl.complete(".l")
+        );
+        assert!(
+            repl.complete("tri").contains(&"trio".to_string()),
+            "a macro name is a word `.macro run` can take: {:?}",
+            repl.complete("tri")
+        );
+    }
+
+    /// A session may hold many aliases, but not without limit: the table is
+    /// session state, so a pipe of `.alias` lines would otherwise grow it until
+    /// the process ran out of memory. The cap refuses a new name while still
+    /// allowing an existing one to be redefined.
+    #[test]
+    fn edge_alias_table_stops_at_its_capacity() {
+        let mut repl = Repl::new();
+        for index in 0..super::MAX_ALIASES {
+            let definition = format!("alias{index} :vars");
+            assert!(
+                repl.define_alias(&definition).is_ok(),
+                "alias {index} should be within the cap: {definition}"
+            );
+        }
+        assert_eq!(repl.aliases.len(), super::MAX_ALIASES);
+
+        let refused = repl
+            .define_alias("one-too-many :vars")
+            .expect_err("a new alias past the cap is refused");
+        assert!(
+            refused.contains("maximum"),
+            "the refusal names the cap: {refused}"
+        );
+        assert_eq!(
+            repl.aliases.len(),
+            super::MAX_ALIASES,
+            "the refused alias did not grow the table"
+        );
+        assert!(
+            repl.define_alias("alias0 :help").is_ok(),
+            "redefining an alias already in the table does not need a new slot"
+        );
+    }
+
+    /// A recording is a list of lines the session keeps, so it too needs a cap.
+    /// Reaching it stores what was recorded and stops, rather than silently
+    /// dropping the line that overflowed or growing without bound.
+    #[test]
+    fn edge_macro_recording_stops_at_its_line_capacity() {
+        let mut repl = Repl::new();
+        let mut input = vec![Ok(Line::Text(".macro start long".to_string()))];
+        for index in 0..super::MAX_MACRO_LINES {
+            input.push(Ok(Line::Text(format!("set kept to {index}"))));
+        }
+        input.push(Ok(Line::Text("set kept to 999".to_string())));
+        input.push(Ok(Line::Text(".macro".to_string())));
+        input.push(Ok(Line::Text(":quit".to_string())));
+        let mut source = ScriptedSource::new(input);
+
+        drive(&mut repl, &mut source);
+
+        assert!(
+            repl.macro_recording.is_none(),
+            "the cap stops the recording instead of letting it grow"
+        );
+        assert_eq!(
+            repl.macros.get("long").map(Vec::len),
+            Some(super::MAX_MACRO_LINES),
+            "the completed macro keeps the lines up to the cap"
+        );
+    }
+
+    /// The macro table has its own cap, and re-recording a macro already in the
+    /// table replaces it rather than needing another slot.
+    #[test]
+    fn edge_macro_table_stops_at_its_capacity() {
+        let mut repl = Repl::new();
+        for index in 0..super::MAX_MACROS {
+            let name = format!("macro{index}");
+            assert!(repl.start_macro(&name).is_ok());
+            assert!(repl.stop_macro().is_ok());
+        }
+        assert_eq!(repl.macros.len(), super::MAX_MACROS);
+
+        let refused = repl
+            .start_macro("one-too-many")
+            .expect_err("a new macro past the cap is refused");
+        assert!(
+            refused.contains("maximum"),
+            "the refusal names the cap: {refused}"
+        );
+        assert!(
+            repl.start_macro("macro0").is_ok(),
+            "re-recording an existing macro does not need a new slot"
         );
     }
 
