@@ -1160,7 +1160,7 @@ fn edge_type_cannot_delete_a_file() {
     std::fs::create_dir_all(&dir).expect("the test needs a directory");
     let path = dir.join("notes.rb");
     std::fs::write(&path, "original").expect("the test needs a file to protect");
-    let quoted = path.display().to_string();
+    let quoted = path.display().to_string().replace('\\', "/");
 
     let s = session(&format!(
         ":type files.delete(\"{quoted}\")\n:type files.write(\"{quoted}\", \"clobbered\")\n\
@@ -1219,7 +1219,7 @@ fn edge_type_cannot_delete_a_file_through_a_function_the_session_declared() {
     std::fs::create_dir_all(&dir).expect("the test needs a directory");
     let path = dir.join("victim.rb");
     std::fs::write(&path, "original").expect("the test needs a file to protect");
-    let quoted = path.display().to_string();
+    let quoted = path.display().to_string().replace('\\', "/");
 
     let s = session(&format!(
         "to evil()\n    files.delete(\"{quoted}\")\nend\n\
