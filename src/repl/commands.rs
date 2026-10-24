@@ -12,6 +12,21 @@ pub enum ReplCommand {
     History,
     Vars,
     Functions,
+    /// Runs a shell command in the host shell and reports its output and exit.
+    ///
+    /// The command text is kept whole rather than split into words: the shell
+    /// is the parser for it, and `!echo a | wc -l` is one command with its own
+    /// pipeline in it.
+    Shell(String),
+    /// Sends the session's last result to a shell command's standard input.
+    Pipe(String),
+    /// Moves the session's working directory, which every relative file
+    /// argument is resolved against.
+    ChangeDir(String),
+    /// Prints the session's working directory.
+    PrintWorkingDirectory,
+    /// Lists the session's working directory.
+    ListDirectory,
     Load(String),
     Save(String),
     /// Reads a history file written by [`ReplCommand::Save`] back into the
@@ -258,6 +273,18 @@ pub const SIGILS: [char; 2] = [':', ALT_SIGIL];
 /// list of five words to fall out of date.
 const FILE_USAGE: &str = "<filename>";
 
+/// The placeholder `.cd` declares.
+///
+/// A directory is still a path, so TAB completes it like one, but saying
+/// `<filename>` in `.cd`'s usage line described an argument the command cannot
+/// accept.
+const DIRECTORY_USAGE: &str = "<directory>";
+
+/// Whether `usage` names an argument TAB should complete as a path.
+fn is_path_usage(usage: &str) -> bool {
+    usage == FILE_USAGE || usage == DIRECTORY_USAGE
+}
+
 /// Every command, in the order `:help` lists them.
 static COMMAND_TABLE: &[CommandSpec] = &[
     CommandSpec {
@@ -307,6 +334,38 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |_| ReplCommand::Functions,
+    },
+    CommandSpec {
+        names: &["pipe"],
+        description: "Send the last result through a shell command (host only)",
+        usage: Some("<command>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Pipe(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["cd"],
+        description: "Change the session's working directory",
+        usage: Some(DIRECTORY_USAGE),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::ChangeDir(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["pwd"],
+        description: "Print the session's working directory",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::PrintWorkingDirectory,
+    },
+    CommandSpec {
+        names: &["ls"],
+        description: "List the session's working directory (directories end with /)",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::ListDirectory,
     },
     CommandSpec {
         names: &["load", "l"],
@@ -834,6 +893,12 @@ impl ReplCommand {
     pub fn parse(input: &str) -> Self {
         let input = input.trim_start();
 
+        // `!` is the one command that is not a word with a sigil: everything
+        // after it belongs to the shell, including a pipeline of its own.
+        if let Some(command) = input.strip_prefix('!') {
+            return ReplCommand::Shell(command.trim().to_string());
+        }
+
         if !input.starts_with(SIGILS) {
             return ReplCommand::NotACommand;
         }
@@ -847,7 +912,7 @@ impl ReplCommand {
                     input.trim_end()
                 }) {
                     Some(value) => {
-                        let value = if spec.usage == Some(FILE_USAGE) {
+                        let value = if spec.usage.is_some_and(is_path_usage) {
                             Self::unquote_path(&value)
                         } else {
                             value
@@ -874,9 +939,9 @@ impl ReplCommand {
     /// path in the argument of a command that takes one, and nowhere else, so
     /// `say "` is not answered with a directory listing.
     ///
-    /// Read out of the table by its `<filename>` placeholder rather than kept as a
-    /// list here, for the reason the whole table exists: a second copy of the
-    /// answer is a second answer.
+    /// Read out of the table by its path placeholders rather than kept as a list
+    /// here, for the reason the whole table exists: a second copy of the answer
+    /// is a second answer.
     ///
     /// A sigil is required, and by the same first step [`ReplCommand::parse`]
     /// takes: `load x` with no sigil is not a command at all, it is Redblue source
@@ -891,7 +956,7 @@ impl ReplCommand {
             return false;
         }
         input.starts_with(SIGILS)
-            && spec_for(input).is_some_and(|spec| spec.usage == Some(FILE_USAGE))
+            && spec_for(input).is_some_and(|spec| spec.usage.is_some_and(is_path_usage))
     }
 
     /// Whether `input` names a command whose argument keeps the whitespace at its
@@ -914,7 +979,10 @@ impl ReplCommand {
     /// the bug that table exists to keep fixed.
     pub fn argument_text(&self) -> Option<&str> {
         match self {
-            ReplCommand::Load(value)
+            ReplCommand::Shell(value)
+            | ReplCommand::Pipe(value)
+            | ReplCommand::ChangeDir(value)
+            | ReplCommand::Load(value)
             | ReplCommand::Save(value)
             | ReplCommand::Restore(value)
             | ReplCommand::Checkpoint(value)
@@ -1694,7 +1762,7 @@ mod tests {
     /// The commands whose argument is a path, and only those.
     ///
     /// This is the gate on where TAB offers the filesystem. It is read out of the
-    /// table by its filename placeholder, so a sixth command that takes a path
+    /// table by its filename placeholder, so a further command that takes a path
     /// says so by declaring the same thing — and a command that takes something
     /// else cannot be completed as though it took a path.
     #[test]
@@ -1707,6 +1775,7 @@ mod tests {
         assert_eq!(
             taking,
             vec![
+                "cd".to_string(),
                 "export".to_string(),
                 "l".to_string(),
                 "load".to_string(),
@@ -1716,14 +1785,15 @@ mod tests {
                 "s".to_string(),
                 "save".to_string(),
             ],
-            "the five commands that take a filename, aliases included, and \
-             nothing else: a command taking a line number or an expression is not \
-             one whose argument can be completed as a path"
+            "the commands that take a filename, aliases included, and nothing \
+             else: a command taking a line number or an expression is not one \
+             whose argument can be completed as a path"
         );
 
         for (command, takes) in [
             (":load x", true),
             (".save x", true),
+            (".cd x", true),
             (":run x", true),
             (":restore x", true),
             (":export x", true),
@@ -1775,5 +1845,49 @@ mod tests {
             ReplCommand::takes_a_file_path(":restore saved.txt"),
             "the file half still takes a path"
         );
+    }
+
+    /// The host-shell family parses, and `!` keeps the whole command rather
+    /// than a first word: the shell, not the REPL, splits it.
+    #[test]
+    fn edge_shell_and_directory_commands_parse() {
+        assert_eq!(
+            ReplCommand::parse("!echo a | wc -l"),
+            ReplCommand::Shell("echo a | wc -l".to_string()),
+            "everything after ! belongs to the shell"
+        );
+        assert_eq!(
+            ReplCommand::parse("!   "),
+            ReplCommand::Shell(String::new()),
+            "an empty ! is still the shell command with nothing to run, which              dispatch refuses with a usage line before spawning anything"
+        );
+        assert_eq!(
+            ReplCommand::parse(".pipe cat"),
+            ReplCommand::Pipe("cat".to_string())
+        );
+        assert_eq!(
+            ReplCommand::parse(".pipe"),
+            ReplCommand::MissingArgument {
+                command: "pipe",
+                usage: "<command>"
+            }
+        );
+        assert_eq!(
+            ReplCommand::parse(".cd /tmp"),
+            ReplCommand::ChangeDir("/tmp".to_string())
+        );
+        assert_eq!(
+            ReplCommand::parse(".cd"),
+            ReplCommand::MissingArgument {
+                command: "cd",
+                usage: "<directory>"
+            },
+            ".cd takes a directory, and its usage line says so"
+        );
+        assert_eq!(
+            ReplCommand::parse(".pwd"),
+            ReplCommand::PrintWorkingDirectory
+        );
+        assert_eq!(ReplCommand::parse(".ls"), ReplCommand::ListDirectory);
     }
 }

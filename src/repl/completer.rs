@@ -10,7 +10,7 @@ use super::commands;
 /// Both separators are *accepted* when one is being completed (see
 /// [`split_fragment`]), so offering this one on Windows is cosmetic rather than
 /// wrong.
-const DIRECTORY_SEPARATOR: &str = "/";
+pub(super) const DIRECTORY_SEPARATOR: &str = "/";
 
 /// How many entries one directory offers before the list is cut short.
 ///

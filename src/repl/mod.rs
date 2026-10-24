@@ -9,13 +9,14 @@ pub mod history;
 pub mod introspect;
 pub mod measure;
 pub mod render;
+pub mod shell;
 pub mod style;
 pub mod transcript;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -690,6 +691,7 @@ struct SessionSnapshot {
     tutorial_step: Option<usize>,
     tutorial_typed: Vec<String>,
     last_file: Option<LastFile>,
+    cwd: PathBuf,
     format_on_entry: bool,
     transcript: Transcript,
 }
@@ -746,6 +748,12 @@ pub struct Repl {
     prompt_format: String,
     /// The file `.reload` re-runs, or `None` until a `:load` or `:run` names one.
     last_file: Option<LastFile>,
+    /// Where this session resolves relative file arguments.
+    ///
+    /// Session state rather than process state: `.cd` moves the session, not
+    /// the interpreter, so a relative path in `:load`, `:save`, `:run`,
+    /// `:restore` or `.export` means the same thing at every prompt after it.
+    cwd: PathBuf,
     /// Whether each entered source line is formatted before it runs.
     ///
     /// A session preference rather than session state: `:reset` forgets the
@@ -828,6 +836,7 @@ impl Repl {
             style: Style::detect(),
             prompt_format: DEFAULT_PROMPT.to_string(),
             last_file: None,
+            cwd: Self::process_directory(),
             format_on_entry: false,
             definitions: HashMap::new(),
             transcript: Transcript::new(),
@@ -1597,6 +1606,32 @@ impl Repl {
                 self.print_functions();
                 true
             }
+            ReplCommand::Shell(command) => {
+                self.run_shell(&command);
+                true
+            }
+            ReplCommand::Pipe(command) => {
+                match self.pipe_last(&command) {
+                    Ok(outcome) => self.print_shell_outcome(&outcome),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
+                true
+            }
+            ReplCommand::ChangeDir(path) => {
+                match self.change_directory(&path) {
+                    Ok(()) => println!("{}", self.session_directory().display()),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
+                true
+            }
+            ReplCommand::PrintWorkingDirectory => {
+                println!("{}", self.session_directory().display());
+                true
+            }
+            ReplCommand::ListDirectory => {
+                self.print_session_listing();
+                true
+            }
             ReplCommand::Load(path) => {
                 self.load_file(&path);
                 true
@@ -1978,6 +2013,7 @@ impl Repl {
         self.variables.clear();
         self.definitions.clear();
         self.last_file = None;
+        self.cwd = Self::process_directory();
         self.multiline_buffer.clear();
         self.in_multiline = false;
         self.tutorial_step = None;
@@ -2011,6 +2047,7 @@ impl Repl {
             tutorial_step: self.tutorial_step,
             tutorial_typed: self.tutorial_typed.clone(),
             last_file: self.last_file.clone(),
+            cwd: self.cwd.clone(),
             format_on_entry: self.format_on_entry,
             transcript: self.transcript.clone(),
         }
@@ -2047,6 +2084,7 @@ impl Repl {
         self.tutorial_step = snapshot.tutorial_step;
         self.tutorial_typed = snapshot.tutorial_typed.clone();
         self.last_file = snapshot.last_file.clone();
+        self.cwd = snapshot.cwd.clone();
         self.format_on_entry = snapshot.format_on_entry;
         self.transcript = snapshot.transcript.clone();
     }
@@ -2611,6 +2649,10 @@ impl Repl {
             "  Every command also answers to '{alt}' in place of ':' \
              — {alt}quit is :quit."
         );
+        println!(
+            "  !<command> runs it in the host shell (host only), \
+             for example !ls or !git status."
+        );
         println!();
         self.print_aliases();
         println!();
@@ -2719,7 +2761,8 @@ impl Repl {
     /// stay available to the lines that follow — the difference from `:run`,
     /// which runs the file in a VM of its own and throws them away.
     fn load_file(&mut self, path: &str) {
-        let source = match std::fs::read_to_string(path) {
+        let resolved = self.resolve_path(path);
+        let source = match std::fs::read_to_string(&resolved) {
             Ok(content) => content,
             Err(e) => {
                 println!("Could not load file: {}: {}", path, e);
@@ -2734,6 +2777,172 @@ impl Repl {
         // that failed to run has said so already, in the same rendered error a
         // typed line would have produced.
         let _ = self.execute_code_from(path, 0, &source);
+    }
+
+    /// The directory the process started in, which is where a fresh session is.
+    fn process_directory() -> PathBuf {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
+    /// The user's home directory, when the host has one.
+    fn home_directory() -> Option<PathBuf> {
+        #[cfg(windows)]
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        #[cfg(not(windows))]
+        let home = std::env::var_os("HOME");
+        home.map(PathBuf::from).filter(|path| path.is_absolute())
+    }
+
+    /// `path` with a leading `~` or `~/` replaced by `home`.
+    ///
+    /// Only the current user's home is expanded: `~other/name` needs the system
+    /// account database, which this session deliberately does not read. A
+    /// missing home leaves the path as typed, so a failure names what the user
+    /// actually wrote.
+    fn expand_tilde_with_home(path: &str, home: Option<&Path>) -> PathBuf {
+        let Some(rest) = path.strip_prefix('~') else {
+            return PathBuf::from(path);
+        };
+        if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
+            return PathBuf::from(path);
+        }
+        match home {
+            Some(home) if rest.is_empty() => home.to_path_buf(),
+            Some(home) => home.join(rest.trim_start_matches(['/', '\\'])),
+            None => PathBuf::from(path),
+        }
+    }
+
+    /// `path` as this session means it: a leading `~` expanded, an absolute path
+    /// unchanged, a relative one under the session's working directory.
+    fn resolve_path(&self, path: &str) -> PathBuf {
+        let path = Self::expand_tilde_with_home(path, Self::home_directory().as_deref());
+        if path.is_absolute() {
+            path
+        } else {
+            self.cwd.join(path)
+        }
+    }
+
+    /// Removes `.` and `..` from `path` without resolving symlinks.
+    ///
+    /// `canonicalize` was doing two jobs: validating the directory and turning
+    /// it into the real path. The second is not what `.cd` means — a session
+    /// that entered `link` should still say `link` — so validation uses
+    /// `metadata` (which follows the link) and the stored path stays lexical.
+    fn normalize_path(path: PathBuf) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !normalized.pop() && !normalized.has_root() {
+                        normalized.push(component.as_os_str());
+                    }
+                }
+                Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+        normalized
+    }
+
+    /// The directory relative file arguments are resolved against.
+    fn session_directory(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// Moves the session, not the process.
+    ///
+    /// A path that is not a directory leaves the session where it was: half a
+    /// `.cd` would be a session that cannot say which directory its next
+    /// relative `:load` means.
+    fn change_directory(&mut self, path: &str) -> Result<(), String> {
+        let candidate = self.resolve_path(path.trim());
+        let metadata = candidate
+            .metadata()
+            .map_err(|error| format!("Error: could not change directory to '{path}': {error}"))?;
+        if !metadata.is_dir() {
+            return Err(format!("Error: '{path}' is not a directory."));
+        }
+        self.cwd = Self::normalize_path(candidate);
+        Ok(())
+    }
+
+    /// The visible entries of the session directory, directories marked.
+    fn directory_listing(&self) -> Result<Vec<String>, String> {
+        shell::listing(&self.cwd)
+    }
+
+    fn print_session_listing(&self) {
+        match self.directory_listing() {
+            Ok(names) => {
+                println!("{}:", self.cwd.display());
+                for name in names {
+                    println!("{name}");
+                }
+            }
+            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+        }
+    }
+
+    /// `!<command>`: run it in the host shell and show what it said.
+    fn run_shell(&self, command: &str) {
+        match shell::run(command) {
+            Ok(outcome) => self.print_shell_outcome(&outcome),
+            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+        }
+    }
+
+    /// `.pipe <command>`: the last value this session produced, on the
+    /// command's standard input.
+    ///
+    /// The value comes from `_`, the same binding the prompt shows after a
+    /// line, so what `.pipe` sends is what the user just saw.
+    fn pipe_last(&self, command: &str) -> Result<shell::ShellOutcome, String> {
+        let value = self.variables.get("_").ok_or_else(|| {
+            "Error: .pipe has no last result to send; run a line that produces a \
+             value first."
+                .to_string()
+        })?;
+        let owned: String;
+        let input = match value {
+            Value::Text(text) => text.as_str(),
+            other => {
+                owned = other.to_string();
+                owned.as_str()
+            }
+        };
+        shell::pipe(command, input)
+    }
+
+    /// Shows a command's own output and the status the host gave it.
+    ///
+    /// A nonzero status is a fact about the command, not a failure of the REPL,
+    /// so it is printed as an exit code and the session stays where it was.
+    fn print_shell_outcome(&self, outcome: &shell::ShellOutcome) {
+        if !outcome.stdout.is_empty() {
+            print!("{}", outcome.stdout);
+            if !outcome.stdout.ends_with('\n') {
+                println!();
+            }
+        }
+        if !outcome.stderr.is_empty() {
+            eprint!("{}", outcome.stderr);
+            if !outcome.stderr.ends_with('\n') {
+                eprintln!();
+            }
+        }
+        if outcome.truncated {
+            let limit = shell::MAX_OUTPUT_BYTES / (1024 * 1024);
+            eprintln!("[output stopped after {limit} MiB]");
+        }
+        match outcome.code {
+            Some(code) => println!("exit code: {code}"),
+            None => println!("exit: terminated by a signal"),
+        }
+        let _ = io::stdout().flush();
     }
 
     /// Writes the session's history to `path`, one entry per line, in the
@@ -2773,13 +2982,14 @@ impl Repl {
             }
         }
 
-        match std::fs::write(path, document) {
+        let destination = self.resolve_path(path);
+        match std::fs::write(&destination, document) {
             Ok(()) => println!(
                 "Session saved to '{}' ({} line(s)).",
                 path,
                 self.history.len()
             ),
-            Err(e) => println!("Could not save session: {}", e),
+            Err(e) => println!("Could not save session: '{}': {}", destination.display(), e),
         }
     }
 
@@ -2800,7 +3010,7 @@ impl Repl {
         let document = self.transcript.markdown();
         match path {
             None => println!("{}", document.trim_end()),
-            Some(path) => match std::fs::write(path, &document) {
+            Some(path) => match std::fs::write(self.resolve_path(path), &document) {
                 Ok(()) => println!(
                     "Exported {} exchange(s) to '{}'.",
                     self.transcript.len(),
@@ -2830,10 +3040,11 @@ impl Repl {
     /// lines were back and the state they had made was not, which is the half
     /// `:restore` was named for.
     fn restore_session(&mut self, path: &str) {
-        let document = match std::fs::read_to_string(path) {
+        let resolved = self.resolve_path(path);
+        let document = match std::fs::read_to_string(&resolved) {
             Ok(document) => document,
             Err(e) => {
-                println!("Could not restore session: {}", e);
+                println!("Could not restore session: '{}': {}", resolved.display(), e);
                 return;
             }
         };
@@ -3019,8 +3230,9 @@ impl Repl {
     }
 
     fn run_file(&mut self, path: &str) {
+        let resolved = self.resolve_path(path);
         self.last_file = Some(LastFile::Ran(path.to_string()));
-        match crate::run_file(path) {
+        match crate::run_file(&resolved.to_string_lossy()) {
             Ok(_) => println!("File '{}' executed successfully.", path),
             Err(e) => println!("Error running file '{}': {}", path, e),
         }
@@ -10266,7 +10478,7 @@ mod tests {
     /// destinations, so the parse and the split are covered in `commands` and at
     /// the dispatch boundary in `tests/repl_test.rs`.
     mod session_memory {
-        use super::{feed, Repl};
+        use super::{feed, scratch_dir, Repl};
         use crate::repl::{LastFile, MAX_CHECKPOINTS, MAX_UNDO};
         use crate::value::Value;
 
@@ -10379,6 +10591,68 @@ mod tests {
                 inputs,
                 vec!["first"],
                 "the transcript stops at the checkpoint, not after it"
+            );
+        }
+
+        /// A checkpoint carries the session directory, not only its bindings:
+        /// restoring it moves the relative paths of following commands back to
+        /// where the checkpoint was taken.
+        #[test]
+        fn edge_restore_brings_back_the_session_directory() {
+            let dir = scratch_dir("checkpoint-cwd")
+                .canonicalize()
+                .expect("the scratch directory should exist");
+            let mut repl = Repl::new();
+            let origin = repl
+                .session_directory()
+                .to_path_buf()
+                .canonicalize()
+                .expect("the process directory should exist");
+
+            repl.change_directory(&dir.display().to_string())
+                .expect("the scratch directory exists");
+            repl.create_checkpoint("there")
+                .expect("a fresh name is a checkpoint");
+
+            feed(&mut repl, &[&format!(".cd {}", origin.display())]);
+            assert_eq!(
+                repl.session_directory(),
+                origin.as_path(),
+                "premise: the session left the checkpoint's directory"
+            );
+
+            repl.restore_checkpoint("there")
+                .expect("the checkpoint is restorable");
+
+            assert_eq!(
+                repl.session_directory(),
+                dir.as_path(),
+                "the checkpoint's directory came back with its bindings"
+            );
+        }
+
+        /// A reset forgets where the session was as well as what it held, so a
+        /// relative path after it means what it would in a fresh process.
+        #[test]
+        fn edge_reset_returns_the_session_directory_to_the_process_directory() {
+            let dir = scratch_dir("reset-cwd");
+            let mut repl = Repl::new();
+            let process = std::env::current_dir().expect("the process has a working directory");
+
+            repl.change_directory(&dir.display().to_string())
+                .expect("the scratch directory exists");
+            assert_ne!(
+                repl.session_directory(),
+                process.as_path(),
+                "premise: the session had moved away from the process directory"
+            );
+
+            feed(&mut repl, &[":reset"]);
+
+            assert_eq!(
+                repl.session_directory(),
+                process.as_path(),
+                "a reset session resolves relative paths from the process directory again"
             );
         }
 
@@ -10626,6 +10900,292 @@ mod tests {
             assert!(
                 help.contains("saved session file") && help.contains("in-memory checkpoint"),
                 "and the line says which is which: {help}"
+            );
+        }
+
+        /// `~` means the home directory when it is the first component, and
+        /// nothing else is expanded.
+        #[test]
+        fn edge_a_leading_tilde_expands_to_the_home_directory() {
+            let home = std::path::Path::new("/home/example");
+
+            assert_eq!(
+                Repl::expand_tilde_with_home("~", Some(home)),
+                home.to_path_buf(),
+                "a bare ~ is the home directory itself"
+            );
+            assert_eq!(
+                Repl::expand_tilde_with_home("~/notes.rb", Some(home)),
+                home.join("notes.rb"),
+                "and ~/name is a name under it"
+            );
+            assert_eq!(
+                Repl::expand_tilde_with_home("nested/~/notes.rb", Some(home)),
+                std::path::PathBuf::from("nested/~/notes.rb"),
+                "a tilde in the middle is an ordinary character, not a home"
+            );
+            assert_eq!(
+                Repl::expand_tilde_with_home("~other/notes.rb", Some(home)),
+                std::path::PathBuf::from("~other/notes.rb"),
+                "another user's home is not guessed at"
+            );
+            assert_eq!(
+                Repl::expand_tilde_with_home("~/notes.rb", None),
+                std::path::PathBuf::from("~/notes.rb"),
+                "and with no home to expand to, the path is left as typed"
+            );
+        }
+    }
+
+    /// The shell and the session's own working directory.
+    ///
+    /// Host-only features are exercised only where there is a host shell to run
+    /// them against; the refusal path is still compiled everywhere because the
+    /// command dispatch must answer it rather than fail obscurely.
+    #[cfg(unix)]
+    mod shell {
+        use super::{feed, scratch_dir, Repl};
+        use crate::value::Value;
+
+        #[test]
+        fn shell_runs_a_host_command_and_reports_output_and_exit_code() {
+            let outcome =
+                crate::repl::shell::run("echo hi").expect("the host has a shell to run it");
+            assert_eq!(outcome.stdout, "hi\n", "the command's own output is shown");
+            assert_eq!(outcome.code, Some(0), "and a successful command exits zero");
+        }
+
+        #[test]
+        fn edge_shell_reports_a_failing_exit_code_instead_of_a_repl_failure() {
+            let outcome = crate::repl::shell::run("exit 7").expect("the shell ran and answered");
+            assert_eq!(
+                outcome.code,
+                Some(7),
+                "a failing command's exit code is the one the shell gave it"
+            );
+            assert!(
+                outcome.stderr.is_empty(),
+                "and the command's silence is not turned into an error message: {:?}",
+                outcome.stderr
+            );
+        }
+
+        #[test]
+        fn edge_shell_with_an_empty_command_is_a_usage_error_and_spawns_nothing() {
+            let refusal =
+                crate::repl::shell::run("   ").expect_err("an empty command is not a command");
+            assert!(
+                refusal.contains("Usage: !"),
+                "the refusal says how to give a command: {refusal}"
+            );
+        }
+
+        #[test]
+        fn pipe_sends_the_last_value_to_the_commands_stdin() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set payload to \"hello\"", "payload"]);
+
+            let outcome = repl
+                .pipe_last("cat")
+                .expect("cat is a host command that reads stdin");
+
+            assert_eq!(
+                outcome.stdout, "hello",
+                "the last value crossed into the command's stdin, not the other way"
+            );
+            assert_eq!(outcome.code, Some(0), "and the command finished normally");
+        }
+
+        #[test]
+        fn edge_pipe_with_no_last_result_names_what_is_missing() {
+            let repl = Repl::new();
+            let refusal = repl
+                .pipe_last("cat")
+                .expect_err("nothing has produced a value yet");
+            assert!(
+                refusal.contains("last result"),
+                "the refusal names the missing last result: {refusal}"
+            );
+        }
+
+        #[test]
+        fn edge_pipe_to_a_failing_command_surfaces_its_exit_and_keeps_the_session() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set kept to 5", "kept"]);
+
+            let outcome = repl
+                .pipe_last("cat >/dev/null; exit 9")
+                .expect("the command ran and answered with its status");
+
+            assert_eq!(outcome.code, Some(9), "the command's failure is reported");
+            assert_eq!(
+                repl.lookup("kept").map(ToString::to_string),
+                Some("5".to_string()),
+                "and the session still holds the bindings it had"
+            );
+        }
+
+        #[test]
+        fn edge_pipe_streams_a_megabyte_payload() {
+            let mut repl = Repl::new();
+            let payload = "x".repeat(1024 * 1024);
+            repl.variables
+                .insert("_".to_string(), Value::Text(payload.clone()));
+
+            let outcome = repl
+                .pipe_last("cat")
+                .expect("cat can carry a megabyte through a pipe");
+
+            assert_eq!(
+                outcome.stdout.len(),
+                payload.len(),
+                "the whole payload came back, not a truncated first buffer"
+            );
+            assert_eq!(outcome.stdout, payload, "and it came back unchanged");
+        }
+
+        #[test]
+        fn edge_change_directory_to_a_missing_path_names_it_and_leaves_the_directory_alone() {
+            let mut repl = Repl::new();
+            let before = repl.session_directory().to_path_buf();
+            let missing = "definitely-no-such-directory-phase-068";
+
+            let refusal = repl
+                .change_directory(missing)
+                .expect_err("a missing directory cannot be entered");
+
+            assert!(
+                refusal.contains(missing),
+                "the refusal names the path that was missing: {refusal}"
+            );
+            assert_eq!(
+                repl.session_directory(),
+                before,
+                "and the session is still where it was"
+            );
+        }
+
+        /// A relative `.cd` is relative to the session directory, the same place
+        /// every other relative path resolves, not to the process directory.
+        #[test]
+        fn edge_change_directory_accepts_a_relative_path_from_the_session_directory() {
+            let root = scratch_dir("cd-relative")
+                .canonicalize()
+                .expect("the scratch directory should exist");
+            let nested = root.join("nested");
+            std::fs::create_dir_all(&nested).expect("the nested directory should be creatable");
+            let nested = nested
+                .canonicalize()
+                .expect("the nested directory should exist");
+
+            let mut repl = Repl::new();
+            repl.change_directory(&root.display().to_string())
+                .expect("the scratch directory exists");
+
+            feed(&mut repl, &[".cd nested"]);
+            assert_eq!(
+                repl.session_directory(),
+                nested.as_path(),
+                "a bare relative .cd resolved under the session directory"
+            );
+
+            feed(&mut repl, &[".cd .."]);
+            assert_eq!(
+                repl.session_directory(),
+                root.as_path(),
+                "and a parent relative .cd walks back from the session directory"
+            );
+        }
+
+        #[test]
+        fn edge_change_directory_makes_load_resolve_there_and_pwd_is_distinct() {
+            let dir = scratch_dir("cd-load");
+            std::fs::write(dir.join("loaded-by-bare-name.rb"), "set from_cd to 68\n")
+                .expect("the scratch file should be writable");
+
+            let mut repl = Repl::new();
+            let process = std::env::current_dir().expect("the process has a working directory");
+            repl.change_directory(&dir.display().to_string())
+                .expect("the scratch directory exists");
+
+            assert_ne!(
+                repl.session_directory(),
+                process.as_path(),
+                "the session directory is its own, not the process directory"
+            );
+
+            feed(&mut repl, &[":load loaded-by-bare-name.rb"]);
+            assert_eq!(
+                repl.lookup("from_cd").map(ToString::to_string),
+                Some("68".to_string()),
+                "a bare file name after .cd resolved in the session directory"
+            );
+            assert!(
+                repl.directory_listing()
+                    .expect("the session directory can be listed")
+                    .contains(&"loaded-by-bare-name.rb".to_string()),
+                ".ls lists that same directory, so what it shows and what :load                  resolves are one place"
+            );
+        }
+
+        #[test]
+        fn edge_shell_carries_unicode_through_unchanged() {
+            let outcome = crate::repl::shell::run("printf 'héllo 😀'")
+                .expect("the host has a shell to run it");
+            assert_eq!(
+                outcome.stdout, "héllo 😀",
+                "the command's bytes are shown as the command wrote them"
+            );
+            assert_eq!(outcome.code, Some(0));
+        }
+
+        /// `.cd` keeps the path the user typed: entering a symlink must not
+        /// silently rewrite the session directory to the link's target.
+        #[test]
+        fn edge_change_directory_keeps_the_symlink_path_the_user_entered() {
+            let root = scratch_dir("cd-symlink")
+                .canonicalize()
+                .expect("the scratch directory should exist");
+            let target = root.join("target");
+            std::fs::create_dir_all(&target).expect("the link target should be creatable");
+            let link = root.join("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&target, &link)
+                .expect("the scratch symlink should be creatable");
+
+            let mut repl = Repl::new();
+            feed(&mut repl, &[&format!(".cd {}", link.display())]);
+
+            assert_eq!(
+                repl.session_directory(),
+                link.as_path(),
+                "the session stayed at the path the user typed"
+            );
+            assert_ne!(
+                repl.session_directory(),
+                target.as_path(),
+                "rather than being rewritten to the link's target"
+            );
+        }
+
+        #[test]
+        fn edge_listing_marks_directories_with_the_completion_separator() {
+            let dir = scratch_dir("ls");
+            let _ = std::fs::remove_dir_all(dir.join("folder"));
+            std::fs::create_dir(dir.join("folder"))
+                .expect("the scratch folder should be creatable");
+            std::fs::write(dir.join("file.txt"), "x").expect("the scratch file should be writable");
+
+            let names =
+                crate::repl::shell::listing(&dir).expect("the scratch directory can be listed");
+
+            assert!(
+                names.contains(&"folder/".to_string()),
+                "a directory carries the same trailing separator completion offers: {names:?}"
+            );
+            assert!(
+                names.contains(&"file.txt".to_string()),
+                "and a file carries none: {names:?}"
             );
         }
     }
