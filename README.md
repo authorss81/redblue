@@ -287,6 +287,16 @@ list.length([1, 2, 3])                 // 3
 length(xs), push(xs, x)                // flat list builtins
 ```
 
+### Regex
+```
+regex.match(text, pattern)             // a match record, or nothing
+regex.is_match(text, pattern)          // yes/no, searching anywhere
+regex.capture(text, pattern, group)    // a captured text, or nothing
+regex.replace(text, pattern, "user-$1")// every match, with capture references
+regex.split(text, pattern)             // the text between matches
+// text.split keeps its literal separator; regex.split is the pattern form.
+```
+
 ## Project Structure
 
 ```

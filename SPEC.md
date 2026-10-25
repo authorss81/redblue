@@ -1429,6 +1429,39 @@ has to read the clock itself — `time.now()` twice and `time.sleep` between the
 The calls that block besides `time.sleep` are `network.get` and `network.post`,
 which wait for a response.
 
+### regex
+
+```redblue
+say regex.match("id=42", "id=([0-9]+)")      // {text: id=42, ...}
+say regex.is_match("id=42", "^id")           // yes
+say regex.capture("id=42", "id=([0-9]+)", 1) // 42
+say regex.replace("id=42", "id=([0-9]+)", "user-$1") // user-42
+say regex.split("a1b22c", "[0-9]+")          // [a, b, c]
+```
+
+The module binds the `regex` crate named in
+[LIBRARIES.md](LIBRARIES.md) § 2; the engine is not written in Redblue.
+`regex.match` searches anywhere in the text and answers a match record, or
+`nothing` when there is no match. The record is ordinary data: `m.text` is the
+whole match, `m.start` and `m.finish` are character positions like `length`
+counts, and `m.groups` is a list whose `0` entry is the whole match and whose
+`n` entry is capture group `n`. A group that did not participate is `nothing`.
+Two match records with the same captures compare equal; there is no identity
+behind them.
+
+`regex.replace` substitutes every non-overlapping match and understands `$1`,
+`$name` and `${name}` capture references. A reference to a group the pattern
+does not have is a catchable `Runtime` failure naming the group, rather than the
+empty text a replacement engine would otherwise put there. `regex.split` splits
+on a pattern and leaves a text whole when the pattern does not match. An empty
+pattern is a valid pattern and matches at position zero.
+
+A pattern that does not compile is a catchable `Runtime` failure carrying the
+crate's message; it is never a panic. The `regex` crate is linear-time, so a
+pattern that backtracks catastrophically in another engine cannot hang a
+Redblue program. `text.split` is unchanged: its separator is still literal, and
+`regex.split` is the pattern form.
+
 ---
 
 ## Grammar

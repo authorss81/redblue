@@ -1,4 +1,4 @@
-use crate::value::{FunctionValue, Value};
+use crate::value::{Fields, FunctionValue, Value};
 use std::collections::HashMap;
 
 /// The module names whose functions are registered as `module_function`
@@ -17,7 +17,8 @@ use std::collections::HashMap;
 /// `formats` would make a misspelling resolve to a namespace and fail later and
 /// less clearly than it does now.
 pub const MODULES: &[&str] = &[
-    "bytes", "console", "csv", "files", "json", "list", "math", "network", "sys", "text", "time",
+    "bytes", "console", "csv", "files", "json", "list", "math", "network", "regex", "sys", "text",
+    "time",
 ];
 
 /// The modules whose functions are the flat builtins of the same name rather
@@ -96,6 +97,10 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
         ],
     ),
     ("network", &["get", "post"]),
+    (
+        "regex",
+        &["match", "is_match", "capture", "replace", "split"],
+    ),
     ("sys", &["argv"]),
     (
         "text",
@@ -457,6 +462,19 @@ pub fn builtins() -> HashMap<String, Value> {
         Value::Builtin("network_post".to_string()),
     );
 
+    // Regex module. The matching itself is the `regex` crate rather than an
+    // engine written here: LIBRARIES.md § 2 names it as a binding, and the
+    // crate is already linked for the test harness.
+    for name in [
+        "regex_match",
+        "regex_is_match",
+        "regex_capture",
+        "regex_replace",
+        "regex_split",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
+
     // Testing module
     globals.insert("expect".to_string(), Value::Builtin("expect".to_string()));
     globals.insert("assert".to_string(), Value::Builtin("assert".to_string()));
@@ -648,7 +666,8 @@ pub fn builtin_function(name: &str, args: Vec<Value>) -> Option<Value> {
             (Value::Text(text), Value::Text(by)) => Some(Value::list(
                 // An empty separator would make every position a boundary and
                 // never advance, so it is the one input that has no answer here.
-                // Redblue has no regex, so this is a literal separator.
+                // This is a literal separator: `regex.split` is the pattern
+                // form, and `text.split` keeps its literal meaning.
                 if by.is_empty() {
                     return Some(Value::Nothing);
                 } else {
@@ -767,6 +786,12 @@ pub fn builtin(
     if let Some(value) = crate::runtime::builtin(span, name, args)? {
         return Ok(Some(value));
     }
+    if matches!(
+        name,
+        "regex_match" | "regex_is_match" | "regex_capture" | "regex_replace" | "regex_split"
+    ) {
+        return regex_builtin(span, name, args).map(Some);
+    }
     match builtin_function(name, args.to_vec()) {
         // `Value::Nothing` out of `builtin_function` means the builtin ran and
         // has no answer to give — `sqrt` of a negative, `log` of zero, an
@@ -790,6 +815,252 @@ pub fn builtin(
             span,
         )),
         None => Ok(None),
+    }
+}
+
+/// The `regex` module, bound to the crate rather than written in Redblue.
+///
+/// `regex_match` answers a match record or `nothing`; the record is ordinary
+/// data (`text`, `start`, `end`, `groups`), so two matches with the same
+/// captures compare equal. `groups[0]` is the whole match and `groups[n]` is
+/// capture group `n`; a group that did not participate is `nothing`.
+fn regex_builtin(
+    span: crate::error::Span,
+    name: &str,
+    args: &[Value],
+) -> crate::error::Result<Value> {
+    match name {
+        "regex_match" => {
+            let (text, pattern) = regex_text_and_pattern(span, name, args)?;
+            let expression = regex_compile(span, pattern)?;
+            Ok(regex_match_value(text, &expression))
+        }
+        "regex_is_match" => {
+            let (text, pattern) = regex_text_and_pattern(span, name, args)?;
+            let expression = regex_compile(span, pattern)?;
+            Ok(Value::YesNo(expression.is_match(text)))
+        }
+        "regex_capture" => {
+            let (text, pattern, group) = match args {
+                [Value::Text(text), Value::Text(pattern), Value::Number(group)] => {
+                    (text, pattern, *group)
+                }
+                _ => {
+                    return Err(regex_argument_error(
+                        span,
+                        name,
+                        "text, a pattern and a group number",
+                    ))
+                }
+            };
+            if !group.is_finite() || group.fract() != 0.0 || group < 0.0 {
+                return Err(crate::error::Error::Runtime(
+                    format!("{name} requires a whole group number, but was given {group}"),
+                    span,
+                ));
+            }
+            let expression = regex_compile(span, pattern)?;
+            let Some(captures) = expression.captures(text) else {
+                return Ok(Value::Nothing);
+            };
+            if group >= expression.captures_len() as f64 {
+                return Err(crate::error::Error::Runtime(
+                    format!(
+                        "{name}: pattern {pattern:?} has no capture group {group}; \
+                         it has {}",
+                        expression.captures_len().saturating_sub(1)
+                    ),
+                    span,
+                ));
+            }
+            let group = group as usize;
+            // A group that did not participate has no span, so `get` answers
+            // `None`; that is `nothing`, not the empty text an expansion would
+            // produce. An empty group that *did* participate still has a span
+            // and answers `text("")`.
+            match captures.get(group) {
+                Some(matched) => Ok(Value::Text(matched.as_str().to_string())),
+                None => Ok(Value::Nothing),
+            }
+        }
+        "regex_replace" => {
+            let (text, pattern, replacement) = match args {
+                [Value::Text(text), Value::Text(pattern), Value::Text(replacement)] => {
+                    (text, pattern, replacement)
+                }
+                _ => {
+                    return Err(regex_argument_error(
+                        span,
+                        name,
+                        "text, a pattern and a replacement",
+                    ))
+                }
+            };
+            let expression = regex_compile(span, pattern)?;
+            regex_check_replacement(span, pattern, replacement, &expression)?;
+            Ok(Value::Text(
+                expression
+                    .replace_all(text, replacement.as_str())
+                    .into_owned(),
+            ))
+        }
+        "regex_split" => {
+            let (text, pattern) = regex_text_and_pattern(span, name, args)?;
+            let expression = regex_compile(span, pattern)?;
+            Ok(Value::list(
+                expression
+                    .split(text)
+                    .map(|part| Value::Text(part.to_string()))
+                    .collect(),
+            ))
+        }
+        _ => Ok(Value::Nothing),
+    }
+}
+
+fn regex_argument_error(
+    span: crate::error::Span,
+    name: &str,
+    expected: &str,
+) -> crate::error::Error {
+    crate::error::Error::Runtime(format!("{name} requires {expected}"), span)
+}
+
+fn regex_text_and_pattern<'a>(
+    span: crate::error::Span,
+    name: &str,
+    args: &'a [Value],
+) -> crate::error::Result<(&'a str, &'a str)> {
+    match args {
+        [Value::Text(text), Value::Text(pattern)] => Ok((text, pattern)),
+        _ => Err(regex_argument_error(span, name, "text and a pattern")),
+    }
+}
+
+fn regex_compile(span: crate::error::Span, pattern: &str) -> crate::error::Result<regex::Regex> {
+    regex::Regex::new(pattern).map_err(|failure| {
+        crate::error::Error::Runtime(
+            format!("regex pattern {pattern:?} is not valid: {failure}"),
+            span,
+        )
+    })
+}
+
+fn regex_match_value(text: &str, expression: &regex::Regex) -> Value {
+    let Some(captures) = expression.captures(text) else {
+        return Value::Nothing;
+    };
+    let Some(whole) = captures.get(0) else {
+        return Value::Nothing;
+    };
+    let mut fields = Fields::new();
+    fields.insert("text".to_string(), Value::Text(whole.as_str().to_string()));
+    fields.insert(
+        "start".to_string(),
+        Value::Number(text[..whole.start()].chars().count() as f64),
+    );
+    fields.insert(
+        "finish".to_string(),
+        Value::Number(text[..whole.end()].chars().count() as f64),
+    );
+    fields.insert(
+        "groups".to_string(),
+        Value::list(
+            captures
+                .iter()
+                .map(|matched| match matched {
+                    Some(matched) => Value::Text(matched.as_str().to_string()),
+                    None => Value::Nothing,
+                })
+                .collect(),
+        ),
+    );
+    Value::record(fields)
+}
+
+/// Refuses a replacement that names a capture group the pattern does not have.
+///
+/// `regex`'s own `expand` treats an unknown group as an empty string, which
+/// turns a typo in `$2` into silently deleted text. A group reference the
+/// pattern cannot satisfy is a runtime failure with the pattern and the name in
+/// it, so `try … catch error of Runtime` can report it.
+fn regex_check_replacement(
+    span: crate::error::Span,
+    pattern: &str,
+    replacement: &str,
+    expression: &regex::Regex,
+) -> crate::error::Result<()> {
+    let bytes = replacement.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        match bytes.get(index + 1) {
+            Some(b'$') => {
+                index += 2;
+                continue;
+            }
+            Some(b'{') => {
+                let Some(close) = replacement[index + 2..].find('}') else {
+                    return Err(crate::error::Error::Runtime(
+                        format!(
+                            "regex.replace: replacement {replacement:?} has an unclosed \
+                             capture reference"
+                        ),
+                        span,
+                    ));
+                };
+                let end = index + 2 + close;
+                let name = &replacement[index + 2..end];
+                regex_check_group(span, pattern, name, expression)?;
+                index = end + 1;
+                continue;
+            }
+            Some(next) if next.is_ascii_alphanumeric() || *next == b'_' => {
+                let start = index + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
+                    end += 1;
+                }
+                let name = &replacement[start..end];
+                regex_check_group(span, pattern, name, expression)?;
+                index = end;
+                continue;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn regex_check_group(
+    span: crate::error::Span,
+    pattern: &str,
+    name: &str,
+    expression: &regex::Regex,
+) -> crate::error::Result<()> {
+    let known = if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
+        name.parse::<usize>()
+            .is_ok_and(|group| group < expression.captures_len())
+    } else {
+        expression
+            .capture_names()
+            .flatten()
+            .any(|capture| capture == name)
+    };
+    if known {
+        Ok(())
+    } else {
+        Err(crate::error::Error::Runtime(
+            format!("regex.replace: pattern {pattern:?} has no capture group named {name:?}"),
+            span,
+        ))
     }
 }
 
@@ -912,6 +1183,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "csv_parse",
     "network_get",
     "network_post",
+    "regex_match",
+    "regex_is_match",
+    "regex_capture",
+    "regex_replace",
+    "regex_split",
     "expect",
     "assert",
     "console_log",
@@ -1088,6 +1364,26 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     (
         "network_post",
         "network_post(text, text) -> the body of the response",
+    ),
+    (
+        "regex_match",
+        "regex_match(text, pattern) -> a match record, or nothing when there is no match",
+    ),
+    (
+        "regex_is_match",
+        "regex_is_match(text, pattern) -> yes/no, whether the pattern matches anywhere",
+    ),
+    (
+        "regex_capture",
+        "regex_capture(text, pattern, group) -> the captured text, or nothing",
+    ),
+    (
+        "regex_replace",
+        "regex_replace(text, pattern, replacement) -> text with $1 or ${name} captured",
+    ),
+    (
+        "regex_split",
+        "regex_split(text, pattern) -> a list of the text between matches",
     ),
     (
         "expect",

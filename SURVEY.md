@@ -1,18 +1,18 @@
 # SURVEY.md — what a Python programmer cannot do in Redblue
 
-**Status**: survey only. This file changed no interpreter, no registry and no test.
-It is measured against the tree this commit sits on, and every claim below carries
-the line that proves it.
+**Status**: survey. It is measured against the tree this commit sits on, and
+every claim below carries the line that proves it. Rank 2 was closed by
+phase-095; the entry is kept so the ranking and its history stay readable.
 
-- **Builtins in the registry**: 69 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:860`,
-  which closes with `"input"` at `src/stdlib.rs:929`.
-- **Modules a dotted call may name**: 11 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 47 — `stdlib::MODULE_MEMBERS` at
-  `src/stdlib.rs:62`.
+- **Builtins in the registry**: 74 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1125`,
+  which closes with `"input"` at `src/stdlib.rs:1199`.
+- **Modules a dotted call may name**: 12 — `stdlib::MODULES` at `src/stdlib.rs:19`.
+- **Dotted members those modules accept**: 52 — `stdlib::MODULE_MEMBERS` at
+  `src/stdlib.rs:63`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
 of what a dotted call is allowed to reach, because a name not in them is refused
-before a call happens (`src/stdlib.rs:138`, `module_has_member`). So the ceiling
+before a call happens (`src/stdlib.rs:143`, `module_has_member`). So the ceiling
 of the language is knowable by reading one file, and that is what this survey
 reads.
 
@@ -94,6 +94,7 @@ survey measures against, and it is short.
 | `list` | `map`, `length` | `src/stdlib.rs:91` |
 | `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp` | `src/stdlib.rs:92` |
 | `network` | `get`, `post` | `src/stdlib.rs:98` |
+| `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:101` |
 | `sys` | `argv` | `src/stdlib.rs:99` |
 | `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length` | `src/stdlib.rs:100` |
 | `time` | `now`, `sleep`, `format`, `unix` | `src/stdlib.rs:122` |
@@ -151,40 +152,36 @@ say filter([1, 2, 3], to (x) give back x > 1 end)
 
 Refused as `RuntimeError: filter was called with arguments it cannot use`.
 
-## 2. No regular expressions, anywhere in the language
+## 2. No regular expressions, anywhere in the language — closed by phase-095
 
-- **Blocked programs**: 4 — 1, 6, 7, 21
+- **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:651` — the comment in the `split` arm reads
-  *"Redblue has no regex, so this is a literal separator."* That is the whole
-  reason `split` loses its separators. The crate is **already a dependency**,
-  `Cargo.toml:31` (`regex = "1.10"`, and again at `Cargo.toml:38` as a
-  dev-dependency), and it is reachable **only** from the test harness:
-  `src/testing/assertions.rs:130` builds a `Regex` for an assertion pattern, and
-  `src/testing/runner.rs:252` is the `assert_matches_regex` helper behind it. No
-  line outside `src/testing/` refers to `regex::` — which is why the crate is
-  linked into a program that cannot use it.
-- **Citation drift, reconciled**: the finding this phase was dispatched on cites
-  `src/stdlib.rs:612` for that comment. On this tree that line is `},`; the
-  comment it meant is the one at `src/stdlib.rs:651` above, and it is cited there
-  rather than at a line that says something else. Recorded as **F1** in
-  `phases/phase-090/FINDINGS.md`, and pinned by
-  `tests/stdlib_gap_survey_test.rs::edge_every_citation_resolves_to_a_line_that_exists`,
-  which fails if the anchor ever stops reading `no regex`.
-- **Why it ranks where it does**: log parsing, source scanning, HTML scraping and
-  percent-decoding are four separate programs, and every one of them is a
-  hand-rolled state machine in the language as it stands. It ranks second, not
-  first, because a careful `split`-and-`contains` loop still finishes three of the
-  four — slowly, and with the delimiters lost.
+- **Evidence**: `src/stdlib.rs:827` — `regex_builtin` binds the crate the ranking
+  named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
+  and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
+  **only** from the test harness: `src/testing/assertions.rs:130` builds a
+  `Regex` for an assertion pattern, and `src/testing/runner.rs:252` is the
+  `assert_matches_regex` helper behind it.
+- **What phase-095 changed**: `regex` is now a module with `match`, `is_match`,
+  `capture`, `replace` and `split`. `regex.match` answers a data record with
+  `text`, `start`, `finish` and `groups`; `replace` expands `$1`/`$name` capture
+  references and refuses a group the pattern does not have; a bad pattern is a
+  catchable `Runtime` failure. Both engines answer it because both reach
+  `stdlib::builtin`.
+- **Why it was ranked here**: log parsing, source scanning, HTML scraping and
+  percent-decoding are four separate programs, and every one of them used to be
+  a hand-rolled state machine. It ranked second, not first, because a careful
+  `split`-and-`contains` loop still finished three of the four — slowly, and with
+  the delimiters lost.
 
 ```redblue
-set id to regex.match("id=42", "id=([0-9]+)")
-say id
+say regex.match("id=42", "id=([0-9]+)")
 ```
 
-Refused as `AnalyzerError: Unknown variable 'regex'` — the analyzer refuses it
-before the runtime does, because `regex` is not in `MODULES`.
+Answers a match record: `{text: id=42, start: 0, finish: 5, groups: [id=42, 42]}`.
+Before phase-095 the same program was refused as
+`AnalyzerError: Unknown variable 'regex'`, because `regex` was not in `MODULES`.
 
 ## 3. No way to enumerate a record's fields
 

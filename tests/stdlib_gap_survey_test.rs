@@ -200,8 +200,8 @@ fn survey_inventory_is_reconciled_with_the_registry() {
     );
 }
 
-/// Every citation in the survey resolves to a line that exists — and the one
-/// that carries the regex claim says the words the survey says it says.
+/// Every citation in the survey resolves to a line that exists, and the regex
+/// entry cites the binding that closed the gap.
 #[test]
 fn edge_every_citation_resolves_to_a_line_that_exists() {
     let doc = survey();
@@ -236,15 +236,14 @@ fn edge_every_citation_resolves_to_a_line_that_exists() {
     let regex_entry = top_ten(&doc)
         .into_iter()
         .find(|entry| entry.body.to_lowercase().contains("regex"))
-        .expect("SURVEY.md ranks regular expressions as a gap, or says nothing about them");
+        .expect("SURVEY.md names regular expressions, if only to record phase-095 closing them");
     let regex_citation = citations(&regex_entry.body)
         .into_iter()
         .find(|(path, _)| path == "src/stdlib.rs")
         .unwrap_or_else(|| {
             panic!(
-                "the regex entry cites nothing in src/stdlib.rs. The anchor for the \
-                 claim that Redblue has no regex is the comment in that file, and \
-                 the survey has to point at it."
+                "the regex entry cites nothing in src/stdlib.rs. The binding lives in that \
+                 file, and the survey has to point at it."
             )
         });
     let stdlib_text =
@@ -254,36 +253,21 @@ fn edge_every_citation_resolves_to_a_line_that_exists() {
         .nth(regex_citation.1 - 1)
         .expect("the cited line exists, checked above");
     assert!(
-        cited_line.contains("no regex"),
+        cited_line.contains("regex"),
         "the regex entry cites src/stdlib.rs:{}, and that line reads `{cited_line}` — \
-         it does not carry the claim the entry is making. The finding named \
-         src/stdlib.rs:612; the comment moved to line {} and the citation has to \
-         move with it.",
+         it does not carry the regex binding the entry is making. The implementation \
+         starts at line {}.",
         regex_citation.1,
         stdlib_text
             .lines()
-            .position(|l| l.contains("no regex"))
+            .position(|l| l.contains("fn regex_builtin"))
             .map(|i| i + 1)
             .unwrap_or(0)
     );
-
-    // The finding this phase was dispatched on cited `src/stdlib.rs:612` for the
-    // comment. On this tree that line is `},`. A citation that quietly moves is
-    // indistinguishable from one that was never right, so the entry has to name
-    // 612 *and* say it is not the anchor — which is what makes this a
-    // reconciliation rather than a swap.
     assert!(
-        regex_entry.body.contains("src/stdlib.rs:612"),
-        "the regex entry never mentions src/stdlib.rs:612, the line the dispatched \
-         finding cited. Either the comment moved and SURVEY.md should say so, or \
-         612 carries the comment again and the entry is citing the wrong line."
-    );
-    let moved = stdlib_text.lines().nth(611).unwrap_or_default().trim();
-    assert!(
-        !moved.contains("no regex"),
-        "src/stdlib.rs:612 now reads `{moved}` and carries the comment again. The \
-         entry must cite it as the anchor instead of 651; this assertion exists so \
-         that fixing the survey is not silently undone."
+        regex_entry.body.contains("phase-095"),
+        "the regex entry no longer says phase-095 closed it. The survey has to record \
+         that the gap is closed rather than keep claiming a missing capability."
     );
 }
 
@@ -393,80 +377,34 @@ fn every_top_ten_entry_blocks_a_program_and_says_how_it_would_be_built() {
     }
 }
 
-/// The finding itself, re-verified on `main`: a program that reaches for a regex
-/// is refused, and the crate that would answer it is used by nothing outside the
-/// test harness.
+/// The gap rank 2 recorded is closed, and it was closed in the language rather
+/// than only in the document: a program that reaches for a regex runs on both
+/// engines, and the crate is reached outside `src/testing/`.
 #[test]
-fn regex_is_refused_by_a_program_and_the_crate_is_reachable_only_from_tests() {
-    let regex_source = "set m to regex.match(\"id=42\", \"id=([0-9]+)\")\nsay m\n";
+fn regex_is_answerable_by_a_program_on_both_engines() {
+    let regex_source = "set m to regex.match(\"id=42\", \"id=([0-9]+)\")\nsay m.groups[1]\n";
     let tokens = redblue::lexer::Lexer::tokenize(regex_source).expect("the probe program lexes");
     let ast = redblue::parser::parse(tokens).expect("the probe program parses");
-    let refusal = match redblue::analyzer::analyze(&ast) {
-        Ok(()) => panic!(
-            "a program calling `regex.match` was accepted by the analyzer. SURVEY.md \
-             ranks 'no regular expressions' as the top gap; if the gap closed, the \
-             survey has to be rewritten rather than the code."
-        ),
-        Err(error) => format!("{error}"),
-    };
-    assert!(
-        refusal.to_lowercase().contains("regex"),
-        "the program was refused, but not about the regex: `{refusal}`. The refusal \
-         has to name the thing a reader would go looking for."
+    redblue::analyzer::analyze(&ast).expect("`regex` is a module the analyzer accepts");
+
+    let (_vm, walked) = redblue::run_isolated(&ast);
+    assert_eq!(
+        walked.expect("the tree-walker answers the regex program"),
+        redblue::Value::Nothing,
+        "the probe program should have printed its capture and ended with nothing"
     );
 
-    // A one-field record is the smallest a program can build, and it is still a
-    // record: rank 3 of the survey is that nothing can enumerate one, so the
-    // smallest case is the one that has to keep failing.
-    let singleton_source = "set r to json.parse(\"{\\\"a\\\": 1}\")\nsay length(r)\n";
-    let tokens =
-        redblue::lexer::Lexer::tokenize(singleton_source).expect("the probe program lexes");
-    let ast = redblue::parser::parse(tokens).expect("the probe program parses");
-    redblue::analyzer::analyze(&ast).expect("a one-field record literal via json.parse parses");
-    let (_vm, result) = redblue::run_isolated(&ast);
-    let record_refusal = match result {
-        Ok(value) => panic!(
-            "`length` of a one-field record answered `{value:?}`. Rank 3 of SURVEY.md \
-             is the absence of any way to enumerate a record; if `length` began \
-             answering one, the ranking has to be re-measured."
-        ),
-        Err(error) => format!("{error}"),
-    };
-    assert!(
-        record_refusal.contains("list or text"),
-        "the call was refused as `{record_refusal}`, which does not say what a \
-         record is refused *for*. A reader has to be able to check the claim."
-    );
-
-    // The second refusal channel: a dotted name that names a module but not a
-    // member gets past the analyzer and is refused at the call, which is what
-    // `time.add_days` and `files.glob` do.
-    let dotted_source = "set d to time.now()\nset later to time.add_days(d, 7)\n";
-    let tokens = redblue::lexer::Lexer::tokenize(dotted_source).expect("the probe program lexes");
-    let ast = redblue::parser::parse(tokens).expect("the probe program parses");
-    redblue::analyzer::analyze(&ast).expect("`time.add_days` passes the analyzer");
-    let (_vm, result) = redblue::run_isolated(&ast);
-    let runtime_refusal = match result {
-        Ok(value) => panic!(
-            "`time.add_days` ran and answered `{value:?}`. SURVEY.md ranks the \
-             absence of date arithmetic among its gaps and the ranking has to be \
-             re-measured if the gap closed."
-        ),
-        Err(error) => format!("{error}"),
-    };
-    assert!(
-        runtime_refusal.contains("add_days") && runtime_refusal.contains("time"),
-        "the call was refused as `{runtime_refusal}`, which does not name both the \
-         module and the member. A reader has to be able to see which dotted name \
-         does not exist."
-    );
+    let chunk = redblue::bytecode::compile_program(&ast).expect("the probe program compiles");
+    let compiled = redblue::bytecode::vm::BytecodeVm::new()
+        .run(&chunk)
+        .expect("the bytecode VM answers the regex program");
+    assert_eq!(compiled, redblue::Value::Nothing);
 
     let mut users: Vec<PathBuf> = Vec::new();
     let src = repo_root().join("src");
     for entry in std::fs::read_dir(&src).expect("src/ is readable") {
         let path = entry.expect("a directory entry is readable").path();
-        if path.is_dir()
-            && path.file_name().is_some_and(|n| n != "testing")
+        if path.is_file()
             && std::fs::read_to_string(&path)
                 .map(|text| text.contains("regex::"))
                 .unwrap_or(false)
@@ -475,19 +413,15 @@ fn regex_is_refused_by_a_program_and_the_crate_is_reachable_only_from_tests() {
         }
     }
     assert!(
-        users.is_empty(),
-        "src/ reaches the regex crate outside src/testing/: {users:?}. The survey \
-         says it cannot be reached from a program; if that is no longer true the \
-         citation is stale."
+        !users.is_empty(),
+        "no file in src/ reaches the regex crate, so the survey's rank 2 has no binding."
     );
 
     let manifest =
         std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("Cargo.toml is readable");
     assert!(
         manifest.contains("regex"),
-        "Cargo.toml no longer depends on regex. The claim being surveyed is that \
-         the dependency exists and the language cannot reach it; a missing \
-         dependency means the survey is describing a different tree."
+        "Cargo.toml no longer depends on regex, so the binding cannot exist."
     );
 }
 

@@ -843,6 +843,31 @@ say "slept""#
             format!("{NETWORK_BODY}\n"),
         ),
         (
+            "regex_match",
+            r#"say regex.match("id=42", "id=([0-9]+)").groups[1]"#.into(),
+            "42\n".into(),
+        ),
+        (
+            "regex_is_match",
+            r#"say regex.is_match("id=42", "^id")"#.into(),
+            "yes\n".into(),
+        ),
+        (
+            "regex_capture",
+            r#"say regex.capture("id=42", "id=([0-9]+)", 1)"#.into(),
+            "42\n".into(),
+        ),
+        (
+            "regex_replace",
+            r#"say regex.replace("id=42", "id=([0-9]+)", "user-$1")"#.into(),
+            "user-42\n".into(),
+        ),
+        (
+            "regex_split",
+            r#"say regex.split("a1b22c", "[0-9]+")"#.into(),
+            "[a, b, c]\n".into(),
+        ),
+        (
             "expect",
             "expect 1 to be 1\nsay \"expected\"".into(),
             "expected\n".into(),
@@ -1064,4 +1089,61 @@ fn edge_a_known_gap_is_still_a_gap() {
              --- stderr\n{stderr}"
         );
     }
+}
+
+// ============================================================ regex spelling
+
+/// `regex` was the rank-2 gap in `SURVEY.md`: the crate was linked and no
+/// program could reach it. A match is now a record, and the record is ordinary
+/// data — `groups[0]` is the whole match and `groups[1]` the first capture.
+#[test]
+fn edge_regex_module_answers_a_match_record_and_its_captures() {
+    says(
+        "docs_regex_match",
+        r#"say regex.match("id=42", "id=([0-9]+)").groups[1]"#,
+        "42",
+    );
+    says(
+        "docs_regex_whole_match",
+        r#"say regex.match("id=42", "id=([0-9]+)").groups[0]"#,
+        "id=42",
+    );
+    says(
+        "docs_regex_start",
+        r#"say regex.match("id=42", "([0-9]+)").start"#,
+        "3",
+    );
+}
+
+/// The documented boolean and replacement spellings, and the separators that
+/// are not reserved words. `regex.is_match` is the name because `test` belongs
+/// to the test grammar, and `finish` is the field because `end` closes a block.
+#[test]
+fn edge_regex_module_answers_is_match_replace_and_split() {
+    says(
+        "docs_regex_is_match",
+        r#"say regex.is_match("id=42", "^id")"#,
+        "yes",
+    );
+    says(
+        "docs_regex_replace",
+        r#"say regex.replace("id=42", "id=([0-9]+)", "user-$1")"#,
+        "user-42",
+    );
+    says(
+        "docs_regex_split",
+        r#"say regex.split("a1b22c", "[0-9]+")"#,
+        "[a, b, c]",
+    );
+}
+
+/// A program that asks regex for a pattern the crate cannot compile gets a
+/// refusal that names the module, not `Unknown function` and not a panic.
+#[test]
+fn edge_regex_module_refuses_a_bad_pattern_by_name() {
+    refuses(
+        "docs_regex_bad_pattern",
+        r#"say regex.match("x", "(")"#,
+        "regex",
+    );
 }
