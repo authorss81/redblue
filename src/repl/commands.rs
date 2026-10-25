@@ -191,6 +191,12 @@ pub enum ReplCommand {
     /// about code the session has not bound, and `.compare say 1` is a question
     /// about what running it does on each engine.
     Compare(String),
+    /// Shows the engine this session runs on, or switches to another one.
+    ///
+    /// `Option` because a bare `.vm` is a question — "which engine am I talking
+    /// to?" — rather than a command typed incompletely. The two answers are
+    /// `walker` and `bytecode`; anything else is refused by name.
+    Vm(Option<String>),
     Example,
     /// The guided tour: a numbered set of steps, each with code to run.
     ///
@@ -770,6 +776,14 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Compare(argument.unwrap_or_default()),
     },
     CommandSpec {
+        names: &["vm"],
+        description: "Show the engine or switch it: walker or bytecode",
+        usage: Some("<walker|bytecode>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Vm(argument),
+    },
+    CommandSpec {
         names: &["example", "examples"],
         description: "Show example code",
         usage: None,
@@ -1096,6 +1110,7 @@ impl ReplCommand {
             | ReplCommand::Watch(value)
             | ReplCommand::Export(Some(value)) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
+            ReplCommand::Vm(Some(value)) => Some(value.as_str()),
             ReplCommand::Alias(Some(value)) => Some(value.as_str()),
             ReplCommand::Macro(Some(value)) => Some(value.as_str()),
             ReplCommand::Format(Some(value)) => Some(value.as_str()),

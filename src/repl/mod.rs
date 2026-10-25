@@ -29,6 +29,7 @@ pub use introspect::Definition;
 pub use transcript::Transcript;
 
 use crate::analyzer;
+use crate::bytecode::vm::BytecodeVm;
 use crate::debugger::{lock, DebugAction, DebugSession, SharedDebugSession, StepMode};
 use crate::error::Error;
 use crate::interpreter::{CallContext, Vm};
@@ -94,6 +95,48 @@ const SCRATCH_DIR_ATTEMPTS: usize = 64;
 /// Distinct from `>>> ` and `..  2 ` because it is asked by a running program
 /// rather than typed at, and a session has to be able to tell the three apart.
 const DEBUG_PROMPT: &str = "(rb-debug) ";
+
+/// Which engine a REPL session runs source on.
+///
+/// Both engines are part of the language. A session chooses one and says which
+/// one it is using in the banner and, once `.vm` has been used, in the prompt:
+/// the same expression can behave differently on each, so an answer with no
+/// engine attached is an answer to a question the user did not mean to ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Engine {
+    /// The tree-walking interpreter, and the default.
+    #[default]
+    Walker,
+    /// The bytecode VM that `rb compile` and `rb vm` drive.
+    Bytecode,
+}
+
+impl Engine {
+    /// The name a user reads: the same words the banner uses.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Walker => banner::ENGINE,
+            Self::Bytecode => "bytecode VM",
+        }
+    }
+
+    /// The short name `.vm` accepts.
+    pub fn command_name(self) -> &'static str {
+        match self {
+            Self::Walker => "walker",
+            Self::Bytecode => "bytecode",
+        }
+    }
+
+    /// The engine `.vm` names, or `None` when the word is not one of the two.
+    fn from_command_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "walker" => Some(Self::Walker),
+            "bytecode" => Some(Self::Bytecode),
+            _ => None,
+        }
+    }
+}
 
 /// The prompt a session reads a fresh line at, until `:prompt` says otherwise.
 ///
@@ -165,6 +208,11 @@ const SESSION_STATE_MARKER: &str = "#!redblue-session-state";
 /// choice of where to print them from the function that parses.
 #[derive(Default)]
 struct SessionState {
+    engine: Option<Engine>,
+    /// Whether the state section named an engine at all. A record the parser
+    /// could not read is still a record, and the difference decides whether the
+    /// restoring session keeps its own engine or returns to the Walker default.
+    engine_recorded: bool,
     aliases: HashMap<String, String>,
     macros: HashMap<String, Vec<String>>,
     warnings: Vec<String>,
@@ -727,6 +775,18 @@ struct Checkpoint {
 
 pub struct Repl {
     vm: Vm,
+    /// The engine this session runs source on. Tree-walking by default, because
+    /// that is the documented language semantics.
+    engine: Engine,
+    /// The engine the most recent program actually ran on, for callers that need
+    /// proof of a switch rather than the prompt text that advertises one.
+    last_engine: Engine,
+    /// Whether a `.vm` has made the prompt name the engine.
+    ///
+    /// The default prompt is untouched for sessions that never switch: `>>> ` is
+    /// the documented prompt and every existing script reads it. A session that
+    /// has asked the question gets the answer in the prompt from then on.
+    engine_named_in_prompt: bool,
     variables: HashMap<String, Value>,
     history: ReplHistory,
     completer: ReplCompleter,
@@ -902,6 +962,9 @@ impl Repl {
     pub fn new() -> Self {
         Self {
             vm: Vm::new(),
+            engine: Engine::Walker,
+            last_engine: Engine::Walker,
+            engine_named_in_prompt: false,
             variables: HashMap::new(),
             history: ReplHistory::new(HISTORY_LIMIT),
             completer: ReplCompleter::new(),
@@ -1250,10 +1313,16 @@ impl Repl {
     /// without it, a single `:prompt` line would make every prompt after it
     /// allocate whatever the user had typed, forever.
     fn render_prompt_format(&self) -> String {
-        self.prompt_format
-            .replace("{engine}", banner::ENGINE)
+        let rendered = self
+            .prompt_format
+            .replace("{engine}", self.engine.label())
             .replace("{version}", banner::VERSION)
-            .replace("{history}", &self.history.len().to_string())
+            .replace("{history}", &self.history.len().to_string());
+        if self.engine_named_in_prompt && !self.prompt_format.contains("{engine}") {
+            format!("{} {}", self.engine.label(), rendered)
+        } else {
+            rendered
+        }
     }
 
     /// Sets the prompt from a `:prompt` format string, or restores
@@ -1932,6 +2001,10 @@ impl Repl {
                 self.print_compare(&program);
                 true
             }
+            ReplCommand::Vm(argument) => {
+                self.engine_command(argument.as_deref());
+                true
+            }
             ReplCommand::Example => {
                 self.show_examples();
                 true
@@ -2122,6 +2195,60 @@ impl Repl {
         }
     }
 
+    /// Which engine this session runs source on.
+    pub fn engine(&self) -> Engine {
+        self.engine
+    }
+
+    /// The engine the most recent program actually ran on.
+    ///
+    /// A switch is session state, but a switch that silently failed to reach the
+    /// run path would still look right in the prompt. This is the marker a test
+    /// reads instead.
+    pub fn last_engine(&self) -> Engine {
+        self.last_engine
+    }
+
+    /// The name of the engine this session runs source on.
+    pub fn engine_name(&self) -> &'static str {
+        self.engine.label()
+    }
+
+    /// `.vm`: says which engine is in use, or switches to the one named.
+    ///
+    /// The choice is session state. The bindings cross with it — one direction
+    /// by seeding the bytecode VM from the session, the other by adopting what
+    /// that VM bound — so `.vm bytecode`, `set x to 9`, `.vm walker`, `say x`
+    /// still answers 9 rather than starting again. History and the last result
+    /// are engine-independent and are not touched by a switch.
+    fn engine_command(&mut self, argument: Option<&str>) {
+        match self.set_engine(argument) {
+            Ok(()) => println!("Engine: {}", self.engine.label()),
+            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+        }
+    }
+
+    /// The state change behind `.vm`, split out so its refusals are testable.
+    ///
+    /// No argument is a question and changes nothing. A word that is not one of
+    /// the two engines is refused with both valid words, because "Unknown
+    /// command 'bytecod'" sends the user back to `:help` for a typo the command
+    /// can name itself.
+    fn set_engine(&mut self, argument: Option<&str>) -> Result<(), String> {
+        let Some(word) = argument.map(str::trim).filter(|word| !word.is_empty()) else {
+            return Ok(());
+        };
+        let Some(engine) = Engine::from_command_name(word) else {
+            return Err(format!(
+                "Error: .vm takes 'walker' or 'bytecode', not '{}'.",
+                word
+            ));
+        };
+        self.engine = engine;
+        self.engine_named_in_prompt = true;
+        Ok(())
+    }
+
     /// Forgets everything the session has done: its bindings, its last result,
     /// and any block it is halfway through typing.
     ///
@@ -2153,6 +2280,9 @@ impl Repl {
     /// part of what it was.
     fn reset_session(&mut self) {
         self.vm = Vm::new();
+        self.engine = Engine::Walker;
+        self.last_engine = Engine::Walker;
+        self.engine_named_in_prompt = false;
         self.variables.clear();
         self.definitions.clear();
         self.last_file = None;
@@ -2526,7 +2656,15 @@ impl Repl {
                 Ok(value)
             }
             Err(e) => {
-                let rendered = format!("Error: {}", render_error(&self.style, code, file, &e));
+                let rendered = if self.engine_named_in_prompt {
+                    format!(
+                        "Error [{}]: {}",
+                        self.engine.label(),
+                        render_error(&self.style, code, file, &e)
+                    )
+                } else {
+                    format!("Error: {}", render_error(&self.style, code, file, &e))
+                };
                 println!("{rendered}");
                 output.push(rendered.clone());
                 Err(rendered)
@@ -2750,6 +2888,26 @@ impl Repl {
         program: &Program,
         source: &str,
     ) -> Result<Value, crate::error::Error> {
+        // The marker is written before the run, so a compile failure still says
+        // which engine was asked to run the line that failed.
+        self.last_engine = self.engine;
+        if self.engine == Engine::Bytecode {
+            self.vm.take_output();
+            let (result, output) = self.run_bytecode(program);
+            if result.is_ok() {
+                for line in &output {
+                    println!("{}", line);
+                }
+            }
+            self.last_output = output;
+            if result.is_err() {
+                for line in &self.last_output {
+                    println!("{}", line);
+                }
+            }
+            return result;
+        }
+
         self.arm_debugger(source);
         self.vm.take_output();
         let result = self.vm.run(program);
@@ -2767,6 +2925,67 @@ impl Repl {
             }
         }
         result
+    }
+
+    /// Runs `program` on the bytecode VM, with the session's bindings and
+    /// language context seeded in and whatever it built copied back out.
+    ///
+    /// A fresh VM per run rather than one kept beside the tree-walker: a
+    /// compiled chunk is tied to the program that produced it, and keeping a
+    /// second VM's frames alive across REPL lines buys nothing a seed and an
+    /// adopt do not. The bindings and the context are the shared state, so they
+    /// cross both ways: an `import ... as` on one bytecode line still names its
+    /// module on the next, and a switch back to the tree-walker reads what the
+    /// bytecode side wrote.
+    fn run_bytecode(
+        &mut self,
+        program: &Program,
+    ) -> (Result<Value, crate::error::Error>, Vec<String>) {
+        let chunk = match crate::bytecode::compile_program(program) {
+            Ok(chunk) => chunk,
+            Err(error) => return (Err(error), Vec::new()),
+        };
+        let mut compiled = BytecodeVm::new_in(self.vm.root());
+        compiled.set_echo(false);
+        compiled.observe_context(self.vm.call_context());
+        for (name, value) in self.session_bindings() {
+            compiled.seed_binding(&name, value);
+        }
+        for (name, value) in self.vm.published_member_bindings() {
+            compiled.seed_binding(&name, value);
+        }
+        let result = compiled.run(&chunk);
+        let output = compiled.take_output();
+        self.adopt_bytecode_bindings(&compiled);
+        (result, output)
+    }
+
+    /// Copies the names and language context the bytecode VM built back into
+    /// the session's VM.
+    ///
+    /// The context crosses with the bindings because the bindings alone do not
+    /// say what an imported name means: `M` is a name for a module only while
+    /// `module_aliases` says so, and `M.circle_area(..)` reaches a function only
+    /// while the context records the module and the published member. The
+    /// tree-walker's own globals and scopes are kept, so its functions survive
+    /// the round trip; only names the bytecode VM bound are overwritten. Language
+    /// builtins are not copied, because every VM builds its own and a copied one
+    /// would be a second answer to the same name. A function the bytecode VM
+    /// declared carries a compiled body and cannot be called by the tree-walker;
+    /// that is a known cross-engine limit, not a binding this method invents a
+    /// value for.
+    fn adopt_bytecode_bindings(&mut self, compiled: &BytecodeVm) {
+        self.vm.observe_context(&compiled.session_context());
+        let bindings = compiled.transfer_bindings();
+        if bindings.is_empty() {
+            return;
+        }
+        let locals = self.vm.current_bindings().0.to_vec();
+        let mut globals = self.vm.current_bindings().1.clone();
+        for (name, value) in bindings {
+            globals.insert(name, value);
+        }
+        self.vm.observe_bindings(&locals, &globals);
     }
 
     fn print_help(&self) {
@@ -3339,13 +3558,20 @@ impl Repl {
             }
         }
 
-        // Only a session carrying aliases or macros gets a state section. A
-        // session without them writes exactly the history file it always did,
-        // which is what keeps an existing saved session readable and its line
-        // count unchanged.
-        if !self.aliases.is_empty() || !self.macros.is_empty() {
+        // Only a session carrying aliases, macros, or a non-default engine gets
+        // a state section. A session without them writes exactly the history
+        // file it always did, which is what keeps an existing saved session
+        // readable and its line count unchanged.
+        //
+        // When a state section is written, the engine is recorded even if it is
+        // the default. A state section exists to say what the session was, and a
+        // Walker session with aliases is not a session with no engine: omitting
+        // the line made a restore into a bytecode session read the default as
+        // "keep the engine you have".
+        if !self.aliases.is_empty() || !self.macros.is_empty() || self.engine != Engine::Walker {
             document.push_str(SESSION_STATE_MARKER);
             document.push('\n');
+            document.push_str(&format!("engine {}\n", self.engine.command_name()));
 
             let mut aliases: Vec<(&String, &String)> = self.aliases.iter().collect();
             aliases.sort_by(|left, right| left.0.cmp(right.0));
@@ -3455,6 +3681,24 @@ impl Repl {
         }
         self.aliases = restored.aliases;
         self.macros = restored.macros;
+        // A saved session with no engine record was a Walker session: the
+        // default engine is what it ran on, and restoring it into a session
+        // that has since switched must put that default back rather than leave
+        // the lines to replay on the engine the restoring session happened to
+        // hold. A record that was present but unreadable keeps the current
+        // engine, which is what its warning promises.
+        let saved_engine = if restored.engine_recorded {
+            restored.engine.unwrap_or(self.engine)
+        } else {
+            Engine::Walker
+        };
+        self.engine = saved_engine;
+        // A Walker engine record is written for a session with aliases or
+        // macros too, so the record alone does not mean the session ever used
+        // `.vm`. Only a restored bytecode choice turns the prompt into one that
+        // names its engine; a restored Walker session keeps the documented
+        // `>>> ` prompt it had before it was saved.
+        self.engine_named_in_prompt = saved_engine != Engine::Walker;
 
         let (replayed, skipped) = self.replay(&lines);
         println!("Restored {} line(s) from '{}'", restored_lines, path);
@@ -3498,7 +3742,17 @@ impl Repl {
         let mut lines = state.lines();
 
         while let Some(line) = lines.next() {
-            if let Some(rest) = line.strip_prefix("alias ") {
+            if let Some(rest) = line.strip_prefix("engine ") {
+                parsed.engine_recorded = true;
+                let name = rest.trim();
+                match Engine::from_command_name(name) {
+                    Some(engine) => parsed.engine = Some(engine),
+                    None => parsed.warnings.push(format!(
+                        "Warning: saved session names unknown engine '{name}'; using \
+                         the engine this session already has."
+                    )),
+                }
+            } else if let Some(rest) = line.strip_prefix("alias ") {
                 let (name, value) = match rest.split_once(char::is_whitespace) {
                     Some((name, value)) => (name, value),
                     None => (rest, ""),
@@ -9036,6 +9290,416 @@ mod tests {
         }
     }
 
+    /// Engine switching from the session: which VM runs the next line, and
+    /// what crosses the boundary with it.
+    mod engines {
+        use super::{feed, scratch_path, Repl};
+        use crate::repl::Engine;
+
+        /// What the most recent exchange said, which is where a run's output is
+        /// observable after the session has recorded it.
+        fn said(repl: &Repl) -> Vec<String> {
+            repl.transcript
+                .exchanges()
+                .last()
+                .map(|exchange| exchange.output.clone())
+                .unwrap_or_default()
+        }
+
+        #[test]
+        fn vm_switches_engine_and_the_next_program_runs_there() {
+            let mut repl = Repl::new();
+            assert_eq!(
+                repl.engine(),
+                Engine::Walker,
+                "the default stays the tree-walker"
+            );
+            assert!(repl.handle_command(".vm bytecode"));
+
+            feed(&mut repl, &["set x to 9"]);
+            repl.execute_line("say x + 1");
+            assert_eq!(
+                said(&repl),
+                vec!["10".to_string()],
+                "the bytecode VM read the binding the tree-walker made"
+            );
+            assert_eq!(
+                repl.last_engine(),
+                Engine::Bytecode,
+                "the engine marker proves the run reached the bytecode VM"
+            );
+
+            repl.execute_line("say 1 + 2");
+            assert_eq!(
+                said(&repl),
+                vec!["3".to_string()],
+                "arithmetic is answered by the switched engine"
+            );
+        }
+
+        #[test]
+        fn bindings_survive_both_directions_of_a_switch() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 9", ".vm bytecode"]);
+
+            repl.execute_line("say x");
+            assert_eq!(said(&repl), vec!["9".to_string()]);
+
+            repl.execute_line("set x to 11");
+            assert!(repl.handle_command(".vm walker"));
+            repl.execute_line("say x");
+            assert_eq!(
+                said(&repl),
+                vec!["11".to_string()],
+                "the value the bytecode VM wrote is what the tree-walker reads"
+            );
+
+            assert!(repl.handle_command(".vm bytecode"));
+            repl.execute_line("say x");
+            assert_eq!(
+                said(&repl),
+                vec!["11".to_string()],
+                "and it is still there on the way back"
+            );
+        }
+
+        /// A bare `.vm` is a question, not an incomplete command: it answers
+        /// which engine is in use and leaves both the engine and the prompt
+        /// where they were.
+        #[test]
+        fn edge_a_bare_vm_asks_without_switching() {
+            let mut repl = Repl::new();
+
+            assert!(repl.handle_command(".vm"));
+            assert_eq!(
+                repl.engine(),
+                Engine::Walker,
+                "asking does not leave the default engine"
+            );
+            assert_eq!(
+                repl.prompt_for_next_line(),
+                ">>> ",
+                "and asking does not make the prompt name it"
+            );
+
+            assert!(repl.handle_command(".vm bytecode"));
+            assert!(repl.handle_command(".vm"));
+            assert_eq!(
+                repl.engine(),
+                Engine::Bytecode,
+                "the query form reports the current engine without changing it"
+            );
+        }
+
+        /// An alias is session context, not a binding the next line can infer:
+        /// the fresh bytecode VM has to be handed the module import that made
+        /// it, or `M.circle_area(..)` is a module the second line cannot name.
+        #[test]
+        fn edge_an_import_alias_survives_a_second_bytecode_line() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[".vm bytecode", "import MathUtils as M"]);
+
+            repl.execute_line("say M.circle_area(2) > 12");
+
+            assert_eq!(
+                said(&repl),
+                vec!["yes".to_string()],
+                "the alias and the module it names crossed to the second line"
+            );
+        }
+
+        /// The language context crosses back with the bindings. A module the
+        /// bytecode side imported is still imported after a switch, including
+        /// the program it was read from, which is what its members are listed
+        /// from.
+        #[test]
+        fn edge_a_bytecode_import_joins_the_walker_context_on_a_switch() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[".vm bytecode", "import MathUtils as M", ".vm walker"],
+            );
+
+            let imports = repl.vm.imported_modules();
+            assert!(
+                imports.contains(&("M".to_string(), "MathUtils".to_string())),
+                "the alias still names its module after the switch: {imports:?}"
+            );
+            let members = repl.vm.module_member_values("MathUtils");
+            assert!(
+                members.iter().any(|(name, _)| name == "circle_area"),
+                "and the module's members are read from the program it was loaded from:                  {members:?}"
+            );
+            assert!(
+                !repl
+                    .session_bindings()
+                    .iter()
+                    .any(|(name, _)| name.contains("MathUtils_")),
+                "the qualified spelling is context, not a session binding"
+            );
+        }
+
+        /// Objects are context too. A declaration made on the bytecode side is
+        /// still a declared type after switching back, rather than a record
+        /// with no methods.
+        #[test]
+        fn edge_a_bytecode_object_joins_the_walker_context_on_a_switch() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    ".vm bytecode",
+                    "object Counter",
+                    "    has count default 0",
+                    "    to bump()",
+                    "        set this.count to this.count + 1",
+                    "    end",
+                    "end",
+                    ".vm walker",
+                ],
+            );
+
+            let (fields, methods) = repl
+                .vm
+                .object_type_members("Counter")
+                .expect("the object declaration crossed the switch");
+
+            assert_eq!(fields, vec!["count".to_string()]);
+            assert_eq!(methods, vec!["bump".to_string()]);
+        }
+
+        /// A Walker session with aliases writes an engine record because a state
+        /// section names the engine it saved. That record is not evidence the
+        /// session ever used `.vm`, so restoring it must not turn the default
+        /// prompt into one that names an engine.
+        #[test]
+        fn edge_restoring_a_walker_session_with_aliases_keeps_the_default_prompt() {
+            let path = scratch_path("walker-alias-prompt", "session");
+            let mut saved = Repl::new();
+            feed(&mut saved, &[".alias showvars :vars", "set x to 7"]);
+            assert!(saved.handle_command(&format!(":save {}", path.display())));
+
+            let mut restored = Repl::new();
+            assert!(restored.handle_command(".vm bytecode"));
+            assert!(restored.handle_command(&format!(":restore {}", path.display())));
+
+            assert_eq!(restored.engine(), Engine::Walker);
+            assert_eq!(
+                restored.prompt_for_next_line(),
+                ">>> ",
+                "a restored Walker session keeps the documented default prompt"
+            );
+
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn edge_vm_refuses_a_third_engine_name_and_names_the_two() {
+            let mut repl = Repl::new();
+            assert!(repl.handle_command(".vm bytecode"));
+
+            let refusal = repl
+                .set_engine(Some("interpreter"))
+                .expect_err("a third engine name is not an engine");
+
+            assert!(
+                refusal.contains("walker") && refusal.contains("bytecode"),
+                "the refusal lists both valid engines: {refusal}"
+            );
+            assert!(
+                refusal.contains("interpreter"),
+                "and names the word it refused: {refusal}"
+            );
+            assert_eq!(
+                repl.engine(),
+                Engine::Bytecode,
+                "a refused switch leaves the session on the engine it had"
+            );
+        }
+
+        #[test]
+        fn edge_engine_specific_divergence_is_reported_with_the_engine_named() {
+            // The differential-corpus edge: the two engines place the same
+            // failure differently. The tree-walker names the call's column, a
+            // bytecode instruction carries a line and no column. The program is
+            // run once on each engine so the test cannot pass on one engine
+            // twice.
+            let program = "to f(n)\n    give back sqrt(\"x\")\nend\nsay f(1)";
+            let mut repl = Repl::new();
+
+            assert!(repl.handle_command(".vm bytecode"));
+            repl.execute_line(program);
+            assert_eq!(repl.last_engine(), Engine::Bytecode);
+            let bytecode = repl
+                .transcript
+                .exchanges()
+                .last()
+                .expect("the failed run was recorded")
+                .output
+                .join("\n");
+            assert!(
+                bytecode.contains("Error [bytecode VM]:"),
+                "the bytecode engine is named beside its failure: {bytecode}"
+            );
+            assert!(
+                bytecode.contains("2:1"),
+                "and the failure is the bytecode engine's placement: {bytecode}"
+            );
+
+            assert!(repl.handle_command(".vm walker"));
+            repl.execute_line(program);
+            assert_eq!(repl.last_engine(), Engine::Walker);
+            let walker = repl
+                .transcript
+                .exchanges()
+                .last()
+                .expect("the second failed run was recorded")
+                .output
+                .join("\n");
+            assert!(
+                walker.contains("Error [tree-walking interpreter]:"),
+                "the tree-walker is named beside its failure: {walker}"
+            );
+            assert!(
+                walker.contains("2:10"),
+                "and it places the call's column where the other engine cannot: {walker}"
+            );
+            assert_ne!(bytecode, walker, "the two engines really did diverge");
+        }
+
+        #[test]
+        fn edge_vm_switch_inside_a_multiline_block_applies_at_execution() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &["repeat 2 times", ".vm bytecode", "    say \"mid\"", "end"],
+            );
+
+            assert_eq!(
+                said(&repl),
+                vec!["mid".to_string(), "mid".to_string()],
+                "the block was preserved across the command and ran whole"
+            );
+            assert_eq!(
+                repl.last_engine(),
+                Engine::Bytecode,
+                "the engine chosen mid-block is the one that executed it"
+            );
+        }
+
+        #[test]
+        fn edge_vm_choice_survives_save_and_restore() {
+            let path = scratch_path("engine", "session");
+            let mut saved = Repl::new();
+            feed(&mut saved, &[".vm bytecode", "set x to 9"]);
+            assert!(saved.handle_command(&format!(":save {}", path.display())));
+
+            let mut restored = Repl::new();
+            assert!(restored.handle_command(&format!(":restore {}", path.display())));
+            assert_eq!(
+                restored.engine(),
+                Engine::Bytecode,
+                "the engine choice is session state and comes back with the session"
+            );
+            restored.execute_line("say x");
+            assert_eq!(said(&restored), vec!["9".to_string()]);
+            assert_eq!(restored.last_engine(), Engine::Bytecode);
+        }
+
+        #[test]
+        fn edge_a_saved_walker_session_returns_a_bytecode_session_to_the_walker() {
+            let path = scratch_path("walker-session", "session");
+            let mut saved = Repl::new();
+            feed(&mut saved, &["set x to 7"]);
+            assert!(saved.handle_command(&format!(":save {}", path.display())));
+
+            let mut restored = Repl::new();
+            assert!(restored.handle_command(".vm bytecode"));
+            assert_eq!(restored.engine(), Engine::Bytecode);
+            assert!(restored.handle_command(&format!(":restore {}", path.display())));
+
+            assert_eq!(
+                restored.engine(),
+                Engine::Walker,
+                "a session saved on the default engine comes back to it, even when \
+                 the file has no engine record"
+            );
+            restored.execute_line("say x");
+            assert_eq!(said(&restored), vec!["7".to_string()]);
+            assert_eq!(
+                restored.last_engine(),
+                Engine::Walker,
+                "the replayed line actually ran on the restored engine"
+            );
+
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn edge_a_walker_state_section_names_the_engine_it_saved() {
+            let path = scratch_path("walker-alias-session", "session");
+            let mut saved = Repl::new();
+            feed(&mut saved, &[".alias showvars :vars", "set x to 7"]);
+            assert!(saved.handle_command(&format!(":save {}", path.display())));
+
+            let document =
+                std::fs::read_to_string(&path).expect("the saved session should be readable");
+            assert!(
+                document.lines().any(|line| line == "engine walker"),
+                "a state section names the default engine too:\n{document}"
+            );
+
+            let mut restored = Repl::new();
+            assert!(restored.handle_command(".vm bytecode"));
+            assert!(restored.handle_command(&format!(":restore {}", path.display())));
+
+            assert_eq!(
+                restored.engine(),
+                Engine::Walker,
+                "the aliases and the engine come back together"
+            );
+            assert_eq!(
+                restored.aliases.get("showvars").map(String::as_str),
+                Some(":vars"),
+                "and the alias that made the section necessary is restored"
+            );
+
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn edge_vm_rapid_double_switch_is_idempotent() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 9", "x + 1"]);
+            let bindings = repl.session_bindings();
+            let last_result = repl.lookup("_").cloned();
+            let history = repl.history.len();
+            let transcript = repl.transcript.clone();
+
+            assert!(repl.handle_command(".vm bytecode"));
+            assert_eq!(repl.engine(), Engine::Bytecode);
+            assert!(repl.handle_command(".vm bytecode"));
+
+            assert_eq!(
+                repl.engine(),
+                Engine::Bytecode,
+                "the second switch is the same switch"
+            );
+            assert_eq!(
+                repl.session_bindings(),
+                bindings,
+                "no binding was re-seeded"
+            );
+            assert_eq!(
+                repl.lookup("_").cloned(),
+                last_result,
+                "the last result is untouched"
+            );
+            assert_eq!(repl.history.len(), history, "history is engine-independent");
+            assert_eq!(repl.transcript, transcript, "the transcript is untouched");
+        }
+    }
+
     /// The session surface: the greeting, the prompt, and `!!`.
     ///
     /// These drive [`Repl::session_loop`] over a [`ScriptedSource`] that records the
@@ -9195,6 +9859,30 @@ mod tests {
                 prompts_for(&mut repl, &[""])[0],
                 ">>> ",
                 "and with no argument it puts the default back"
+            );
+        }
+
+        /// A switch names the engine in the next prompt, so the answer to
+        /// "which engine am I talking to?" does not need `:help`.
+        #[test]
+        fn a_vm_switch_is_named_by_the_next_prompt() {
+            let mut repl = Repl::new();
+            let prompts = prompts_for(&mut repl, &[".vm bytecode", ".vm walker", ":quit"]);
+
+            assert!(
+                prompts[1].contains("bytecode VM"),
+                "the prompt after the switch names the bytecode engine: {:?}",
+                prompts[1]
+            );
+            assert!(
+                prompts[1].starts_with("bytecode VM "),
+                "and names it before the prompt text rather than hiding it: {:?}",
+                prompts[1]
+            );
+            assert!(
+                prompts[2].contains("tree-walking interpreter"),
+                "the prompt after switching back names the tree-walker: {:?}",
+                prompts[2]
             );
         }
 

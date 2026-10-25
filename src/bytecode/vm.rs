@@ -36,7 +36,7 @@
 //! per block; everything else about a loop follows from them.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::bytecode::format::{Block, Chunk, Constant, Instruction};
 use crate::bytecode::opcode::Opcode;
@@ -45,7 +45,9 @@ use crate::bytecode::{
 };
 use crate::error::{Error, Result, Span};
 use crate::failure::{value_of as failure_value, FailureKind};
-use crate::interpreter::{qualified_member, DeclaredModule};
+use crate::interpreter::{
+    qualified_member, CallContext, DeclaredModule, ObjectType as WalkerObjectType,
+};
 use crate::interpreter::{
     resolve_max_call_depth, resolve_max_iterations, resolve_max_iterations_from, resolve_max_steps,
     resolve_max_steps_from, MAX_CALL_DEPTH, MAX_ITERATIONS, MAX_STEPS,
@@ -654,6 +656,16 @@ fn split_dotted(name: &str) -> Option<(&str, &str)> {
     name.find('.').map(|dot| (&name[..dot], &name[dot + 1..]))
 }
 
+/// The names [`stdlib::builtins`] binds, cached because the set never changes.
+///
+/// `user_bindings` asks this question every time a session switches back from
+/// the bytecode VM, and building the whole builtin table to answer it would
+/// allocate the same owned names on every switch.
+fn builtin_names() -> &'static HashSet<String> {
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    NAMES.get_or_init(|| stdlib::builtins().into_keys().collect())
+}
+
 /// Runs a compiled Redblue program.
 pub struct BytecodeVm {
     /// The directory modules are resolved from: where the `redblue.manifest`
@@ -673,6 +685,10 @@ pub struct BytecodeVm {
     /// programs in one process — and two roots — keep their own pins.
     pins: crate::manifest::Pins,
     globals: HashMap<String, Value>,
+    /// The qualified member names this VM published, so a REPL switching back
+    /// to the tree-walker can hand over the session's own bindings without also
+    /// handing over the qualified spellings the user never wrote.
+    published_members: HashSet<String>,
     /// The names bound by a `constant` declaration. The value lives in
     /// [`BytecodeVm::globals`] so a read resolves through one name-resolution
     /// path; what this table adds is the refusal to rebind the name.
@@ -699,15 +715,18 @@ pub struct BytecodeVm {
     output_full: bool,
     /// Every `object` declaration, by type name. See [`ObjectType`].
     objects: HashMap<String, ObjectType>,
-    /// The modules an `import` has already run, by the name the program wrote.
+    /// The modules an `import` has already run, by the name the program wrote,
+    /// with the parsed program each one was read from.
     ///
     /// A module is run once, because running it twice declares its names twice:
     /// a `constant` cannot be declared twice at all, so a second `import` of the
     /// same module would fail on the module's own first declaration. The
     /// tree-walking VM keeps the parsed program here for the same reason — see
     /// [`crate::interpreter::Vm::load_module`], which answers the second import with a
-    /// no-op.
-    modules: HashSet<String>,
+    /// no-op. Keeping the program, not only the name, is what lets a REPL hand
+    /// the language context built here to the tree-walker when the session
+    /// switches back.
+    modules: HashMap<String, Arc<Program>>,
     /// The name each imported module is called by, to the module it names.
     ///
     /// An `import X as Y` binds `Y`, and a call written `Y.member` has to reach
@@ -841,13 +860,14 @@ impl BytecodeVm {
             root: root.to_path_buf(),
             pins: crate::manifest::Pins::for_running(root),
             globals: stdlib::builtins(),
+            published_members: HashSet::new(),
             constants: HashSet::new(),
             locals: vec![CapturedScope::new()],
             output: Vec::new(),
             output_bytes: 0,
             output_full: false,
             objects: HashMap::new(),
-            modules: HashSet::new(),
+            modules: HashMap::new(),
             module_aliases: HashMap::new(),
             declared_modules: HashMap::new(),
             module_depth: 0,
@@ -928,6 +948,101 @@ impl BytecodeVm {
     /// program that assigns to it writes its own copy.
     pub(crate) fn seed_binding(&mut self, name: &str, value: Value) {
         self.globals.insert(name.to_string(), value);
+    }
+
+    /// The session's own bindings, without the language's builtins and without
+    /// the qualified member names this VM published.
+    ///
+    /// Used when a REPL switches from the bytecode VM back to the tree-walker:
+    /// what crosses engines is the names the user can write, not the builtin
+    /// table every VM builds for itself or the mangled spellings that are only
+    /// how a call through a module resolves.
+    pub(crate) fn user_bindings(&self) -> Vec<(String, Value)> {
+        let builtins = builtin_names();
+        let mut bindings: Vec<(String, Value)> = self
+            .globals
+            .iter()
+            .filter(|(name, _)| {
+                !builtins.contains(*name) && !self.published_members.contains(*name)
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        bindings.sort_by(|left, right| left.0.cmp(&right.0));
+        bindings
+    }
+
+    /// The names the session can write, including the qualified member names a
+    /// call through a module resolves to.
+    ///
+    /// Unlike [`BytecodeVm::user_bindings`], the member names cross with the
+    /// bindings here because they are what makes `M.circle_area(..)` reachable
+    /// after an import: they are the VM's interior name for that call, and a
+    /// session that hands only the user's spelling to the other engine leaves
+    /// the call with nothing to resolve to.
+    pub(crate) fn transfer_bindings(&self) -> Vec<(String, Value)> {
+        let mut bindings = self.user_bindings();
+        for name in &self.published_members {
+            if let Some(value) = self.globals.get(name) {
+                bindings.push((name.clone(), value.clone()));
+            }
+        }
+        bindings.sort_by(|left, right| left.0.cmp(&right.0));
+        bindings
+    }
+
+    /// The language context this VM built: the modules it imported, the aliases
+    /// they are named by, the modules it declared, the members they published
+    /// and the objects it declared.
+    ///
+    /// The tree-walking VM's [`CallContext`] is the shape a session keeps, so a
+    /// REPL switching engines hands this over rather than a copy of only the
+    /// bindings. Module programs are shared rather than copied: the values are
+    /// `Arc`s, so the hand-off does not re-read or re-parse a module.
+    pub(crate) fn session_context(&self) -> CallContext {
+        CallContext {
+            modules: self.modules.clone(),
+            module_aliases: self.module_aliases.clone(),
+            declared_modules: self.declared_modules.clone(),
+            qualified_members: self.published_members.clone(),
+            objects: self
+                .objects
+                .iter()
+                .map(|(name, object)| {
+                    (
+                        name.clone(),
+                        WalkerObjectType {
+                            parent: object.parent.clone(),
+                            fields: object.fields.clone(),
+                            methods: object.methods.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Re-points this VM at a session's language context, so a REPL run on this
+    /// engine can see the modules, aliases, declared members and objects the
+    /// session already built on either engine.
+    pub(crate) fn observe_context(&mut self, context: &CallContext) {
+        self.modules = context.modules.clone();
+        self.module_aliases = context.module_aliases.clone();
+        self.declared_modules = context.declared_modules.clone();
+        self.published_members = context.qualified_members.clone();
+        self.objects = context
+            .objects
+            .iter()
+            .map(|(name, object)| {
+                (
+                    name.clone(),
+                    ObjectType {
+                        parent: object.parent.clone(),
+                        fields: object.fields.clone(),
+                        methods: object.methods.clone(),
+                    },
+                )
+            })
+            .collect();
     }
 
     /// Takes the structured failure from the most recent failed `expect`, so a
@@ -3715,8 +3830,8 @@ impl BytecodeVm {
             // all a second time. The chain in `self.importing` is what refuses a
             // module reaching *itself*, so the re-entrance the set used to
             // prevent is already a cycle by the time it could happen.
-            if !self.modules.contains(&name) {
-                let (compiled, functions) = self.compile_module(&path)?;
+            if !self.modules.contains_key(&name) {
+                let (compiled, functions, program) = self.compile_module(&path)?;
                 let chunk = Arc::new(compiled);
                 // Read before the module runs, because the module's own `STORE`
                 // is what overwrites them.
@@ -3745,7 +3860,7 @@ impl BytecodeVm {
                 // there by a compile failure would answer a later import of the
                 // same name with a module that was never bound, binding the alias
                 // to nothing rather than reporting the failure again.
-                self.modules.insert(name.clone());
+                self.modules.insert(name.clone(), program);
             }
         }
 
@@ -3755,8 +3870,9 @@ impl BytecodeVm {
         if let Some(declared) = self.declared_modules.get(&name) {
             let members = declared.members.clone();
             for (member, _, value) in members {
-                self.globals
-                    .insert(qualified_member(&alias, &member), value);
+                let qualified = qualified_member(&alias, &member);
+                self.published_members.insert(qualified.clone());
+                self.globals.insert(qualified, value);
             }
         }
 
@@ -3807,7 +3923,7 @@ impl BytecodeVm {
     /// member table does not refuse members a program just published; where they
     /// meet is [`crate::stdlib::dotted_call_reaches`].
     fn is_declared_module(&self, name: &str) -> bool {
-        self.modules.contains(name) || self.declared_modules.contains_key(name)
+        self.modules.contains_key(name) || self.declared_modules.contains_key(name)
     }
 
     /// `MODULE`: runs a `module NAME ... end` declaration's body block.
@@ -3927,6 +4043,7 @@ impl BytecodeVm {
                 continue;
             };
             let qualified = qualified_member(&name, member);
+            self.published_members.insert(qualified.clone());
             self.globals.insert(qualified.clone(), value.clone());
             members.push((member.clone(), qualified, value));
         }
@@ -3971,7 +4088,9 @@ impl BytecodeVm {
             let Some(value) = self.globals.remove(&member) else {
                 continue;
             };
-            self.globals.insert(qualified_member(name, &member), value);
+            let qualified = qualified_member(name, &member);
+            self.published_members.insert(qualified.clone());
+            self.globals.insert(qualified, value);
             if let Some(previous) = previous {
                 self.globals.insert(member, previous);
             }
@@ -4000,7 +4119,7 @@ impl BytecodeVm {
     /// then imports it has to work here too. A `std::fs` read compiled, passed
     /// every native test, and failed on that target with an `Io` error naming a
     /// file the program could plainly see.
-    fn compile_module(&self, path: &str) -> Result<(Chunk, Vec<String>)> {
+    fn compile_module(&self, path: &str) -> Result<(Chunk, Vec<String>, Arc<Program>)> {
         let source = crate::vfs::read_to_string(path)
             .map_err(|e| Error::Io(format!("Cannot load module '{path}': {e}")))?;
         let tokens = Lexer::tokenize(&source)?;
@@ -4027,7 +4146,8 @@ impl BytecodeVm {
                 .cloned()
                 .collect(),
         };
-        Ok((crate::bytecode::compile_program(&program)?, functions))
+        let compiled = crate::bytecode::compile_program(&program)?;
+        Ok((compiled, functions, Arc::new(ast)))
     }
 }
 

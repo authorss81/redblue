@@ -1237,6 +1237,27 @@ impl Vm {
         self.context.qualified_members.contains(name)
     }
 
+    /// The values this VM published under module-member names, sorted by name.
+    ///
+    /// A session switching to the bytecode engine seeds these alongside its own
+    /// names: `M.circle_area(..)` resolves to `MathUtils_circle_area`, and the
+    /// call has nothing to reach unless that binding crosses with the context
+    /// that says which module the alias names.
+    pub(crate) fn published_member_bindings(&self) -> Vec<(String, Value)> {
+        let mut bindings: Vec<(String, Value)> = self
+            .context
+            .qualified_members
+            .iter()
+            .filter_map(|name| {
+                self.globals
+                    .get(name)
+                    .map(|value| (name.clone(), value.clone()))
+            })
+            .collect();
+        bindings.sort_by(|left, right| left.0.cmp(&right.0));
+        bindings
+    }
+
     /// Every module name an `import` bound in this program, paired with the
     /// module it names, sorted by the bound name.
     ///
