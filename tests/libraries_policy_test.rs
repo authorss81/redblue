@@ -191,6 +191,84 @@ fn edge_policy_is_linked_from_readme_and_agents() {
     }
 }
 
+/// The written-in-Redblue section covers the classes the phase names, including
+/// data structures, and gives each one a reason rather than a bare name.
+#[test]
+fn edge_data_structures_are_written_in_redblue() {
+    let doc = read(POLICY);
+    let body = section(&doc, SECTIONS[0]).expect("the written-in-Redblue section exists");
+
+    for entry in [
+        "Data structures",
+        "stacks",
+        "queues",
+        "sets",
+        "trees",
+        "graphs",
+        "priority queues",
+    ] {
+        assert!(
+            body.contains(entry),
+            "the written-in-Redblue section never mentions `{entry}`. Data \
+             structures are a class the phase names explicitly; leaving them \
+             out sends the next phase back to arguing the question."
+        );
+    }
+    assert!(
+        body.contains("interpreter already owns") || body.contains("control flow"),
+        "the data-structures entry gives no reason. It has to say why the work \
+         belongs in Redblue rather than in a binding."
+    );
+}
+
+/// The policy says the speed limit out loud: interpreted Redblue cannot out-run
+/// a native library, and only a native backend changes that answer.
+#[test]
+fn the_native_speed_limit_is_stated_without_a_promise() {
+    let doc = read(POLICY).to_lowercase();
+
+    assert!(
+        doc.contains("cannot out-run a native library"),
+        "LIBRARIES.md never says interpreted Redblue cannot out-run a native \
+         library. The honest speed answer has to name the limit, not just say \
+         'slower than Python'."
+    );
+    assert!(
+        doc.contains("only thing") && doc.contains("native backend"),
+        "LIBRARIES.md does not name the native backend as the only thing that \
+         changes the speed answer."
+    );
+    for promise in ["redblue is fast", "as fast as", "out-run python"] {
+        assert!(
+            !doc.contains(promise),
+            "LIBRARIES.md promises `{promise}`. Speed is not a design goal the \
+             language should claim."
+        );
+    }
+}
+
+/// A binding-required capability is still refused cleanly today. The policy is
+/// describing an open gap, not a surface that already exists.
+#[test]
+fn edge_binding_required_directory_gap_is_a_clean_refusal() {
+    let tokens = redblue::lexer::Lexer::tokenize("say files.glob(\"corpus/*.rb\")\n")
+        .expect("the probe program lexes");
+    let ast = redblue::parser::parse(tokens).expect("the probe program parses");
+    let (_vm, result) = redblue::run_isolated(&ast);
+
+    assert!(
+        result.is_err(),
+        "files.glob ran; LIBRARIES.md ranks directories as binding-required, so \
+         the gap must still be open."
+    );
+    let message = format!("{}", result.unwrap_err());
+    assert!(
+        message.contains("files") && message.contains("glob"),
+        "files.glob was refused as `{message}`, which does not name both the \
+         module and the member."
+    );
+}
+
 /// The premise of the binding section, re-verified on this tree: a program that
 /// reaches for a binding-required library is refused today. If one of these
 /// calls started working, the entry would describe a gap that had closed.
