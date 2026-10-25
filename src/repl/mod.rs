@@ -15,7 +15,7 @@ pub mod transcript;
 pub mod weight;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
@@ -843,6 +843,58 @@ fn resolve_path_against(dir: &Path, path: &str) -> PathBuf {
         path
     } else {
         dir.join(path)
+    }
+}
+
+/// Adds the shape label of every record and object reachable from `value` to
+/// `shapes`, keyed by the rendered row so two equal shapes are one row.
+///
+/// Lists are walked because a record inside a list is still a shape the session
+/// holds. The label names the field order the value carries, which is the order
+/// `say` prints, so two records with the same fields in a different order are
+/// two shapes rather than one.
+fn collect_shape_labels(value: &Value, vm: &Vm, shapes: &mut BTreeMap<String, String>) {
+    // An explicit worklist rather than recursion: a session can build a list
+    // deeper than the call stack, and `.types` has to describe it rather than
+    // overflow looking at it.
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Record(fields) => {
+                let label = format!(
+                    "record {{{}}}",
+                    fields
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                shapes.entry(label.clone()).or_insert(label);
+            }
+            Value::Object(name, fields) => {
+                let label = format!(
+                    "object {} {{{}}}",
+                    name,
+                    fields
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                let methods = vm
+                    .object_type_members(name)
+                    .map(|(_, methods)| methods)
+                    .unwrap_or_default();
+                let rendered = if methods.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{} methods: {}", label, methods.join(", "))
+                };
+                shapes.entry(rendered.clone()).or_insert(rendered);
+            }
+            Value::List(items) => pending.extend(items.iter()),
+            _ => {}
+        }
     }
 }
 
@@ -1798,6 +1850,22 @@ impl Repl {
             }
             ReplCommand::Type(expression) => {
                 self.print_type(&expression);
+                true
+            }
+            ReplCommand::Env => {
+                self.print_environment();
+                true
+            }
+            ReplCommand::Types => {
+                self.print_types();
+                true
+            }
+            ReplCommand::Dir(expression) => {
+                self.print_dir(&expression);
+                true
+            }
+            ReplCommand::Typehints => {
+                self.print_typehints();
                 true
             }
             ReplCommand::Pretty(expression) => {
@@ -2794,6 +2862,250 @@ impl Repl {
         for line in lines {
             println!("{}", line);
         }
+    }
+
+    /// The session bindings a user-facing listing shows: everything except the
+    /// `Nothing` placeholder an `import` leaves behind for a module's own name.
+    ///
+    /// The import section already names that module, so repeating it as a
+    /// session row would show an internal placeholder as if the user had bound
+    /// it. A user binding with the same name holds a real value and stays.
+    fn visible_session_bindings(&self) -> Vec<(String, Value)> {
+        let imports = self.vm.imported_modules();
+        let imported: HashSet<&str> = imports.iter().map(|(bound, _)| bound.as_str()).collect();
+        self.session_bindings()
+            .into_iter()
+            .filter(|(name, value)| {
+                !imported.contains(name.as_str()) || !matches!(value, Value::Nothing)
+            })
+            .collect()
+    }
+
+    /// `.env` — the whole environment the session can reach, in three labelled
+    /// sections: its own bindings, the modules it imported and what each one
+    /// exposes, and the language's builtins.
+    ///
+    /// Read from the live session every time rather than from a table written
+    /// here: a name a line bound, a module an `import` added and a member it
+    /// published all have to appear without this command knowing about them in
+    /// advance. An imported module's own name is held out of the session
+    /// section because it is what the imports section is for — an `import` adds
+    /// a section, not a second row under the session. A binding the user made
+    /// with the same name is not that name: it holds the user's value, so it
+    /// stays in the session section where the user bound it.
+    fn environment_lines(&self) -> Vec<String> {
+        let imports = self.vm.imported_modules();
+
+        let mut lines = vec!["environment:".to_string(), "  session:".to_string()];
+        let session = self.visible_session_bindings();
+        if session.is_empty() {
+            lines.push("    (none)".to_string());
+        } else {
+            for (name, value) in &session {
+                lines.push(format!("    {} = {} ({})", name, value, value.type_name()));
+            }
+        }
+
+        lines.push("  imports:".to_string());
+        if imports.is_empty() {
+            lines.push("    (none)".to_string());
+        } else {
+            for (bound, module) in &imports {
+                if bound == module {
+                    lines.push(format!("    {}", module));
+                } else {
+                    lines.push(format!("    {} -> {}", bound, module));
+                }
+                let members = self.vm.module_member_values(module);
+                if members.is_empty() {
+                    lines.push("      (no members)".to_string());
+                }
+                for (member, value) in &members {
+                    lines.push(format!(
+                        "      {}.{} ({})",
+                        bound,
+                        member,
+                        value.type_name()
+                    ));
+                }
+            }
+        }
+
+        lines.push("  builtins:".to_string());
+        let mut builtins: Vec<String> = stdlib::builtins().into_keys().collect();
+        builtins.sort();
+        for name in builtins {
+            lines.push(format!("    {} (builtin)", name));
+        }
+        lines
+    }
+
+    fn print_environment(&self) {
+        for line in self.environment_lines() {
+            println!("{}", line);
+        }
+    }
+
+    /// `.types` — every distinct record and object shape in the session, with
+    /// the field names each one holds.
+    ///
+    /// Records are read out of the live bindings, nested ones included: a record
+    /// inside a list is still a shape the session holds. Declared object types
+    /// are read from the VM whether or not one has been instantiated, because a
+    /// declaration is a shape in the session even before a value is made from it.
+    fn types_lines(&self) -> Vec<String> {
+        let mut shapes: BTreeMap<String, String> = BTreeMap::new();
+
+        for (binding, value) in self.session_bindings() {
+            // The declaration's own binding is the object row added below, but
+            // only while it still holds the declared shape. Rebinding the name
+            // to another record makes that record a shape in its own right, and
+            // hiding it here was how a rebound object type disappeared from the
+            // listing.
+            let is_declaration_shape =
+                self.vm
+                    .object_type_members(&binding)
+                    .is_some_and(|(declared, _)| match &value {
+                        Value::Record(fields) => fields.keys().eq(declared.iter()),
+                        _ => false,
+                    });
+            if is_declaration_shape {
+                continue;
+            }
+            collect_shape_labels(&value, &self.vm, &mut shapes);
+        }
+        for (name, fields, methods) in self.vm.object_types() {
+            let label = format!("object {} {{{}}}", name, fields.join(", "));
+            let rendered = if methods.is_empty() {
+                label.clone()
+            } else {
+                format!("{} methods: {}", label, methods.join(", "))
+            };
+            shapes.entry(rendered.clone()).or_insert(rendered);
+        }
+
+        let mut lines = vec!["types:".to_string()];
+        if shapes.is_empty() {
+            lines.push("  (none)".to_string());
+        } else {
+            lines.extend(shapes.into_values().map(|shape| format!("  {}", shape)));
+        }
+        lines
+    }
+
+    fn print_types(&self) {
+        for line in self.types_lines() {
+            println!("{}", line);
+        }
+    }
+
+    /// `.typehints` — every session variable with the type it currently holds.
+    ///
+    /// A listing read at the moment it is asked for, so rebinding a name to a
+    /// value of another type changes its row rather than leaving a type the name
+    /// no longer has.
+    fn typehint_lines(&self) -> Vec<String> {
+        let bindings = self.visible_session_bindings();
+        let mut lines = vec!["type hints:".to_string()];
+        if bindings.is_empty() {
+            lines.push("  (none)".to_string());
+        } else {
+            for (name, value) in &bindings {
+                lines.push(format!("  {}: {}", name, value.type_name()));
+            }
+        }
+        lines
+    }
+
+    fn print_typehints(&self) {
+        for line in self.typehint_lines() {
+            println!("{}", line);
+        }
+    }
+
+    /// `.dir <expression>` — the fields and methods of one value.
+    fn print_dir(&mut self, code: &str) {
+        match self.dir_answer(code) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => println!("{}", paint_diagnostic(&self.style, &message)),
+        }
+    }
+
+    /// What `.dir` has to show about `code`, or why it will not show it.
+    ///
+    /// The same gates as `.type`: an expression, no effectful call, and a fork.
+    /// A value that is not a record or an object has no fields section at all,
+    /// because an empty one would claim it has fields and none are there; its
+    /// kind and its methods are still shown.
+    fn dir_answer(&mut self, code: &str) -> Result<Vec<String>, String> {
+        let value = self.value_answer(code, ".dir", introspect::Wording::Shown)?;
+
+        // An object declaration binds the object's fields as a record, so the
+        // value's shape is what says it is an instance: the type table, not the
+        // value's own kind, holds its methods. The expression is only a hint
+        // that disambiguates two declarations with the same shape; a copy held
+        // by a variable, a call or a field is still recognised by its shape.
+        // A `Value::Object` is recognised by its own name, because the bytecode
+        // side can produce one.
+        let object_type = self.vm.object_type_of_value(&value, Some(code.trim()));
+
+        let mut lines = vec![format!(
+            "kind: {}",
+            if object_type.is_some() {
+                "object"
+            } else {
+                value.type_name()
+            }
+        )];
+        if let Some(name) = &object_type {
+            lines.push(format!("type: {}", name));
+        }
+        lines.push(format!("value: {}", value));
+
+        let (fields, methods) = match &value {
+            Value::Record(fields) => (
+                Some(fields.clone()),
+                object_type
+                    .as_deref()
+                    .and_then(|name| self.vm.object_type_members(name))
+                    .map(|(_, methods)| methods)
+                    .unwrap_or_default(),
+            ),
+            Value::Object(name, fields) => {
+                let methods = self
+                    .vm
+                    .object_type_members(name)
+                    .map(|(_, methods)| methods)
+                    .unwrap_or_default();
+                (Some(fields.clone()), methods)
+            }
+            _ => (None, Vec::new()),
+        };
+
+        if let Some(fields) = fields {
+            lines.push("fields:".to_string());
+            if fields.is_empty() {
+                lines.push("  (none)".to_string());
+            } else {
+                for (name, field) in fields.iter() {
+                    lines.push(format!("  {}: {} = {}", name, field.type_name(), field));
+                }
+            }
+        }
+
+        lines.push("methods:".to_string());
+        if methods.is_empty() {
+            lines.push("  (none)".to_string());
+        } else {
+            for method in methods {
+                lines.push(format!("  {}", method));
+            }
+        }
+        Ok(lines)
     }
 
     /// The `:funcs` listing: every function the session declared, in name order,
@@ -12125,6 +12437,516 @@ mod tests {
                 repl.session_directory(),
                 before,
                 "and the session directory is unchanged"
+            );
+        }
+    }
+
+    /// `.env`, `.types`, `.dir` and `.typehints` describe the live session.
+    ///
+    /// Every assertion builds state first and then reads the listing back, so a
+    /// command that returned a hardcoded picture of some other session cannot
+    /// pass: the shape of the answer is fixed, its contents are not.
+    mod environment_map {
+        use super::{feed, Repl};
+        use crate::repl::commands::ReplCommand;
+        use crate::value::Value;
+
+        /// The rows of one labelled section of `.env`, without their indent.
+        ///
+        /// A section header is indented two spaces and its rows four, so the
+        /// split is structural rather than a search for a word that could also
+        /// occur inside a value.
+        fn section(lines: &[String], name: &str) -> Vec<String> {
+            let mut rows = Vec::new();
+            let mut inside = false;
+            for line in lines {
+                let header = line.starts_with("  ") && !line.starts_with("    ");
+                if header {
+                    inside = line.trim() == format!("{}:", name);
+                    continue;
+                }
+                if inside {
+                    rows.push(line.trim().to_string());
+                }
+            }
+            rows
+        }
+
+        /// Drops a value built as a chain of one-element lists without
+        /// recursing, so the test's own cleanup cannot overflow the stack the
+        /// behaviour under test is about.
+        fn drop_nested(mut value: Value) {
+            while let Value::List(items) = value {
+                let Ok(mut items) = std::sync::Arc::try_unwrap(items) else {
+                    break;
+                };
+                value = items.pop().unwrap_or(Value::Nothing);
+            }
+        }
+
+        #[test]
+        fn the_environment_commands_parse() {
+            assert_eq!(ReplCommand::parse(".env"), ReplCommand::Env);
+            assert_eq!(ReplCommand::parse(":environment"), ReplCommand::Env);
+            assert_eq!(ReplCommand::parse(".types"), ReplCommand::Types);
+            assert_eq!(ReplCommand::parse(".typehints"), ReplCommand::Typehints);
+            assert_eq!(
+                ReplCommand::parse(".dir r"),
+                ReplCommand::Dir("r".to_string())
+            );
+            assert_eq!(
+                ReplCommand::parse(".dir"),
+                ReplCommand::MissingArgument {
+                    command: "dir",
+                    usage: "<expression>"
+                },
+                "a bare .dir says what it needs rather than asking about nothing"
+            );
+        }
+
+        #[test]
+        fn environment_has_session_import_and_builtin_sections() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set greeting to \"hi\"", "import MathUtils"]);
+
+            let lines = repl.environment_lines();
+
+            let session = section(&lines, "session");
+            assert!(
+                session.iter().any(|row| row == "greeting = hi (text)"),
+                "the session's own binding is in the session section: {session:?}"
+            );
+
+            let imports = section(&lines, "imports");
+            assert!(
+                imports.iter().any(|row| row == "MathUtils"),
+                "the imported module names itself: {imports:?}"
+            );
+            assert!(
+                imports
+                    .iter()
+                    .any(|row| row.starts_with("MathUtils.circle_area (function)")),
+                "and its published members are under it: {imports:?}"
+            );
+            assert!(
+                imports.iter().any(|row| row == "MathUtils.PI (number)"),
+                "a published constant is a member too: {imports:?}"
+            );
+            assert!(
+                imports.iter().any(|row| row == "MathUtils.TAU (number)"),
+                "and so is every other constant it publishes: {imports:?}"
+            );
+
+            let builtins = section(&lines, "builtins");
+            assert!(
+                builtins.iter().any(|row| row == "abs (builtin)"),
+                "the builtins section is read from the registry: {builtins:?}"
+            );
+        }
+
+        /// Two modules whose names share a prefix are two modules. The members
+        /// under `alpha` are the ones `alpha` declares, not every qualified
+        /// name that happens to start with `alpha_`.
+        #[test]
+        fn edge_an_import_lists_only_its_own_members_across_prefix_overlap() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "module alpha",
+                    "    to one()",
+                    "        give back 1",
+                    "    end",
+                    "    export all",
+                    "end",
+                    "module alpha_beta",
+                    "    to two()",
+                    "        give back 2",
+                    "    end",
+                    "    export all",
+                    "end",
+                ],
+            );
+
+            let imports = section(&repl.environment_lines(), "imports");
+            assert!(
+                imports.iter().any(|row| row == "alpha.one (function)"),
+                "alpha lists what it published: {imports:?}"
+            );
+            assert!(
+                imports.iter().any(|row| row == "alpha_beta.two (function)"),
+                "and alpha_beta lists what it published: {imports:?}"
+            );
+            assert!(
+                !imports.iter().any(|row| row == "alpha.beta_two (function)"),
+                "a module boundary is not a string prefix: {imports:?}"
+            );
+        }
+
+        /// An import that finds the name already bound does not take it over,
+        /// so the user's value is what the session section has to show.
+        #[test]
+        fn edge_a_session_binding_that_shadows_an_import_stays_visible() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set files to \"mine\"", "import files"]);
+
+            let lines = repl.environment_lines();
+            let session = section(&lines, "session");
+            assert!(
+                session.iter().any(|row| row == "files = mine (text)"),
+                "the user's binding is not hidden by the import: {session:?}"
+            );
+            let imports = section(&lines, "imports");
+            assert!(
+                imports.iter().any(|row| row == "files"),
+                "while the import still names the module: {imports:?}"
+            );
+        }
+
+        #[test]
+        fn edge_environment_on_a_fresh_session_names_empty_sections() {
+            let repl = Repl::new();
+            let lines = repl.environment_lines();
+
+            assert_eq!(
+                section(&lines, "session"),
+                vec!["(none)".to_string()],
+                "a fresh session names the empty session section: {lines:?}"
+            );
+            assert_eq!(
+                section(&lines, "imports"),
+                vec!["(none)".to_string()],
+                "and names the empty imports section too: {lines:?}"
+            );
+            assert!(
+                !section(&lines, "builtins").is_empty(),
+                "while the builtins section is present and populated: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn edge_importing_does_not_duplicate_session_rows() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1"]);
+            let before = section(&repl.environment_lines(), "session");
+
+            feed(&mut repl, &["import files"]);
+            let after = section(&repl.environment_lines(), "session");
+
+            assert_eq!(
+                before, after,
+                "importing a module adds an imports section, not a second session row"
+            );
+            assert_eq!(
+                after.iter().filter(|row| row.starts_with("x = ")).count(),
+                1,
+                "the session variable is still there exactly once: {after:?}"
+            );
+            assert!(
+                !section(&repl.environment_lines(), "imports").is_empty(),
+                "and the import is what changed"
+            );
+        }
+
+        #[test]
+        fn types_names_the_record_shape_and_dir_lists_its_fields() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set r to {a: 1, b: \"x\"}"]);
+
+            let types = repl.types_lines();
+            assert!(
+                types.iter().any(|line| line.trim() == "record {a, b}"),
+                "the record's shape names its fields in order: {types:?}"
+            );
+
+            let dir = repl.dir_answer("r").expect("r is a value to describe");
+            assert!(
+                dir.iter().any(|line| line == "kind: record"),
+                "the kind is shown: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "  a: number = 1"),
+                "the first field is shown with its kind and value: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "  b: text = x"),
+                "and so is the second: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "methods:"),
+                "a record still has a methods section, empty: {dir:?}"
+            );
+        }
+
+        #[test]
+        fn edge_dir_on_a_non_record_omits_the_fields_section() {
+            let mut repl = Repl::new();
+            let dir = repl
+                .dir_answer("1 + 1")
+                .expect("an expression evaluates to a value");
+
+            assert!(
+                dir.iter().any(|line| line == "kind: number"),
+                "the kind is still shown: {dir:?}"
+            );
+            assert!(
+                !dir.iter().any(|line| line == "fields:"),
+                "there are no fields, so there is no fields section: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "methods:"),
+                "and the methods section is still named: {dir:?}"
+            );
+        }
+
+        #[test]
+        fn edge_dir_refuses_a_statement_rather_than_describing_it() {
+            let mut repl = Repl::new();
+            let refusal = repl
+                .dir_answer("say \"hi\"")
+                .expect_err("a statement is not a value to describe");
+
+            assert!(
+                refusal.contains(".dir") && refusal.contains("say"),
+                "the refusal names the command and the keyword it was handed: {refusal}"
+            );
+        }
+
+        #[test]
+        fn typehints_track_a_rebinding_to_another_type() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set n to 1"]);
+            let before = repl.typehint_lines();
+            assert!(
+                before.iter().any(|line| line == "  n: number"),
+                "the binding's type is listed: {before:?}"
+            );
+
+            feed(&mut repl, &["set n to \"one\""]);
+            let after = repl.typehint_lines();
+            assert!(
+                after.iter().any(|line| line == "  n: text"),
+                "rebinding updates the row: {after:?}"
+            );
+            assert!(
+                !after.iter().any(|line| line == "  n: number"),
+                "the old type is not left behind: {after:?}"
+            );
+        }
+
+        #[test]
+        fn edge_types_with_no_records_bound_is_named_empty() {
+            let repl = Repl::new();
+            assert_eq!(
+                repl.types_lines(),
+                vec!["types:".to_string(), "  (none)".to_string()],
+                "a session with no shapes names the empty listing"
+            );
+        }
+
+        /// `.types` walks a list with its own worklist, so a session can nest
+        /// one deeper than the call stack and still read the listing back.
+        #[test]
+        fn edge_types_walks_a_list_deeper_than_the_call_stack() {
+            let mut repl = Repl::new();
+            let mut value = Value::Number(1.0);
+            for _ in 0..100_000 {
+                value = Value::list(vec![value]);
+            }
+            repl.variables.insert("deep".to_string(), value);
+
+            let types = repl.types_lines();
+            assert_eq!(
+                types,
+                vec!["types:".to_string(), "  (none)".to_string()],
+                "a deep list of numbers holds no shapes, and reading it does not overflow: {types:?}"
+            );
+
+            drop_nested(
+                repl.variables
+                    .remove("deep")
+                    .expect("the deep value is still bound"),
+            );
+        }
+
+        #[test]
+        fn edge_types_renders_a_hundred_field_record_completely() {
+            let mut repl = Repl::new();
+            let fields: Vec<String> = (0..100).map(|i| format!("f{}: {}", i, i)).collect();
+            let program = format!("set big to {{{}}}", fields.join(", "));
+            feed(&mut repl, &[&program]);
+
+            let types = repl.types_lines();
+            let shape = types
+                .iter()
+                .find(|line| line.starts_with("  record {"))
+                .expect("the record shape is listed");
+            assert!(
+                !shape.contains("...") && !shape.contains("more"),
+                "nothing is truncated without notice: {shape}"
+            );
+            for i in 0..100 {
+                assert!(
+                    shape.contains(&format!("f{}", i)),
+                    "field f{} is in the shape: {shape}",
+                    i
+                );
+            }
+        }
+
+        #[test]
+        fn edge_dir_on_an_object_shows_its_type_fields_and_methods() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "object Counter",
+                    "    has count default 0",
+                    "    to bump()",
+                    "        set this.count to this.count + 1",
+                    "    end",
+                    "end",
+                    "set c to Counter",
+                ],
+            );
+
+            let dir = repl
+                .dir_answer("Counter")
+                .expect("Counter is an object value");
+            assert!(
+                dir.iter().any(|line| line == "kind: object"),
+                "the value's kind is object: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "type: Counter"),
+                "its declared type is named: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "  count: number = 0"),
+                "its field is shown with kind and value: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "  bump"),
+                "and its method is listed: {dir:?}"
+            );
+            assert_eq!(
+                repl.lookup("Counter").map(Value::type_name),
+                Some("record"),
+                "describing the object did not change it"
+            );
+        }
+
+        #[test]
+        fn edge_dir_recognises_an_object_instance_bound_to_another_name() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "object Counter",
+                    "    has count default 0",
+                    "    to bump()",
+                    "        set this.count to this.count + 1",
+                    "    end",
+                    "end",
+                    "set c to Counter",
+                ],
+            );
+
+            let dir = repl
+                .dir_answer("c")
+                .expect("a copy of an object is still a value to describe");
+            assert!(
+                dir.iter().any(|line| line == "kind: object"),
+                "the instance is recognised by its shape, not its binding name: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "type: Counter"),
+                "the declared type is recovered from the shape: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "  count: number = 0"),
+                "its field is still shown: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "  bump"),
+                "and its methods are not lost with the binding name: {dir:?}"
+            );
+        }
+
+        #[test]
+        fn edge_dir_recognises_an_object_returned_by_an_expression() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "object Counter",
+                    "    has count default 0",
+                    "    to bump()",
+                    "        set this.count to this.count + 1",
+                    "    end",
+                    "end",
+                    "to make_counter()",
+                    "    give back Counter",
+                    "end",
+                ],
+            );
+
+            let dir = repl
+                .dir_answer("make_counter()")
+                .expect("a call result is a value to describe");
+            assert!(
+                dir.iter().any(|line| line == "kind: object"),
+                "a shape is recognised wherever the value came from: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "type: Counter"),
+                "the type comes from the value, not the expression text: {dir:?}"
+            );
+            assert!(
+                dir.iter().any(|line| line == "  bump"),
+                "and its methods are listed: {dir:?}"
+            );
+        }
+
+        #[test]
+        fn edge_types_shows_a_rebound_object_name_by_its_actual_shape() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "object Counter",
+                    "    has count default 0",
+                    "end",
+                    "set Counter to {other: 1}",
+                ],
+            );
+
+            let types = repl.types_lines();
+            assert!(
+                types.iter().any(|line| line.trim() == "record {other}"),
+                "the rebound value's actual shape is listed: {types:?}"
+            );
+            assert!(
+                types
+                    .iter()
+                    .any(|line| line.trim() == "object Counter {count}"),
+                "the declared type is still a shape in the session: {types:?}"
+            );
+        }
+
+        #[test]
+        fn edge_typehints_omits_imported_module_placeholders() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1", "import files"]);
+
+            let hints = repl.typehint_lines();
+            assert!(
+                hints.iter().any(|line| line == "  x: number"),
+                "a real session binding is listed: {hints:?}"
+            );
+            assert!(
+                !hints.iter().any(|line| line == "  files: nothing"),
+                "an import's Nothing placeholder is not a user binding: {hints:?}"
             );
         }
     }

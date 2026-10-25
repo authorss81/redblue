@@ -116,6 +116,18 @@ pub enum ReplCommand {
     /// The argument is an *expression*, not a name: `.type [1, 2]` is a question
     /// about a value that no session has ever bound.
     Type(String),
+    /// The whole environment the session can reach: its own bindings, the
+    /// modules it imported with their members, and the language's builtins.
+    Env,
+    /// Every distinct record and object shape the session holds, with fields.
+    Types,
+    /// The fields and methods of one value.
+    ///
+    /// The argument is an *expression*, like [`ReplCommand::Type`]'s: the
+    /// question is about a value, and a value need not be one the session bound.
+    Dir(String),
+    /// Every session binding with the type it currently holds.
+    Typehints,
     /// Prints a value as an indented structure — one level of indentation per
     /// level of nesting.
     ///
@@ -596,6 +608,38 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Type(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["env", "environment"],
+        description: "Show session bindings, imports and builtins",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Env,
+    },
+    CommandSpec {
+        names: &["types"],
+        description: "Show every record and object shape in the session",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Types,
+    },
+    CommandSpec {
+        names: &["dir"],
+        description: "Show the fields and methods of a value",
+        usage: Some("<expression>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Dir(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["typehints"],
+        description: "Show every session variable with its current type",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Typehints,
     },
     CommandSpec {
         names: &["pretty"],

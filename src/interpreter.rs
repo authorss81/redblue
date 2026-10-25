@@ -1237,6 +1237,145 @@ impl Vm {
         self.context.qualified_members.contains(name)
     }
 
+    /// Every module name an `import` bound in this program, paired with the
+    /// module it names, sorted by the bound name.
+    ///
+    /// `import files as F` binds both `F` and `files`, and both are entries
+    /// here: the tree a REPL prints is the names a program can write, not one
+    /// canonical spelling of each module.
+    pub fn imported_modules(&self) -> Vec<(String, String)> {
+        let mut modules: Vec<(String, String)> = self
+            .context
+            .module_aliases
+            .iter()
+            .map(|(bound, module)| (bound.clone(), module.clone()))
+            .collect();
+        modules.sort();
+        modules
+    }
+
+    /// The members `module` exposes, as `(member, value)`, sorted by member.
+    ///
+    /// Read from the same places a module resolves through: the standard
+    /// library's member table, a `module … end` declaration's published
+    /// members, and the names an imported module file declares — its functions
+    /// under their qualified names, its `set` and `constant` names under the
+    /// ordinary bindings the import gives them. A module name nothing publishes
+    /// anything under is an empty list rather than an invented one.
+    pub fn module_member_values(&self, module: &str) -> Vec<(String, Value)> {
+        let mut members: std::collections::BTreeMap<String, Value> =
+            std::collections::BTreeMap::new();
+
+        if let Some((_, listed)) = crate::stdlib::MODULE_MEMBERS
+            .iter()
+            .find(|(name, _)| *name == module)
+        {
+            for member in *listed {
+                if crate::stdlib::member_resolves(module, member) {
+                    members.insert(
+                        (*member).to_string(),
+                        Value::Builtin(format!("{module}.{member}")),
+                    );
+                }
+            }
+        }
+
+        if let Some(declared) = self.context.declared_modules.get(module) {
+            for (member, _, value) in &declared.members {
+                members.insert(member.clone(), value.clone());
+            }
+        }
+
+        // A loaded module's members are read from the names its own body
+        // declares rather than by stripping `module_` off every qualified name.
+        // A prefix is not a boundary: module `alpha` and module `alpha_beta`
+        // share one, so `alpha_beta_two` would otherwise be listed as `alpha`'s
+        // member `beta_two`. A file's `set` and `constant` names are bound flat
+        // rather than under a qualified name, so their ordinary binding is what
+        // the import contributes and what `.env` lists under the module.
+        if let Some(program) = self.context.modules.get(module) {
+            for member in crate::parser::module_declared_names(crate::parser::module_body(program))
+            {
+                let qualified = qualified_member(module, &member);
+                let value = if self.context.qualified_members.contains(&qualified) {
+                    self.globals.get(&qualified)
+                } else {
+                    self.globals.get(&member)
+                };
+                if let Some(value) = value {
+                    members.insert(member, value.clone());
+                }
+            }
+        }
+
+        members.into_iter().collect()
+    }
+
+    /// The declared fields and methods of the object type `name`, in declaration
+    /// order, or `None` when no `object` declaration has that name.
+    pub fn object_type_members(&self, name: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let object = self.context.objects.get(name)?;
+        Some((
+            object.fields.keys().cloned().collect(),
+            object.methods.keys().cloned().collect(),
+        ))
+    }
+
+    /// The object type `value` is an instance of, by the shape it carries.
+    ///
+    /// A declaration binds a record rather than a tagged object, and a copy of
+    /// it — `set c to Counter`, or what a `create` method hands back — is a
+    /// record too. The field names in declaration order are the shape both
+    /// carry, so a value whose field order matches a declared object is that
+    /// object's instance. `hint` disambiguates two declarations with the same
+    /// shape when the expression names one of them; without a matching hint an
+    /// ambiguous shape is a plain record rather than a guess.
+    pub fn object_type_of_value(&self, value: &Value, hint: Option<&str>) -> Option<String> {
+        match value {
+            Value::Object(name, _) => Some(name.clone()),
+            Value::Record(fields) => {
+                let mut matches: Vec<&String> = self
+                    .context
+                    .objects
+                    .iter()
+                    .filter(|(_, object)| object.fields.keys().eq(fields.keys()))
+                    .map(|(name, _)| name)
+                    .collect();
+                matches.sort();
+                if let Some(hint) = hint {
+                    if matches.iter().any(|name| name.as_str() == hint) {
+                        return Some(hint.to_string());
+                    }
+                }
+                if matches.len() == 1 {
+                    Some(matches[0].clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Every object type the program declared, as `(name, fields, methods)`,
+    /// sorted by name.
+    pub fn object_types(&self) -> Vec<(String, Vec<String>, Vec<String>)> {
+        let mut types: Vec<(String, Vec<String>, Vec<String>)> = self
+            .context
+            .objects
+            .iter()
+            .map(|(name, object)| {
+                (
+                    name.clone(),
+                    object.fields.keys().cloned().collect(),
+                    object.methods.keys().cloned().collect(),
+                )
+            })
+            .collect();
+        types.sort_by(|left, right| left.0.cmp(&right.0));
+        types
+    }
+
     /// The value bound to `name`, wherever this VM keeps it.
     ///
     /// What a REPL's `:inspect` and `:vars` read, and neither of them could
