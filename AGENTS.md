@@ -204,6 +204,9 @@ replace("text", from, to)
 
 ## Resources
 
+- [Library policy](LIBRARIES.md) — **read this before adding a stdlib module**:
+  what is written in Redblue, what is a binding to a Rust crate, and what is not
+  built at all
 - [Language Specification](SPEC.md)
 - [Grammar](docs/GRAMMAR.md)
 - [Philosophy](PHILOSOPHY.md)
