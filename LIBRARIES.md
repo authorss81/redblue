@@ -16,7 +16,7 @@ Redblue's advantage is **readability**, not speed. Its interpreter is slower tha
 slower: an interpreted tree-walker does more work per
 operation than a bytecode VM with a mature JIT. Speed is therefore not a design
 goal the language should promise, and a library is never chosen for Redblue
-because Redblue would make it fast.
+because Redblue would make it fast. Interpreted Redblue **cannot out-run a native library**: when the cost of a task is a native kernel, no amount of Redblue source changes that. The fast path is always a binding.
 
 That has one firm consequence. A PyTorch-equivalent — tensors plus autograd —
 written in Redblue is **not achievable**, not merely a lot of effort. Tensor and
@@ -42,6 +42,7 @@ self-hosting material.
 |---|---|---|
 | Collections and higher-order list functions — `filter`, `reduce`, `any`, `all`, `zip`, `chunk`, `group_by`, `sort_by`, `take`, `skip`, `reverse`, `unique` | `SURVEY.md` rank 1 | `map` already calls a Redblue closure and `push` already exists; the missing functions are loops and comparisons, not native kernels. |
 | Record field enumeration — `keys`, `values`, iterating a record | `SURVEY.md` rank 3 | A record is a language value with insertion order; exposing its fields is value semantics, not a numeric kernel. |
+| Data structures — stacks, queues, sets, trees, graphs, priority queues | class — no top-ten entry | These are algorithms over values the interpreter already owns; at script sizes their cost is control flow, not a native kernel, and keeping them in Redblue keeps them inspectable. |
 | Ordering, min/max, sum, mean, median | `SURVEY.md` rank 4 | Sorting and folding are O(n log n) and O(n) over values the interpreter already owns; the readability win is the whole point and a native sort would add a boundary for no practical gain. |
 | Text slicing, searching and padding — `slice`, `index_of`, `pad_left`, `repeat`, `chars` | `SURVEY.md` rank 5 | `length` already counts characters in the interpreter; slicing by character is the same Unicode work, written once in Redblue. |
 | Number formatting and parsing — fixed precision, separators, a stated base | `SURVEY.md` rank 9 | This is presentation over a number Redblue already has; formatting is arithmetic and text building, not a native dependency. |

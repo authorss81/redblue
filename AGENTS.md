@@ -143,6 +143,12 @@ Detects: unused variables, style issues
 
 ### Standard Library (Implemented)
 
+Before adding a module or builtin, read [LIBRARIES.md](LIBRARIES.md). It decides
+the three answers: write it in Redblue when interpreted speed is irrelevant, bind
+a Rust crate when the work is numeric, native or security-sensitive, or do not
+build it at all. Interpreted Redblue cannot out-run a native library; readability,
+not speed, is the reason to write something here.
+
 #### Files Module
 ```redblue
 files.read("path")     // Read entire file as text
