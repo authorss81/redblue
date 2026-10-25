@@ -152,6 +152,18 @@ pub enum ReplCommand {
     Time(String),
     /// The same, reported as a distribution over a hundred runs.
     Bench(String),
+    /// What the session is carrying: its bindings, its history, and an estimate
+    /// of the heap those bindings hold, each labelled.
+    ///
+    /// Observing only: no binding is read into a clone, no history entry moves,
+    /// and the last result is left exactly as it was.
+    Mem,
+    /// Where the time went in the last multiline block, one figure per source
+    /// line, slowest first.
+    ///
+    /// A block rather than the last single line, because one line has one figure
+    /// and that is what `.time` already answers.
+    Profile,
     Ast(String),
     Tokens(String),
     /// The instruction listing an expression compiles to.
@@ -656,6 +668,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |argument| ReplCommand::Bench(argument.unwrap_or_default()),
+    },
+    CommandSpec {
+        names: &["mem", "memory"],
+        description: "Show binding count, history weight and heap estimate",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Mem,
+    },
+    CommandSpec {
+        names: &["profile"],
+        description: "Time each line of the last multiline block, slowest first",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Profile,
     },
     CommandSpec {
         names: &["ast"],
@@ -1291,6 +1319,37 @@ mod tests {
                 parsed.argument_text(),
                 Some(argument),
                 "{:?} carries what was asked about",
+                input
+            );
+        }
+    }
+
+    /// `.mem` and `.profile` are commands the session answers, under both
+    /// sigils, and neither takes an argument.
+    #[test]
+    fn mem_and_profile_are_commands() {
+        let cases = [
+            (".mem", "Mem"),
+            (":mem", "Mem"),
+            (".memory", "Mem"),
+            (":memory", "Mem"),
+            (".profile", "Profile"),
+            (":profile", "Profile"),
+        ];
+
+        for (input, expected) in cases {
+            let parsed = ReplCommand::parse(input);
+            let rendered = format!("{:?}", parsed);
+            let variant = rendered.split(['(', ' ']).next().unwrap_or_default();
+            assert_eq!(
+                variant, expected,
+                "parsing {:?} should give {}",
+                input, expected
+            );
+            assert_eq!(
+                parsed.argument_text(),
+                None,
+                "{:?} takes no argument, so it must not be a command missing one",
                 input
             );
         }

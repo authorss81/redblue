@@ -20,6 +20,7 @@ use crate::value::{
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 // The HTTP timeouts belong to the builtin library, which is `runtime`'s; they
 // are part of this module's public surface because they were declared here
@@ -493,6 +494,32 @@ pub struct Vm {
     /// not a failure: it has to unwind past `if` statements and `try` bodies
     /// that have no idea a loop is around them.
     loop_control: Option<LoopControl>,
+    /// Per-source-line self time, while `.profile` is measuring a block.
+    ///
+    /// `None` for every ordinary run, so the only cost a program pays for this
+    /// instrument is the branch in [`Vm::execute_statement`].
+    line_timer: Option<LineTimer>,
+}
+
+/// One statement's clock reading, while it is executing.
+///
+/// A frame holds its own start and how much of its elapsed time belongs to
+/// statements nested inside it. Subtracting the child time leaves the statement's
+/// own cost, so a parent and a child on different source lines are not counted
+/// twice in the report.
+struct ActiveLine {
+    line: usize,
+    started: Instant,
+    child_nanos: u128,
+}
+
+/// The per-line totals one profiled block is building.
+#[derive(Default)]
+struct LineTimer {
+    /// Self time by source line, first-completion order. A `Vec` rather than a
+    /// map so two runs of the same block report the same order.
+    totals: Vec<(usize, u128)>,
+    stack: Vec<ActiveLine>,
 }
 
 /// What a `break` or a `skip` asks the innermost enclosing loop to do.
@@ -693,6 +720,7 @@ impl Vm {
             max_iterations: resolve_max_iterations(),
             loop_depth: 0,
             loop_control: None,
+            line_timer: None,
         }
     }
 
@@ -1696,15 +1724,88 @@ impl Vm {
         let previous_span = std::mem::replace(&mut self.current_span, stmt.span);
         self.statement_depth += 1;
         self.debug_before(stmt.span.line);
+        // Opened before the step charge and before the body, closed on every
+        // path out, so a statement that fails still has its cost recorded.
+        let profile = self.profile_enter(stmt.span.line);
         let result = self
             .charge_step()
             .and_then(|()| self.execute_statement_body(&stmt.statement));
+        self.profile_exit(profile);
         // Restored on the failing path as well as the succeeding one: a
         // statement that raised an error still finished, and leaving the counter
         // raised would make every later statement look nested inside it.
         self.statement_depth -= 1;
         self.current_span = previous_span;
         result
+    }
+
+    /// Starts collecting per-source-line self time for the next run.
+    ///
+    /// Only the tree-walker is timed: it is the engine a REPL session runs, and
+    /// `.profile` is a question about the session the user is sitting in. A
+    /// block that binds or reads something changes the session exactly as it
+    /// would without the instrument; the timer only reads the clock.
+    pub fn start_line_profile(&mut self) {
+        self.line_timer = Some(LineTimer::default());
+    }
+
+    /// Stops collecting and answers what was collected, by source line.
+    pub fn take_line_profile(&mut self) -> Option<Vec<(usize, u128)>> {
+        self.line_timer.take().map(|timer| timer.totals)
+    }
+
+    /// Opens a timing frame for `line`, if this statement belongs to the
+    /// program being profiled.
+    ///
+    /// Statements inside a user function call are not timed: their source lines
+    /// belong to the function's declaration, not to the block the user typed, so
+    /// their time stays in the call-site line rather than being attributed to a
+    /// line the block never showed. That is every statement at `call_depth > 0`,
+    /// not only the body's direct statements: a `catch` or `finally` body that
+    /// runs inside the call has declaration lines too, even when it is unwinding
+    /// a loop, because saving and restoring `loop_depth` around the call does not
+    /// change which frame the code belongs to. A `finally` that unwinds a loop at
+    /// the top level is still at depth zero and is timed like any other statement.
+    fn profile_enter(&mut self, line: usize) -> bool {
+        if self.call_depth != 0 {
+            return false;
+        }
+        let Some(timer) = self.line_timer.as_mut() else {
+            return false;
+        };
+        timer.stack.push(ActiveLine {
+            line,
+            started: Instant::now(),
+            child_nanos: 0,
+        });
+        true
+    }
+
+    /// Closes the frame opened by [`Vm::profile_enter`] and books its self time.
+    fn profile_exit(&mut self, entered: bool) {
+        if !entered {
+            return;
+        }
+        let Some(timer) = self.line_timer.as_mut() else {
+            return;
+        };
+        let Some(frame) = timer.stack.pop() else {
+            return;
+        };
+        let elapsed = frame.started.elapsed().as_nanos();
+        let own = elapsed.saturating_sub(frame.child_nanos);
+        if let Some((_, recorded)) = timer
+            .totals
+            .iter_mut()
+            .find(|(line, _)| *line == frame.line)
+        {
+            *recorded += own;
+        } else {
+            timer.totals.push((frame.line, own));
+        }
+        if let Some(parent) = timer.stack.last_mut() {
+            parent.child_nanos += elapsed;
+        }
     }
 
     /// Installs the debugger, or takes it away again with `None`.
@@ -2844,5 +2945,46 @@ mod tests {
              observe_bindings replaced that stack, so the base has to be \
              restarted with it"
         );
+    }
+
+    /// A user function's body is not part of the block being profiled, so its
+    /// time belongs to the line that called it. The body's own lines are never
+    /// timed, even though they run inside the call-site statement.
+    #[test]
+    fn profile_keeps_a_user_function_body_at_its_call_site() {
+        let source = "\
+to add_up(n)
+    set total to 0
+    for each i from 1 to n
+        set total to total + i
+    end
+    give back total
+end
+set answer to add_up(20000)
+";
+        let program = crate::lexer::Lexer::tokenize(source)
+            .and_then(|tokens| crate::parser::Parser::new(tokens).parse())
+            .expect("the profiling fixture is a valid program");
+
+        let mut vm = Vm::new();
+        vm.start_line_profile();
+        vm.run(&program).expect("the fixture runs");
+
+        let timings = vm
+            .take_line_profile()
+            .expect("a profile was started and not yet taken");
+        assert!(
+            timings.iter().any(|(line, _)| *line == 8),
+            "the call-site line is timed: {:?}",
+            timings
+        );
+        for body_line in 2..=6 {
+            assert!(
+                !timings.iter().any(|(line, _)| *line == body_line),
+                "line {body_line} is inside the function body and must stay \
+                 attributed to the call site, not itself: {:?}",
+                timings
+            );
+        }
     }
 }

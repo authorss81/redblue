@@ -12,6 +12,7 @@ pub mod render;
 pub mod shell;
 pub mod style;
 pub mod transcript;
+pub mod weight;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -825,6 +826,10 @@ pub struct Repl {
     undo_stack: VecDeque<UndoStep>,
     /// The states `.redo` can walk forward to, oldest first.
     redo_stack: VecDeque<UndoStep>,
+    /// The per-line timings the last multiline block left behind, if one has
+    /// run. A single line has one figure and `.time` already answers that
+    /// question; `.profile` is about the block.
+    last_profile: Option<weight::BlockProfile>,
 }
 
 /// `path` as a session rooted at `dir` means it: a leading `~` expanded, an
@@ -870,6 +875,7 @@ impl Repl {
             current_checkpoint: None,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
+            last_profile: None,
         }
     }
 
@@ -1830,6 +1836,14 @@ impl Repl {
                 self.print_bench(&expression);
                 true
             }
+            ReplCommand::Mem => {
+                self.print_mem();
+                true
+            }
+            ReplCommand::Profile => {
+                self.print_profile();
+                true
+            }
             ReplCommand::Ast(expr) => {
                 self.print_ast(&expr);
                 true
@@ -1927,10 +1941,24 @@ impl Repl {
 
         let code = std::mem::take(&mut self.multiline_buffer).join("\n");
         self.in_multiline = false;
+        // A block is the unit `.profile` reports on, so a run that spans more
+        // than one line is timed as it runs. A single line is left alone: it has
+        // one figure and `.time` is the command for that.
+        let profiling = code.contains('\n');
+        if profiling {
+            self.vm.start_line_profile();
+        }
         // A failure was reported in full by the run itself, with the line that
         // failed and a caret under it; a line the user typed has nothing to add
         // to that and nowhere else to put it.
         let _ = self.execute_code(&code);
+        if profiling {
+            let timings = self.vm.take_line_profile().unwrap_or_default();
+            self.last_profile = Some(weight::BlockProfile {
+                lines: weight::source_lines(&code),
+                timings,
+            });
+        }
     }
 
     /// `line` as the formatter writes it, or `line` unchanged when the formatter
@@ -3946,6 +3974,83 @@ impl Repl {
                 .map(|hit| format!("  [{}] {}", hit.source, hit.text)),
         );
         Ok(lines)
+    }
+
+    /// `.mem` — what the session is carrying, with every figure named.
+    fn print_mem(&self) {
+        for line in self.memory_answer() {
+            println!("{}", line);
+        }
+    }
+
+    /// What `.mem` has to say.
+    ///
+    /// Read-only by construction: the bindings are borrowed for their logical
+    /// size and never cloned, and the history is read by index. A session with a
+    /// five-megabyte text therefore answers without copying it, and asking twice
+    /// cannot change what the second answer sees.
+    fn memory_answer(&self) -> Vec<String> {
+        let bindings = self.binding_sizes();
+        let history_entries = self.history.len();
+        let history_bytes = (0..history_entries)
+            .filter_map(|index| self.history.get(index))
+            .map(|entry| entry.len())
+            .sum();
+        weight::memory_lines(&bindings, history_entries, history_bytes)
+    }
+
+    /// Every binding's logical size, heaviest first.
+    ///
+    /// The session's own map holds `_`; the VM holds every name a `set`, `to` or
+    /// `import` bound. The session's entry wins where both know a name, for the
+    /// reason `:vars` prefers it: the VM holds a `Nothing` for `_`, not the last
+    /// result.
+    fn binding_sizes(&self) -> Vec<(String, usize)> {
+        let mut sizes: Vec<(String, usize)> = self
+            .variables
+            .iter()
+            .map(|(name, value)| (name.clone(), weight::value_bytes(value)))
+            .collect();
+        let known: HashSet<String> = sizes.iter().map(|(name, _)| name.clone()).collect();
+
+        for name in self.vm.user_names() {
+            if known.contains(&name) {
+                continue;
+            }
+            if let Some(value) = self.vm.user_value(&name) {
+                sizes.push((name, weight::value_bytes(value)));
+            }
+        }
+
+        sizes.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        sizes
+    }
+
+    /// `.profile` — the last multiline block, one figure per source line.
+    fn print_profile(&self) {
+        match self.profile_answer() {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+        }
+    }
+
+    /// What `.profile` has to say, or why there is nothing to say.
+    ///
+    /// The absence is named against `:history`, which is where the user can see
+    /// for themselves that no multiline block has run: "nothing to profile" with
+    /// no way to check it is a refusal that looks like a bug.
+    fn profile_answer(&self) -> Result<Vec<String>, String> {
+        match &self.last_profile {
+            Some(block) => Ok(weight::profile_lines(block)),
+            None => Err(
+                "No multiline block to profile: :history has no multi-line block that ran."
+                    .to_string(),
+            ),
+        }
     }
 
     /// `:time <expression> [n times]` — wall time, and the mean of the runs.
@@ -9369,6 +9474,309 @@ mod tests {
             assert!(
                 repl.time_answer("\"héllo \" + \"🙂\"").is_ok(),
                 "a unicode expression is timed like any other"
+            );
+        }
+    }
+
+    /// `.mem` and `.profile` — the session weighing itself.
+    ///
+    /// Both are observations: the memory report borrows the bindings rather
+    /// than cloning them, and the profile reads timings the block run already
+    /// recorded. Nothing here executes code to answer a question about weight.
+    mod weight {
+        use super::{feed, Repl};
+        use crate::value::Value;
+
+        /// The figure after `label`, as a number in the report's own unit.
+        fn figure(line: &str) -> f64 {
+            line.split_once(':')
+                .map(|(_, rest)| rest.trim())
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|number| number.parse().ok())
+                .unwrap_or_else(|| panic!("{:?} should carry a figure", line))
+        }
+
+        /// A 10 KiB text is the largest binding, named with a human size whose
+        /// raw byte count is within 10% of what was put in.
+        #[test]
+        fn mem_reports_the_largest_binding_and_its_size() {
+            let mut repl = Repl::new();
+            let payload = "x".repeat(10 * 1024);
+            feed(
+                &mut repl,
+                &[
+                    "set small to \"hi\"",
+                    &format!("set payload to \"{payload}\""),
+                ],
+            );
+
+            let lines = repl.memory_answer();
+            let joined = lines.join("\n");
+            let payload_line = lines
+                .iter()
+                .find(|line| line.contains("payload"))
+                .unwrap_or_else(|| panic!("the binding is named: {}", joined));
+
+            assert!(
+                payload_line.contains("10.0 KiB (10240 B)"),
+                "the size is human-readable with raw bytes: {}",
+                payload_line
+            );
+            let payload_index = lines
+                .iter()
+                .position(|line| line.contains("payload"))
+                .unwrap();
+            let small_index = lines
+                .iter()
+                .position(|line| line.contains("small"))
+                .unwrap();
+            assert!(
+                payload_index < small_index,
+                "the largest binding is listed first: {:?}",
+                lines
+            );
+            assert!(
+                joined.contains("bindings:")
+                    && joined.contains("history:")
+                    && joined.contains("heap:"),
+                "every weight is labelled: {}",
+                joined
+            );
+        }
+
+        /// A fresh session answers with zeros, not blanks.
+        #[test]
+        fn edge_mem_on_a_fresh_session_names_every_zero() {
+            let lines = Repl::new().memory_answer();
+            let joined = lines.join("\n");
+
+            assert!(joined.contains("bindings: 0"), "{}", joined);
+            assert!(joined.contains("history: 0 entries"), "{}", joined);
+            assert!(joined.contains("0 B (0 B)"), "{}", joined);
+            assert!(joined.contains("largest bindings: (none)"), "{}", joined);
+        }
+
+        /// Asking twice observes twice: the binding count and `_` are the same
+        /// before the first report and after the second.
+        #[test]
+        fn edge_mem_twice_leaves_bindings_and_last_result_alone() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["set x to 1", "40 + 2"]);
+
+            let bindings_before = repl.binding_sizes().len();
+            let last_result = repl.lookup("_").cloned();
+            assert_eq!(
+                last_result,
+                Some(Value::Number(42.0)),
+                "the fixture has a last result to preserve"
+            );
+
+            feed(&mut repl, &[".mem", ".mem"]);
+
+            assert_eq!(
+                repl.binding_sizes().len(),
+                bindings_before,
+                "measuring added no binding"
+            );
+            assert_eq!(
+                repl.lookup("_").cloned(),
+                last_result,
+                "and did not replace the last result"
+            );
+        }
+
+        /// A five-megabyte binding is reported by its logical size; the report
+        /// never copies the text to measure it.
+        #[test]
+        fn edge_mem_reports_a_five_megabyte_text_without_copying_it() {
+            let mut repl = Repl::new();
+            let bytes = 5 * 1024 * 1024;
+            repl.variables
+                .insert("huge".to_string(), Value::Text("y".repeat(bytes)));
+
+            let lines = repl.memory_answer();
+            let joined = lines.join("\n");
+
+            assert!(joined.contains("huge"), "{}", joined);
+            assert!(
+                joined.contains("5.0 MiB (5242880 B)"),
+                "the largest binding's logical size is reported: {}",
+                joined
+            );
+            assert_eq!(
+                repl.variables.get("huge").map(|value| match value {
+                    Value::Text(text) => text.len(),
+                    _ => 0,
+                }),
+                Some(bytes),
+                "the binding is still exactly as long as it was"
+            );
+        }
+
+        /// No block has run, so `.profile` names the absence and where to see
+        /// it for oneself rather than printing an empty report.
+        #[test]
+        fn edge_profile_with_no_previous_block_names_the_history() {
+            let message = Repl::new()
+                .profile_answer()
+                .expect_err("a fresh session has no block to profile");
+
+            assert!(
+                message.contains(":history"),
+                "the absence is named against :history: {}",
+                message
+            );
+        }
+
+        /// A three-line block attributes one figure per line, slowest first,
+        /// and the parts sum to the reported total.
+        #[test]
+        fn profile_times_each_line_slowest_first_and_sums_to_the_total() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "set x to 0",
+                    "for each i from 1 to 20000",
+                    "    set x to x + i",
+                    "end",
+                ],
+            );
+
+            let lines = repl
+                .profile_answer()
+                .expect("the block just ran, so it has a profile");
+            assert!(
+                lines[0].contains("3 line(s)"),
+                "the report is about the three-line block: {:?}",
+                lines
+            );
+
+            let total = figure(
+                lines
+                    .iter()
+                    .find(|line| line.trim_start().starts_with("total:"))
+                    .expect("a total is reported"),
+            );
+            let rows: Vec<&String> = lines
+                .iter()
+                .filter(|line| line.trim_start().starts_with("line "))
+                .collect();
+            assert_eq!(rows.len(), 3, "one row per source line: {:?}", lines);
+
+            let sum: f64 = rows.iter().map(|line| figure(line)).sum();
+            assert!(
+                (sum - total).abs() <= total.abs() * 0.2 + 0.01,
+                "the lines sum to the block total: {} vs {} in {:?}",
+                sum,
+                total,
+                lines
+            );
+            let figures: Vec<f64> = rows.iter().map(|line| figure(line)).collect();
+            assert!(
+                figures.windows(2).all(|pair| pair[0] >= pair[1]),
+                "the rows are slowest first: {:?}",
+                rows
+            );
+        }
+
+        /// A newline inside a text literal is still a line the lexer numbers,
+        /// so the statement after it keeps its own source line in the report.
+        #[test]
+        fn profile_quotes_the_line_the_lexer_numbered() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &["say \"first\nsecond\"\nset x to 1"]);
+
+            let block = repl
+                .last_profile
+                .as_ref()
+                .expect("the block just ran, so it has a profile");
+            assert_eq!(
+                block.lines,
+                vec![
+                    "say \"first".to_string(),
+                    "second\"".to_string(),
+                    "set x to 1".to_string(),
+                ],
+                "the source map follows the lexer through the literal"
+            );
+
+            let lines = repl
+                .profile_answer()
+                .expect("the block just ran, so it has a profile");
+            assert!(
+                lines.iter().any(|line| line.contains("set x to 1")),
+                "the later statement is quoted on its own line: {:?}",
+                lines
+            );
+        }
+
+        /// `.profile` answers about the block that just ran, not about every
+        /// block the session has run. A four-line block followed by a
+        /// three-line one reports the second alone: its lines, its timings and
+        /// nothing left over from the first.
+        #[test]
+        fn profile_reports_only_the_last_block_not_the_earlier_one() {
+            let mut repl = Repl::new();
+            feed(
+                &mut repl,
+                &[
+                    "set left to 0",
+                    "for each i from 1 to 3",
+                    "    set left to left + i",
+                    "end",
+                ],
+            );
+            feed(
+                &mut repl,
+                &[
+                    "set right to 7",
+                    "if right is greater than 0 then",
+                    "    set right to right - 1",
+                    "end",
+                ],
+            );
+
+            let block = repl
+                .last_profile
+                .as_ref()
+                .expect("the second block just ran");
+            assert_eq!(
+                block.lines,
+                vec![
+                    "if right is greater than 0 then".to_string(),
+                    "    set right to right - 1".to_string(),
+                    "end".to_string(),
+                ],
+                "the profile keeps the last block's source, not the first's"
+            );
+            assert!(
+                block
+                    .timings
+                    .iter()
+                    .all(|(line, _)| (1..=block.lines.len()).contains(line)),
+                "every timing belongs to a line of the last block: {:?}",
+                block.timings
+            );
+
+            let lines = repl
+                .profile_answer()
+                .expect("the second block just ran, so it has a profile");
+            let joined = lines.join("\n");
+            assert!(
+                lines[0].contains("3 line(s)"),
+                "the report is about the last block: {:?}",
+                lines
+            );
+            assert!(
+                joined.contains("if right is greater than 0 then"),
+                "the last block's source is quoted: {}",
+                joined
+            );
+            assert!(
+                !joined.contains("left"),
+                "nothing from the earlier block survives: {}",
+                joined
             );
         }
     }
