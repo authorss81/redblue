@@ -2,24 +2,25 @@
 
 **Status**: survey. It is measured against the tree this commit sits on, and
 every claim below carries the line that proves it. Rank 2 was closed by
-phase-095; the entry is kept so the ranking and its history stay readable.
+phase-095; rank 6 gained date arithmetic in phase-096 but still cannot parse a
+date; the entries are kept so the ranking and its history stay readable.
 
-- **Builtins in the registry**: 74 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1125`,
-  which closes with `"input"` at `src/stdlib.rs:1199`.
+- **Builtins in the registry**: 83 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1161`,
+  which closes with `"input"` at `src/stdlib.rs:1244`.
 - **Modules a dotted call may name**: 12 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 52 — `stdlib::MODULE_MEMBERS` at
+- **Dotted members those modules accept**: 61 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:63`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
 of what a dotted call is allowed to reach, because a name not in them is refused
-before a call happens (`src/stdlib.rs:143`, `module_has_member`). So the ceiling
+before a call happens (`src/stdlib.rs:160`, `module_has_member`). So the ceiling
 of the language is knowable by reading one file, and that is what this survey
 reads.
 
 ## Method
 
 1. **Enumerate what exists.** `MODULES` (`src/stdlib.rs:19`) and
-   `MODULE_MEMBERS` (`src/stdlib.rs:62`) are the authoritative surface, and
+   `MODULE_MEMBERS` (`src/stdlib.rs:63`) are the authoritative surface, and
    `tests/stdlib_module_names_test.rs` reconciles them against `SPEC.md` and
    `README.md` in both directions. Anything absent from those tables is absent
    from the language, whether or not a registry entry exists.
@@ -86,29 +87,29 @@ survey measures against, and it is short.
 
 | Module | Members | Line |
 |---|---|---|
-| `bytes` | `from_text`, `text`, `write` | `src/stdlib.rs:63` |
-| `console` | `log`, `error`, `clear` | `src/stdlib.rs:64` |
-| `csv` | `parse` | `src/stdlib.rs:65` |
-| `files` | `read`, `write`, `append`, `exists`, `lines`, `delete`, `copy`, `rename` | `src/stdlib.rs:66` |
-| `json` | `parse`, `stringify` | `src/stdlib.rs:72` |
-| `list` | `map`, `length` | `src/stdlib.rs:91` |
-| `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp` | `src/stdlib.rs:92` |
-| `network` | `get`, `post` | `src/stdlib.rs:98` |
+| `bytes` | `from_text`, `text`, `write` | `src/stdlib.rs:64` |
+| `console` | `log`, `error`, `clear` | `src/stdlib.rs:65` |
+| `csv` | `parse` | `src/stdlib.rs:66` |
+| `files` | `read`, `write`, `append`, `exists`, `lines`, `delete`, `copy`, `rename` | `src/stdlib.rs:67` |
+| `json` | `parse`, `stringify` | `src/stdlib.rs:73` |
+| `list` | `map`, `length` | `src/stdlib.rs:92` |
+| `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp` | `src/stdlib.rs:94` |
+| `network` | `get`, `post` | `src/stdlib.rs:99` |
 | `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:101` |
-| `sys` | `argv` | `src/stdlib.rs:99` |
-| `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length` | `src/stdlib.rs:100` |
-| `time` | `now`, `sleep`, `format`, `unix` | `src/stdlib.rs:122` |
+| `sys` | `argv` | `src/stdlib.rs:104` |
+| `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length` | `src/stdlib.rs:106` |
+| `time` | `now`, `sleep`, `format`, `unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:128` |
 
 Two observations from that table that the rest of this document depends on:
 
 - **`text` has no way to take a piece of a text.** `split` and `join` can get
-  there with loss (`src/stdlib.rs:651` — the separator is a literal, so
+  there with loss (`src/stdlib.rs:699` — the separator is a literal, so
   `split("a1b22c", "2")` loses the separators), but there is no `slice`, no
   `index_of`, no `pad_left`. Every "extract the field between the colons" task is
   rank 5.
 - **`list` has exactly one higher-order function, and `filter` and `reduce` are
-  registered without being implemented.** `src/stdlib.rs:73` says so in the table
-  itself, and `tests/stdlib_module_docs_test.rs:709` carries the two programs
+  registered without being implemented.** `src/stdlib.rs:74` says so in the table
+  itself, and `tests/stdlib_module_docs_test.rs:1013` carries the two programs
   that still fail as `known_gaps()`.
 
 ## How to use this ranking
@@ -135,9 +136,9 @@ Python prints.
 - **Blocked programs**: 6 — 1, 12, 14, 16, 17, 18
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:91` — the `list` row is `map` and `length`, and
-  the comment above it at `src/stdlib.rs:73` records that `filter` and `reduce`
+  the comment above it at `src/stdlib.rs:74` records that `filter` and `reduce`
   are registered at `src/stdlib.rs:887` and answer nothing. The two programs that
-  prove it are pinned as gaps at `tests/stdlib_module_docs_test.rs:709`.
+  prove it are pinned as gaps at `tests/stdlib_module_docs_test.rs:1013`.
 - **Also missing**: `any`, `all`, `flatten`, `zip`, `chunk`, `enumerate`,
   `unique`, `group_by`, `sort_by`, `take`, `skip`, `reverse`.
 - **Why it ranks first**: six of the thirty-two. Anything that counts, selects,
@@ -157,7 +158,7 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:827` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:857` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -237,7 +238,7 @@ Refused as `RuntimeError: Unknown function 'sort'`.
   takes an index or produces a substring: `uppercase`, `lowercase`, `trim`,
   `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`.
   `split` is documented at `src/stdlib.rs:975` as taking a literal separator, and
-  `src/stdlib.rs:651` is the comment explaining why there is no pattern to give
+  `src/stdlib.rs:699` is the comment explaining why there is no pattern to give
   it. `length` counts **characters**, not bytes (`src/runtime.rs:812`), so a
   slicing design has a defined unit to slice by; the gap is that no slicing call
   exists at all.
@@ -260,14 +261,18 @@ Refused as `RuntimeError: Module 'text' has no function 'pad_left'`.
 - **Blocked programs**: 4 — 2, 9, 10, 11
 - **Implementable**: binding-required
 - **Rust crate**: `chrono`
-- **Evidence**: `src/stdlib.rs:122` — the `time` row is `now`, `sleep`,
-  `format`, `unix`. There is no `add_days`, no `difference`, no `weekday`, no
-  `iso`. `src/runtime.rs:447` shows what `time.unix` accepts: exactly
-  `%Y-%m-%d %H:%M:%S` and nothing else, so a date out of an ISO-8601 log line
-  cannot be read at all. `time.format` (`src/runtime.rs:994`) is a strftime pass-
-  through, which is the one direction that works.
+- **Evidence**: `src/stdlib.rs:128` — the `time` row now carries the date and
+duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
+`add_*` movers), but it still has no way to turn text or a Unix timestamp into a
+date. `src/runtime.rs:584` shows what `time.unix` accepts: exactly
+`%Y-%m-%d %H:%M:%S` and nothing else, and it answers a number. `time.format`
+(`src/runtime.rs:1297`) is a strftime pass-through, the one direction that works.
+- **What phase-096 changed**: date values, durations and calendar arithmetic are
+  now first class. What remains is the parse/convert edge: there is no
+  `time.parse`, no `time.from_unix`, and `time.unix` still answers a number, so a
+  birthdate read from text cannot enter the arithmetic.
 - **Note**: `chrono` is already a dependency (`Cargo.toml:32`) and already used
-  at `src/runtime.rs:1006`. The gap is the surface, not the crate — which makes
+  at `src/runtime.rs:1309`. The gap is the surface, not the crate — which makes
   this the cheapest binding on the list.
 - **Why**: age in years, "3 days ago", a month-end report and a file renamed by
   its date all need arithmetic. A language that can read the clock but cannot move
@@ -278,7 +283,7 @@ set born to time.unix("1990-03-04 00:00:00")
 say time.add_days(born, 365)
 ```
 
-Refused as `RuntimeError: Module 'time' has no function 'add_days'`.
+Refused as `RuntimeError: time.add_days requires a date, but was given a number`.
 
 ## 7. No directories, no globbing, no stat
 
@@ -317,7 +322,7 @@ Refused as `RuntimeError: Module 'files' has no function 'glob'`.
   that cannot be worked around by any amount of loop.
 - **Note**: `bytes` cannot even report its own length or compare two of them; the
   registry has no `bytes_length`: the three `bytes` names are at
-  `src/stdlib.rs:925` through `src/stdlib.rs:927`.
+  `src/stdlib.rs:552` through `src/stdlib.rs:560`.
 
 ```redblue
 say base64.decode("aGk=")

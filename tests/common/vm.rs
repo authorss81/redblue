@@ -54,6 +54,8 @@ impl Typed {
             Value::Object(name, _) => Typed::Opaque(format!("Object {name}")),
             Value::Function(f) => Typed::Opaque(format!("Function {}", f.name)),
             Value::Builtin(name) => Typed::Opaque(format!("Builtin {name}")),
+            Value::Date(date) => Typed::Opaque(format!("Date {date}")),
+            Value::Duration(duration) => Typed::Opaque(format!("Duration {duration:?}")),
         }
     }
 

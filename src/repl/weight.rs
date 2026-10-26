@@ -49,7 +49,13 @@ pub fn value_bytes(value: &Value) -> usize {
 
     while let Some(item) = pending.pop() {
         match item {
-            Pending::Value(Value::Nothing | Value::Number(_) | Value::YesNo(_)) => {}
+            Pending::Value(
+                Value::Nothing
+                | Value::Number(_)
+                | Value::YesNo(_)
+                | Value::Date(_)
+                | Value::Duration(_),
+            ) => {}
             Pending::Value(Value::Text(text)) => bytes += text.len(),
             Pending::Value(Value::Builtin(name)) => bytes += name.len(),
             Pending::Value(Value::List(items)) => {

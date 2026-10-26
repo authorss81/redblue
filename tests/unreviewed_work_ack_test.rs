@@ -242,18 +242,20 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// phases in flight, and nothing else. Another phase's `resume phase-083: …` is
 /// still unreviewed work with nothing acknowledging it.
 ///
-/// **The in-flight phases**, so there are three prefixes. The
+/// **The in-flight phases**, so there is one prefix per phase. The
 /// pipeline keeps one recovery branch per phase and re-creates that phase's
 /// delivery commit on top of the current `main` on every round: phase-084's
-/// reviewer-permission work, phase-063's REPL printing trio, and phase-088's
-/// value assertions are all in this history, arrived in a delivery commit,
-/// and none of their delivery commits' SHAs are knowable while the work is being written.
+/// reviewer-permission work, phase-063's REPL printing trio, phase-088's
+/// value assertions, and phase-096's date and duration values are all in this
+/// history, arrived in a delivery commit, and none of their delivery commits'
+/// SHAs are knowable while the work is being written.
 const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
     "resume phase-068:",
     "resume phase-084:",
     "resume phase-063:",
     "resume phase-088:",
     "resume phase-090:",
+    "resume phase-096:",
 ];
 
 /// The reason recorded for the delivery commits this rule acknowledges.

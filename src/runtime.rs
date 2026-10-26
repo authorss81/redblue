@@ -18,6 +18,8 @@
 use std::cell::Cell;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, TimeDelta, Timelike};
+
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
@@ -77,11 +79,55 @@ pub fn module_bindings(
 pub fn property(span: Span, object: Value, name: &str) -> Result<Value> {
     match object {
         Value::Record(fields) => Ok(fields.get(name).cloned().unwrap_or(Value::Nothing)),
+        Value::Date(date) => Ok(date_property(date, name)),
+        Value::Duration(duration) => Ok(duration_property(duration, name)),
         _ => Err(Error::Runtime(
             "Cannot access property on non-object".to_string(),
             span,
         )),
     }
+}
+
+/// One named component of a date, or `nothing` for a name it does not have.
+///
+/// A missing property answers `nothing` for the same reason a record does: a
+/// program can test for it, and a typo is a value it can see rather than an
+/// error that stops the run.
+fn date_property(date: NaiveDateTime, name: &str) -> Value {
+    let number = match name {
+        "year" => date.year() as f64,
+        "month" => date.month() as f64,
+        "day" => date.day() as f64,
+        "hour" => date.hour() as f64,
+        "minute" => date.minute() as f64,
+        "second" => date.second() as f64,
+        "weekday" => date.weekday().number_from_monday() as f64,
+        _ => return Value::Nothing,
+    };
+    Value::Number(number)
+}
+
+/// One named component of a duration, or `nothing` for a name it does not have.
+///
+/// `days`, `hours`, `minutes` and `seconds` are the components a reader sees:
+/// the hours are the remainder inside the last day, and so on, so
+/// `time.duration(90000)` reads as `1 day, 1 hour`. `total_seconds` is the whole
+/// span, and `nanoseconds` is the fractional second that is left.
+fn duration_property(duration: TimeDelta, name: &str) -> Value {
+    let number = match name {
+        "days" => duration.num_days() as f64,
+        "hours" => (duration.num_hours() % 24) as f64,
+        "minutes" => (duration.num_minutes() % 60) as f64,
+        "seconds" => (duration.num_seconds() % 60) as f64,
+        "total_seconds" => duration.as_seconds_f64(),
+        // `subsec_nanos` is already signed: it is the fractional second with
+        // the span's sign, so negating a negative span here turned -0.5
+        // seconds into a positive half second that no longer summed to the
+        // total.
+        "nanoseconds" => duration.subsec_nanos() as f64,
+        _ => return Value::Nothing,
+    };
+    Value::Number(number)
 }
 
 /// `list[index]`, and every failure a bad index is.
@@ -140,18 +186,35 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
         BinaryOp::Add => match (left, right) {
             (Value::Number(a), Value::Number(b)) => Value::number(a + b, span),
             (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{}{}", a, b))),
+            (Value::Date(date), Value::Duration(delta)) => date_add(span, date, delta),
+            (Value::Duration(delta), Value::Date(date)) => date_add(span, date, delta),
+            (Value::Duration(a), Value::Duration(b)) => a
+                .checked_add(&b)
+                .map(Value::Duration)
+                .ok_or_else(|| Error::Runtime("The duration is too large".to_string(), span)),
+            (Value::Date(_), Value::Date(_)) => Err(Error::Runtime(
+                "Cannot add two dates; add a duration to a date".to_string(),
+                span,
+            )),
             _ => Err(Error::Runtime("Cannot add non-numbers".to_string(), span)),
         },
-        BinaryOp::Sub => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                Value::number(a - b, span)
-            } else {
-                Err(Error::Runtime(
-                    "Cannot subtract non-numbers".to_string(),
-                    span,
-                ))
-            }
-        }
+        BinaryOp::Sub => match (left, right) {
+            (Value::Number(a), Value::Number(b)) => Value::number(a - b, span),
+            (Value::Date(a), Value::Date(b)) => Ok(Value::Duration(a - b)),
+            (Value::Date(date), Value::Duration(delta)) => date_sub(span, date, delta),
+            (Value::Duration(a), Value::Duration(b)) => a
+                .checked_sub(&b)
+                .map(Value::Duration)
+                .ok_or_else(|| Error::Runtime("The duration is too large".to_string(), span)),
+            (Value::Duration(_), Value::Date(_)) => Err(Error::Runtime(
+                "Cannot subtract a date from a duration".to_string(),
+                span,
+            )),
+            _ => Err(Error::Runtime(
+                "Cannot subtract non-numbers".to_string(),
+                span,
+            )),
+        },
         BinaryOp::Mul => {
             if let (Value::Number(a), Value::Number(b)) = (left, right) {
                 Value::number(a * b, span)
@@ -190,48 +253,12 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
                 ))
             }
         }
-        BinaryOp::Equal => Ok(Value::YesNo(left == right)),
-        BinaryOp::NotEqual => Ok(Value::YesNo(left != right)),
-        BinaryOp::Less => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                Ok(Value::YesNo(a < b))
-            } else {
-                Err(Error::Runtime(
-                    "Cannot compare non-numbers".to_string(),
-                    span,
-                ))
-            }
-        }
-        BinaryOp::LessEqual => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                Ok(Value::YesNo(a <= b))
-            } else {
-                Err(Error::Runtime(
-                    "Cannot compare non-numbers".to_string(),
-                    span,
-                ))
-            }
-        }
-        BinaryOp::Greater => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                Ok(Value::YesNo(a > b))
-            } else {
-                Err(Error::Runtime(
-                    "Cannot compare non-numbers".to_string(),
-                    span,
-                ))
-            }
-        }
-        BinaryOp::GreaterEqual => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                Ok(Value::YesNo(a >= b))
-            } else {
-                Err(Error::Runtime(
-                    "Cannot compare non-numbers".to_string(),
-                    span,
-                ))
-            }
-        }
+        BinaryOp::Equal => equality(span, left, right, false),
+        BinaryOp::NotEqual => equality(span, left, right, true),
+        BinaryOp::Less => compare(span, op, left, right),
+        BinaryOp::LessEqual => compare(span, op, left, right),
+        BinaryOp::Greater => compare(span, op, left, right),
+        BinaryOp::GreaterEqual => compare(span, op, left, right),
         BinaryOp::And => Ok(Value::YesNo(left.is_truthy() && right.is_truthy())),
         BinaryOp::Or => Ok(Value::YesNo(left.is_truthy() || right.is_truthy())),
         BinaryOp::In => {
@@ -245,6 +272,116 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
             }
         }
     }
+}
+
+/// `date + duration` and `duration + date`, refusing a span that leaves the
+/// calendar.
+fn date_add(span: Span, date: NaiveDateTime, delta: TimeDelta) -> Result<Value> {
+    date.checked_add_signed(delta)
+        .map(Value::Date)
+        .ok_or_else(|| {
+            Error::Runtime(
+                "The date is too far from the calendar this language can name".to_string(),
+                span,
+            )
+        })
+}
+
+/// `date - duration`, refusing a span that leaves the calendar.
+fn date_sub(span: Span, date: NaiveDateTime, delta: TimeDelta) -> Result<Value> {
+    date.checked_sub_signed(delta)
+        .map(Value::Date)
+        .ok_or_else(|| {
+            Error::Runtime(
+                "The date is too far from the calendar this language can name".to_string(),
+                span,
+            )
+        })
+}
+
+/// `is` and `is not`, refusing a date or a duration mixed with a number.
+///
+/// Ordering already treats the two kinds as incomparable, and equality is the
+/// same question: `date is 5` used to answer a silent `no`, which looks like a
+/// real answer to a program that compared the wrong kinds. The refusal names
+/// both kinds, exactly as ordering does, so a `try … catch error of Runtime`
+/// can report it.
+fn equality(span: Span, left: Value, right: Value, negated: bool) -> Result<Value> {
+    let mixed = match (&left, &right) {
+        (Value::Date(_), Value::Number(_)) => Some(("date", "number")),
+        (Value::Number(_), Value::Date(_)) => Some(("number", "date")),
+        (Value::Duration(_), Value::Number(_)) => Some(("duration", "number")),
+        (Value::Number(_), Value::Duration(_)) => Some(("number", "duration")),
+        _ => None,
+    };
+    if let Some((left_kind, right_kind)) = mixed {
+        return Err(Error::Runtime(
+            format!("Cannot compare a {left_kind} with a {right_kind}"),
+            span,
+        ));
+    }
+    let equal = left == right;
+    Ok(Value::YesNo(if negated { !equal } else { equal }))
+}
+
+/// `<`, `<=`, `>` and `>=` over numbers, dates and durations.
+///
+/// A date and a number are different kinds of value, so ordering them is a
+/// refusal rather than a coercion: a program that wrote `date < 5` asked a
+/// question with no answer, and it is told which two kinds it mixed.
+fn compare(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result<Value> {
+    use std::cmp::Ordering;
+
+    let ordering = match (&left, &right) {
+        (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
+        (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
+        (Value::Duration(a), Value::Duration(b)) => Some(a.cmp(b)),
+        (Value::Date(_), other) => {
+            return Err(Error::Runtime(
+                format!("Cannot compare a date with a {}", other.type_name()),
+                span,
+            ))
+        }
+        (other, Value::Date(_)) => {
+            return Err(Error::Runtime(
+                format!("Cannot compare a {} with a date", other.type_name()),
+                span,
+            ))
+        }
+        (Value::Duration(_), other) => {
+            return Err(Error::Runtime(
+                format!("Cannot compare a duration with a {}", other.type_name()),
+                span,
+            ))
+        }
+        (other, Value::Duration(_)) => {
+            return Err(Error::Runtime(
+                format!("Cannot compare a {} with a duration", other.type_name()),
+                span,
+            ))
+        }
+        _ => {
+            return Err(Error::Runtime(
+                "Cannot compare non-numbers".to_string(),
+                span,
+            ))
+        }
+    };
+    let ordering =
+        ordering.ok_or_else(|| Error::Runtime("Cannot compare these numbers".to_string(), span))?;
+    let answer = match op {
+        BinaryOp::Less => ordering == Ordering::Less,
+        BinaryOp::LessEqual => ordering != Ordering::Greater,
+        BinaryOp::Greater => ordering == Ordering::Greater,
+        BinaryOp::GreaterEqual => ordering != Ordering::Less,
+        _ => {
+            return Err(Error::Runtime(
+                "Cannot compare these values".to_string(),
+                span,
+            ))
+        }
+    };
+    Ok(Value::YesNo(answer))
 }
 
 /// The value of a unary operator, and the failure for the wrong type.
@@ -535,6 +672,172 @@ fn sleep_duration(seconds: f64, span: Span) -> Result<Duration> {
             span,
         )
     })
+}
+
+/// A whole-number argument to a date builtin, refusing a fraction or a value
+/// that is not a finite number.
+fn whole_argument(
+    args: &[Value],
+    index: usize,
+    builtin: &str,
+    component: &str,
+    span: Span,
+) -> Result<i64> {
+    let Some(Value::Number(n)) = args.get(index) else {
+        return Err(Error::Runtime(
+            format!("{builtin} requires a whole number for {component}"),
+            span,
+        ));
+    };
+    if !n.is_finite() || n.fract() != 0.0 {
+        return Err(Error::Runtime(
+            format!("{builtin} requires a whole number for {component}, got {n}"),
+            span,
+        ));
+    }
+    if *n < i64::MIN as f64 || *n > i64::MAX as f64 {
+        return Err(Error::Runtime(
+            format!("{builtin} cannot represent {n} as {component}"),
+            span,
+        ));
+    }
+    Ok(*n as i64)
+}
+
+/// `time.date` and `time.datetime`: six components, or three, as a naive date.
+fn date_from_arguments(
+    args: &[Value],
+    builtin: &str,
+    with_time: bool,
+    span: Span,
+) -> Result<NaiveDateTime> {
+    let expected = if with_time { 6 } else { 3 };
+    if args.len() != expected {
+        return Err(Error::Runtime(
+            format!("{builtin} requires {expected} numbers"),
+            span,
+        ));
+    }
+    let year = i32::try_from(whole_argument(args, 0, builtin, "year", span)?)
+        .map_err(|_| Error::Runtime(format!("{builtin} cannot represent that year"), span))?;
+    let month = u32::try_from(whole_argument(args, 1, builtin, "month", span)?)
+        .map_err(|_| Error::Runtime(format!("{builtin} cannot represent that month"), span))?;
+    let day = u32::try_from(whole_argument(args, 2, builtin, "day", span)?)
+        .map_err(|_| Error::Runtime(format!("{builtin} cannot represent that day"), span))?;
+    let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
+        Error::Runtime(
+            format!("{builtin} was given {year}-{month:02}-{day:02}, which is not a real date"),
+            span,
+        )
+    })?;
+    if !with_time {
+        return Ok(date.and_hms_opt(0, 0, 0).expect("midnight is always valid"));
+    }
+    let hour = whole_argument(args, 3, builtin, "hour", span)?;
+    let minute = whole_argument(args, 4, builtin, "minute", span)?;
+    let second = whole_argument(args, 5, builtin, "second", span)?;
+    let hour = u32::try_from(hour)
+        .map_err(|_| Error::Runtime(format!("{builtin} cannot represent that hour"), span))?;
+    let minute = u32::try_from(minute)
+        .map_err(|_| Error::Runtime(format!("{builtin} cannot represent that minute"), span))?;
+    let second = u32::try_from(second)
+        .map_err(|_| Error::Runtime(format!("{builtin} cannot represent that second"), span))?;
+    date.and_hms_opt(hour, minute, second).ok_or_else(|| {
+        Error::Runtime(
+            format!(
+                "{builtin} was given {year}-{month:02}-{day:02} \
+                 {hour:02}:{minute:02}:{second:02}, which is not a real time"
+            ),
+            span,
+        )
+    })
+}
+
+/// The date a date-arithmetic builtin was given, refusing any other kind.
+fn expect_date(value: Option<&Value>, builtin: &str, span: Span) -> Result<NaiveDateTime> {
+    match value {
+        Some(Value::Date(date)) => Ok(*date),
+        Some(other) => Err(Error::Runtime(
+            format!(
+                "{builtin} requires a date, but was given a {}",
+                other.type_name()
+            ),
+            span,
+        )),
+        None => Err(Error::Runtime(format!("{builtin} requires a date"), span)),
+    }
+}
+
+/// `time.duration`: a signed number of seconds, with millisecond precision.
+fn duration_from_arguments(args: &[Value], span: Span) -> Result<TimeDelta> {
+    let Some(Value::Number(seconds)) = args.first() else {
+        return Err(Error::Runtime(
+            "time.duration requires a number of seconds".to_string(),
+            span,
+        ));
+    };
+    if !seconds.is_finite() {
+        return Err(Error::Runtime(
+            format!("time.duration requires a finite number of seconds, got {seconds}"),
+            span,
+        ));
+    }
+    let milliseconds = (seconds * 1000.0).round();
+    if milliseconds < i64::MIN as f64 || milliseconds > i64::MAX as f64 {
+        return Err(Error::Runtime(
+            format!("time.duration cannot represent {seconds} seconds"),
+            span,
+        ));
+    }
+    TimeDelta::try_milliseconds(milliseconds as i64).ok_or_else(|| {
+        Error::Runtime(
+            format!("time.duration cannot represent {seconds} seconds"),
+            span,
+        )
+    })
+}
+
+/// `time.add_years` and `time.add_months`: calendar arithmetic that clamps a
+/// day past the end of the target month.
+fn add_calendar(
+    span: Span,
+    date: NaiveDateTime,
+    amount: i64,
+    months_per_unit: i64,
+    builtin: &str,
+) -> Result<Value> {
+    let months = amount
+        .checked_mul(months_per_unit)
+        .ok_or_else(|| Error::Runtime(format!("{builtin} cannot move the date that far"), span))?;
+    let magnitude = months.unsigned_abs();
+    if magnitude > i32::MAX as u64 {
+        return Err(Error::Runtime(
+            format!("{builtin} cannot move the date that far"),
+            span,
+        ));
+    }
+    let moved = if months >= 0 {
+        date.checked_add_months(Months::new(magnitude as u32))
+    } else {
+        date.checked_sub_months(Months::new(magnitude as u32))
+    };
+    moved
+        .map(Value::Date)
+        .ok_or_else(|| Error::Runtime(format!("{builtin} cannot move the date that far"), span))
+}
+
+/// `time.add_days` and friends: a fixed span, with no daylight-saving rule.
+fn add_fixed(
+    span: Span,
+    date: NaiveDateTime,
+    delta: Option<TimeDelta>,
+    builtin: &str,
+) -> Result<Value> {
+    let delta = delta
+        .ok_or_else(|| Error::Runtime(format!("{builtin} cannot move the date that far"), span))?;
+    date.checked_add_signed(delta)
+        .map(Value::Date)
+        .ok_or_else(|| Error::Runtime(format!("{builtin} cannot move the date that far"), span))
 }
 
 // ============================================================ the seeded draws
@@ -1023,6 +1326,81 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             };
             let seconds = seconds_for_unix(text, span)?;
             Ok(Some(Value::Number(seconds as f64)))
+        }
+        "time_date" => Ok(Some(Value::Date(date_from_arguments(
+            args,
+            "time.date",
+            false,
+            span,
+        )?))),
+        "time_datetime" => Ok(Some(Value::Date(date_from_arguments(
+            args,
+            "time.datetime",
+            true,
+            span,
+        )?))),
+        "time_duration" => Ok(Some(Value::Duration(duration_from_arguments(args, span)?))),
+        "time_add_years" => {
+            let date = expect_date(args.first(), "time.add_years", span)?;
+            let amount = whole_argument(args, 1, "time.add_years", "years", span)?;
+            Ok(Some(add_calendar(
+                span,
+                date,
+                amount,
+                12,
+                "time.add_years",
+            )?))
+        }
+        "time_add_months" => {
+            let date = expect_date(args.first(), "time.add_months", span)?;
+            let amount = whole_argument(args, 1, "time.add_months", "months", span)?;
+            Ok(Some(add_calendar(
+                span,
+                date,
+                amount,
+                1,
+                "time.add_months",
+            )?))
+        }
+        "time_add_days" => {
+            let date = expect_date(args.first(), "time.add_days", span)?;
+            let amount = whole_argument(args, 1, "time.add_days", "days", span)?;
+            Ok(Some(add_fixed(
+                span,
+                date,
+                TimeDelta::try_days(amount),
+                "time.add_days",
+            )?))
+        }
+        "time_add_hours" => {
+            let date = expect_date(args.first(), "time.add_hours", span)?;
+            let amount = whole_argument(args, 1, "time.add_hours", "hours", span)?;
+            Ok(Some(add_fixed(
+                span,
+                date,
+                TimeDelta::try_hours(amount),
+                "time.add_hours",
+            )?))
+        }
+        "time_add_minutes" => {
+            let date = expect_date(args.first(), "time.add_minutes", span)?;
+            let amount = whole_argument(args, 1, "time.add_minutes", "minutes", span)?;
+            Ok(Some(add_fixed(
+                span,
+                date,
+                TimeDelta::try_minutes(amount),
+                "time.add_minutes",
+            )?))
+        }
+        "time_add_seconds" => {
+            let date = expect_date(args.first(), "time.add_seconds", span)?;
+            let amount = whole_argument(args, 1, "time.add_seconds", "seconds", span)?;
+            Ok(Some(add_fixed(
+                span,
+                date,
+                TimeDelta::try_seconds(amount),
+                "time.add_seconds",
+            )?))
         }
         // Formats module (JSON/CSV)
         "json_parse" => {
@@ -1830,6 +2208,8 @@ pub(crate) fn json_stringify(value: &Value) -> String {
         Value::Function(_) => "null".to_string(),
         Value::Builtin(_) => "null".to_string(),
         Value::Object(_, _) => "null".to_string(),
+        Value::Date(date) => json_escape_text(&date.format("%Y-%m-%d %H:%M:%S").to_string()),
+        Value::Duration(duration) => format!("{}", duration.as_seconds_f64()),
     }
 }
 

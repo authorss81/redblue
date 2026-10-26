@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use chrono::{NaiveDateTime, TimeDelta};
 use indexmap::IndexMap;
 
 use crate::bytecode::Chunk;
@@ -255,6 +256,15 @@ pub enum Value {
     Object(String, Shared<Fields>),
     Function(FunctionValue),
     Builtin(String),
+    /// A timezone-naive calendar date and time.
+    ///
+    /// There is no zone behind it: every component is read and written as the
+    /// same wall-clock reading, so adding 24 hours is always one day and no
+    /// daylight-saving transition can make an hour disappear. See SPEC.md §
+    /// time for the stance.
+    Date(NaiveDateTime),
+    /// A signed span of time, as the difference between two dates.
+    Duration(TimeDelta),
 }
 
 /// Storage a list or a record's contents live in, shared rather than owned.
@@ -340,8 +350,52 @@ impl fmt::Display for Value {
             Value::Function(function) => write!(f, "<function {}>", function.name),
             Value::Builtin(name) => write!(f, "<builtin {}>", name),
             Value::Object(_, _) => write!(f, "<object>"),
+            Value::Date(date) => write!(f, "{}", date.format("%Y-%m-%d %H:%M:%S")),
+            Value::Duration(duration) => write!(f, "{}", display_duration(*duration)),
         }
     }
+}
+
+/// The words `say` prints for a duration, such as `1 day, 2 hours, 3 seconds`.
+///
+/// Zero is `0 seconds` and a negative span carries one leading `-`. Every
+/// component is read from the absolute span, so `-90000` seconds is
+/// `-1 day, 1 hour` rather than a mixture of signs.
+fn display_duration(duration: TimeDelta) -> String {
+    if duration.is_zero() {
+        return "0 seconds".to_string();
+    }
+    let negative = duration < TimeDelta::zero();
+    let span = duration.abs();
+    let days = span.num_days();
+    let hours = span.num_hours() % 24;
+    let minutes = span.num_minutes() % 60;
+    let seconds = span.num_seconds() % 60;
+    let nanos = span.subsec_nanos();
+
+    let mut parts = Vec::new();
+    let mut push = |amount: i64, unit: &str| {
+        if amount != 0 {
+            parts.push(format!(
+                "{} {}{}",
+                amount,
+                unit,
+                if amount == 1 { "" } else { "s" }
+            ));
+        }
+    };
+    push(days, "day");
+    push(hours, "hour");
+    push(minutes, "minute");
+    push(seconds, "second");
+    if nanos != 0 {
+        parts.push(format!(
+            "{} nanosecond{}",
+            nanos,
+            if nanos == 1 { "" } else { "s" }
+        ));
+    }
+    format!("{}{}", if negative { "-" } else { "" }, parts.join(", "))
 }
 
 impl Value {
@@ -368,6 +422,8 @@ impl Value {
             Value::Object(_, _) => "object",
             Value::Function(_) => "function",
             Value::Builtin(_) => "builtin",
+            Value::Date(_) => "date",
+            Value::Duration(_) => "duration",
         }
     }
 
@@ -382,6 +438,8 @@ impl Value {
             Value::Object(_, _) => true,
             Value::Function(_) => true,
             Value::Builtin(_) => true,
+            Value::Date(_) => true,
+            Value::Duration(_) => true,
         }
     }
 }

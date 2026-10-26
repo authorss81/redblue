@@ -1429,6 +1429,93 @@ has to read the clock itself — `time.now()` twice and `time.sleep` between the
 The calls that block besides `time.sleep` are `network.get` and `network.post`,
 which wait for a response.
 
+#### Dates and durations
+
+A **date** is a first-class value: it can be stored in a record or a list,
+passed to and returned from a function, compared, and printed. A **duration** is
+a signed span of time, and it is a first-class value too.
+
+```redblue
+set start to time.datetime(2024, 2, 29, 23, 30, 0)
+set next  to time.add_months(start, 1)      // 2024-03-29 23:30:00
+set span  to next - start                   // a duration of 29 days
+say to_text(span)                           // 29 days
+
+set later to start + time.duration(86400)   // exactly one day later
+say later                                   // 2024-03-01 23:30:00
+
+set jan to time.date(2024, 1, 31)
+say to_text(time.add_months(jan, 1))        // 2024-02-29 00:00:00
+say to_text(time.add_years(jan, 1))         // 2025-01-31 00:00:00
+say to_text(time.add_days(jan, 1))          // 2024-02-01 00:00:00
+say to_text(time.add_hours(jan, 24))        // 2024-02-01 00:00:00
+say to_text(time.add_minutes(jan, 60))      // 2024-01-31 01:00:00
+say to_text(time.add_seconds(jan, 1))       // 2024-01-31 00:00:01
+```
+
+`time.date(year, month, day)` makes a date at midnight, and
+`time.datetime(year, month, day, hour, minute, second)` makes one at the stated
+time. Both read whole numbers and refuse a component that is not a real part of
+the calendar (`2024-02-30`, month `13`, hour `24`) with a catchable runtime
+error naming the builtin. `time.duration(seconds)` makes a duration from a
+number of seconds; the number may be negative or fractional (to millisecond
+precision).
+
+The operators are defined on these values:
+
+| Expression | Answer |
+|---|---|
+| `date < date`, `date <= date`, `date > date`, `date >= date` | `yes` or `no` |
+| `date is date` | `yes` when the two readings are identical |
+| `date - date` | a duration, negative when the left date is earlier |
+| `date + duration`, `duration + date` | the date moved by that span |
+| `date - duration` | the date moved back by that span |
+| `duration + duration`, `duration - duration` | a duration |
+| `duration < duration`, and the other orderings | `yes` or `no` |
+
+A date or a duration compared with a number is a **runtime error**, not a
+coercion, whether the comparison is an ordering or `is`/`is not`:
+`time.date(2024, 1, 1) < 5` and `time.date(2024, 1, 1) is 5` both name the two
+kinds they mixed, and `try … catch error of Runtime` can catch either. Adding a
+date to a date, or subtracting a date from a duration, is refused the same way.
+
+The components of a date are read as properties: `year`, `month`, `day`, `hour`,
+`minute`, `second`, and `weekday` (Monday is `1`, Sunday is `7`). The components
+of a duration are `days`, `hours`, `minutes`, `seconds` (the remainder inside
+the last day, hour and minute), `total_seconds`, and `nanoseconds`. A negative
+span carries its sign in each component, so `time.duration(-1.5).seconds` is
+`-1` and its `nanoseconds` is `-500000000`; the components sum to
+`total_seconds`. An unknown property answers `nothing`, as a missing record
+field does.
+
+Calendar arithmetic is `time.add_years`, `time.add_months`, `time.add_days`,
+`time.add_hours`, `time.add_minutes` and `time.add_seconds`; each takes a date
+and a whole number, and a negative number moves the date backwards. Years and
+months are calendar units, not fixed spans:
+
+- **Month-end overflow clamps to the last day of the target month.**
+  `time.add_months(time.date(2024, 1, 31), 1)` is `2024-02-29`; the same call in
+  2023 is `2023-02-28`; and `time.add_months(time.date(2024, 3, 31), -1)` is
+  `2024-02-29`.
+- **29 February plus one year is 28 February.** `time.add_years` clamps the same
+  way, so `time.add_years(time.date(2024, 2, 29), 1)` is `2025-02-28`.
+- Days, hours, minutes and seconds are fixed spans: one day is always 24 hours
+  and one hour is always 60 minutes. A move that leaves the range of dates the
+  implementation can represent is a runtime error naming the builtin.
+
+**Timezone stance.** A date is *timezone-naive*: it has no zone, no offset and
+no daylight-saving rule. The components are the same reading everywhere, so
+`2024-03-10` is not a 23-hour day and `2024-11-03` is not a 25-hour day — adding
+24 hours always lands on the same clock time on the next calendar day. Programs
+that need a zone, an offset, or a conversion to local time must carry that
+information themselves; this phase deliberately defines the zone-free value
+first. `time.format` and `time.unix` continue to read their seconds as UTC and
+are unchanged.
+
+`time.format` does not yet format a date value, and there is no parsing from a
+date text; those belong to the next phase. A date can be printed with `say` or
+`to_text`, which writes `YYYY-MM-DD HH:MM:SS`.
+
 ### regex
 
 ```redblue
