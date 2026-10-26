@@ -124,7 +124,24 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "length",
         ],
     ),
-    ("time", &["now", "sleep", "format", "unix"]),
+    (
+        "time",
+        &[
+            "now",
+            "sleep",
+            "format",
+            "unix",
+            "date",
+            "datetime",
+            "duration",
+            "add_years",
+            "add_months",
+            "add_days",
+            "add_hours",
+            "add_minutes",
+            "add_seconds",
+        ],
+    ),
 ];
 
 /// Whether `module.member` is one of the spellings the language has.
@@ -437,6 +454,19 @@ pub fn builtins() -> HashMap<String, Value> {
         "time_unix".to_string(),
         Value::Builtin("time_unix".to_string()),
     );
+    for name in [
+        "time_date",
+        "time_datetime",
+        "time_duration",
+        "time_add_years",
+        "time_add_months",
+        "time_add_days",
+        "time_add_hours",
+        "time_add_minutes",
+        "time_add_seconds",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
 
     // Formats module
     globals.insert(
@@ -1178,6 +1208,15 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "time_sleep",
     "time_format",
     "time_unix",
+    "time_date",
+    "time_datetime",
+    "time_duration",
+    "time_add_years",
+    "time_add_months",
+    "time_add_days",
+    "time_add_hours",
+    "time_add_minutes",
+    "time_add_seconds",
     "json_parse",
     "json_stringify",
     "csv_parse",
@@ -1347,6 +1386,42 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     (
         "time_unix",
         "time_unix(text) -> number; a \"YYYY-MM-DD HH:MM:SS\" as seconds",
+    ),
+    (
+        "time_date",
+        "time_date(number, number, number) -> a date at midnight",
+    ),
+    (
+        "time_datetime",
+        "time_datetime(number, number, number, number, number, number) -> a date and time",
+    ),
+    (
+        "time_duration",
+        "time_duration(number) -> a duration of that many seconds",
+    ),
+    (
+        "time_add_years",
+        "time_add_years(date, number) -> the date that many years later",
+    ),
+    (
+        "time_add_months",
+        "time_add_months(date, number) -> the date that many months later",
+    ),
+    (
+        "time_add_days",
+        "time_add_days(date, number) -> the date that many days later",
+    ),
+    (
+        "time_add_hours",
+        "time_add_hours(date, number) -> the date that many hours later",
+    ),
+    (
+        "time_add_minutes",
+        "time_add_minutes(date, number) -> the date that many minutes later",
+    ),
+    (
+        "time_add_seconds",
+        "time_add_seconds(date, number) -> the date that many seconds later",
     ),
     (
         "json_parse",
