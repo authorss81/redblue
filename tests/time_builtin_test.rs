@@ -693,3 +693,92 @@ fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_time_operations_and_errors(
         "the two engines disagree about a date/number comparison"
     );
 }
+
+#[test]
+fn edge_time_from_unix_agrees_with_time_unix_on_literal_instants() {
+    for (seconds, expected) in [
+        ("0", "1970-01-01 00:00:00"),
+        ("1704067200", "2024-01-01 00:00:00"),
+        ("-1", "1969-12-31 23:59:59"),
+        ("1709164800", "2024-02-29 00:00:00"),
+    ] {
+        assert_eq!(
+            eval_text(&format!("to_text(time.from_unix({seconds}))")),
+            expected,
+            "time.from_unix({seconds}) must be the instant it names"
+        );
+    }
+    // The two directions are one window: what `time.unix` reads, `from_unix`
+    // must construct, including the leap day that has no 29 February next year.
+    assert!(yes(
+        "set leap to time.from_unix(time.unix(\"2024-02-29 00:00:00\"))\n\
+         leap is time.date(2024, 2, 29)"
+    ));
+    assert!(yes(
+        "set leap to time.from_unix(time.unix(\"2024-02-29 00:00:00\"))\n\
+         time.unix(to_text(leap)) is 1709164800"
+    ));
+    assert!(yes(
+        "set next to time.from_unix(1709164800) + time.duration(86400)\n\
+         next is time.date(2024, 3, 1)"
+    ));
+}
+
+#[test]
+fn edge_time_from_unix_truncates_a_fractional_second_like_time_format() {
+    // Both builtins read a number of seconds the same way: `as i64` truncates
+    // toward zero, so the part before the decimal point is the instant. A
+    // negative fraction must not round down to the previous second.
+    assert_eq!(
+        eval_text("to_text(time.from_unix(1.9))"),
+        "1970-01-01 00:00:01"
+    );
+    assert_eq!(
+        eval_text("to_text(time.from_unix(-1.9))"),
+        "1969-12-31 23:59:59"
+    );
+    assert_eq!(
+        eval_text("to_text(time.from_unix(0))"),
+        "1970-01-01 00:00:00"
+    );
+}
+
+#[test]
+fn edge_time_from_unix_of_an_instant_outside_the_shared_window_is_an_error() {
+    for source in [
+        "time.from_unix(253402300801)",
+        "time.from_unix(1e300)",
+        "time.from_unix(-1e300)",
+    ] {
+        assert_runtime_error(source, "time.from_unix");
+    }
+    // A number is the only thing a caller may pass, and the empty call is the
+    // empty case of the same rule rather than a panic or a silent zero.
+    for source in [
+        "time.from_unix(\"0\")",
+        "time.from_unix([0])",
+        "time.from_unix()",
+    ] {
+        assert_runtime_error(source, "time.from_unix");
+    }
+}
+
+#[test]
+fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_time_from_unix() {
+    let source = "\
+        set d to time.from_unix(1709164800)\n\
+        set span to d - time.date(2024, 2, 28)\n\
+        {d: d, span: span, text: to_text(d), next: d + time.duration(86400)}\n";
+    assert_eq!(
+        tree_walk(source),
+        bytecode(source),
+        "the two engines disagree about time.from_unix"
+    );
+
+    let bad = "time.from_unix(1e300)";
+    assert_eq!(
+        tree_runtime_error(bad),
+        bytecode_runtime_error(bad),
+        "the two engines disagree about a time.from_unix refusal"
+    );
+}

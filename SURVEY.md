@@ -5,10 +5,10 @@ every claim below carries the line that proves it. Rank 2 was closed by
 phase-095; rank 6 gained date arithmetic in phase-096 but still cannot parse a
 date; the entries are kept so the ranking and its history stay readable.
 
-- **Builtins in the registry**: 83 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1161`,
-  which closes with `"input"` at `src/stdlib.rs:1244`.
+- **Builtins in the registry**: 84 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1163`,
+  which closes with `"input"` at `src/stdlib.rs:1247`.
 - **Modules a dotted call may name**: 12 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 61 — `stdlib::MODULE_MEMBERS` at
+- **Dotted members those modules accept**: 62 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:63`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
@@ -158,7 +158,7 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:857` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:859` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -263,16 +263,18 @@ Refused as `RuntimeError: Module 'text' has no function 'pad_left'`.
 - **Rust crate**: `chrono`
 - **Evidence**: `src/stdlib.rs:128` — the `time` row now carries the date and
 duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
-`add_*` movers), but it still has no way to turn text or a Unix timestamp into a
-date. `src/runtime.rs:584` shows what `time.unix` accepts: exactly
-`%Y-%m-%d %H:%M:%S` and nothing else, and it answers a number. `time.format`
-(`src/runtime.rs:1297`) is a strftime pass-through, the one direction that works.
+`add_*` movers), and `time.from_unix` turns a Unix timestamp into a date, but
+text still cannot enter the arithmetic. `src/runtime.rs:591` shows what
+`time.unix` accepts: exactly `%Y-%m-%d %H:%M:%S` and nothing else, and it
+answers a number. `time.format` (`src/runtime.rs:1306`) is a strftime
+pass-through, the other numeric direction that works.
 - **What phase-096 changed**: date values, durations and calendar arithmetic are
-  now first class. What remains is the parse/convert edge: there is no
-  `time.parse`, no `time.from_unix`, and `time.unix` still answers a number, so a
-  birthdate read from text cannot enter the arithmetic.
+  now first class, and `time.from_unix` converts numeric epoch seconds into a
+  date. What remains is the text edge: there is no `time.parse`, and `time.unix`
+  still answers a number, so a birthdate read from text cannot enter the
+  arithmetic.
 - **Note**: `chrono` is already a dependency (`Cargo.toml:32`) and already used
-  at `src/runtime.rs:1309`. The gap is the surface, not the crate — which makes
+  at `src/runtime.rs:1318`. The gap is the surface, not the crate — which makes
   this the cheapest binding on the list.
 - **Why**: age in years, "3 days ago", a month-end report and a file renamed by
   its date all need arithmetic. A language that can read the clock but cannot move

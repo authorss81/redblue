@@ -228,6 +228,7 @@ time.now()             // Get current timestamp
 time.sleep(seconds) // Sleep for N seconds
 time.format(timestamp, "format")
 time.unix("YYYY-MM-DD HH:MM:SS")
+time.from_unix(seconds)                        // Seconds to a date, read as UTC
 time.date(year, month, day)                    // A date at midnight
 time.datetime(year, month, day, hour, minute, second)
 time.duration(seconds)                         // A signed span of time

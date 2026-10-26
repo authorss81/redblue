@@ -818,6 +818,11 @@ say "slept""#
             "1704067200\n".into(),
         ),
         (
+            "time_from_unix",
+            "say to_text(time.from_unix(1709164800))".into(),
+            "2024-02-29 00:00:00\n".into(),
+        ),
+        (
             "time_date",
             "say to_text(time.date(2024, 2, 29))".into(),
             "2024-02-29 00:00:00\n".into(),

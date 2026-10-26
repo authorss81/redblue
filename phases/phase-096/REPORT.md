@@ -18,6 +18,12 @@
 | `tests/time_builtin_test.rs` (resumed) | +118 | Four more edge tests: mixed-kind equality, signed negative components, backward month-end, cross-engine operations and errors |
 | `tests/doc_blocks_runs.txt` (resumed) | +1 −1 | Regex block re-anchored to `SPEC.md:1521` after the SPEC additions |
 | `tests/unreviewed_work_ack_test.rs` (resumed) | +6 −4 | `resume phase-096:` added to the delivery-commit rule so HEAD's own resume commit is acknowledged |
+| `src/runtime.rs` (resumed again) | +32 −4 | `time.from_unix`; one shared epoch-window helper for `time.format` and `time.from_unix`; midnight built without a panic path |
+| `src/stdlib.rs` (resumed again) | +7 | Register `time.from_unix` as a member, global, name and signature |
+| `SPEC.md`, `README.md`, `SURVEY.md` (resumed again) | +18 −14 | Document `time.from_unix`; inventory re-anchored to 84 builtins and 62 dotted members |
+| `tests/time_builtin_test.rs` (resumed again) | +89 | Four `time.from_unix` tests: literal round trip, fractional truncation, window/wrong-type refusals, cross-engine agreement |
+| `tests/stdlib_module_docs_test.rs` (resumed again) | +5 | Reachable `time_from_unix` row |
+| `tests/doc_blocks_runs.txt` (resumed again) | +2 −2 | Date and regex blocks re-anchored for the new SPEC example line |
 
 ## Behaviour
 `time.date(year, month, day)` makes a date at midnight and
@@ -48,9 +54,12 @@ components sum to `total_seconds`; an unknown property answers `nothing`, which
 is the existing property contract. JSON turns a date into its display text and a
 duration into its total seconds.
 
-`time.unix` is deliberately unchanged: it still answers a number. Phase 096 adds
-the value types and arithmetic, not a text-to-date parser; that surviving edge is
-recorded in `SURVEY.md` rank 6.
+`time.from_unix(seconds)` is the numeric entry point the clock needed: it turns
+epoch seconds into a date value, read as UTC, with the same window and the same
+truncation toward zero that `time.format` uses, so `time.from_unix(time.unix(t))`
+is the date the text named. `time.unix` itself is deliberately unchanged and
+still answers a number. There is still no text-to-date parser; that surviving
+edge is recorded in `SURVEY.md` rank 6.
 
 ## Tests added
 | Test | Edge class covered |
@@ -69,20 +78,24 @@ recorded in `SURVEY.md` rank 6.
 | `edge_negative_duration_components_are_signed_and_sum_to_the_total` | negative, zero and fractional duration boundaries |
 | `edge_month_end_overflow_backwards_in_leap_and_non_leap_years` | month-end clamping backward and across a year rollover |
 | `edge_the_tree_walker_and_the_bytecode_vm_agree_on_time_operations_and_errors` | cross-engine arithmetic and cross-engine error text |
+| `edge_time_from_unix_agrees_with_time_unix_on_literal_instants` | empty/epoch boundary, pre-epoch, leap day, round trip and arithmetic |
+| `edge_time_from_unix_truncates_a_fractional_second_like_time_format` | positive and negative fractional-second boundary |
+| `edge_time_from_unix_of_an_instant_outside_the_shared_window_is_an_error` | out of bounds, wrong type, missing argument |
+| `edge_the_tree_walker_and_the_bytecode_vm_agree_on_time_from_unix` | cross-engine value and cross-engine refusal |
 
 ## Mandatory edge-case matrix
 | Row | Status |
 |---|---|
 | empty | covered — zero-length duration displays and decomposes as `0 seconds` |
 | singleton | covered — a single date and a single duration are first-class values in a record and a list |
-| boundary | covered — month-end clamping forward and backward, leap and non-leap years, year rollover and negative spans |
+| boundary | covered — month-end clamping forward and backward, leap and non-leap years, year rollover, negative spans, the epoch and the `time.from_unix` window |
 | out_of_bounds | covered — day `30` in February, month `13` and hour `24` are refused by name |
 | type_mismatch | covered — date/duration versus number ordering and equality, and a number passed to `add_days` |
-| numeric_boundary | covered — leap years, negative durations, signed nanoseconds and fractional seconds rounded to the nearest millisecond |
+| numeric_boundary | covered — leap years, negative durations, signed nanoseconds, fractional seconds rounded to the nearest millisecond, and fractional epoch seconds truncated toward zero |
 | unicode | N/A — dates and durations are numeric values, not text |
 | nesting_recursion | covered — dates inside records/lists and through a user function |
 | duplicate_missing_keys | N/A — the new values have fixed properties and no user-supplied keys; an unknown property answers `nothing` |
-| malformed_input | covered — invalid calendar components, wrong arity and wrong argument types |
+| malformed_input | covered — invalid calendar components, wrong arity and wrong argument types, and an epoch value outside the shared window |
 | resource_limit | N/A — date arithmetic is fixed-size and allocates no growing structure |
 
 ## Gates
@@ -90,8 +103,8 @@ recorded in `SURVEY.md` rank 6.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 77 test binaries, 2247 passed, 0 failed |
-| `../rbops/verify.sh phase-096` | pass — report, diff hygiene, fmt, clippy, 2247 tests, doc sweep, test policy, report honesty |
+| `cargo test --all-targets` | 77 test binaries, 2251 passed, 0 failed |
+| `../rbops/verify.sh phase-096` | pass — report, diff hygiene, fmt, clippy, 2251 tests, doc sweep, test policy, report honesty |
 
 ## Invariants touched
 - `Value` gains `Date` and `Duration`. This is the value-contract change the
@@ -100,7 +113,8 @@ recorded in `SURVEY.md` rank 6.
 - No grammar, lexer, parser or analyzer change. Dates are reached through the
   existing `time` module and the existing operators.
 - The existing `time.now`, `time.sleep`, `time.format` and `time.unix` behaviour
-  is unchanged; `time.unix` still answers a number.
+  is unchanged; `time.unix` still answers a number, and `time.from_unix` is the
+  inverse numeric conversion.
 - No new dependency: `chrono` was already in `Cargo.toml`.
 - No skip, no ignored test and no lint suppression was added.
 
@@ -116,16 +130,17 @@ Four existing expectations encoded the old inventory and moved with the change:
   `DELIVERY_SUBJECT_PREFIXES`. This is the acknowledgement the audit requires
   for HEAD's own delivery commit; the rule acknowledges it by subject because
   the pipeline rebuilds that commit on every round.
-- `SURVEY.md` now states 83 builtins and 61 dotted members, lists the new `time`
+- `SURVEY.md` now states 84 builtins and 62 dotted members, lists the new `time`
   members, and re-anchors citations that moved in `src/stdlib.rs`. Rank 6 keeps
-  its blocked count because the parse/convert gap survives, but its evidence now
+  its blocked count because the text parsing gap survives, but its evidence now
   says what phase-096 added and what still cannot be done.
 - `tests/stdlib_module_docs_test.rs` gains the nine new reachable builtins; no
   assertion was weakened.
 
 ## Known gaps / follow-ups
-- There is no `time.parse` and no `time.from_unix`; text and Unix timestamps
-  cannot enter date arithmetic. This is the remaining half of `SURVEY.md` rank 6.
+- There is no `time.parse`; text still cannot enter date arithmetic. This is the
+  remaining half of `SURVEY.md` rank 6. Numeric epoch seconds now can, through
+  `time.from_unix`.
 - Timezone-naive by design: no zones and no DST, so `add_days` is always 24 hours.
 - `time.duration` accepts fractional seconds only to millisecond precision, and
   date constructors take whole seconds.

@@ -18,7 +18,7 @@
 use std::cell::Cell;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, TimeDelta, Timelike};
+use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike};
 
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
@@ -544,9 +544,18 @@ fn now() -> Result<SystemTime> {
 /// a negative timestamp would have quietly formatted as the epoch rather than
 /// as 1969.
 fn seconds_for_format(timestamp: f64, span: Span) -> Result<i64> {
+    seconds_for_instant(timestamp, "time.format", span)
+}
+
+/// The whole seconds a builtin that names an instant should read.
+///
+/// Shared by `time.format` and `time.from_unix`: both take a number counted
+/// from the epoch and both must agree on which instants exist. The builtin's
+/// name is a parameter so a refusal says which call the program wrote.
+fn seconds_for_instant(timestamp: f64, builtin: &str, span: Span) -> Result<i64> {
     if !timestamp.is_finite() {
         return Err(Error::Runtime(
-            format!("time.format requires a finite number of seconds, got {timestamp}"),
+            format!("{builtin} requires a finite number of seconds, got {timestamp}"),
             span,
         ));
     }
@@ -562,7 +571,7 @@ fn seconds_for_format(timestamp: f64, span: Span) -> Result<i64> {
     const MAX_SECONDS: f64 = 253_402_300_800.0; // 10000-01-01T00:00:00Z
     if timestamp < -MAX_SECONDS || timestamp > MAX_SECONDS {
         return Err(Error::Runtime(
-            format!("time.format cannot represent {timestamp} seconds from 1970-01-01T00:00:00Z"),
+            format!("{builtin} cannot represent {timestamp} seconds from 1970-01-01T00:00:00Z"),
             span,
         ));
     }
@@ -731,7 +740,7 @@ fn date_from_arguments(
         )
     })?;
     if !with_time {
-        return Ok(date.and_hms_opt(0, 0, 0).expect("midnight is always valid"));
+        return Ok(date.and_time(NaiveTime::MIN));
     }
     let hour = whole_argument(args, 3, builtin, "hour", span)?;
     let minute = whole_argument(args, 4, builtin, "minute", span)?;
@@ -1326,6 +1335,25 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             };
             let seconds = seconds_for_unix(text, span)?;
             Ok(Some(Value::Number(seconds as f64)))
+        }
+        "time_from_unix" => {
+            let Some(Value::Number(timestamp)) = args.first() else {
+                return Err(Error::Runtime(
+                    "time.from_unix requires a number of seconds".to_string(),
+                    span,
+                ));
+            };
+            let seconds = seconds_for_instant(*timestamp, "time.from_unix", span)?;
+            let instant = chrono::DateTime::from_timestamp(seconds, 0).ok_or_else(|| {
+                Error::Runtime(
+                    format!(
+                        "time.from_unix cannot represent {timestamp} seconds from \
+                         1970-01-01T00:00:00Z"
+                    ),
+                    span,
+                )
+            })?;
+            Ok(Some(Value::Date(instant.naive_utc())))
         }
         "time_date" => Ok(Some(Value::Date(date_from_arguments(
             args,

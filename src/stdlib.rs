@@ -131,6 +131,7 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "sleep",
             "format",
             "unix",
+            "from_unix",
             "date",
             "datetime",
             "duration",
@@ -455,6 +456,7 @@ pub fn builtins() -> HashMap<String, Value> {
         Value::Builtin("time_unix".to_string()),
     );
     for name in [
+        "time_from_unix",
         "time_date",
         "time_datetime",
         "time_duration",
@@ -1208,6 +1210,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "time_sleep",
     "time_format",
     "time_unix",
+    "time_from_unix",
     "time_date",
     "time_datetime",
     "time_duration",
@@ -1386,6 +1389,10 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     (
         "time_unix",
         "time_unix(text) -> number; a \"YYYY-MM-DD HH:MM:SS\" as seconds",
+    ),
+    (
+        "time_from_unix",
+        "time_from_unix(number) -> date; the instant that many seconds after 1970-01-01T00:00:00Z",
     ),
     (
         "time_date",

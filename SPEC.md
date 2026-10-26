@@ -1412,6 +1412,7 @@ set stamp to time.now()                  // a record: seconds, nanoseconds
 time.sleep(0.5)                          // pause for half a second
 say time.format(1704067200, "%Y-%m-%d")  // "2024-01-01"
 say time.unix("2024-01-01 00:00:00")     // 1704067200
+say time.from_unix(1704067200)           // 2024-01-01 00:00:00
 ```
 
 `time.now()` is a record of `seconds` and `nanoseconds` since
@@ -1419,8 +1420,8 @@ say time.unix("2024-01-01 00:00:00")     // 1704067200
 `time.format` takes a number of seconds since the same instant and a format
 string; with no format string it writes `%Y-%m-%d %H:%M:%S`. `time.unix` is the
 other direction: it takes `YYYY-MM-DD HH:MM:SS` and answers the seconds since
-the same instant, read as UTC whichever time zone the machine is in, so the
-answer is the same on the machine that wrote the text and on one that reads it.
+the same instant, read as UTC wherever it runs; `time.from_unix(seconds)` is the
+inverse and turns such seconds into a date value, read as UTC too.
 
 `time.sleep` is the one call in this section that blocks — the other three are
 computed and returned immediately, so `time.format` and `time.unix` cost no wall
