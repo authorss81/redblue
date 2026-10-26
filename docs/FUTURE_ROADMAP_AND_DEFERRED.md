@@ -116,21 +116,56 @@ The following VM and memory optimizations are queued to close the performance ga
 ### Phase 143: Structural Cycle-Break Collector
 - **Goal**: Implement a trial-deletion cycle collector for reference-counted cyclic structures (records referencing records), guaranteeing deterministic memory release without stop-the-world GC pauses.
 
+### 4.3 Why Performance Optimizations Must Precede Bootstrapping (Self-Hosting)
+
+The project includes a 140 KB compiler written in pure Redblue (`bootstrap/compiler.rb`). The ultimate self-hosting milestone requires the S3 fixed-point bootstrap ladder (`docs/BOOTSTRAP.md`):
+$$\text{Rust Compiler} \to \text{Stage 1 Compiler} \to \text{Stage 2 Compiler} \quad (\text{assert } \text{stage1.rbc} == \text{stage2.rbc})$$
+
+**Why optimization is prerequisite to Stage 3:**
+1. **Compiling the Compiler in Redblue**: Stage 2 and Stage 3 require the Redblue compiler to run *inside* Redblue itself. Compiling 140 KB of complex AST parser logic on an unoptimized interpreter would take 15–25 minutes per pass, risking CI timeouts.
+2. **Memory Churn**: Without NaN-boxing and small-value inlining, generating hundreds of thousands of AST nodes and token strings creates heavy heap allocator pressure.
+3. **Sequence**: Implementing Phases 139–143 (NaN-boxing, constant folding, and inlining) **before** the final bootstrap ladder ensures that self-compilation executes in seconds, making fixed-point verification fast and reproducible.
+
+### 4.4 Execution Engine Strategy: Dual-Engine Testing vs. VM Consolidation
+
+Currently, Redblue maintains two distinct execution engines: the **AST Tree-Walking Interpreter** (`src/interpreter.rs`) and the **Bytecode VM** (`src/bytecode/`).
+
+#### Current Phase (Development & Correctness): Dual-Engine Superpower
+* **Differential Testing**: Redblue's greatest test asset is differential testing (`.compare` and `tests/differential_test.rs`). Every program and expression is executed across both engines and asserted to produce identical values. If the bytecode compiler emits an invalid stack offset or wrong jump target, the AST interpreter immediately exposes the discrepancy.
+
+#### Future Phase (Production & v1.0): Bytecode VM Consolidation
+* **Double Maintenance Cost**: Maintaining both engines permanently means every single new keyword, syntax form, or standard library type must be implemented and maintained twice (`src/interpreter.rs` and `src/bytecode/vm.rs`).
+* **Optimization Asymmetry**: Key performance optimizations (NaN-boxing, register allocation, inline caches, and JIT compilation) can only be built into the Bytecode VM. The AST tree-walker cannot benefit from them.
+* **Roadmap**:
+  1. Maintain both engines throughout the 126 base phases and initial bootstrap testing.
+  2. Once the Bytecode VM optimizations (Phases 139–143) land and pass all test suites, consolidate on the **Bytecode VM as the primary and default engine**.
+  3. Demote the AST interpreter to an optional reference specification or retire it to reduce technical debt.
+
 ---
 
-## 5. The "Full OS in Redblue" Feature (From `DEFERRED-PHASES.md`)
+## 5. The Redblue OS Architecture: Decoupled Dedicated Repository
 
-In `rbops/DEFERRED-PHASES.md` (§Tier 3), two distinct OS projects were designed:
+In `rbops/DEFERRED-PHASES.md` (§Tier 3), two distinct OS projects were designed: an OS simulator (CPU emulator + minimal kernel in Redblue) and bare-metal hardware boot.
 
-### 5.1 The Achievable One: OS Simulator in Pure Redblue (Phase 144)
-- **Scope**: Write a CPU emulator (RISC-V or custom bytecode), a minimal multitasking kernel, and a bootloader *entirely in Redblue*, running as a simulated machine on top of Linux.
-- **Why it works**: Pure Redblue, every line gate-verified by tests, requiring no root privileges or native compiler. It plays directly to Redblue’s proven strength (it already runs a self-hosted bytecode VM).
-- **Prerequisites**: Tier 1 standard library complete (Phases 095–107) and Phase 109 (Native backend feasibility survey).
+### 5.1 Repository Separation: Dedicated Sibling Repo (`authorss81/rbos`)
+Rather than building the Operating System inside the `authorss81/redblue` language repository, **the OS project will be established in its own dedicated repository (e.g. `authorss81/rbos`)**:
 
-### 5.2 The Ambitious One: Bare-Metal Redblue OS Booting on Hardware
+* **Why Separation is Superior**:
+  1. **Separation of Concerns**: `redblue` is a programming language toolchain. An Operating System is a large, standalone application built *with* Redblue.
+  2. **Pipeline Unblocking**: Kernel development, CPU emulation, and hardware mock tests require extensive compute and run time. Embedding this in `redblue` would stall language toolchain phases.
+  3. **Parallel Autonomous Execution**: A separate repository can run its own independent GitHub Actions pipeline using the same self-dispatching OpenCode logic (powered by free DeepSeek/Nemotron models) 24/7 without competing for job concurrency or tokens with language development.
+  4. **True Dogfooding**: The OS repository consumes the official `rb` binary release as an external toolchain (analogous to how Linux consumes GCC), validating real-world developer workflows.
+
+### 5.2 The Two OS Tiers
+
+#### Tier 1: OS Simulator & CPU Emulator in Pure Redblue (In `authorss81/rbos`)
+- **Scope**: Write a CPU emulator (RISC-V/custom), a minimal multitasking kernel, and a bootloader *entirely in Redblue*, running as a simulated machine on host OS.
+- **Why it works**: Pure Redblue, gate-verified by tests, requiring no root privileges or native compiler.
+
+#### Tier 2: Bare-Metal Redblue OS Booting on Hardware
 - **Scope**: Redblue compiling to machine code that boots on bare x86_64/ARM64 hardware without an underlying Linux/Windows host.
 - **Blockers**: Needs a native LLVM/Cranelift code generator (`Redblue → machine code`), raw memory access, and interrupt handlers.
-- **Status**: **Strictly gated behind Phase 109.** Do not start until native compilation is decided.
+- **Status**: **Strictly gated behind Phase 109 (Native backend feasibility survey).** Do not start until native compilation is decided.
 
 ---
 
@@ -140,5 +175,6 @@ In `rbops/DEFERRED-PHASES.md` (§Tier 3), two distinct OS projects were designed
    - **Do not modify `rbops/phases.json` now.**
    - Keeping the active queue fixed at 126 phases ensures the current CI pipeline runs uninterrupted without merge conflicts or moving target completion dates (finishing ~October 30–31).
 2. **At Phase 126 Completion**:
-   - Append Phases 127 through 144 to the end of `rbops/phases.json`.
+   - Append Phases 127 through 143 (Visual Polish, Real-World Apps, and VM Optimizations) to the end of `rbops/phases.json`.
+   - Initialize `authorss81/rbos` as a standalone repo for OS development.
    - Because `phases.json` operates strictly as a FIFO queue, they will seamlessly trigger one by one.
