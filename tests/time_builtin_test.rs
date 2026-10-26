@@ -386,6 +386,15 @@ fn edge_date_constructs_and_compares() {
     assert!(yes("set d to time.datetime(2024, 2, 29, 13, 45, 59)\n\
          d.year is 2024 and d.month is 2 and d.day is 29 and \
          d.hour is 13 and d.minute is 45 and d.second is 59"));
+
+    // Monday is 1 and Sunday is 7, so the week starts on Monday.
+    assert!(yes("time.date(2024, 1, 1).weekday is 1 and \
+         time.date(2024, 1, 7).weekday is 7"));
+
+    // An unknown property is a visible `nothing`, not an error, for both kinds.
+    assert!(yes("set d to time.date(2024, 1, 1)\n\
+         set span to time.duration(60)\n\
+         d.bogus is nothing and span.bogus is nothing"));
 }
 
 #[test]
@@ -558,5 +567,129 @@ fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_dates() {
     assert_eq!(
         tree, compiled,
         "the two engines disagree about a date value"
+    );
+}
+
+#[test]
+fn edge_equality_between_a_date_or_duration_and_a_number_is_a_catchable_type_error() {
+    // SPEC.md says a date or a duration compared with a number is a runtime
+    // error, not a coercion. Ordering already refused it; equality used to
+    // answer a silent `no`, which hid a program that compared the wrong kinds.
+    for source in [
+        "time.date(2024, 1, 1) is 5",
+        "5 is time.date(2024, 1, 1)",
+        "time.date(2024, 1, 1) is not 5",
+        "time.duration(1) is 5",
+        "5 is time.duration(1)",
+        "time.duration(1) is not 5",
+    ] {
+        let message = runtime_error(source);
+        assert!(
+            message.contains("number")
+                && (message.contains("date") || message.contains("duration")),
+            "`{source}` must name both kinds it mixed, got `{message}`"
+        );
+    }
+
+    // Equality within a kind is still defined and still answers yes/no.
+    assert!(yes("time.date(2024, 1, 1) is time.date(2024, 1, 1)"));
+    assert!(yes("time.date(2024, 1, 1) is not time.date(2024, 1, 2)"));
+    assert!(yes("time.duration(60) is time.duration(60)"));
+    assert!(yes("time.duration(60) is not time.duration(61)"));
+}
+
+#[test]
+fn edge_negative_duration_components_are_signed_and_sum_to_the_total() {
+    // A span before an instant reads with negative components, and the total
+    // still matches the components the program can see.
+    assert!(yes("set span to time.duration(-90000)\n\
+         span.days is -1 and span.hours is -1 and span.minutes is 0 and \
+         span.seconds is 0 and span.total_seconds is -90000"));
+    assert!(yes("set span to time.duration(-1.5)\n\
+         span.days is 0 and span.hours is 0 and span.minutes is 0 and \
+         span.seconds is -1 and span.nanoseconds is -500000000 and \
+         span.total_seconds is -1.5"));
+    // Zero is the boundary between the two signs and has no negative zero.
+    assert!(yes(
+        "set zero to time.duration(0)\n\
+         zero.days is 0 and zero.hours is 0 and zero.minutes is 0 and \
+         zero.seconds is 0 and zero.nanoseconds is 0 and zero.total_seconds is 0"
+    ));
+    // Fractional seconds are rounded to the nearest millisecond, half away
+    // from zero, so the 0.0004/0.0006 boundary is pinned in both signs.
+    assert!(yes("time.duration(0.0004).nanoseconds is 0 and \
+         time.duration(0.0006).nanoseconds is 1000000 and \
+         time.duration(-0.0004).nanoseconds is 0 and \
+         time.duration(-0.0006).nanoseconds is -1000000"));
+}
+
+#[test]
+fn edge_month_end_overflow_backwards_in_leap_and_non_leap_years() {
+    // The same backward move clamps to 29 February in a leap year and to
+    // 28 February in a common year.
+    assert!(yes(
+        "set leap to time.add_months(time.date(2024, 3, 31), -1)\n\
+         set plain to time.add_months(time.date(2023, 3, 31), -1)\n\
+         leap.month is 2 and leap.day is 29 and \
+         plain.month is 2 and plain.day is 28"
+    ));
+    // Thirteen months is a year plus one month, so the clamp applies after
+    // the year rollover too.
+    assert!(yes(
+        "set moved to time.add_months(time.date(2024, 1, 31), 13)\n\
+         moved.year is 2025 and moved.month is 2 and moved.day is 28"
+    ));
+}
+
+#[track_caller]
+fn tree_runtime_error(source: &str) -> String {
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("the source lexes");
+    let program = redblue::parser::parse(tokens).expect("the source parses");
+    redblue::analyzer::analyze(&program).expect("the source analyzes");
+    let (_vm, result) = redblue::run_isolated(&program);
+    match result {
+        Err(Error::Runtime(message, _)) => message,
+        other => panic!("expected a Runtime error from `{source}`, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn bytecode_runtime_error(source: &str) -> String {
+    let chunk = redblue::compile_source(source).expect("the source compiles");
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    match vm.run(&chunk) {
+        Err(Error::Runtime(message, _)) => message,
+        other => panic!("expected a Runtime error from `{source}`, got {other:?}"),
+    }
+}
+
+#[test]
+fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_time_operations_and_errors() {
+    let source = "\
+        set a to time.datetime(2024, 1, 31, 23, 59, 59)\n\
+        set b to time.add_months(a, 1)\n\
+        set c to time.add_years(b, 1)\n\
+        set d to time.add_days(c, 2)\n\
+        set e to time.add_hours(d, 3)\n\
+        set f to time.add_minutes(e, 4)\n\
+        set g to time.add_seconds(f, 5)\n\
+        set h to time.duration(-1.5)\n\
+        {a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h, \
+         earlier: a < b, same: a is a, span: b - a}\n";
+
+    assert_eq!(
+        tree_walk(source),
+        bytecode(source),
+        "the two engines disagree about time arithmetic"
+    );
+
+    // Both engines must refuse the same mixed-kind equality, with the same
+    // message, not one silently answering `no`.
+    let bad = "time.date(2024, 1, 1) is 5";
+    assert_eq!(
+        tree_runtime_error(bad),
+        bytecode_runtime_error(bad),
+        "the two engines disagree about a date/number comparison"
     );
 }

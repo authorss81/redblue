@@ -1474,15 +1474,19 @@ The operators are defined on these values:
 | `duration < duration`, and the other orderings | `yes` or `no` |
 
 A date or a duration compared with a number is a **runtime error**, not a
-coercion: `time.date(2024, 1, 1) < 5` names the two kinds it mixed, and `try …
-catch error of Runtime` can catch it. Adding a date to a date, or subtracting a
-date from a duration, is refused the same way.
+coercion, whether the comparison is an ordering or `is`/`is not`:
+`time.date(2024, 1, 1) < 5` and `time.date(2024, 1, 1) is 5` both name the two
+kinds they mixed, and `try … catch error of Runtime` can catch either. Adding a
+date to a date, or subtracting a date from a duration, is refused the same way.
 
 The components of a date are read as properties: `year`, `month`, `day`, `hour`,
 `minute`, `second`, and `weekday` (Monday is `1`, Sunday is `7`). The components
 of a duration are `days`, `hours`, `minutes`, `seconds` (the remainder inside
-the last day, hour and minute), `total_seconds`, and `nanoseconds`. An unknown
-property answers `nothing`, as a missing record field does.
+the last day, hour and minute), `total_seconds`, and `nanoseconds`. A negative
+span carries its sign in each component, so `time.duration(-1.5).seconds` is
+`-1` and its `nanoseconds` is `-500000000`; the components sum to
+`total_seconds`. An unknown property answers `nothing`, as a missing record
+field does.
 
 Calendar arithmetic is `time.add_years`, `time.add_months`, `time.add_days`,
 `time.add_hours`, `time.add_minutes` and `time.add_seconds`; each takes a date
@@ -1491,7 +1495,7 @@ months are calendar units, not fixed spans:
 
 - **Month-end overflow clamps to the last day of the target month.**
   `time.add_months(time.date(2024, 1, 31), 1)` is `2024-02-29`; the same call in
-  2023 is `2024-02-28`; and `time.add_months(time.date(2024, 3, 31), -1)` is
+  2023 is `2023-02-28`; and `time.add_months(time.date(2024, 3, 31), -1)` is
   `2024-02-29`.
 - **29 February plus one year is 28 February.** `time.add_years` clamps the same
   way, so `time.add_years(time.date(2024, 2, 29), 1)` is `2025-02-28`.

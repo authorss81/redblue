@@ -120,14 +120,11 @@ fn duration_property(duration: TimeDelta, name: &str) -> Value {
         "minutes" => (duration.num_minutes() % 60) as f64,
         "seconds" => (duration.num_seconds() % 60) as f64,
         "total_seconds" => duration.as_seconds_f64(),
-        "nanoseconds" => {
-            let nanos = duration.subsec_nanos() as i64;
-            if duration < TimeDelta::zero() {
-                (-nanos) as f64
-            } else {
-                nanos as f64
-            }
-        }
+        // `subsec_nanos` is already signed: it is the fractional second with
+        // the span's sign, so negating a negative span here turned -0.5
+        // seconds into a positive half second that no longer summed to the
+        // total.
+        "nanoseconds" => duration.subsec_nanos() as f64,
         _ => return Value::Nothing,
     };
     Value::Number(number)
@@ -256,8 +253,8 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
                 ))
             }
         }
-        BinaryOp::Equal => Ok(Value::YesNo(left == right)),
-        BinaryOp::NotEqual => Ok(Value::YesNo(left != right)),
+        BinaryOp::Equal => equality(span, left, right, false),
+        BinaryOp::NotEqual => equality(span, left, right, true),
         BinaryOp::Less => compare(span, op, left, right),
         BinaryOp::LessEqual => compare(span, op, left, right),
         BinaryOp::Greater => compare(span, op, left, right),
@@ -300,6 +297,31 @@ fn date_sub(span: Span, date: NaiveDateTime, delta: TimeDelta) -> Result<Value> 
                 span,
             )
         })
+}
+
+/// `is` and `is not`, refusing a date or a duration mixed with a number.
+///
+/// Ordering already treats the two kinds as incomparable, and equality is the
+/// same question: `date is 5` used to answer a silent `no`, which looks like a
+/// real answer to a program that compared the wrong kinds. The refusal names
+/// both kinds, exactly as ordering does, so a `try … catch error of Runtime`
+/// can report it.
+fn equality(span: Span, left: Value, right: Value, negated: bool) -> Result<Value> {
+    let mixed = match (&left, &right) {
+        (Value::Date(_), Value::Number(_)) => Some(("date", "number")),
+        (Value::Number(_), Value::Date(_)) => Some(("number", "date")),
+        (Value::Duration(_), Value::Number(_)) => Some(("duration", "number")),
+        (Value::Number(_), Value::Duration(_)) => Some(("number", "duration")),
+        _ => None,
+    };
+    if let Some((left_kind, right_kind)) = mixed {
+        return Err(Error::Runtime(
+            format!("Cannot compare a {left_kind} with a {right_kind}"),
+            span,
+        ));
+    }
+    let equal = left == right;
+    Ok(Value::YesNo(if negated { !equal } else { equal }))
 }
 
 /// `<`, `<=`, `>` and `>=` over numbers, dates and durations.

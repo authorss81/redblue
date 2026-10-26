@@ -109,7 +109,7 @@ Two observations from that table that the rest of this document depends on:
   rank 5.
 - **`list` has exactly one higher-order function, and `filter` and `reduce` are
   registered without being implemented.** `src/stdlib.rs:74` says so in the table
-  itself, and `tests/stdlib_module_docs_test.rs:709` carries the two programs
+  itself, and `tests/stdlib_module_docs_test.rs:1013` carries the two programs
   that still fail as `known_gaps()`.
 
 ## How to use this ranking
@@ -138,7 +138,7 @@ Python prints.
 - **Evidence**: `src/stdlib.rs:91` — the `list` row is `map` and `length`, and
   the comment above it at `src/stdlib.rs:74` records that `filter` and `reduce`
   are registered at `src/stdlib.rs:887` and answer nothing. The two programs that
-  prove it are pinned as gaps at `tests/stdlib_module_docs_test.rs:709`.
+  prove it are pinned as gaps at `tests/stdlib_module_docs_test.rs:1013`.
 - **Also missing**: `any`, `all`, `flatten`, `zip`, `chunk`, `enumerate`,
   `unique`, `group_by`, `sort_by`, `take`, `skip`, `reverse`.
 - **Why it ranks first**: six of the thirty-two. Anything that counts, selects,
@@ -264,15 +264,15 @@ Refused as `RuntimeError: Module 'text' has no function 'pad_left'`.
 - **Evidence**: `src/stdlib.rs:128` — the `time` row now carries the date and
 duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
 `add_*` movers), but it still has no way to turn text or a Unix timestamp into a
-date. `src/runtime.rs:562` shows what `time.unix` accepts: exactly
+date. `src/runtime.rs:584` shows what `time.unix` accepts: exactly
 `%Y-%m-%d %H:%M:%S` and nothing else, and it answers a number. `time.format`
-(`src/runtime.rs:1275`) is a strftime pass-through, the one direction that works.
+(`src/runtime.rs:1297`) is a strftime pass-through, the one direction that works.
 - **What phase-096 changed**: date values, durations and calendar arithmetic are
   now first class. What remains is the parse/convert edge: there is no
   `time.parse`, no `time.from_unix`, and `time.unix` still answers a number, so a
   birthdate read from text cannot enter the arithmetic.
 - **Note**: `chrono` is already a dependency (`Cargo.toml:32`) and already used
-  at `src/runtime.rs:1290`. The gap is the surface, not the crate — which makes
+  at `src/runtime.rs:1309`. The gap is the surface, not the crate — which makes
   this the cheapest binding on the list.
 - **Why**: age in years, "3 days ago", a month-end report and a file renamed by
   its date all need arithmetic. A language that can read the clock but cannot move
