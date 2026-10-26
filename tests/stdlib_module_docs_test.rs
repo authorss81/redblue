@@ -818,6 +818,51 @@ say "slept""#
             "1704067200\n".into(),
         ),
         (
+            "time_date",
+            "say to_text(time.date(2024, 2, 29))".into(),
+            "2024-02-29 00:00:00\n".into(),
+        ),
+        (
+            "time_datetime",
+            "say to_text(time.datetime(2024, 2, 29, 13, 45, 59))".into(),
+            "2024-02-29 13:45:59\n".into(),
+        ),
+        (
+            "time_duration",
+            "say to_text(time.duration(90000))".into(),
+            "1 day, 1 hour\n".into(),
+        ),
+        (
+            "time_add_years",
+            "say to_text(time.add_years(time.date(2024, 2, 29), 1))".into(),
+            "2025-02-28 00:00:00\n".into(),
+        ),
+        (
+            "time_add_months",
+            "say to_text(time.add_months(time.date(2024, 1, 31), 1))".into(),
+            "2024-02-29 00:00:00\n".into(),
+        ),
+        (
+            "time_add_days",
+            "say to_text(time.add_days(time.date(2024, 1, 31), 1))".into(),
+            "2024-02-01 00:00:00\n".into(),
+        ),
+        (
+            "time_add_hours",
+            "say to_text(time.add_hours(time.date(2024, 1, 31), 24))".into(),
+            "2024-02-01 00:00:00\n".into(),
+        ),
+        (
+            "time_add_minutes",
+            "say to_text(time.add_minutes(time.date(2024, 1, 31), 60))".into(),
+            "2024-01-31 01:00:00\n".into(),
+        ),
+        (
+            "time_add_seconds",
+            "say to_text(time.add_seconds(time.date(2024, 1, 31), 1))".into(),
+            "2024-01-31 00:00:01\n".into(),
+        ),
+        (
             "json_parse",
             r#"say json.parse("{}")"#.into(),
             "{}\n".into(),

@@ -295,6 +295,8 @@ pub fn assert_type<T: 'static>(value: &Value) -> Result<(), TestAssertionError> 
         Value::Object(_, _) => TypeId::of::<Value>(),
         Value::Function(_) => TypeId::of::<Value>(),
         Value::Builtin(_) => TypeId::of::<Value>(),
+        Value::Date(_) => TypeId::of::<Value>(),
+        Value::Duration(_) => TypeId::of::<Value>(),
     };
 
     let expected_type = TypeId::of::<T>();

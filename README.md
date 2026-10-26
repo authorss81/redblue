@@ -228,6 +228,16 @@ time.now()             // Get current timestamp
 time.sleep(seconds) // Sleep for N seconds
 time.format(timestamp, "format")
 time.unix("YYYY-MM-DD HH:MM:SS")
+time.date(year, month, day)                    // A date at midnight
+time.datetime(year, month, day, hour, minute, second)
+time.duration(seconds)                         // A signed span of time
+time.add_years(date, years)                    // Calendar arithmetic
+time.add_months(date, months)                  // Clamps at month end
+time.add_days(date, days)                      // Fixed 24-hour days
+time.add_hours(date, hours)
+time.add_minutes(date, minutes)
+time.add_seconds(date, seconds)
+// dates compare with < <= > >=, subtract to a duration, and add a duration
 ```
 
 ### Sys

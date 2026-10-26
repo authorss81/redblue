@@ -14,6 +14,7 @@
 //! value was, which is how the wrong-date bug this file covers survived a round
 //! of review that was otherwise green.
 
+use redblue::bytecode::vm::BytecodeVm;
 use redblue::{Error, Value};
 
 #[track_caller]
@@ -348,4 +349,214 @@ fn time_unix_and_time_format_agree_on_the_window() {
             what
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dates and durations (phase-096)
+// ---------------------------------------------------------------------------
+
+#[track_caller]
+fn yes(source: &str) -> bool {
+    match eval(source) {
+        Ok(Value::YesNo(answer)) => answer,
+        Ok(other) => panic!("expected yes/no from `{source}`, got {other:?}"),
+        Err(error) => panic!("`{source}` should run, got {error:?}"),
+    }
+}
+
+#[track_caller]
+fn runtime_error(source: &str) -> String {
+    match eval(source) {
+        Err(Error::Runtime(message, _)) => message,
+        Err(other) => panic!("expected a Runtime error from `{source}`, got {other:?}"),
+        Ok(value) => panic!("`{source}` should fail, got {value:?}"),
+    }
+}
+
+#[test]
+fn edge_date_constructs_and_compares() {
+    let value = eval(
+        "set earlier to time.date(2024, 2, 29)\n\
+         set later to time.date(2024, 3, 1)\n\
+         earlier < later",
+    )
+    .expect("a date must be constructible and comparable");
+    assert_eq!(value, Value::YesNo(true));
+
+    assert!(yes("set d to time.datetime(2024, 2, 29, 13, 45, 59)\n\
+         d.year is 2024 and d.month is 2 and d.day is 29 and \
+         d.hour is 13 and d.minute is 45 and d.second is 59"));
+}
+
+#[test]
+fn edge_subtracting_dates_spans_a_month_and_a_leap_day() {
+    // January 31 to March 1 in a leap year is 30 days: 1 day into February and
+    // all 29 days of it. The same span in a non-leap year is one day shorter.
+    assert!(yes(
+        "set span to time.date(2024, 3, 1) - time.date(2024, 1, 31)\n\
+         span.days is 30 and span.total_seconds is 2592000"
+    ));
+    assert!(yes(
+        "set leap to time.date(2024, 3, 1) - time.date(2024, 2, 28)\n\
+         set plain to time.date(2023, 3, 1) - time.date(2023, 2, 28)\n\
+         leap.days is 2 and plain.days is 1"
+    ));
+}
+
+#[test]
+fn edge_adding_months_clamps_at_the_end_of_the_month_both_ways() {
+    // Forward: 31 January plus one month is 29 February in a leap year and
+    // 28 February in a non-leap year. Backward: 31 March minus one month is
+    // 29 February, not 3 March.
+    assert!(yes(
+        "set leap to time.add_months(time.date(2024, 1, 31), 1)\n\
+         set plain to time.add_months(time.date(2023, 1, 31), 1)\n\
+         set earlier to time.add_months(time.date(2024, 3, 31), -1)\n\
+         leap.month is 2 and leap.day is 29 and \
+         plain.month is 2 and plain.day is 28 and \
+         earlier.month is 2 and earlier.day is 29"
+    ));
+}
+
+#[test]
+fn edge_adding_a_year_to_a_leap_day_lands_on_the_last_day_of_february() {
+    assert!(yes(
+        "set next to time.add_years(time.date(2024, 2, 29), 1)\n\
+         set before to time.add_years(time.date(2024, 2, 29), -1)\n\
+         next.year is 2025 and next.month is 2 and next.day is 28 and \
+         before.year is 2023 and before.month is 2 and before.day is 28"
+    ));
+}
+
+#[test]
+fn edge_duration_components_and_negative_and_zero_spans() {
+    assert!(yes("set span to time.duration(90000)\n\
+         span.days is 1 and span.hours is 1 and span.minutes is 0 and \
+         span.seconds is 0 and span.total_seconds is 90000"));
+    assert!(yes(
+        "set forward to time.date(2024, 1, 1) - time.date(2024, 1, 2)\n\
+         set zero to time.date(2024, 1, 1) - time.date(2024, 1, 1)\n\
+         forward.days is -1 and forward.total_seconds is -86400 and \
+         zero.total_seconds is 0 and to_text(zero) is \"0 seconds\""
+    ));
+}
+
+#[test]
+fn edge_adding_a_duration_is_fixed_24_hour_days_with_no_dst() {
+    // 2024-03-10 and 2024-11-03 are the two American daylight-saving dates.
+    // A naive date has no zone, so neither day is 23 or 25 hours long: adding
+    // 24 hours always moves exactly one calendar day.
+    assert!(yes(
+        "set spring to time.date(2024, 3, 10) + time.duration(86400)\n\
+         set fall to time.add_hours(time.date(2024, 11, 3), 24)\n\
+         spring.year is 2024 and spring.month is 3 and spring.day is 11 and \
+         spring.hour is 0 and fall.day is 4 and fall.hour is 0"
+    ));
+}
+
+#[test]
+fn edge_a_date_is_first_class_in_records_lists_and_functions() {
+    assert!(yes("to stamp()\n\
+             give back time.date(2024, 5, 17)\n\
+         end\n\
+         set r to {when: stamp(), history: [stamp()]}\n\
+         set s to r.when\n\
+         type_of(s) is \"date\" and type_of(r.history[0]) is \"date\" and \
+         s.year is 2024 and to_text(s) is \"2024-05-17 00:00:00\""));
+}
+
+#[test]
+fn edge_comparing_a_date_with_a_number_is_a_catchable_type_error() {
+    for (source, first, second) in [
+        ("time.date(2024, 1, 1) < 5", "date", "number"),
+        ("5 < time.date(2024, 1, 1)", "number", "date"),
+        (
+            "time.duration(1) < time.date(2024, 1, 1)",
+            "duration",
+            "date",
+        ),
+    ] {
+        let message = runtime_error(source);
+        assert!(
+            message.contains(first) && message.contains(second),
+            "`{source}` must name both {first} and {second}, got `{message}`"
+        );
+    }
+
+    // Adding or subtracting a date and a number is refused too; it never
+    // silently becomes the epoch or a count of seconds.
+    assert!(runtime_error("time.date(2024, 1, 1) + 1").contains("non-numbers"));
+    assert!(runtime_error("time.date(2024, 1, 1) - 1").contains("non-numbers"));
+}
+
+#[test]
+fn edge_malformed_dates_and_arithmetic_are_refused_by_name() {
+    for (source, needle) in [
+        ("time.date(2024, 13, 1)", "not a real date"),
+        ("time.date(2024, 2, 30)", "not a real date"),
+        ("time.date(2024, 0, 1)", "not a real date"),
+        ("time.date(2024, 1, 0)", "not a real date"),
+        ("time.date(2024, 1.5, 1)", "whole number"),
+        (r#"time.date("2024", 1, 1)"#, "whole number"),
+        ("time.date(2024, 1)", "requires 3 numbers"),
+        ("time.datetime(2024, 1, 1, 24, 0, 0)", "not a real time"),
+        (r#"time.duration("1")"#, "time.duration"),
+        ("time.duration(1e300)", "cannot represent"),
+        ("time.add_years(5, 1)", "requires a date"),
+        (
+            "time.add_years(time.date(2024, 1, 1), 300000)",
+            "cannot move the date that far",
+        ),
+        (
+            "time.add_days(time.date(2024, 1, 1), 1e300)",
+            "cannot represent",
+        ),
+    ] {
+        let message = runtime_error(source);
+        assert!(
+            message.contains(needle),
+            "`{source}` should mention `{needle}`, got `{message}`"
+        );
+    }
+}
+
+/// The lines a tree-walking run printed, and the value it ended on.
+#[track_caller]
+fn tree_walk(source: &str) -> (Vec<String>, Value) {
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("the source lexes");
+    let program = redblue::parser::parse(tokens).expect("the source parses");
+    redblue::analyzer::analyze(&program).expect("the source analyzes");
+    let (mut vm, result) = redblue::run_isolated(&program);
+    let lines = vm.take_output();
+    let value = result.expect("the source runs on the tree-walker");
+    (lines, value)
+}
+
+/// The lines a bytecode run printed, and the value it ended on.
+#[track_caller]
+fn bytecode(source: &str) -> (Vec<String>, Value) {
+    let chunk = redblue::compile_source(source).expect("the source compiles");
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    let result = vm.run(&chunk);
+    let lines = vm.take_output();
+    let value = result.expect("the source runs on the bytecode VM");
+    (lines, value)
+}
+
+#[test]
+fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_dates() {
+    let source = "\
+        set a to time.datetime(2024, 2, 29, 23, 30, 0)\n\
+        set b to time.add_months(a, 1)\n\
+        set span to b - a\n\
+        set neg to time.duration(-90000)\n\
+        {a: a, b: b, span: span, neg: neg}\n";
+
+    let tree = tree_walk(source);
+    let compiled = bytecode(source);
+    assert_eq!(
+        tree, compiled,
+        "the two engines disagree about a date value"
+    );
 }
