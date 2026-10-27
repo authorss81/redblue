@@ -1424,8 +1424,19 @@ and a format string; with no format string it writes `%Y-%m-%d %H:%M:%S`.
 `time.parse` reads an ISO-8601 timestamp as a date, applying any zone offset so
 the value is the UTC reading of the instant. `time.unix` is the other direction:
 it takes a timestamp text or a date value and answers the seconds since the same
-instant, read as UTC wherever it runs; `time.from_unix(seconds)` is the inverse
-and turns such seconds into a date value.
+instant, read as UTC wherever it runs. A date that holds a fractional second
+answers a fractional number of seconds rather than dropping it, so
+`time.unix(time.parse("2024-02-29T23:59:58.5Z"))` is `1709251198.5`.
+`time.from_unix(seconds)` is the inverse and turns such seconds into a date
+value; a fractional number names the whole second that contains it, so
+`time.from_unix(-0.5)` is `1969-12-31 23:59:59`, the second the date
+`1969-12-31T23:59:59.5Z` falls in. For compatibility with the layout it read
+before `time.parse` existed, `time.unix` also accepts
+`YYYY-MM-DD HH:MM:SS` with one- or two-digit month, day, hour, minute and
+second fields, and a leap second (`:60`) in that layout answers the second it
+always did. The shared window ends at `10000-01-01T00:00:00Z`; a fraction in
+that final second is past the end, so `time.unix` refuses it instead of
+answering a number `time.format` will not take.
 
 `time.sleep` is the one call in this section that blocks — the other three are
 computed and returned immediately, so `time.format` and `time.unix` cost no wall
@@ -1536,11 +1547,12 @@ or `+` is accepted, so the expanded-year forms `%Y` writes (`-10000` and
 `+10000`) read back. A timestamp with no zone is read as UTC, the same stance a
 date value has.
 
-Not accepted, each a catchable runtime error naming the builtin and the byte
-position where the text stopped matching: a leap second (`:60`), a fraction
-with no digits or more than nine after either decimal mark, a time with no
-seconds (`HH:MM`), an offset without minutes, trailing characters, and a day
-that does not exist (`30` February, `29` February in a common year).
+`time.parse` does not accept, each a catchable runtime error naming the builtin
+and the byte position where the text stopped matching: a leap second (`:60`), a
+fraction with no digits or more than nine after either decimal mark, a time with
+no seconds (`HH:MM`), an offset without minutes, trailing characters, and a day
+that does not exist (`30` February, `29` February in a common year). It also
+requires two digits for every field, unlike the old `time.unix` layout.
 `time.format` refuses a layout `chrono` cannot read the same way. A date can
 also be printed with `say` or `to_text`, which writes `YYYY-MM-DD HH:MM:SS` and
 appends the fraction when the value holds one.

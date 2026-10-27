@@ -562,9 +562,12 @@ fn seconds_for_instant(timestamp: f64, builtin: &str, span: Span) -> Result<i64>
             span,
         ));
     }
-    // A timestamp with a fractional part keeps the behaviour it always had:
-    // `as` truncates toward zero, so `time.format(1.5)` is one second after the
-    // epoch. Refusing it would reject a program that used to work.
+    // A timestamp is a real number counted from the epoch, so the whole second
+    // it names is the floor, not the truncation toward zero. `-0.5` is half a
+    // second before the epoch, whose second is `-1` (1969-12-31 23:59:59);
+    // truncating toward zero made it `0`, one second after the instant that
+    // `time.unix` names. A positive fraction floors and truncates alike, so
+    // `time.format(1.5)` is still one second after the epoch.
     // `i64::MAX` seconds is far past the last instant a `SystemTime` can hold,
     // and `chrono` cannot format one either, so the range is bounded here
     // rather than by whichever of the two overflows first. A timestamp before
@@ -578,7 +581,7 @@ fn seconds_for_instant(timestamp: f64, builtin: &str, span: Span) -> Result<i64>
             span,
         ));
     }
-    Ok(timestamp as i64)
+    Ok(timestamp.floor() as i64)
 }
 
 /// A refusal from the one text-to-date parser, naming where it stopped.
@@ -716,6 +719,7 @@ fn date_expect(
 /// byte position where the expected text stopped matching.
 fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime> {
     let mut pos = 0;
+    let year_start = pos;
     let year = date_year(text, &mut pos, builtin, span)?;
     date_expect(text, &mut pos, b'-', builtin, "a '-' after the year", span)?;
     let month_start = pos;
@@ -742,13 +746,26 @@ fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime>
         ));
     }
     let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
-        date_parse_error(
-            text,
-            day_start,
-            builtin,
-            "a day that exists in that month",
-            span,
-        )
+        // `from_ymd_opt` also refuses a year outside the calendar's range.
+        // Blaming the day for `999999-01-01` named a field that was valid, so
+        // the year is checked separately and the refusal points at it.
+        if NaiveDate::from_ymd_opt(year, 1, 1).is_none() {
+            date_parse_error(
+                text,
+                year_start,
+                builtin,
+                "a year the calendar can represent",
+                span,
+            )
+        } else {
+            date_parse_error(
+                text,
+                day_start,
+                builtin,
+                "a day that exists in that month",
+                span,
+            )
+        }
     })?;
     if pos == text.len() {
         return Ok(date.and_time(NaiveTime::MIN));
@@ -916,6 +933,17 @@ fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime>
     })
 }
 
+/// Reads the fixed layout `time.unix` accepted before the shared ISO parser.
+///
+/// `chrono`'s `%Y-%m-%d %H:%M:%S` reads one- or two-digit month, day, hour,
+/// minute and second fields and accepts the leap second `:60`. The ISO parser
+/// is deliberately stricter, so `time.unix` falls back to this layout after it
+/// refuses, keeping the answers old callers already had. `time.parse` does not
+/// use this fallback: its surface is the ISO forms only.
+fn parse_legacy_unix_text(text: &str) -> Option<NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()
+}
+
 /// Formats a date with a caller-chosen layout, refusing a layout `chrono`
 /// cannot read rather than letting its display panic.
 ///
@@ -955,14 +983,22 @@ fn formatted_date(
 /// The same window `seconds_for_format` uses, so the two agree on both sides. A
 /// date outside it is a catchable `Runtime` error naming `time.unix` rather
 /// than a number no other builtin will take.
+///
+/// The window ends exactly at `10000-01-01T00:00:00Z`, so a fraction in that
+/// final second is past the end even though the whole second it truncates to
+/// is still the boundary. Checking only the whole second let
+/// `+10000-01-01T00:00:00.5Z` through, and the number it produced was one
+/// `time.format` refuses. The fraction is part of the instant, so it is part
+/// of the bound.
 fn unix_seconds_for(date: NaiveDateTime, builtin: &str, span: Span) -> Result<i64> {
     let seconds = date.and_utc().timestamp();
     const MAX_SECONDS: i64 = 253_402_300_800; // 10000-01-01T00:00:00Z
-    if !(-MAX_SECONDS..=MAX_SECONDS).contains(&seconds) {
+    let past_the_end = seconds > MAX_SECONDS || (seconds == MAX_SECONDS && date.nanosecond() > 0);
+    if seconds < -MAX_SECONDS || past_the_end {
         return Err(Error::Runtime(
             format!(
                 "{builtin} cannot represent {} as seconds from 1970-01-01T00:00:00Z",
-                date.format("%Y-%m-%d %H:%M:%S")
+                crate::value::date_text(date)
             ),
             span,
         ));
@@ -1701,7 +1737,14 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         "time_unix" => {
             let date = match args.first() {
-                Some(Value::Text(text)) => parse_iso8601(text, "time.unix", span)?,
+                Some(Value::Text(text)) => match parse_iso8601(text, "time.unix", span) {
+                    Ok(date) => date,
+                    // The old layout was chrono's `%Y-%m-%d %H:%M:%S`, which
+                    // read unpadded fields and a leap second. Falling back to
+                    // it keeps those callers' answers without widening the ISO
+                    // surface `time.parse` documents.
+                    Err(error) => parse_legacy_unix_text(text).ok_or(error)?,
+                },
                 Some(Value::Date(date)) => *date,
                 _ => {
                     return Err(Error::Runtime(
@@ -1711,7 +1754,34 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 }
             };
             let seconds = unix_seconds_for(date, "time.unix", span)?;
-            Ok(Some(Value::Number(seconds as f64)))
+            // A Unix timestamp is a real number, so the fraction `time.parse`
+            // kept belongs in the answer. Dropping it here made the two
+            // builtins disagree: the date value held the nanosecond, but the
+            // timestamp named the whole second before it. The fraction is
+            // positive because `timestamp` floors, which is what makes a
+            // pre-epoch fraction such as -0.5 come out with the right sign.
+            let nanos = date.nanosecond();
+            let fraction = if nanos >= 1_000_000_000 {
+                // A leap second is stored as `:59` plus a nanosecond in the
+                // next second. The old layout answered the second that begins
+                // it, so keep that answer rather than adding a whole second.
+                f64::from(nanos - 1_000_000_000) / 1_000_000_000.0
+            } else {
+                f64::from(nanos) / 1_000_000_000.0
+            };
+            let whole = seconds as f64;
+            let answer = whole + fraction;
+            // At 2024's magnitude an `f64` step is about 0.24 microseconds, so
+            // adding `.999999999` can round up to the next whole second. That
+            // would make the number name 23:59:59 while the date value still
+            // names 23:59:58.999999999. Keep the answer strictly inside the
+            // second `timestamp()` floored to.
+            let answer = if answer >= whole + 1.0 {
+                (whole + 1.0).next_down()
+            } else {
+                answer
+            };
+            Ok(Some(Value::Number(answer)))
         }
         "time_parse" => {
             let Some(Value::Text(text)) = args.first() else {

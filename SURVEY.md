@@ -191,9 +191,9 @@ Before phase-095 the same program was refused as
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/interpreter.rs:1844` — `for each` binds its variable only
   inside `if let Value::List(items)`, so a record is not a list and the loop body
-  never runs. `src/runtime.rs:815` — `length` refuses a record outright with
+  never runs. `src/runtime.rs:1525` — `length` refuses a record outright with
   *"length requires a list or text"*. And the registry holds no `keys` and no
-  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:929` without one.
+  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:1250` without one.
 - **Why it matters more than it looks**: a record is Redblue's only map type. A
   program cannot count a record, iterate it, merge one into another, or turn one
   back into text. Grouping is the operation almost every data program performs
@@ -240,7 +240,7 @@ Refused as `RuntimeError: Unknown function 'sort'`.
   `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`.
   `split` is documented at `src/stdlib.rs:975` as taking a literal separator, and
   `src/stdlib.rs:699` is the comment explaining why there is no pattern to give
-  it. `length` counts **characters**, not bytes (`src/runtime.rs:812`), so a
+  it. `length` counts **characters**, not bytes (`src/runtime.rs:1522`), so a
   slicing design has a defined unit to slice by; the gap is that no slicing call
   exists at all.
 - **What is missing**: `slice`, `substring`, `index_of`, `last_index_of`,
@@ -264,9 +264,9 @@ Refused as `RuntimeError: Module 'text' has no function 'pad_left'`.
 - **Rust crate**: `chrono`
 - **Evidence**: `src/stdlib.rs:128` — the `time` row carries the date and
 duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
-`add_*` movers), plus `time.parse` added by phase-097. `src/runtime.rs:717`
+`add_*` movers), plus `time.parse` added by phase-097. `src/runtime.rs:720`
 parses the ISO-8601 forms, including an offset and a fraction, into the date
-value; `src/runtime.rs:1668` formats a date or a numeric timestamp. `time.unix`
+value; `src/runtime.rs:1704` formats a date or a numeric timestamp. `time.unix`
 now reads the same parser and also accepts a date value, so a birthdate read
 from text can enter the arithmetic. `time.from_unix` remains the numeric inverse.
 - **What phase-097 changed**: text parsing and caller-chosen formatting are now
@@ -274,7 +274,7 @@ one date model. `time.parse` accepts a date-only or date-and-time ISO-8601 text,
 optionally with `.fraction`, `Z` or `±HH:MM`; a zone-free text is read as UTC.
 Malformed text is a catchable `Runtime` error naming the byte position.
 - **Note**: `chrono` is already a dependency (`Cargo.toml:32`) and already used
-  at `src/runtime.rs:717`. The gap was the surface, not the crate.
+  at `src/runtime.rs:720`. The gap was the surface, not the crate.
 - **Why**: age in years, "3 days ago", a month-end report and a file renamed by
   its date all need arithmetic. A language that can read the clock but cannot move
   it is a language that can log and not schedule.

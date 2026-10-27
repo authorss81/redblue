@@ -730,22 +730,39 @@ fn edge_time_from_unix_agrees_with_time_unix_on_literal_instants() {
 }
 
 #[test]
-fn edge_time_from_unix_truncates_a_fractional_second_like_time_format() {
-    // Both builtins read a number of seconds the same way: `as i64` truncates
-    // toward zero, so the part before the decimal point is the instant. A
-    // negative fraction must not round down to the previous second.
+fn edge_time_from_unix_floors_a_fractional_second_like_time_format() {
+    // Both builtins read a number of seconds the same way: the whole second is
+    // the floor, so the part before the decimal point is the instant for a
+    // positive fraction and a negative fraction stays in the second before the
+    // epoch. Truncating toward zero would make `-1.9` land on 1969-12-31
+    // 23:59:59 and `-0.5` land on 1970-01-01, one second after the date.
     assert_eq!(
         eval_text("to_text(time.from_unix(1.9))"),
         "1970-01-01 00:00:01"
     );
     assert_eq!(
         eval_text("to_text(time.from_unix(-1.9))"),
+        "1969-12-31 23:59:58"
+    );
+    assert_eq!(
+        eval_text("to_text(time.from_unix(-0.5))"),
         "1969-12-31 23:59:59"
     );
     assert_eq!(
         eval_text("to_text(time.from_unix(0))"),
         "1970-01-01 00:00:00"
     );
+    assert_eq!(
+        eval_text("time.format(-0.5, \"%Y-%m-%d %H:%M:%S\")"),
+        "1969-12-31 23:59:59",
+        "the formatter must name the same second as from_unix"
+    );
+    // The number `time.unix` emits for a pre-epoch fraction must name the
+    // second the date value is in, not the one after it.
+    assert!(yes(
+        "time.from_unix(time.unix(time.parse(\"1969-12-31T23:59:59.5Z\"))) \
+         is time.datetime(1969, 12, 31, 23, 59, 59)"
+    ));
 }
 
 #[test]
@@ -879,6 +896,19 @@ fn edge_time_unix_reads_the_short_years_the_old_layout_accepted() {
     ));
 }
 
+/// The old `time.unix` layout also read unpadded fields and the leap second
+/// `:60` through chrono's `%m/%d/%H/%M/%S`. Those callers must keep their
+/// answers, so `time.unix` falls back to that layout while `time.parse` stays
+/// strict ISO and refuses both forms.
+#[test]
+fn edge_time_unix_keeps_the_old_layouts_unpadded_fields_and_leap_second() {
+    assert!(yes("time.unix(\"2024-1-1 0:0:0\") is 1704067200 and \
+         time.unix(\"2024-01-1 0:0:0\") is 1704067200 and \
+         time.unix(\"2016-12-31 23:59:60\") is 1483228799"));
+    assert_runtime_error(r#"time.parse("2024-1-1 0:0:0")"#, "time.parse");
+    assert_runtime_error(r#"time.parse("2016-12-31 23:59:60")"#, "time.parse");
+}
+
 #[test]
 fn edge_time_unix_reads_a_date_value_and_iso_text_with_an_offset() {
     // The date value and the text both name the epoch second the literal says.
@@ -893,6 +923,84 @@ fn edge_time_unix_reads_a_date_value_and_iso_text_with_an_offset() {
     assert!(yes(
         "time.format(time.from_unix(1704067200), \"%Y-%m-%d %H:%M:%S\") \
          is \"2024-01-01 00:00:00\""
+    ));
+}
+
+/// A Unix timestamp carries a fractional second, so `time.unix` must not
+/// silently drop the fraction `time.parse` kept. Every fraction here is
+/// binary-exact, so the assertion is on the numeric value rather than on a
+/// formatting round trip through the same code.
+#[test]
+fn edge_time_unix_preserves_a_parsed_fraction() {
+    assert!(yes(
+        "time.unix(time.parse(\"2024-02-29T23:59:58.5Z\")) is 1709251198.5 and \
+         time.unix(time.parse(\"2024-02-29T23:59:58.25Z\")) is 1709251198.25 and \
+         time.unix(time.parse(\"2024-02-29T23:59:58.75Z\")) is 1709251198.75 and \
+         time.unix(time.parse(\"1969-12-31T23:59:59.5Z\")) is -0.5 and \
+         time.unix(time.parse(\"2024-01-01T00:00:00.5+02:00\")) is 1704060000.5 and \
+         time.unix(time.parse(\"2024-02-29T23:59:58Z\")) is 1709251198"
+    ));
+}
+
+/// An `f64` cannot hold every nanosecond at 2024's magnitude. A fraction
+/// within half an ulp of 1 used to round the addition up to the next whole
+/// second, so the timestamp named 23:59:59 while the date value still named
+/// 23:59:58.999999999. The answer must stay inside the second it floored to,
+/// including at the positive window edge where the rounded value was
+/// `+10000-01-01`.
+#[test]
+fn edge_time_unix_keeps_a_near_one_fraction_inside_its_second() {
+    assert!(yes(
+        "set stamp to time.unix(time.parse(\"2024-02-29T23:59:58.999999999Z\"))\n\
+         stamp is greater than or equal to 1709251198 and \
+         stamp is less than 1709251199 and \
+         time.from_unix(stamp) is time.datetime(2024, 2, 29, 23, 59, 58)"
+    ));
+    assert!(yes(
+        "set edge to time.unix(time.parse(\"9999-12-31T23:59:59.999999999Z\"))\n\
+         edge is greater than or equal to 253402300799 and \
+         edge is less than 253402300800 and \
+         time.from_unix(edge) is time.datetime(9999, 12, 31, 23, 59, 59)"
+    ));
+}
+
+#[test]
+fn edge_time_unix_fraction_agrees_across_engines_and_text() {
+    let source = "\
+        set d to time.parse(\"2024-02-29T23:59:58.5Z\")\n\
+        set stamp to time.unix(d)\n\
+        {stamp: stamp, whole: time.unix(time.parse(\"2024-02-29T23:59:58Z\")), \
+         text: to_text(d), formatted: time.format(d, \"%Y-%m-%dT%H:%M:%S%.f\")}\n";
+    assert_eq!(
+        tree_walk(source),
+        bytecode(source),
+        "the two engines disagree about a fractional Unix timestamp"
+    );
+    // The fraction survives both the text round trip and the formatter, so the
+    // timestamp, the date text and the chosen layout name the same instant.
+    assert!(yes(
+        "set d to time.parse(\"2024-02-29T23:59:58.5Z\")\n\
+         time.unix(to_text(d)) is time.unix(d) and \
+         time.format(d, \"%Y-%m-%dT%H:%M:%S%.f\") is \"2024-02-29T23:59:58.500\""
+    ));
+}
+
+/// The window ends at `10000-01-01T00:00:00Z`, so the fraction in that final
+/// second is past the end. It must be a catchable `time.unix` error rather than
+/// a timestamp `time.format` then refuses, while the whole boundary second
+/// itself stays accepted.
+#[test]
+fn edge_time_unix_refuses_a_fraction_past_the_positive_window_edge() {
+    assert_runtime_error(
+        "time.unix(time.parse(\"+10000-01-01T00:00:00.5Z\"))",
+        "time.unix",
+    );
+    assert!(yes("set caught to 0\n\
+         try\n    say time.unix(time.parse(\"+10000-01-01T00:00:00.5Z\"))\n\
+         catch error of Runtime\n    set caught to 1\nend\n\
+         caught is 1"));
+    assert!(yes(
+        "time.unix(time.parse(\"10000-01-01T00:00:00Z\")) is 253402300800"
     ));
 }
 
@@ -989,6 +1097,27 @@ fn edge_time_parse_refuses_each_out_of_range_field_at_its_position() {
             "`{text}` must be a catchable Runtime error"
         );
     }
+}
+
+/// `chrono` cannot hold a year outside its calendar range, and the refusal
+/// must name the year rather than the day field. A real year with an
+/// impossible day still blames the day at its own position.
+#[test]
+fn edge_time_parse_names_the_year_when_the_calendar_cannot_hold_it() {
+    for text in ["999999-01-01", "262143-01-01", "-262144-01-01"] {
+        let message = runtime_error(&format!("time.parse(\"{text}\")"));
+        assert!(
+            message.contains("time.parse")
+                && message.contains("position 0")
+                && message.contains("year"),
+            "`{text}` must be refused at the year, got `{message}`"
+        );
+    }
+    let day = runtime_error(r#"time.parse("2024-02-30")"#);
+    assert!(
+        day.contains("position 8") && day.contains("day"),
+        "a real year with an impossible day must still name the day, got `{day}`"
+    );
 }
 
 #[test]
