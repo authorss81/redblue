@@ -2,13 +2,14 @@
 
 **Status**: survey. It is measured against the tree this commit sits on, and
 every claim below carries the line that proves it. Rank 2 was closed by
-phase-095; rank 6 gained date arithmetic in phase-096 but still cannot parse a
-date; the entries are kept so the ranking and its history stay readable.
+phase-095; rank 6 gained date arithmetic in phase-096 and text parsing and
+formatting in phase-097; the entries are kept so the ranking and its history
+stay readable.
 
-- **Builtins in the registry**: 84 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1163`,
-  which closes with `"input"` at `src/stdlib.rs:1247`.
+- **Builtins in the registry**: 85 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1165`,
+  which closes with `"input"` at `src/stdlib.rs:1250`.
 - **Modules a dotted call may name**: 12 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 62 — `stdlib::MODULE_MEMBERS` at
+- **Dotted members those modules accept**: 63 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:63`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
@@ -98,7 +99,7 @@ survey measures against, and it is short.
 | `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:101` |
 | `sys` | `argv` | `src/stdlib.rs:104` |
 | `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length` | `src/stdlib.rs:106` |
-| `time` | `now`, `sleep`, `format`, `unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:128` |
+| `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:128` |
 
 Two observations from that table that the rest of this document depends on:
 
@@ -158,7 +159,7 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:859` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:861` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -258,34 +259,30 @@ Refused as `RuntimeError: Module 'text' has no function 'pad_left'`.
 
 ## 6. No date or time arithmetic, and one parseable date format
 
-- **Blocked programs**: 4 — 2, 9, 10, 11
+- **Blocked programs**: 4 — 2, 9, 10, 11 (at survey time; 0 since phase-097)
 - **Implementable**: binding-required
 - **Rust crate**: `chrono`
-- **Evidence**: `src/stdlib.rs:128` — the `time` row now carries the date and
+- **Evidence**: `src/stdlib.rs:128` — the `time` row carries the date and
 duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
-`add_*` movers), and `time.from_unix` turns a Unix timestamp into a date, but
-text still cannot enter the arithmetic. `src/runtime.rs:591` shows what
-`time.unix` accepts: exactly `%Y-%m-%d %H:%M:%S` and nothing else, and it
-answers a number. `time.format` (`src/runtime.rs:1306`) is a strftime
-pass-through, the other numeric direction that works.
-- **What phase-096 changed**: date values, durations and calendar arithmetic are
-  now first class, and `time.from_unix` converts numeric epoch seconds into a
-  date. What remains is the text edge: there is no `time.parse`, and `time.unix`
-  still answers a number, so a birthdate read from text cannot enter the
-  arithmetic.
+`add_*` movers), plus `time.parse` added by phase-097. `src/runtime.rs:717`
+parses the ISO-8601 forms, including an offset and a fraction, into the date
+value; `src/runtime.rs:1668` formats a date or a numeric timestamp. `time.unix`
+now reads the same parser and also accepts a date value, so a birthdate read
+from text can enter the arithmetic. `time.from_unix` remains the numeric inverse.
+- **What phase-097 changed**: text parsing and caller-chosen formatting are now
+one date model. `time.parse` accepts a date-only or date-and-time ISO-8601 text,
+optionally with `.fraction`, `Z` or `±HH:MM`; a zone-free text is read as UTC.
+Malformed text is a catchable `Runtime` error naming the byte position.
 - **Note**: `chrono` is already a dependency (`Cargo.toml:32`) and already used
-  at `src/runtime.rs:1318`. The gap is the surface, not the crate — which makes
-  this the cheapest binding on the list.
+  at `src/runtime.rs:717`. The gap was the surface, not the crate.
 - **Why**: age in years, "3 days ago", a month-end report and a file renamed by
   its date all need arithmetic. A language that can read the clock but cannot move
   it is a language that can log and not schedule.
 
 ```redblue
-set born to time.unix("1990-03-04 00:00:00")
+set born to time.parse("1990-03-04T00:00:00Z")
 say time.add_days(born, 365)
 ```
-
-Refused as `RuntimeError: time.add_days requires a date, but was given a number`.
 
 ## 7. No directories, no globbing, no stat
 
