@@ -226,7 +226,8 @@ bytes.write(path, bytes) // Write a byte list to a file
 ```
 time.now()             // Get current timestamp
 time.sleep(seconds) // Sleep for N seconds
-time.format(timestamp, "format")
+time.format(timestamp_or_date, "format")
+time.parse("YYYY-MM-DDTHH:MM:SS+HH:MM")         // ISO-8601 text to a date
 time.unix("YYYY-MM-DD HH:MM:SS")
 time.from_unix(seconds)                        // Seconds to a date, read as UTC
 time.date(year, month, day)                    // A date at midnight

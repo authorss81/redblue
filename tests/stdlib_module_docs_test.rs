@@ -813,6 +813,11 @@ say "slept""#
             "1970\n".into(),
         ),
         (
+            "time_parse",
+            r#"say to_text(time.parse("2024-02-29T23:59:58Z"))"#.into(),
+            "2024-02-29 23:59:58\n".into(),
+        ),
+        (
             "time_unix",
             r#"say time.unix("2024-01-01 00:00:00")"#.into(),
             "1704067200\n".into(),
