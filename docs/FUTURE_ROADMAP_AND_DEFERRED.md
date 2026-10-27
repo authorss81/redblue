@@ -116,6 +116,19 @@ The following VM and memory optimizations are queued to close the performance ga
 ### Phase 143: Structural Cycle-Break Collector
 - **Goal**: Implement a trial-deletion cycle collector for reference-counted cyclic structures (records referencing records), guaranteeing deterministic memory release without stop-the-world GC pauses.
 
+### Phase 144: High-Precision Euclidean Time Math & POSIX Compliance
+- **Goal**: Upgrade all numeric timestamp conversions (`time.from_unix`, `time.format`, and temporal arithmetic) to use mathematical `floor` / Euclidean division ($[s, s+1)$ intervals), matching POSIX `timespec`, Python (`datetime.fromtimestamp`), Go (`time.Unix`), and Rust (`chrono::DateTime::from_timestamp`).
+- **Context & Motivation**:
+  - In Phase 096, `time.from_unix` and `time.format` initially implemented numeric instant conversions using Rust's direct `as i64` cast, which truncates toward zero. This created a double-bucket anomaly around epoch where both $+0.5\text{s}$ and $-0.5\text{s}$ collapsed into `1970-01-01 00:00:00`, erasing the second `1969-12-31 23:59:59` for fractional pre-epoch timestamps.
+  - Phase 097 added `time.parse` and preserved the legacy truncation behavior for raw numbers to avoid breaking pre-existing Phase 096 test assertions (`edge_time_from_unix_truncates_a_fractional_second_like_time_format`), documenting the asymmetry in `REPORT.md`.
+  - For high-accuracy projects (financial ledgers, astronomy, scientific telemetry, and microsecond event logging), timeline continuity requires Euclidean floor division so that $-0.5\text{s}$ correctly resolves to `1969-12-31 23:59:59.500`.
+- **Implementation Tasks**:
+  1. Update `seconds_for_instant` across the runtime: $\text{sec} = \lfloor t \rfloor$ and $\text{nanos} = (t - \lfloor t \rfloor) \times 10^9$.
+  2. Guarantee symmetric two-way round-trip invariance: $\text{time.unix}(\text{time.from\_unix}(t)) == t$ across all signed floating-point timestamps.
+  3. Formally update `SPEC.md` to document POSIX Euclidean division for signed fractional timestamps.
+  4. Formally re-scope `edge_time_from_unix_truncates_a_fractional_second_like_time_format` to `edge_time_from_unix_floors_negative_timestamps_posix_compliant` as an explicit, documented language upgrade.
+  5. Add high-precision astronomical and pre-epoch epoch-boundary tests.
+
 ### 4.3 Why Performance Optimizations Must Precede Bootstrapping (Self-Hosting)
 
 The project includes a 140 KB compiler written in pure Redblue (`bootstrap/compiler.rb`). The ultimate self-hosting milestone requires the S3 fixed-point bootstrap ladder (`docs/BOOTSTRAP.md`):
@@ -175,6 +188,6 @@ Rather than building the Operating System inside the `authorss81/redblue` langua
    - **Do not modify `rbops/phases.json` now.**
    - Keeping the active queue fixed at 126 phases ensures the current CI pipeline runs uninterrupted without merge conflicts or moving target completion dates (finishing ~October 30–31).
 2. **At Phase 126 Completion**:
-   - Append Phases 127 through 143 (Visual Polish, Real-World Apps, and VM Optimizations) to the end of `rbops/phases.json`.
+   - Append Phases 127 through 144 (Visual Polish, Real-World Apps, VM Optimizations, and High-Precision Time Math) to the end of `rbops/phases.json`.
    - Initialize `authorss81/rbos` as a standalone repo for OS development.
    - Because `phases.json` operates strictly as a FIFO queue, they will seamlessly trigger one by one.
