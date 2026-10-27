@@ -321,6 +321,18 @@ impl Value {
     }
 }
 
+/// The text a date prints as: `YYYY-MM-DD HH:MM:SS`, with the fractional
+/// second appended when the value holds one.
+///
+/// `%.f` writes the fraction only when it is non-zero, and uses the shortest
+/// of three, six or nine digits that keeps every digit, so a date with no
+/// fraction keeps the text it always had. This is the one text form `say`,
+/// `to_text` and JSON use, so a parsed fraction survives a round trip through
+/// `to_text` instead of being silently dropped.
+pub(crate) fn date_text(date: NaiveDateTime) -> String {
+    date.format("%Y-%m-%d %H:%M:%S%.f").to_string()
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -350,7 +362,7 @@ impl fmt::Display for Value {
             Value::Function(function) => write!(f, "<function {}>", function.name),
             Value::Builtin(name) => write!(f, "<builtin {}>", name),
             Value::Object(_, _) => write!(f, "<object>"),
-            Value::Date(date) => write!(f, "{}", date.format("%Y-%m-%d %H:%M:%S")),
+            Value::Date(date) => write!(f, "{}", date_text(*date)),
             Value::Duration(duration) => write!(f, "{}", display_duration(*duration)),
         }
     }

@@ -2622,7 +2622,7 @@ pub(crate) fn json_stringify(value: &Value) -> String {
         Value::Function(_) => "null".to_string(),
         Value::Builtin(_) => "null".to_string(),
         Value::Object(_, _) => "null".to_string(),
-        Value::Date(date) => json_escape_text(&date.format("%Y-%m-%d %H:%M:%S").to_string()),
+        Value::Date(date) => json_escape_text(&crate::value::date_text(*date)),
         Value::Duration(duration) => format!("{}", duration.as_seconds_f64()),
     }
 }

@@ -1091,3 +1091,87 @@ fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_parsing_and_formatting_date
         "the two engines disagree about a parse refusal"
     );
 }
+
+/// A fraction that `time.parse` kept must still be in the text a program
+/// prints, so `to_text` round-trips the instant rather than dropping it.
+#[test]
+fn edge_date_text_keeps_a_parsed_fraction_and_round_trips() {
+    assert_eq!(
+        eval_text(r#"to_text(time.parse("2024-02-29T23:59:58.123456789Z"))"#),
+        "2024-02-29 23:59:58.123456789"
+    );
+    assert!(yes(
+        "set d to time.parse(\"2024-02-29T23:59:58.123456789Z\")\n\
+         time.parse(to_text(d)) is d and \
+         time.parse(to_text(d)).nanosecond is d.nanosecond"
+    ));
+    // A date with no fraction keeps exactly the text it always had.
+    assert_eq!(
+        eval_text("to_text(time.date(2024, 2, 9))"),
+        "2024-02-09 00:00:00"
+    );
+    // JSON is the same text form, so the two printers cannot disagree.
+    assert_eq!(
+        eval_text(r#"json.stringify(time.parse("2024-02-29T23:59:58.5Z"))"#),
+        "\"2024-02-29 23:59:58.500\""
+    );
+}
+
+/// The fraction is written with three, six or nine digits, the shortest form
+/// that keeps every digit, and a zero fraction writes no mark at all.
+#[test]
+fn edge_date_text_uses_the_shortest_fraction_without_losing_precision() {
+    for (text, expected) in [
+        ("2024-02-29T23:59:58.1Z", "2024-02-29 23:59:58.100"),
+        ("2024-02-29T23:59:58.123Z", "2024-02-29 23:59:58.123"),
+        ("2024-02-29T23:59:58.123456Z", "2024-02-29 23:59:58.123456"),
+        (
+            "2024-02-29T23:59:58.123456789Z",
+            "2024-02-29 23:59:58.123456789",
+        ),
+        ("2024-02-29T23:59:58.000Z", "2024-02-29 23:59:58"),
+    ] {
+        assert_eq!(
+            eval_text(&format!("to_text(time.parse(\"{text}\"))")),
+            expected,
+            "`{text}` must print as `{expected}`"
+        );
+    }
+}
+
+/// Appending a second fraction to the text a date printed is trailing garbage,
+/// and the refusal names where it starts and stays catchable.
+#[test]
+fn edge_date_text_round_trip_refuses_trailing_fraction_text() {
+    let source = r#"time.parse("2024-02-29 23:59:58.500.250")"#;
+    let result = eval(source);
+    assert!(
+        result.is_err(),
+        "a second fraction after a date's text must be refused"
+    );
+    match result {
+        Err(Error::Runtime(message, _)) => assert!(
+            message.contains("time.parse") && message.contains("position 23"),
+            "the trailing fraction must be named at its position, got `{message}`"
+        ),
+        other => panic!("expected a Runtime error, got {other:?}"),
+    }
+    assert!(yes("set caught to 0\n\
+         try\n    say time.parse(\"2024-02-29 23:59:58.500.250\")\n\
+         catch error of Runtime\n    set caught to 1\nend\n\
+         caught is 1"));
+}
+
+/// Both engines must print and serialize a fractional date identically, not
+/// merely parse it to the same value.
+#[test]
+fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_fractional_date_text() {
+    let source = "\
+        set d to time.parse(\"2024-02-29T23:59:58.123456789+02:00\")\n\
+        {text: to_text(d), json: json.stringify(d), n: d.nanosecond}\n";
+    assert_eq!(
+        tree_walk(source),
+        bytecode(source),
+        "the two engines disagree about printing or serializing a fractional date"
+    );
+}

@@ -1543,7 +1543,7 @@ seconds (`HH:MM`), an offset without minutes, trailing characters, and a day
 that does not exist (`30` February, `29` February in a common year).
 `time.format` refuses a layout `chrono` cannot read the same way. A date can
 also be printed with `say` or `to_text`, which writes `YYYY-MM-DD HH:MM:SS` and
-drops the fraction.
+appends the fraction when the value holds one.
 
 ### regex
 

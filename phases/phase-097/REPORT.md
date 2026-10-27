@@ -3,15 +3,22 @@
 ## What changed
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +426 −35 | one ISO-8601 parser, date formatting, `time.parse`, date-aware `time.format` and `time.unix`, nanosecond property, bounded layout validation, and a comma decimal mark in the fraction |
+| `src/runtime.rs` | +427 −36 | one ISO-8601 parser, date formatting, `time.parse`, date-aware `time.format` and `time.unix`, nanosecond property, bounded layout validation, and a comma decimal mark in the fraction; JSON dates now use the shared text form |
+| `src/value.rs` | +14 −1 | one `date_text` printer shared by `say`, `to_text` and JSON, so a parsed fraction survives a round trip instead of being dropped |
 | `src/stdlib.rs` | +9 −2 | register `time.parse`, add the `time.parse` member, name and signature, widen the format/unix signatures |
-| `SPEC.md` | +40 −12 | document accepted and refused ISO-8601 layouts, date formatting, offset handling and the nanosecond property |
+| `SPEC.md` | +40 −12 | document accepted and refused ISO-8601 layouts, date formatting, offset handling, the nanosecond property, and fraction-preserving date text |
 | `README.md` | +2 −1 | time quick reference names `time.parse` and a date argument to `time.format` |
 | `SURVEY.md` | +21 −24 | rank 6 closed, inventory 85 builtins and 63 dotted members, citations re-anchored |
-| `tests/time_builtin_test.rs` | +310 | fifteen tests for parsing, formatting, conversion, refusals and cross-engine agreement |
+| `tests/time_builtin_test.rs` | +394 | nineteen tests for parsing, formatting, conversion, refusals, fraction-preserving text and cross-engine agreement |
 | `tests/unreviewed_work_ack_test.rs` | +1 | names phase-097's delivery subject in the rule that acknowledges the in-flight phase's commit |
 | `tests/stdlib_module_docs_test.rs` | +5 | an answerable-program row for `time.parse` |
 | `tests/doc_blocks_runs.txt` | +2 −2 | time and date documentation blocks re-anchored after the SPEC edits |
+
+The ISO-8601 parser, `time.parse`, the date-aware `time.format`/`time.unix` and
+their tests were merged by the previous attempt. This resumed run added the one
+missing round-trip property they left behind: the fraction a parse kept was
+dropped by `say`/`to_text`/JSON, so this run shares one `date_text` printer and
+pins it with four new tests. No working code was removed.
 
 ## Behaviour
 `time.parse(text)` reads ISO-8601 into a date value. It accepts a date only
@@ -19,7 +26,10 @@
 digits, and an optional `Z` or `±HH:MM` offset. An offset is applied, so
 `2024-01-01T12:00:00+02:00` is the literal date `2024-01-01 10:00:00`. A text
 without a zone is read as UTC, the timezone stance phase-096 already documented.
-The fraction is kept in the date value and is readable as `nanosecond`.
+The fraction is kept in the date value, is readable as `nanosecond`, and is
+written by `say`, `to_text` and JSON: `to_text(time.parse(...))` now carries the
+fraction with three, six or nine digits, so the text round-trips through
+`time.parse`. A date with no fraction keeps the text it always had.
 
 `time.format` now accepts a date value as well as the numeric timestamp it
 always accepted, and still uses `%Y-%m-%d %H:%M:%S` when no layout is given.
@@ -56,6 +66,10 @@ refused the same way rather than panicking in its display implementation.
 | `edge_time_parse_reads_a_space_separator_and_a_date_only_as_utc` | space separator, timezone-less date and midnight |
 | `edge_time_parse_refuses_a_lone_fraction_mark_and_an_offset_without_minutes` | malformed input at an exact position, catchability |
 | `edge_time_unix_refuses_malformed_text_and_wrong_types` | failure channel for malformed text and wrong argument kinds |
+| `edge_date_text_keeps_a_parsed_fraction_and_round_trips` | fraction preservation through `to_text` and JSON, zero-fraction boundary, `time.parse` round trip |
+| `edge_date_text_uses_the_shortest_fraction_without_losing_precision` | numeric boundary: three, six and nine fraction digits, zero fraction writes no mark |
+| `edge_date_text_round_trip_refuses_trailing_fraction_text` | malformed input: a second fraction is refused at position 23 and is catchable |
+| `edge_the_tree_walker_and_the_bytecode_vm_agree_on_fractional_date_text` | cross-engine text, JSON and nanosecond agreement for a fractional date |
 
 ## Mandatory edge-case matrix
 | Row | Status |
@@ -77,7 +91,7 @@ refused the same way rather than panicking in its display implementation.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 77 test binaries, 2266 passed, 0 failed |
+| `cargo test --all-targets` | 77 test binaries, 2270 passed, 0 failed |
 | `../rbops/verify.sh phase-097` | pass |
 
 ## Invariants touched
@@ -86,6 +100,9 @@ refused the same way rather than panicking in its display implementation.
 - `time.unix` accepts the ISO-8601 text `time.parse` accepts, a superset of the
   old fixed layout, so old callers keep their answers.
 - A date property `nanosecond` is added; existing date properties are unchanged.
+- A date's printed text now keeps a non-zero fraction. Dates without a fraction
+  print exactly as before, so every existing `say`/`to_text`/JSON answer for
+  them is unchanged.
 - The list of date values, `.rb` extension, grammar, and error kinds are
   unchanged.
 
@@ -107,7 +124,8 @@ refused the same way rather than panicking in its display implementation.
 - `time.parse` does not take a caller-chosen input layout; it accepts the ISO
   shapes documented in `SPEC.md` and refuses everything else. A layout-based
   parser is a separate capability and is not needed for the ISO-8601 finding.
-- A date's display text and `to_text` drop the fraction even though the value
-  keeps it; `time.format` and the `nanosecond` property expose it.
+- A date value is timezone-naive, so the offset a parsed text carried is applied
+  and then forgotten. The instant is correct, but printing it back cannot name
+  the original offset.
 - `time.parse` does not enforce the `time.format` numeric window; a date outside
   it can be constructed, but `time.unix` refuses to convert it, as documented.
