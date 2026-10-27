@@ -849,6 +849,36 @@ fn edge_time_format_of_a_date_pads_and_honours_the_chosen_layout() {
     );
 }
 
+/// The numeric timestamp branch formats a UTC `DateTime`, not a naive value.
+/// A naive value has no zone, so `%Z` and `%z` rendered as empty text even
+/// though the instant was UTC; the zone-bearing layouts must still name UTC.
+#[test]
+fn edge_time_format_of_a_numeric_timestamp_keeps_its_utc_zone() {
+    assert_eq!(
+        eval_text(r#"time.format(0, "%Z")"#),
+        "UTC",
+        "a numeric timestamp is UTC and must name its zone"
+    );
+    assert_eq!(
+        eval_text(r#"time.format(0, "%z")"#),
+        "+0000",
+        "a numeric timestamp must render its UTC offset"
+    );
+}
+
+/// The old `time.unix` layout went through chrono's `%Y`, which reads one to
+/// three digit years. Those callers must keep their answers, so the ISO parser
+/// accepts the same short years rather than narrowing the old surface.
+#[test]
+fn edge_time_unix_reads_the_short_years_the_old_layout_accepted() {
+    assert!(yes(
+        "time.unix(\"999-01-01 00:00:00\") is -30641760000 and \
+         time.unix(\"99-01-01 00:00:00\") is -59042995200 and \
+         time.unix(\"0999-01-01 00:00:00\") is -30641760000 and \
+         time.parse(\"999-01-01\") is time.datetime(999, 1, 1, 0, 0, 0)"
+    ));
+}
+
 #[test]
 fn edge_time_unix_reads_a_date_value_and_iso_text_with_an_offset() {
     // The date value and the text both name the epoch second the literal says.
@@ -980,6 +1010,65 @@ fn edge_time_parse_keeps_leap_days_and_refuses_leap_seconds() {
         runtime_error(r#"time.parse("2024-02-29T23:59:60Z")"#).contains("leap second"),
         "a leap second must be refused rather than accepted silently"
     );
+}
+
+#[test]
+fn edge_time_parse_accepts_a_comma_fraction_mark_like_iso_8601() {
+    // ISO-8601 permits either `.` or `,` before the fractional second. Log
+    // lines and CSVs from locales that write a decimal comma use the latter.
+    assert!(yes(
+        "set comma to time.parse(\"2024-02-29T23:59:58,123456789Z\")\n\
+         set dot to time.parse(\"2024-02-29T23:59:58.123456789Z\")\n\
+         comma is dot and comma.nanosecond is 123456789"
+    ));
+    assert_eq!(
+        eval_text(r#"time.format(time.parse("2024-02-29T03:04:05,5Z"), "%S.%f")"#),
+        "05.500000000",
+        "a comma fraction must reach the formatter with the same value"
+    );
+}
+
+#[test]
+fn edge_time_parse_reads_a_space_separator_and_a_date_only_as_utc() {
+    assert!(yes("time.parse(\"2024-02-29 23:59:58\") is \
+         time.datetime(2024, 2, 29, 23, 59, 58) and \
+         time.parse(\"2024-02-29T23:59:58\") is \
+         time.datetime(2024, 2, 29, 23, 59, 58) and \
+         time.parse(\"2024-02-29\") is time.date(2024, 2, 29)"));
+}
+
+#[test]
+fn edge_time_parse_refuses_a_lone_fraction_mark_and_an_offset_without_minutes() {
+    let fraction = runtime_error(r#"time.parse("2024-02-29T23:59:58,")"#);
+    assert!(
+        fraction.contains("position 20") && fraction.contains("decimal mark"),
+        "a comma with no digits must be refused where it is written, got `{fraction}`"
+    );
+    let offset = runtime_error(r#"time.parse("2024-02-29T23:59:58+02")"#);
+    assert!(
+        offset.contains("position 22") && offset.contains("offset"),
+        "an offset with no minutes must be refused at the end, got `{offset}`"
+    );
+    assert!(yes("set caught to 0\n\
+         try\n    say time.parse(\"2024-02-29T23:59:58,\")\n\
+         catch error of Runtime\n    set caught to 1\nend\n\
+         caught is 1"));
+}
+
+#[test]
+fn edge_time_unix_refuses_malformed_text_and_wrong_types() {
+    for source in [
+        "time.unix(\"not a timestamp\")",
+        "time.unix(5)",
+        "time.unix([\"2024-02-29\"])",
+        "time.unix()",
+    ] {
+        assert_runtime_error(source, "time.unix");
+    }
+    assert!(yes("set caught to 0\n\
+         try\n    say time.unix(\"not a timestamp\")\n\
+         catch error of Runtime\n    set caught to 1\nend\n\
+         caught is 1"));
 }
 
 #[test]

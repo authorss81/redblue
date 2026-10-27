@@ -640,14 +640,15 @@ fn date_digits(
     Ok(value)
 }
 
-/// Reads the year, which is at least four digits and may carry a sign.
+/// Reads the year, which is one or more digits and may carry a sign.
 ///
-/// Four digits is ISO-8601's ordinary form; more are accepted because
+/// Four digits is ISO-8601's ordinary form; one to three are accepted because
+/// the old `time.unix` went through chrono's `%Y` parser, which reads them, and
+/// old callers must keep their answers. More than four are accepted because
 /// `time.format` and `to_text` write the shared window's last instant as
 /// chrono's expanded year `+10000`, and `time.unix` must read back what those
-/// builtins write. The old `time.unix` went through chrono's `%Y` parser, which
-/// rejected years above 9999; this parser is what widens the window, and
-/// `unix_seconds_for` refuses anything beyond it.
+/// builtins write. The old `%Y` parser rejected years above 9999; this parser
+/// is what widens the window, and `unix_seconds_for` refuses anything beyond it.
 fn date_year(text: &str, pos: &mut usize, builtin: &str, span: Span) -> Result<i32> {
     let bytes = text.as_bytes();
     let start = *pos;
@@ -666,12 +667,12 @@ fn date_year(text: &str, pos: &mut usize, builtin: &str, span: Span) -> Result<i
     while matches!(bytes.get(*pos), Some(byte) if byte.is_ascii_digit()) {
         *pos += 1;
     }
-    if *pos - digits_start < 4 {
+    if *pos == digits_start {
         return Err(date_parse_error(
             text,
             digits_start,
             builtin,
-            "a year of at least four digits",
+            "a year of at least one digit",
             span,
         ));
     }
@@ -701,11 +702,12 @@ fn date_expect(
 
 /// Parses the ISO-8601 timestamp forms the `time` module accepts.
 ///
-/// Accepted: `YYYY-MM-DD`, optionally followed by `T` (or a space) and
-/// `HH:MM:SS`, an optional fraction of one to nine digits after `.`, and an
-/// optional `Z` or `±HH:MM` offset. A timestamp without a zone is read as UTC,
-/// the same stance date arithmetic already has. The offset is applied, so the
-/// answer is always the UTC reading of the instant the text named.
+/// Accepted: `YYYY-MM-DD` (the year is one or more digits), optionally followed
+/// by `T` (or a space) and `HH:MM:SS`, an optional fraction of one to nine
+/// digits after `.` or `,`, and an optional `Z` or `±HH:MM` offset. A timestamp
+/// without a zone is read as UTC, the same stance date arithmetic already has.
+/// The offset is applied, so the answer is always the UTC reading of the
+/// instant the text named.
 ///
 /// Not accepted: leap seconds (`:60`), a fraction with no digits or more than
 /// nine, a `HH:MM` time with no seconds, an offset without minutes, trailing
@@ -804,7 +806,7 @@ fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime>
         ));
     }
     let mut nanos = 0u32;
-    if text.as_bytes().get(pos) == Some(&b'.') {
+    if matches!(text.as_bytes().get(pos), Some(b'.') | Some(b',')) {
         pos += 1;
         let fraction_start = pos;
         while matches!(text.as_bytes().get(pos), Some(byte) if byte.is_ascii_digit()) {
@@ -816,7 +818,7 @@ fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime>
                 text,
                 pos,
                 builtin,
-                "one to nine digits after the decimal point",
+                "one to nine digits after the decimal mark",
                 span,
             ));
         }
@@ -825,7 +827,7 @@ fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime>
                 text,
                 fraction_start,
                 builtin,
-                "at most nine digits after the decimal point",
+                "at most nine digits after the decimal mark",
                 span,
             ));
         }
@@ -922,7 +924,16 @@ fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime>
 /// fail inside chrono's writer with `fmt::Error`, which `to_string` would turn
 /// into a panic. Writing into a `String` keeps that failure an ordinary
 /// `Result` the caller can catch.
-fn formatted_date(date: NaiveDateTime, format: &str, builtin: &str, span: Span) -> Result<Value> {
+///
+/// The instant is a UTC `DateTime`, not a naive one, so a layout that renders a
+/// zone (`%Z`, `%z`, `%+`) names UTC instead of rendering nothing. Date values
+/// are read as UTC before they reach here.
+fn formatted_date(
+    date: chrono::DateTime<chrono::Utc>,
+    format: &str,
+    builtin: &str,
+    span: Span,
+) -> Result<Value> {
     if StrftimeItems::new(format).any(|item| matches!(item, Item::Error)) {
         return Err(Error::Runtime(
             format!("{builtin} does not understand the format {format:?}"),
@@ -1677,10 +1688,10 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                             span,
                         )
                     })?;
-                    formatted_date(tm.naive_utc(), &format, "time.format", span).map(Some)
+                    formatted_date(tm, &format, "time.format", span).map(Some)
                 }
                 Some(Value::Date(date)) => {
-                    formatted_date(*date, &format, "time.format", span).map(Some)
+                    formatted_date(date.and_utc(), &format, "time.format", span).map(Some)
                 }
                 _ => Err(Error::Runtime(
                     "time.format requires a date or a number and optional text".to_string(),

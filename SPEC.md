@@ -1525,21 +1525,25 @@ explicit offset in `time.parse` is applied to the reading.
 | date and time | `2024-02-29T23:59:58` | that clock reading, read as UTC |
 | space instead of `T` | `2024-02-29 23:59:58` | the same instant |
 | fraction | `2024-02-29T23:59:58.123456789` | the fraction is kept to the nanosecond |
+| comma fraction | `2024-02-29T23:59:58,123456789` | the same instant; ISO-8601 allows either mark |
 | `Z` zone | `2024-02-29T23:59:58Z` | the same instant |
 | offset zone | `2024-01-01T12:00:00+02:00` | `2024-01-01 10:00:00` in UTC |
 
-The year is at least four digits and may have more. An optional leading `-` or
-`+` is accepted, so the expanded-year forms `%Y` writes (`-10000` and `+10000`)
-read back. A timestamp with no zone is read as UTC, the same stance a date value
-has.
+The year is one or more digits. Four is ISO-8601's ordinary form; one to three
+are accepted because the old `time.unix` layout accepted them, and more than
+four are accepted because `%Y` writes the expanded year. An optional leading `-`
+or `+` is accepted, so the expanded-year forms `%Y` writes (`-10000` and
+`+10000`) read back. A timestamp with no zone is read as UTC, the same stance a
+date value has.
 
 Not accepted, each a catchable runtime error naming the builtin and the byte
 position where the text stopped matching: a leap second (`:60`), a fraction
-with no digits or more than nine, a time with no seconds (`HH:MM`), an offset
-without minutes, trailing characters, and a day that does not exist (`30`
-February, `29` February in a common year). `time.format` refuses a layout
-`chrono` cannot read the same way. A date can also be printed with `say` or
-`to_text`, which writes `YYYY-MM-DD HH:MM:SS` and drops the fraction.
+with no digits or more than nine after either decimal mark, a time with no
+seconds (`HH:MM`), an offset without minutes, trailing characters, and a day
+that does not exist (`30` February, `29` February in a common year).
+`time.format` refuses a layout `chrono` cannot read the same way. A date can
+also be printed with `say` or `to_text`, which writes `YYYY-MM-DD HH:MM:SS` and
+drops the fraction.
 
 ### regex
 

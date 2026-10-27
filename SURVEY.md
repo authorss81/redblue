@@ -99,7 +99,7 @@ survey measures against, and it is short.
 | `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:101` |
 | `sys` | `argv` | `src/stdlib.rs:104` |
 | `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length` | `src/stdlib.rs:106` |
-| `time` | `now`, `sleep`, `format`, `unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:128` |
+| `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:128` |
 
 Two observations from that table that the rest of this document depends on:
 
@@ -264,9 +264,9 @@ Refused as `RuntimeError: Module 'text' has no function 'pad_left'`.
 - **Rust crate**: `chrono`
 - **Evidence**: `src/stdlib.rs:128` — the `time` row carries the date and
 duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
-`add_*` movers), plus `time.parse` added by phase-097. `src/runtime.rs:705`
+`add_*` movers), plus `time.parse` added by phase-097. `src/runtime.rs:717`
 parses the ISO-8601 forms, including an offset and a fraction, into the date
-value; `src/runtime.rs:1634` formats a date or a numeric timestamp. `time.unix`
+value; `src/runtime.rs:1668` formats a date or a numeric timestamp. `time.unix`
 now reads the same parser and also accepts a date value, so a birthdate read
 from text can enter the arithmetic. `time.from_unix` remains the numeric inverse.
 - **What phase-097 changed**: text parsing and caller-chosen formatting are now
@@ -274,7 +274,7 @@ one date model. `time.parse` accepts a date-only or date-and-time ISO-8601 text,
 optionally with `.fraction`, `Z` or `±HH:MM`; a zone-free text is read as UTC.
 Malformed text is a catchable `Runtime` error naming the byte position.
 - **Note**: `chrono` is already a dependency (`Cargo.toml:32`) and already used
-  at `src/runtime.rs:705`. The gap was the surface, not the crate.
+  at `src/runtime.rs:717`. The gap was the surface, not the crate.
 - **Why**: age in years, "3 days ago", a month-end report and a file renamed by
   its date all need arithmetic. A language that can read the clock but cannot move
   it is a language that can log and not schedule.
