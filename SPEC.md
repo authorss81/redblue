@@ -1411,17 +1411,35 @@ them.
 set stamp to time.now()                  // a record: seconds, nanoseconds
 time.sleep(0.5)                          // pause for half a second
 say time.format(1704067200, "%Y-%m-%d")  // "2024-01-01"
+say time.format(time.date(2024, 2, 9))   // 2024-02-09 00:00:00
+say time.parse("2024-01-01T12:00:00+02:00") // 2024-01-01 10:00:00
 say time.unix("2024-01-01 00:00:00")     // 1704067200
 say time.from_unix(1704067200)           // 2024-01-01 00:00:00
 ```
 
 `time.now()` is a record of `seconds` and `nanoseconds` since
 1970-01-01T00:00:00Z, and `time.sleep` answers `nothing` once the pause is over.
-`time.format` takes a number of seconds since the same instant and a format
-string; with no format string it writes `%Y-%m-%d %H:%M:%S`. `time.unix` is the
-other direction: it takes `YYYY-MM-DD HH:MM:SS` and answers the seconds since
-the same instant, read as UTC wherever it runs; `time.from_unix(seconds)` is the
-inverse and turns such seconds into a date value, read as UTC too.
+`time.format` takes a date value or a number of seconds since the same instant
+and a format string; with no format string it writes `%Y-%m-%d %H:%M:%S`.
+`time.parse` reads an ISO-8601 timestamp as a date, applying any zone offset so
+the value is the UTC reading of the instant. `time.unix` is the other direction:
+it takes a timestamp text or a date value and answers the seconds since the same
+instant, read as UTC wherever it runs. A date that holds a fractional second
+answers a fractional number of seconds rather than dropping it, so
+`time.unix(time.parse("2024-02-29T23:59:58.5Z"))` is `1709251198.5`.
+`time.from_unix(seconds)` is the inverse and turns such seconds into a date
+value. A fractional number is truncated toward zero, the answer this builtin
+gave before `time.parse` existed, so `time.from_unix(-0.5)` is
+`1970-01-01 00:00:00` and `time.from_unix(-1.9)` is `1969-12-31 23:59:59`.
+Truncation applies only to converting a number into the legacy whole-second
+date; a date value that holds a fraction is still returned as a fractional
+timestamp by `time.unix`. For compatibility with the layout it read
+before `time.parse` existed, `time.unix` also accepts
+`YYYY-MM-DD HH:MM:SS` with one- or two-digit month, day, hour, minute and
+second fields, and a leap second (`:60`) in that layout answers the second it
+always did. The shared window ends at `10000-01-01T00:00:00Z`; a fraction in
+that final second is past the end, so `time.unix` refuses it instead of
+answering a number `time.format` will not take.
 
 `time.sleep` is the one call in this section that blocks — the other three are
 computed and returned immediately, so `time.format` and `time.unix` cost no wall
@@ -1481,7 +1499,7 @@ kinds they mixed, and `try … catch error of Runtime` can catch either. Adding 
 date to a date, or subtracting a date from a duration, is refused the same way.
 
 The components of a date are read as properties: `year`, `month`, `day`, `hour`,
-`minute`, `second`, and `weekday` (Monday is `1`, Sunday is `7`). The components
+`minute`, `second`, `nanosecond`, and `weekday` (Monday is `1`, Sunday is `7`). The components
 of a duration are `days`, `hours`, `minutes`, `seconds` (the remainder inside
 the last day, hour and minute), `total_seconds`, and `nanoseconds`. A negative
 span carries its sign in each component, so `time.duration(-1.5).seconds` is
@@ -1510,12 +1528,37 @@ no daylight-saving rule. The components are the same reading everywhere, so
 24 hours always lands on the same clock time on the next calendar day. Programs
 that need a zone, an offset, or a conversion to local time must carry that
 information themselves; this phase deliberately defines the zone-free value
-first. `time.format` and `time.unix` continue to read their seconds as UTC and
-are unchanged.
+first. A zone-free text is read as UTC by `time.parse` and `time.unix`; an
+explicit offset in `time.parse` is applied to the reading.
 
-`time.format` does not yet format a date value, and there is no parsing from a
-date text; those belong to the next phase. A date can be printed with `say` or
-`to_text`, which writes `YYYY-MM-DD HH:MM:SS`.
+`time.parse` accepts these ISO-8601 shapes, and nothing else:
+
+| Input | Example | Answer |
+|---|---|---|
+| date only | `2024-02-29` | midnight on that day |
+| date and time | `2024-02-29T23:59:58` | that clock reading, read as UTC |
+| space instead of `T` | `2024-02-29 23:59:58` | the same instant |
+| fraction | `2024-02-29T23:59:58.123456789` | the fraction is kept to the nanosecond |
+| comma fraction | `2024-02-29T23:59:58,123456789` | the same instant; ISO-8601 allows either mark |
+| `Z` zone | `2024-02-29T23:59:58Z` | the same instant |
+| offset zone | `2024-01-01T12:00:00+02:00` | `2024-01-01 10:00:00` in UTC |
+
+The year is one or more digits. Four is ISO-8601's ordinary form; one to three
+are accepted because the old `time.unix` layout accepted them, and more than
+four are accepted because `%Y` writes the expanded year. An optional leading `-`
+or `+` is accepted, so the expanded-year forms `%Y` writes (`-10000` and
+`+10000`) read back. A timestamp with no zone is read as UTC, the same stance a
+date value has.
+
+`time.parse` does not accept, each a catchable runtime error naming the builtin
+and the byte position where the text stopped matching: a leap second (`:60`), a
+fraction with no digits or more than nine after either decimal mark, a time with
+no seconds (`HH:MM`), an offset without minutes, trailing characters, and a day
+that does not exist (`30` February, `29` February in a common year). It also
+requires two digits for every field, unlike the old `time.unix` layout.
+`time.format` refuses a layout `chrono` cannot read the same way. A date can
+also be printed with `say` or `to_text`, which writes `YYYY-MM-DD HH:MM:SS` and
+appends the fraction when the value holds one.
 
 ### regex
 

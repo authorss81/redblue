@@ -16,8 +16,10 @@
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::format::{Item, StrftimeItems};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike};
 
 use crate::error::{Error, Result, Span};
@@ -102,6 +104,7 @@ fn date_property(date: NaiveDateTime, name: &str) -> Value {
         "minute" => date.minute() as f64,
         "second" => date.second() as f64,
         "weekday" => date.weekday().number_from_monday() as f64,
+        "nanosecond" => date.nanosecond() as f64,
         _ => return Value::Nothing,
     };
     Value::Number(number)
@@ -538,9 +541,10 @@ fn now() -> Result<SystemTime> {
 ///
 /// `SystemTime + Duration` panics when the addition overflows, and it does so
 /// from inside `std`, past every `Result` in this crate — `time.format(1e300)`
-/// aborted the process. The range is therefore checked here, and a timestamp
-/// that is not finite, not whole, or past what a date can name is a `Runtime`
-/// error. `timestamp as u64` is not usable for the conversion: it saturates, so
+/// aborted the process. The range is therefore checked here: a timestamp that
+/// is not finite or past what a date can name is a `Runtime` error, while a
+/// fractional timestamp truncates toward zero instead of being refused.
+/// `timestamp as u64` is not usable for the conversion: it saturates, so
 /// a negative timestamp would have quietly formatted as the epoch rather than
 /// as 1969.
 fn seconds_for_format(timestamp: f64, span: Span) -> Result<i64> {
@@ -560,8 +564,15 @@ fn seconds_for_instant(timestamp: f64, builtin: &str, span: Span) -> Result<i64>
         ));
     }
     // A timestamp with a fractional part keeps the behaviour it always had:
-    // `as` truncates toward zero, so `time.format(1.5)` is one second after the
-    // epoch. Refusing it would reject a program that used to work.
+    // `as` truncates toward zero, so `time.format(1.5)` is one second after
+    // the epoch and `time.format(-0.5)` is the epoch itself. Flooring a
+    // negative fraction instead moved every pre-epoch fraction one second
+    // earlier than `time.format` and `time.from_unix` answered before
+    // phase-097, which is a compatibility regression rather than a fix: the
+    // phase's contract is that the inputs these builtins already handled keep
+    // their answers. `time.unix` still answers a fractional number for a date
+    // that holds a fraction, so the pre-epoch instant is not lost; only the
+    // legacy whole-second conversion of a negative number stays truncated.
     // `i64::MAX` seconds is far past the last instant a `SystemTime` can hold,
     // and `chrono` cannot format one either, so the range is bounded here
     // rather than by whichever of the two overflows first. A timestamp before
@@ -578,30 +589,422 @@ fn seconds_for_instant(timestamp: f64, builtin: &str, span: Span) -> Result<i64>
     Ok(timestamp as i64)
 }
 
-/// The epoch seconds `time.unix` reports for a date `chrono` accepted.
+/// A refusal from the one text-to-date parser, naming where it stopped.
 ///
-/// `NaiveDateTime::parse_from_str` accepts a year as low as -262143, which
-/// counts to about -8.3e12 seconds — a number `time.format` refuses, so the two
-/// builtins disagreed about whether an instant existed. The parse itself is not
-/// the panic risk this phase found elsewhere (`timestamp()` is i64 arithmetic
-/// over a `chrono`-bounded year, so it cannot overflow), but the range is
-/// checked here anyway so `time.unix` and `time.format` accept exactly the same
-/// instants, and a date outside it is a catchable `Runtime` error naming
-/// `time.unix` rather than a number no other builtin will take.
-fn seconds_for_unix(text: &str, span: Span) -> Result<i64> {
-    let parsed =
-        chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").map_err(|_| {
-            Error::Runtime(
-                "Invalid date format, use YYYY-MM-DD HH:MM:SS".to_string(),
+/// The position is a byte offset into `text`, which is also a character offset
+/// because every accepted byte is ASCII. The offending characters are quoted
+/// with `text.get`, so a position inside a multi-byte character is reported
+/// without slicing through it.
+fn date_parse_error(text: &str, pos: usize, builtin: &str, expected: &str, span: Span) -> Error {
+    let found = text
+        .get(pos..)
+        .map(|rest| rest.chars().take(12).collect::<String>())
+        .unwrap_or_default();
+    let found = if found.is_empty() {
+        "the end of the text".to_string()
+    } else {
+        format!("`{found}`")
+    };
+    Error::Runtime(
+        format!("{builtin} could not parse at position {pos}: expected {expected}, found {found}"),
+        span,
+    )
+}
+
+/// Reads exactly `count` ASCII digits at `pos`, leaving `pos` after them.
+fn date_digits(
+    text: &str,
+    pos: &mut usize,
+    count: usize,
+    label: &str,
+    builtin: &str,
+    span: Span,
+) -> Result<u32> {
+    let bytes = text.as_bytes();
+    let start = *pos;
+    let mut value: u32 = 0;
+    for offset in 0..count {
+        let Some(byte) = bytes.get(start + offset) else {
+            return Err(date_parse_error(
+                text,
+                start,
+                builtin,
+                &format!("{count} digits for the {label}"),
+                span,
+            ));
+        };
+        if !byte.is_ascii_digit() {
+            return Err(date_parse_error(
+                text,
+                start + offset,
+                builtin,
+                &format!("{count} digits for the {label}"),
+                span,
+            ));
+        }
+        value = value * 10 + u32::from(byte - b'0');
+    }
+    *pos = start + count;
+    Ok(value)
+}
+
+/// Reads the year, which is one or more digits and may carry a sign.
+///
+/// Four digits is ISO-8601's ordinary form; one to three are accepted because
+/// the old `time.unix` went through chrono's `%Y` parser, which reads them, and
+/// old callers must keep their answers. More than four are accepted because
+/// `time.format` and `to_text` write the shared window's last instant as
+/// chrono's expanded year `+10000`, and `time.unix` must read back what those
+/// builtins write. The old `%Y` parser rejected years above 9999; this parser
+/// is what widens the window, and `unix_seconds_for` refuses anything beyond it.
+fn date_year(text: &str, pos: &mut usize, builtin: &str, span: Span) -> Result<i32> {
+    let bytes = text.as_bytes();
+    let start = *pos;
+    let sign = match bytes.get(*pos) {
+        Some(b'-') => {
+            *pos += 1;
+            -1
+        }
+        Some(b'+') => {
+            *pos += 1;
+            1
+        }
+        _ => 1,
+    };
+    let digits_start = *pos;
+    while matches!(bytes.get(*pos), Some(byte) if byte.is_ascii_digit()) {
+        *pos += 1;
+    }
+    if *pos == digits_start {
+        return Err(date_parse_error(
+            text,
+            digits_start,
+            builtin,
+            "a year of at least one digit",
+            span,
+        ));
+    }
+    let value: i64 = text[digits_start..*pos].parse().map_err(|_| {
+        date_parse_error(text, start, builtin, "a year that fits the calendar", span)
+    })?;
+    let signed = sign * value;
+    i32::try_from(signed)
+        .map_err(|_| date_parse_error(text, start, builtin, "a year that fits the calendar", span))
+}
+
+/// One character that the layout requires, such as the `-` between fields.
+fn date_expect(
+    text: &str,
+    pos: &mut usize,
+    wanted: u8,
+    builtin: &str,
+    expected: &str,
+    span: Span,
+) -> Result<()> {
+    if text.as_bytes().get(*pos) != Some(&wanted) {
+        return Err(date_parse_error(text, *pos, builtin, expected, span));
+    }
+    *pos += 1;
+    Ok(())
+}
+
+/// Parses the ISO-8601 timestamp forms the `time` module accepts.
+///
+/// Accepted: `YYYY-MM-DD` (the year is one or more digits), optionally followed
+/// by `T` (or a space) and `HH:MM:SS`, an optional fraction of one to nine
+/// digits after `.` or `,`, and an optional `Z` or `±HH:MM` offset. A timestamp
+/// without a zone is read as UTC, the same stance date arithmetic already has.
+/// The offset is applied, so the answer is always the UTC reading of the
+/// instant the text named.
+///
+/// Not accepted: leap seconds (`:60`), a fraction with no digits or more than
+/// nine, a `HH:MM` time with no seconds, an offset without minutes, trailing
+/// characters, and a date that does not exist (30 February, 29 February in a
+/// common year). Every refusal is a `Runtime` error naming `builtin` and the
+/// byte position where the expected text stopped matching.
+fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime> {
+    let mut pos = 0;
+    let year_start = pos;
+    let year = date_year(text, &mut pos, builtin, span)?;
+    date_expect(text, &mut pos, b'-', builtin, "a '-' after the year", span)?;
+    let month_start = pos;
+    let month = date_digits(text, &mut pos, 2, "month", builtin, span)?;
+    if !(1..=12).contains(&month) {
+        return Err(date_parse_error(
+            text,
+            month_start,
+            builtin,
+            "a month from 1 to 12",
+            span,
+        ));
+    }
+    date_expect(text, &mut pos, b'-', builtin, "a '-' after the month", span)?;
+    let day_start = pos;
+    let day = date_digits(text, &mut pos, 2, "day", builtin, span)?;
+    if !(1..=31).contains(&day) {
+        return Err(date_parse_error(
+            text,
+            day_start,
+            builtin,
+            "a day from 1 to 31",
+            span,
+        ));
+    }
+    let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
+        // `from_ymd_opt` also refuses a year outside the calendar's range.
+        // Blaming the day for `999999-01-01` named a field that was valid, so
+        // the year is checked separately and the refusal points at it.
+        if NaiveDate::from_ymd_opt(year, 1, 1).is_none() {
+            date_parse_error(
+                text,
+                year_start,
+                builtin,
+                "a year the calendar can represent",
+                span,
+            )
+        } else {
+            date_parse_error(
+                text,
+                day_start,
+                builtin,
+                "a day that exists in that month",
+                span,
+            )
+        }
+    })?;
+    if pos == text.len() {
+        return Ok(date.and_time(NaiveTime::MIN));
+    }
+    if !matches!(text.as_bytes().get(pos), Some(b'T') | Some(b' ')) {
+        return Err(date_parse_error(
+            text,
+            pos,
+            builtin,
+            "a 'T' or a space between the date and the time",
+            span,
+        ));
+    }
+    pos += 1;
+    let hour_start = pos;
+    let hour = date_digits(text, &mut pos, 2, "hour", builtin, span)?;
+    if hour > 23 {
+        return Err(date_parse_error(
+            text,
+            hour_start,
+            builtin,
+            "an hour from 0 to 23",
+            span,
+        ));
+    }
+    date_expect(text, &mut pos, b':', builtin, "a ':' after the hour", span)?;
+    let minute_start = pos;
+    let minute = date_digits(text, &mut pos, 2, "minute", builtin, span)?;
+    if minute > 59 {
+        return Err(date_parse_error(
+            text,
+            minute_start,
+            builtin,
+            "a minute from 0 to 59",
+            span,
+        ));
+    }
+    date_expect(
+        text,
+        &mut pos,
+        b':',
+        builtin,
+        "a ':' after the minute",
+        span,
+    )?;
+    let second_start = pos;
+    let second = date_digits(text, &mut pos, 2, "second", builtin, span)?;
+    if second > 59 {
+        return Err(date_parse_error(
+            text,
+            second_start,
+            builtin,
+            "a second from 0 to 59 (leap seconds are not accepted)",
+            span,
+        ));
+    }
+    let mut nanos = 0u32;
+    if matches!(text.as_bytes().get(pos), Some(b'.') | Some(b',')) {
+        pos += 1;
+        let fraction_start = pos;
+        while matches!(text.as_bytes().get(pos), Some(byte) if byte.is_ascii_digit()) {
+            pos += 1;
+        }
+        let digits = pos - fraction_start;
+        if digits == 0 {
+            return Err(date_parse_error(
+                text,
+                pos,
+                builtin,
+                "one to nine digits after the decimal mark",
+                span,
+            ));
+        }
+        if digits > 9 {
+            return Err(date_parse_error(
+                text,
+                fraction_start,
+                builtin,
+                "at most nine digits after the decimal mark",
+                span,
+            ));
+        }
+        let fraction: u32 = text[fraction_start..pos].parse().map_err(|_| {
+            date_parse_error(
+                text,
+                fraction_start,
+                builtin,
+                "a whole number of fractional-second digits",
                 span,
             )
         })?;
-    let seconds = parsed.and_utc().timestamp();
-    // The same window `seconds_for_format` uses, so the two agree on both sides.
-    const MAX_SECONDS: i64 = 253_402_300_800; // 10000-01-01T00:00:00Z
-    if !(-MAX_SECONDS..=MAX_SECONDS).contains(&seconds) {
+        nanos = fraction * 10u32.pow(9 - digits as u32);
+    }
+    let mut offset_seconds: i64 = 0;
+    match text.as_bytes().get(pos) {
+        None => {}
+        Some(b'Z') => pos += 1,
+        Some(byte @ (b'+' | b'-')) => {
+            let sign = if *byte == b'-' { -1 } else { 1 };
+            pos += 1;
+            let offset_hour_start = pos;
+            let offset_hour = date_digits(text, &mut pos, 2, "offset hour", builtin, span)?;
+            if offset_hour > 23 {
+                return Err(date_parse_error(
+                    text,
+                    offset_hour_start,
+                    builtin,
+                    "an offset hour from 0 to 23",
+                    span,
+                ));
+            }
+            date_expect(
+                text,
+                &mut pos,
+                b':',
+                builtin,
+                "a ':' between the offset's hours and minutes",
+                span,
+            )?;
+            let offset_minute_start = pos;
+            let offset_minute = date_digits(text, &mut pos, 2, "offset minute", builtin, span)?;
+            if offset_minute > 59 {
+                return Err(date_parse_error(
+                    text,
+                    offset_minute_start,
+                    builtin,
+                    "an offset minute from 0 to 59",
+                    span,
+                ));
+            }
+            offset_seconds = sign * i64::from(offset_hour * 3600 + offset_minute * 60);
+        }
+        Some(_) => {
+            return Err(date_parse_error(
+                text,
+                pos,
+                builtin,
+                "a 'Z' or a ±HH:MM offset",
+                span,
+            ))
+        }
+    }
+    if pos != text.len() {
+        return Err(date_parse_error(
+            text,
+            pos,
+            builtin,
+            "the end of the timestamp",
+            span,
+        ));
+    }
+    let time = NaiveTime::from_hms_nano_opt(hour, minute, second, nanos)
+        .ok_or_else(|| date_parse_error(text, hour_start, builtin, "a real clock time", span))?;
+    let local = date.and_time(time);
+    let offset = TimeDelta::try_seconds(offset_seconds)
+        .ok_or_else(|| date_parse_error(text, hour_start, builtin, "a real offset", span))?;
+    local.checked_sub_signed(offset).ok_or_else(|| {
+        date_parse_error(
+            text,
+            hour_start,
+            builtin,
+            "a timestamp the calendar can represent after applying the offset",
+            span,
+        )
+    })
+}
+
+/// Reads the fixed layout `time.unix` accepted before the shared ISO parser.
+///
+/// `chrono`'s `%Y-%m-%d %H:%M:%S` reads one- or two-digit month, day, hour,
+/// minute and second fields and accepts the leap second `:60`. The ISO parser
+/// is deliberately stricter, so `time.unix` falls back to this layout after it
+/// refuses, keeping the answers old callers already had. `time.parse` does not
+/// use this fallback: its surface is the ISO forms only.
+fn parse_legacy_unix_text(text: &str) -> Option<NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()
+}
+
+/// Formats a date with a caller-chosen layout, refusing a layout `chrono`
+/// cannot read rather than letting its display panic.
+///
+/// `Item::Error` catches text that is not a layout at all. Some layouts parse
+/// but cannot format — `%#z` is the parse-only permissive offset — and those
+/// fail inside chrono's writer with `fmt::Error`, which `to_string` would turn
+/// into a panic. Writing into a `String` keeps that failure an ordinary
+/// `Result` the caller can catch.
+///
+/// The instant is a UTC `DateTime`, not a naive one, so a layout that renders a
+/// zone (`%Z`, `%z`, `%+`) names UTC instead of rendering nothing. Date values
+/// are read as UTC before they reach here.
+fn formatted_date(
+    date: chrono::DateTime<chrono::Utc>,
+    format: &str,
+    builtin: &str,
+    span: Span,
+) -> Result<Value> {
+    if StrftimeItems::new(format).any(|item| matches!(item, Item::Error)) {
         return Err(Error::Runtime(
-            format!("time.unix cannot represent {text} as seconds from 1970-01-01T00:00:00Z"),
+            format!("{builtin} does not understand the format {format:?}"),
+            span,
+        ));
+    }
+    let mut rendered = String::new();
+    write!(rendered, "{}", date.format(format)).map_err(|_| {
+        Error::Runtime(
+            format!("{builtin} does not understand the format {format:?}"),
+            span,
+        )
+    })?;
+    Ok(Value::Text(rendered))
+}
+
+/// The epoch seconds `time.unix` reports for a date value.
+///
+/// The same window `seconds_for_format` uses, so the two agree on both sides. A
+/// date outside it is a catchable `Runtime` error naming `time.unix` rather
+/// than a number no other builtin will take.
+///
+/// The window ends exactly at `10000-01-01T00:00:00Z`, so a fraction in that
+/// final second is past the end even though the whole second it truncates to
+/// is still the boundary. Checking only the whole second let
+/// `+10000-01-01T00:00:00.5Z` through, and the number it produced was one
+/// `time.format` refuses. The fraction is part of the instant, so it is part
+/// of the bound.
+fn unix_seconds_for(date: NaiveDateTime, builtin: &str, span: Span) -> Result<i64> {
+    let seconds = date.and_utc().timestamp();
+    const MAX_SECONDS: i64 = 253_402_300_800; // 10000-01-01T00:00:00Z
+    let past_the_end = seconds > MAX_SECONDS || (seconds == MAX_SECONDS && date.nanosecond() > 0);
+    if seconds < -MAX_SECONDS || past_the_end {
+        return Err(Error::Runtime(
+            format!(
+                "{builtin} cannot represent {} as seconds from 1970-01-01T00:00:00Z",
+                crate::value::date_text(date)
+            ),
             span,
         ));
     }
@@ -1304,37 +1707,95 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::Nothing))
         }
         "time_format" => {
-            let (timestamp, format) = match (args.first(), args.get(1)) {
-                (Some(Value::Number(ts)), Some(Value::Text(fmt))) => (*ts, fmt.clone()),
-                (Some(Value::Number(ts)), None) => (*ts, "%Y-%m-%d %H:%M:%S".to_string()),
-                _ => {
+            let format = match args.get(1) {
+                Some(Value::Text(fmt)) => fmt.clone(),
+                None => "%Y-%m-%d %H:%M:%S".to_string(),
+                Some(_) => {
                     return Err(Error::Runtime(
-                        "time.format requires a number and optional text".to_string(),
+                        "time.format requires a date or a number and optional text".to_string(),
                         span,
                     ))
                 }
             };
-            let secs = seconds_for_format(timestamp, span)?;
-            let tm = chrono::DateTime::from_timestamp(secs, 0).ok_or_else(|| {
-                Error::Runtime(
-                    format!("time.format cannot represent {timestamp} seconds from 1970-01-01T00:00:00Z"),
+            match args.first() {
+                Some(Value::Number(timestamp)) => {
+                    let secs = seconds_for_format(*timestamp, span)?;
+                    let tm = chrono::DateTime::from_timestamp(secs, 0).ok_or_else(|| {
+                        Error::Runtime(
+                            format!(
+                                "time.format cannot represent {timestamp} seconds from \
+                                 1970-01-01T00:00:00Z"
+                            ),
+                            span,
+                        )
+                    })?;
+                    formatted_date(tm, &format, "time.format", span).map(Some)
+                }
+                Some(Value::Date(date)) => {
+                    formatted_date(date.and_utc(), &format, "time.format", span).map(Some)
+                }
+                _ => Err(Error::Runtime(
+                    "time.format requires a date or a number and optional text".to_string(),
                     span,
-                )
-            })?;
-            Ok(Some(Value::Text(tm.format(&format).to_string())))
+                )),
+            }
         }
         "time_unix" => {
-            let text = match args.first() {
-                Some(Value::Text(s)) => s,
+            let date = match args.first() {
+                Some(Value::Text(text)) => match parse_iso8601(text, "time.unix", span) {
+                    Ok(date) => date,
+                    // The old layout was chrono's `%Y-%m-%d %H:%M:%S`, which
+                    // read unpadded fields and a leap second. Falling back to
+                    // it keeps those callers' answers without widening the ISO
+                    // surface `time.parse` documents.
+                    Err(error) => parse_legacy_unix_text(text).ok_or(error)?,
+                },
+                Some(Value::Date(date)) => *date,
                 _ => {
                     return Err(Error::Runtime(
-                        "time.unix requires a text".to_string(),
+                        "time.unix requires a text timestamp or a date".to_string(),
                         span,
                     ))
                 }
             };
-            let seconds = seconds_for_unix(text, span)?;
-            Ok(Some(Value::Number(seconds as f64)))
+            let seconds = unix_seconds_for(date, "time.unix", span)?;
+            // A Unix timestamp is a real number, so the fraction `time.parse`
+            // kept belongs in the answer. Dropping it here made the two
+            // builtins disagree: the date value held the nanosecond, but the
+            // timestamp named the whole second before it. The fraction is
+            // positive because `timestamp` floors, which is what makes a
+            // pre-epoch fraction such as -0.5 come out with the right sign.
+            let nanos = date.nanosecond();
+            let fraction = if nanos >= 1_000_000_000 {
+                // A leap second is stored as `:59` plus a nanosecond in the
+                // next second. The old layout answered the second that begins
+                // it, so keep that answer rather than adding a whole second.
+                f64::from(nanos - 1_000_000_000) / 1_000_000_000.0
+            } else {
+                f64::from(nanos) / 1_000_000_000.0
+            };
+            let whole = seconds as f64;
+            let answer = whole + fraction;
+            // At 2024's magnitude an `f64` step is about 0.24 microseconds, so
+            // adding `.999999999` can round up to the next whole second. That
+            // would make the number name 23:59:59 while the date value still
+            // names 23:59:58.999999999. Keep the answer strictly inside the
+            // second `timestamp()` floored to.
+            let answer = if answer >= whole + 1.0 {
+                (whole + 1.0).next_down()
+            } else {
+                answer
+            };
+            Ok(Some(Value::Number(answer)))
+        }
+        "time_parse" => {
+            let Some(Value::Text(text)) = args.first() else {
+                return Err(Error::Runtime(
+                    "time.parse requires a text timestamp".to_string(),
+                    span,
+                ));
+            };
+            Ok(Some(Value::Date(parse_iso8601(text, "time.parse", span)?)))
         }
         "time_from_unix" => {
             let Some(Value::Number(timestamp)) = args.first() else {
@@ -2236,7 +2697,7 @@ pub(crate) fn json_stringify(value: &Value) -> String {
         Value::Function(_) => "null".to_string(),
         Value::Builtin(_) => "null".to_string(),
         Value::Object(_, _) => "null".to_string(),
-        Value::Date(date) => json_escape_text(&date.format("%Y-%m-%d %H:%M:%S").to_string()),
+        Value::Date(date) => json_escape_text(&crate::value::date_text(*date)),
         Value::Duration(duration) => format!("{}", duration.as_seconds_f64()),
     }
 }
@@ -2450,7 +2911,9 @@ mod tests {
                 "before the window time.format accepts",
             ),
         ] {
-            match seconds_for_unix(text, span) {
+            let date = parse_iso8601(text, "time.unix", span)
+                .unwrap_or_else(|error| panic!("{} should parse first, got {:?}", what, error));
+            match unix_seconds_for(date, "time.unix", span) {
                 Err(Error::Runtime(message, _)) => assert!(
                     message.contains("time.unix"),
                     "{} must be refused as a time.unix error, got `{}`",
@@ -2473,8 +2936,11 @@ mod tests {
             ("1969-12-31 23:59:59", -1),
             ("2024-01-15 12:30:00", 1_705_321_800),
             ("9999-12-31 23:59:59", 253_402_300_799),
+            ("+10000-01-01 00:00:00", 253_402_300_800),
         ] {
-            let seconds = seconds_for_unix(text, Span::new(1, 1))
+            let date = parse_iso8601(text, "time.unix", Span::new(1, 1))
+                .unwrap_or_else(|e| panic!("{} should parse, got {:?}", text, e));
+            let seconds = unix_seconds_for(date, "time.unix", Span::new(1, 1))
                 .unwrap_or_else(|e| panic!("{} is a real date, got {:?}", text, e));
             assert_eq!(seconds, expected, "{} should count from the epoch", text);
             // The point of the shared window: what `time.unix` produces,
