@@ -1422,7 +1422,9 @@ say time.from_unix(1704067200)           // 2024-01-01 00:00:00
 `time.format` takes a date value or a number of seconds since the same instant
 and a format string; with no format string it writes `%Y-%m-%d %H:%M:%S`.
 `time.parse` reads an ISO-8601 timestamp as a date, applying any zone offset so
-the value is the UTC reading of the instant. `time.unix` is the other direction:
+the value is the UTC reading of the instant. `time.parse(text, layout)` reads
+text in a caller-chosen layout instead, the shape another system emits.
+`time.unix` is the other direction:
 it takes a timestamp text or a date value and answers the seconds since the same
 instant, read as UTC wherever it runs. A date that holds a fractional second
 answers a fractional number of seconds rather than dropping it, so
@@ -1549,6 +1551,17 @@ four are accepted because `%Y` writes the expanded year. An optional leading `-`
 or `+` is accepted, so the expanded-year forms `%Y` writes (`-10000` and
 `+10000`) read back. A timestamp with no zone is read as UTC, the same stance a
 date value has.
+
+`time.parse(text, layout)` takes the same `chrono` layout language
+`time.format` writes, so a program can read the shape another system emits:
+`time.parse("29/02/2024 23:59:58", "%d/%m/%Y %H:%M:%S")` is
+`2024-02-29 23:59:58`. The layout may name a date only (midnight is used), a
+date and time, or a date and time with a zone; a zone offset is applied exactly
+as in the ISO form, and a zone-free layout is read as UTC. Text that does not
+match the layout, an empty text, and a layout `chrono` cannot read are
+catchable `time.parse` runtime errors naming the builtin, the text and the
+layout. The one-argument form is unchanged and remains the strict ISO-8601
+surface below.
 
 `time.parse` does not accept, each a catchable runtime error naming the builtin
 and the byte position where the text stopped matching: a leap second (`:60`), a

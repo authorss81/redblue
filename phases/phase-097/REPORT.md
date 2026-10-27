@@ -3,16 +3,16 @@
 ## What changed
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +505 −40 | one ISO-8601 parser, date formatting, `time.parse`, date-aware `time.format` and `time.unix`, nanosecond property, bounded layout validation, a comma decimal mark in the fraction, a fractional `time.unix` answer whose window edge is checked as an instant, truncation toward zero for numeric instants (their pre-phase-097 behaviour), a near-one clamp, a legacy-layout fallback, and a year-aware refusal; JSON dates now use the shared text form |
+| `src/runtime.rs` | +559 −43 | one ISO-8601 parser, a caller-chosen layout parser, date formatting, `time.parse`, date-aware `time.format` and `time.unix`, nanosecond property, bounded layout validation, a comma decimal mark in the fraction, a fractional `time.unix` answer whose window edge is checked as an instant, truncation toward zero for numeric instants (their pre-phase-097 behaviour), a near-one clamp, a legacy-layout fallback, and a year-aware refusal; JSON dates now use the shared text form |
 | `src/value.rs` | +13 −1 | one `date_text` printer shared by `say`, `to_text` and JSON, so a parsed fraction survives a round trip instead of being dropped |
-| `src/stdlib.rs` | +9 −2 | register `time.parse`, add the `time.parse` member, name and signature, widen the format/unix signatures |
-| `SPEC.md` | +55 −12 | document accepted and refused ISO-8601 layouts, date formatting, offset handling, the nanosecond property, fraction-preserving date text, fractional Unix answers, the legacy truncation of a numeric instant, the legacy-layout fallback, and the window's final-second rule |
-| `README.md` | +2 −1 | time quick reference names `time.parse` and a date argument to `time.format` |
+| `src/stdlib.rs` | +10 −3 | register `time.parse`, add the `time.parse` member, name and signature, widen the format/unix signatures, and name the optional layout |
+| `SPEC.md` | +69 −13 | document accepted and refused ISO-8601 layouts, the optional caller-chosen layout, date formatting, offset handling, the nanosecond property, fraction-preserving date text, fractional Unix answers, the legacy truncation of a numeric instant, the legacy-layout fallback, and the window's final-second rule |
+| `README.md` | +3 −1 | time quick reference names `time.parse`, its optional layout, and a date argument to `time.format` |
 | `SURVEY.md` | +24 −27 | rank 6 closed, inventory 85 builtins and 63 dotted members, citations re-anchored to the current runtime lines |
-| `tests/time_builtin_test.rs` | +605 −4 | twenty-eight tests for parsing, formatting, conversion, refusals, fraction-preserving text, fractional timestamps, legacy-layout compatibility and cross-engine agreement |
+| `tests/time_builtin_test.rs` | +686 −4 | thirty-one tests for parsing, formatting, conversion, refusals, caller-chosen layouts, fraction-preserving text, fractional timestamps, legacy-layout compatibility and cross-engine agreement |
 | `tests/unreviewed_work_ack_test.rs` | +1 | names phase-097's delivery subject in the rule that acknowledges the in-flight phase's commit |
 | `tests/stdlib_module_docs_test.rs` | +5 | an answerable-program row for `time.parse` |
-| `tests/doc_blocks_runs.txt` | +2 −2 | time and date documentation blocks re-anchored after the SPEC edits |
+| `tests/doc_blocks_runs.txt` | +4 −4 | time and date documentation blocks re-anchored after the SPEC edits |
 
 The ISO-8601 parser, `time.parse`, the date-aware `time.format`/`time.unix` and
 their tests were merged by earlier attempts. A resumed run shared one `date_text`
@@ -44,6 +44,15 @@ that direction lie. Three new tests pin the truncation across positive,
 negative and negative-zero numbers, the pre-epoch fraction `time.unix` still
 answers, and a year sign with no digits being refused at its position.
 
+This resumed run closes the last finding in the evidence: a program could not
+read the shape another system emits. `time.parse(text, layout)` now takes the
+same `chrono` layout language `time.format` writes, applying a zone offset the
+way the ISO form does and reading a zone-free layout as UTC; a date-only layout
+answers midnight. The one-argument `time.parse` is unchanged and stays strict
+ISO-8601. Three new tests pin a custom layout against literal dates, the
+refusal channel for bad text and bad layouts, and cross-engine agreement, and
+`SPEC.md` documents the form.
+
 ## Behaviour
 `time.parse(text)` reads ISO-8601 into a date value. It accepts a date only
 (`2024-02-29`), a date and time with `T` or a space, one to nine fractional
@@ -54,6 +63,11 @@ The fraction is kept in the date value, is readable as `nanosecond`, and is
 written by `say`, `to_text` and JSON: `to_text(time.parse(...))` now carries the
 fraction with three, six or nine digits, so the text round-trips through
 `time.parse`. A date with no fraction keeps the text it always had.
+`time.parse(text, layout)` reads text in a caller-chosen layout instead: a
+date-only layout answers midnight, a layout with a zone has its offset applied,
+and a zone-free layout is UTC. A layout `chrono` cannot read and text that does
+not match it are catchable `time.parse` errors naming the builtin, the text and
+the layout; none reaches a panic.
 
 `time.format` now accepts a date value as well as the numeric timestamp it
 always accepted, and still uses `%Y-%m-%d %H:%M:%S` when no layout is given.
@@ -115,11 +129,14 @@ refused the same way rather than panicking in its display implementation.
 | `edge_time_format_of_a_fractional_number_still_truncates_toward_zero` | numeric boundary: `0.5`, `1.9`, `-0.5`, `-1.9` and `-0.0` across both numeric builtins |
 | `edge_time_unix_keeps_a_pre_epoch_fraction_even_though_from_unix_truncates` | pre-epoch fractional date still answers a signed fraction; legacy truncation is only number-to-date |
 | `edge_time_parse_refuses_a_year_sign_without_digits` | malformed input: a lone sign, a signed non-date and a sign before a space, each refused at its position |
+| `edge_time_parse_reads_a_callers_layout` | caller-chosen layout: date-only, date and time, zone offset, fraction |
+| `edge_time_parse_layout_refuses_bad_text_and_bad_layout` | malformed input: unmatched and empty text, unreadable layout, wrong argument kinds, catchability |
+| `edge_time_parse_layout_agrees_across_engines` | cross-engine data, timestamp, fraction and refusal wording for a caller-chosen layout |
 
 ## Mandatory edge-case matrix
 | Row | Status |
 |---|---|
-| empty | covered — `time.parse("")` is refused at position 0 |
+| empty | covered — `time.parse("")` is refused at position 0, and an empty text with a caller-chosen layout is refused too |
 | singleton | N/A — a timestamp is fixed-field text, not a collection with a singleton case |
 | boundary | covered — leap day 2024/2000, common-year 29 February, epoch `-1`, offset conversion, positive window boundary `+10000`, and a fraction in its final second refused |
 | out_of_bounds | covered — 30 February, month 13/00, day 32, hour 24, minute 60, offset hour/minute 24/60, more than nine fraction digits, out-of-window Unix seconds, and a fraction past the window edge |
@@ -128,7 +145,7 @@ refused the same way rather than panicking in its display implementation.
 | unicode | covered — trailing CJK text and full-width digits are refused with a position and no panic |
 | nesting_recursion | N/A — the parser is an iterative fixed field walk with no recursion |
 | duplicate_missing_keys | N/A — timestamps have fixed fields and no user-supplied keys |
-| malformed_input | covered — empty text, bad day, missing seconds, empty/oversized fraction, a decimal mark with no digits, an offset without minutes, bad offset, trailing garbage |
+| malformed_input | covered — empty text, bad day, missing seconds, empty/oversized fraction, a decimal mark with no digits, an offset without minutes, bad offset, trailing garbage, unmatched text under a caller-chosen layout, and a layout `chrono` cannot read |
 | resource_limit | N/A — parsing is single-pass over the input, allocates only the error snippet, and has no loop guard or recursion limit to set |
 
 ## Gates
@@ -136,7 +153,7 @@ refused the same way rather than panicking in its display implementation.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 77 test binaries, 2280 passed, 0 failed |
+| `cargo test --all-targets` | 77 test binaries, 2283 passed, 0 failed |
 | `../rbops/verify.sh phase-097` | pass |
 
 ## Invariants touched
@@ -144,6 +161,9 @@ refused the same way rather than panicking in its display implementation.
   date value); their existing numeric and text behaviour is unchanged.
 - `time.unix` accepts the ISO-8601 text `time.parse` accepts, a superset of the
   old fixed layout, so old callers keep their answers.
+- `time.parse` gains an optional second text argument: a caller-chosen layout.
+  The one-argument call is unchanged and still accepts only the documented ISO
+  forms, so every existing `time.parse` input keeps its answer.
 - A date property `nanosecond` is added; existing date properties are unchanged.
 - A date's printed text now keeps a non-zero fraction. Dates without a fraction
   print exactly as before, so every existing `say`/`to_text`/JSON answer for
@@ -155,14 +175,14 @@ refused the same way rather than panicking in its display implementation.
   unchanged.
 
 ## Existing test reconciliation
-- `tests/doc_blocks_runs.txt` re-anchors the dates block to `SPEC.md:1457` and
-  the regex block to `SPEC.md:1565`. Both moved again because the time
-  documentation changed the numeric-instant paragraph; both were executed by
+- `tests/doc_blocks_runs.txt` re-anchors the dates block to `SPEC.md:1459` and
+  the regex block to `SPEC.md:1578`. Both moved again because the caller-chosen
+  layout documentation added lines to the time section; both were executed by
   the suite, not merely listed.
 - `tests/time_builtin_test.rs` restored the pre-existing
   `edge_time_from_unix_truncates_a_fractional_second_like_time_format` name and
-  assertions instead of leaving the floor re-scope in place. The three tests
-  added by this run sit beside it.
+  assertions instead of leaving the floor re-scope in place. The tests added by
+  these resumed runs sit beside it.
 - `tests/unreviewed_work_ack_test.rs` adds `resume phase-097:` to
   `DELIVERY_SUBJECT_PREFIXES`, because the resumed delivery commit is the
   phase's own and cannot be pinned by SHA.
@@ -173,9 +193,9 @@ refused the same way rather than panicking in its display implementation.
   descends as its own test requires.
 
 ## Known gaps / follow-ups
-- `time.parse` does not take a caller-chosen input layout; it accepts the ISO
-  shapes documented in `SPEC.md` and refuses everything else. A layout-based
-  parser is a separate capability and is not needed for the ISO-8601 finding.
+- A caller-chosen layout is the same `chrono` layout language `time.format`
+  writes, not a Redblue-owned format grammar. A layout `chrono` does not
+  recognise is refused rather than translated.
 - A date value is timezone-naive, so the offset a parsed text carried is applied
   and then forgotten. The instant is correct, but printing it back cannot name
   the original offset.

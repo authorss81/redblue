@@ -944,9 +944,43 @@ fn parse_iso8601(text: &str, builtin: &str, span: Span) -> Result<NaiveDateTime>
 /// minute and second fields and accepts the leap second `:60`. The ISO parser
 /// is deliberately stricter, so `time.unix` falls back to this layout after it
 /// refuses, keeping the answers old callers already had. `time.parse` does not
-/// use this fallback: its surface is the ISO forms only.
+/// use this fallback: its one-argument surface is the ISO forms only.
 fn parse_legacy_unix_text(text: &str) -> Option<NaiveDateTime> {
     chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()
+}
+
+/// Reads `text` with a caller-chosen layout, the shape another system emits.
+///
+/// The layout is a `chrono` format string, the same language `time.format`
+/// writes. A layout with a zone (`%z`, `%:z`, `%Z`, `%+`) yields the UTC
+/// reading of the instant; a zone-free layout is read as UTC, the stance every
+/// date value has. A date-only layout answers midnight.
+///
+/// The three parsers are tried in order because `chrono` splits the job: only
+/// `DateTime` reads an offset, only `NaiveDateTime` reads a clock time without
+/// one, and only `NaiveDate` reads a date on its own. A layout that cannot be
+/// read at all is refused before any parsing, rather than handing a malformed
+/// layout to a parser whose failure would not say why.
+fn parse_with_layout(text: &str, format: &str, builtin: &str, span: Span) -> Result<NaiveDateTime> {
+    if StrftimeItems::new(format).any(|item| matches!(item, Item::Error)) {
+        return Err(Error::Runtime(
+            format!("{builtin} does not understand the format {format:?}"),
+            span,
+        ));
+    }
+    if let Ok(instant) = chrono::DateTime::parse_from_str(text, format) {
+        return Ok(instant.naive_utc());
+    }
+    if let Ok(date) = NaiveDateTime::parse_from_str(text, format) {
+        return Ok(date);
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(text, format) {
+        return Ok(date.and_time(NaiveTime::MIN));
+    }
+    Err(Error::Runtime(
+        format!("{builtin} could not read {text:?} with the layout {format:?}"),
+        span,
+    ))
 }
 
 /// Formats a date with a caller-chosen layout, refusing a layout `chrono`
@@ -1791,11 +1825,28 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         "time_parse" => {
             let Some(Value::Text(text)) = args.first() else {
                 return Err(Error::Runtime(
-                    "time.parse requires a text timestamp".to_string(),
+                    "time.parse requires a text timestamp and an optional text layout".to_string(),
                     span,
                 ));
             };
-            Ok(Some(Value::Date(parse_iso8601(text, "time.parse", span)?)))
+            if args.len() > 2 {
+                return Err(Error::Runtime(
+                    "time.parse requires a text timestamp and an optional text layout".to_string(),
+                    span,
+                ));
+            }
+            let date = match args.get(1) {
+                None => parse_iso8601(text, "time.parse", span)?,
+                Some(Value::Text(format)) => parse_with_layout(text, format, "time.parse", span)?,
+                Some(_) => {
+                    return Err(Error::Runtime(
+                        "time.parse requires a text timestamp and an optional text layout"
+                            .to_string(),
+                        span,
+                    ))
+                }
+            };
+            Ok(Some(Value::Date(date)))
         }
         "time_from_unix" => {
             let Some(Value::Number(timestamp)) = args.first() else {

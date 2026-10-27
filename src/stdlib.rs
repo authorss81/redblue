@@ -1391,7 +1391,7 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ),
     (
         "time_parse",
-        "time_parse(text) -> date; an ISO-8601 timestamp as a date",
+        "time_parse(text, text) -> date; an ISO-8601 timestamp, or text in a chosen layout, as a date",
     ),
     (
         "time_unix",

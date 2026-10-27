@@ -1420,3 +1420,84 @@ fn edge_the_tree_walker_and_the_bytecode_vm_agree_on_fractional_date_text() {
         "the two engines disagree about printing or serializing a fractional date"
     );
 }
+
+/// A caller-chosen layout reads the shape another system emits, not only the
+/// ISO forms the one-argument call accepts. A date-only layout answers
+/// midnight, and a layout with a zone has its offset applied like the ISO
+/// form, so the parsed value is the same literal UTC instant.
+#[test]
+fn edge_time_parse_reads_a_callers_layout() {
+    assert!(yes(
+        "time.parse(\"20240229\", \"%Y%m%d\") is time.date(2024, 2, 29)"
+    ));
+    assert!(yes(
+        "set d to time.parse(\"29/02/2024 23:59:58\", \"%d/%m/%Y %H:%M:%S\")\n\
+         d is time.datetime(2024, 2, 29, 23, 59, 58) and \
+         time.format(d, \"%d/%m/%Y\") is \"29/02/2024\""
+    ));
+    assert!(yes(
+        "time.parse(\"2024-01-01T12:00:00+02:00\", \"%Y-%m-%dT%H:%M:%S%:z\") \
+         is time.datetime(2024, 1, 1, 10, 0, 0) and \
+         time.parse(\"2023-12-31T22:00:00-05:00\", \"%Y-%m-%dT%H:%M:%S%:z\") \
+         is time.datetime(2024, 1, 1, 3, 0, 0)"
+    ));
+    assert!(yes(
+        "set f to time.parse(\"2024-02-29T23:59:58.123456789Z\", \
+         \"%Y-%m-%dT%H:%M:%S%.fZ\")\n\
+         f.nanosecond is 123456789"
+    ));
+}
+
+/// The layout form has the same failure channel as the ISO form: text that does
+/// not match, an empty text, an unreadable layout, and the wrong argument kinds
+/// are catchable `time.parse` errors rather than panics or silent successes.
+#[test]
+fn edge_time_parse_layout_refuses_bad_text_and_bad_layout() {
+    assert!(eval("time.parse(\"not a date\", \"%Y-%m-%d\")").is_err());
+    for (source, part) in [
+        ("time.parse(\"\", \"%Y-%m-%d\")", "time.parse"),
+        ("time.parse(\"2024-01-01x\", \"%Y-%m-%d\")", "time.parse"),
+        (
+            "time.parse(\"2024-01-01\", \"%Q\")",
+            "does not understand the format",
+        ),
+        ("time.parse(\"2024-01-01\", 5)", "time.parse"),
+        ("time.parse()", "time.parse"),
+        (
+            "time.parse(\"2024-01-01\", \"%Y-%m-%d\", \"extra\")",
+            "time.parse",
+        ),
+    ] {
+        let message = runtime_error(source);
+        assert!(
+            message.contains(part),
+            "`{source}` must be refused as a `{part}` error, got `{message}`"
+        );
+    }
+    assert!(yes("set caught to 0\n\
+         try\n    say time.parse(\"31/02/2024\", \"%d/%m/%Y\")\n\
+         catch error of Runtime\n    set caught to 1\nend\n\
+         caught is 1"));
+}
+
+/// Both engines read a caller-chosen layout through the same runtime builtin,
+/// so the date, its printed layout, its timestamp and its fraction must be the
+/// same data on both sides, and a refusal must have the same wording.
+#[test]
+fn edge_time_parse_layout_agrees_across_engines() {
+    let source = "\
+        set d to time.parse(\"20240229-235958.5+0000\", \"%Y%m%d-%H%M%S%.f%z\")\n\
+        {d: d, t: time.format(d, \"%Y-%m-%dT%H:%M:%S%.f%:z\"), \
+         u: time.unix(d), n: d.nanosecond}\n";
+    assert_eq!(
+        tree_walk(source),
+        bytecode(source),
+        "the two engines disagree about a caller-chosen layout"
+    );
+    let bad = "time.parse(\"31/02/2024\", \"%d/%m/%Y\")";
+    assert_eq!(
+        tree_runtime_error(bad),
+        bytecode_runtime_error(bad),
+        "the two engines disagree about a layout parse refusal"
+    );
+}

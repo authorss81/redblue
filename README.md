@@ -228,6 +228,7 @@ time.now()             // Get current timestamp
 time.sleep(seconds) // Sleep for N seconds
 time.format(timestamp_or_date, "format")
 time.parse("YYYY-MM-DDTHH:MM:SS+HH:MM")         // ISO-8601 text to a date
+time.parse("29/02/2024", "%d/%m/%Y")            // text in a chosen layout
 time.unix("YYYY-MM-DD HH:MM:SS")
 time.from_unix(seconds)                        // Seconds to a date, read as UTC
 time.date(year, month, day)                    // A date at midnight
