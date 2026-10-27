@@ -541,9 +541,10 @@ fn now() -> Result<SystemTime> {
 ///
 /// `SystemTime + Duration` panics when the addition overflows, and it does so
 /// from inside `std`, past every `Result` in this crate — `time.format(1e300)`
-/// aborted the process. The range is therefore checked here, and a timestamp
-/// that is not finite, not whole, or past what a date can name is a `Runtime`
-/// error. `timestamp as u64` is not usable for the conversion: it saturates, so
+/// aborted the process. The range is therefore checked here: a timestamp that
+/// is not finite or past what a date can name is a `Runtime` error, while a
+/// fractional timestamp truncates toward zero instead of being refused.
+/// `timestamp as u64` is not usable for the conversion: it saturates, so
 /// a negative timestamp would have quietly formatted as the epoch rather than
 /// as 1969.
 fn seconds_for_format(timestamp: f64, span: Span) -> Result<i64> {
@@ -562,12 +563,16 @@ fn seconds_for_instant(timestamp: f64, builtin: &str, span: Span) -> Result<i64>
             span,
         ));
     }
-    // A timestamp is a real number counted from the epoch, so the whole second
-    // it names is the floor, not the truncation toward zero. `-0.5` is half a
-    // second before the epoch, whose second is `-1` (1969-12-31 23:59:59);
-    // truncating toward zero made it `0`, one second after the instant that
-    // `time.unix` names. A positive fraction floors and truncates alike, so
-    // `time.format(1.5)` is still one second after the epoch.
+    // A timestamp with a fractional part keeps the behaviour it always had:
+    // `as` truncates toward zero, so `time.format(1.5)` is one second after
+    // the epoch and `time.format(-0.5)` is the epoch itself. Flooring a
+    // negative fraction instead moved every pre-epoch fraction one second
+    // earlier than `time.format` and `time.from_unix` answered before
+    // phase-097, which is a compatibility regression rather than a fix: the
+    // phase's contract is that the inputs these builtins already handled keep
+    // their answers. `time.unix` still answers a fractional number for a date
+    // that holds a fraction, so the pre-epoch instant is not lost; only the
+    // legacy whole-second conversion of a negative number stays truncated.
     // `i64::MAX` seconds is far past the last instant a `SystemTime` can hold,
     // and `chrono` cannot format one either, so the range is bounded here
     // rather than by whichever of the two overflows first. A timestamp before
@@ -581,7 +586,7 @@ fn seconds_for_instant(timestamp: f64, builtin: &str, span: Span) -> Result<i64>
             span,
         ));
     }
-    Ok(timestamp.floor() as i64)
+    Ok(timestamp as i64)
 }
 
 /// A refusal from the one text-to-date parser, naming where it stopped.

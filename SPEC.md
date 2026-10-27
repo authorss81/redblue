@@ -1428,9 +1428,12 @@ instant, read as UTC wherever it runs. A date that holds a fractional second
 answers a fractional number of seconds rather than dropping it, so
 `time.unix(time.parse("2024-02-29T23:59:58.5Z"))` is `1709251198.5`.
 `time.from_unix(seconds)` is the inverse and turns such seconds into a date
-value; a fractional number names the whole second that contains it, so
-`time.from_unix(-0.5)` is `1969-12-31 23:59:59`, the second the date
-`1969-12-31T23:59:59.5Z` falls in. For compatibility with the layout it read
+value. A fractional number is truncated toward zero, the answer this builtin
+gave before `time.parse` existed, so `time.from_unix(-0.5)` is
+`1970-01-01 00:00:00` and `time.from_unix(-1.9)` is `1969-12-31 23:59:59`.
+Truncation applies only to converting a number into the legacy whole-second
+date; a date value that holds a fraction is still returned as a fractional
+timestamp by `time.unix`. For compatibility with the layout it read
 before `time.parse` existed, `time.unix` also accepts
 `YYYY-MM-DD HH:MM:SS` with one- or two-digit month, day, hour, minute and
 second fields, and a leap second (`:60`) in that layout answers the second it

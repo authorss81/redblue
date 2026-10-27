@@ -3,16 +3,16 @@
 ## What changed
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +503 −42 | one ISO-8601 parser, date formatting, `time.parse`, date-aware `time.format` and `time.unix`, nanosecond property, bounded layout validation, a comma decimal mark in the fraction, a fractional `time.unix` answer whose window edge is checked as an instant, a floor for numeric instants, a near-one clamp, a legacy-layout fallback, and a year-aware refusal; JSON dates now use the shared text form |
+| `src/runtime.rs` | +505 −40 | one ISO-8601 parser, date formatting, `time.parse`, date-aware `time.format` and `time.unix`, nanosecond property, bounded layout validation, a comma decimal mark in the fraction, a fractional `time.unix` answer whose window edge is checked as an instant, truncation toward zero for numeric instants (their pre-phase-097 behaviour), a near-one clamp, a legacy-layout fallback, and a year-aware refusal; JSON dates now use the shared text form |
 | `src/value.rs` | +13 −1 | one `date_text` printer shared by `say`, `to_text` and JSON, so a parsed fraction survives a round trip instead of being dropped |
 | `src/stdlib.rs` | +9 −2 | register `time.parse`, add the `time.parse` member, name and signature, widen the format/unix signatures |
-| `SPEC.md` | +52 −12 | document accepted and refused ISO-8601 layouts, date formatting, offset handling, the nanosecond property, fraction-preserving date text, fractional Unix answers, the floor of a numeric instant, the legacy-layout fallback, and the window's final-second rule |
+| `SPEC.md` | +55 −12 | document accepted and refused ISO-8601 layouts, date formatting, offset handling, the nanosecond property, fraction-preserving date text, fractional Unix answers, the legacy truncation of a numeric instant, the legacy-layout fallback, and the window's final-second rule |
 | `README.md` | +2 −1 | time quick reference names `time.parse` and a date argument to `time.format` |
 | `SURVEY.md` | +24 −27 | rank 6 closed, inventory 85 builtins and 63 dotted members, citations re-anchored to the current runtime lines |
-| `tests/time_builtin_test.rs` | +527 −5 | twenty-five tests for parsing, formatting, conversion, refusals, fraction-preserving text, fractional timestamps, legacy-layout compatibility and cross-engine agreement |
+| `tests/time_builtin_test.rs` | +605 −4 | twenty-eight tests for parsing, formatting, conversion, refusals, fraction-preserving text, fractional timestamps, legacy-layout compatibility and cross-engine agreement |
 | `tests/unreviewed_work_ack_test.rs` | +1 | names phase-097's delivery subject in the rule that acknowledges the in-flight phase's commit |
 | `tests/stdlib_module_docs_test.rs` | +5 | an answerable-program row for `time.parse` |
-| `tests/doc_blocks_runs.txt` | +4 −4 | time and date documentation blocks re-anchored after the SPEC edits |
+| `tests/doc_blocks_runs.txt` | +2 −2 | time and date documentation blocks re-anchored after the SPEC edits |
 
 The ISO-8601 parser, `time.parse`, the date-aware `time.format`/`time.unix` and
 their tests were merged by earlier attempts. A resumed run shared one `date_text`
@@ -23,15 +23,26 @@ the final second of the shared window is refused when it carries a fraction
 rather than yielding a number `time.format` will not take. Three new tests pin
 both changes. No working code was removed.
 
-Review round 1 fixed the conversion edges those changes exposed. Numeric
-instants now floor rather than truncate toward zero, so `-0.5` is 1969-12-31
-23:59:59 and `time.from_unix(time.unix(pre_epoch_fraction))` names the date's
-own second. A fraction within half an ulp of 1 is clamped below the next second,
-so `.999999999` at 2024 and at the window edge cannot name the following second.
-`time.unix` falls back to the old chrono layout for unpadded fields and the leap
-second, while `time.parse` stays strict ISO. An out-of-range year is refused at
-the year field, and the SURVEY citations were re-anchored. Four tests pin these
-fixes, and the existing truncation test was updated to the floor it now names.
+Review round 1 fixed the conversion edges those changes exposed: a fraction
+within half an ulp of 1 is clamped below the next second, so `.999999999` at
+2024 and at the window edge cannot name the following second; `time.unix` falls
+back to the old chrono layout for unpadded fields and the leap second, while
+`time.parse` stays strict ISO; and an out-of-range year is refused at the year
+field. The SURVEY citations were re-anchored.
+
+That round also changed numeric instants from truncation toward zero to floor
+and re-scoped the pre-existing truncation test to the new answer. This resumed
+run reverses that compatibility regression: the phase's contract says a
+builtin must keep answering what it answered for inputs it already handled, and
+AGENTS.md forbids re-scoping an existing test. `seconds_for_instant` truncates
+again, `edge_time_from_unix_truncates_a_fractional_second_like_time_format`
+carries its original name and assertions, and `time.format(-0.5)` is
+`1970-01-01 00:00:00` as it was before the phase. The date-to-number direction
+still preserves a pre-epoch fraction (`time.unix(time.parse(
+"1969-12-31T23:59:59.5Z"))` is `-0.5`), so the compatibility rule does not make
+that direction lie. Three new tests pin the truncation across positive,
+negative and negative-zero numbers, the pre-epoch fraction `time.unix` still
+answers, and a year sign with no digits being refused at its position.
 
 ## Behaviour
 `time.parse(text)` reads ISO-8601 into a date value. It accepts a date only
@@ -56,11 +67,14 @@ parser also keeps the one-to-three-digit years the old `%Y` path read. A date
 that holds a fractional second answers a fractional number of seconds —
 `time.unix(time.parse("2024-02-29T23:59:58.5Z"))` is `1709251198.5` — so the
 timestamp, the date value and `time.format` name the same instant. A numeric
-instant is read at its floor, not truncated toward zero, so `time.format(-0.5)`
-and `time.from_unix(-0.5)` both name `1969-12-31 23:59:59`, the second the date
-`1969-12-31T23:59:59.5Z` falls in. A fraction that would round up to the next
-whole second at `f64` magnitude is clamped below it, so the number never names a
-second after the date value, even at the window's final second. The window ends
+instant keeps the conversion it always had: `as i64` truncates toward zero, so
+`time.format(-0.5)` and `time.from_unix(-0.5)` name `1970-01-01 00:00:00`, and
+`time.format(-1.9)` names `1969-12-31 23:59:59`. That is the legacy
+number-to-date direction and it is not applied to a date value: a date that
+holds a pre-epoch fraction still answers a fractional timestamp. A fraction
+that would round up to the next whole second at `f64` magnitude is clamped
+below it, so the number never names a second after the date value, even at the
+window's final second. The window ends
 exactly at `10000-01-01T00:00:00Z`; a fraction in that final second is past the
 end and is a catchable `time.unix` error.
 
@@ -75,6 +89,7 @@ refused the same way rather than panicking in its display implementation.
 | Test | Edge class covered |
 |---|---|
 | `edge_time_parse_accepts_iso_offsets_against_literal_utc_dates` | offset conversion against literal calendar values |
+| `edge_time_parse_refuses_an_offset_that_moves_an_edge_date_out_of_range` | offset conversion past both calendar edges, catchable refusal |
 | `edge_time_parse_keeps_fractions_and_reads_a_missing_zone_as_utc` | fraction preservation, date-only, timezone-less |
 | `edge_time_format_of_a_date_pads_and_honours_the_chosen_layout` | zero padding, chosen layout, default layout, unreadable and parse-only layout refusal |
 | `edge_time_unix_reads_a_date_value_and_iso_text_with_an_offset` | date-to-timestamp conversion, old layout preserved, pre-epoch boundary |
@@ -96,6 +111,10 @@ refused the same way rather than panicking in its display implementation.
 | `edge_date_text_uses_the_shortest_fraction_without_losing_precision` | numeric boundary: three, six and nine fraction digits, zero fraction writes no mark |
 | `edge_date_text_round_trip_refuses_trailing_fraction_text` | malformed input: a second fraction is refused at position 23 and is catchable |
 | `edge_the_tree_walker_and_the_bytecode_vm_agree_on_fractional_date_text` | cross-engine text, JSON and nanosecond agreement for a fractional date |
+| `edge_time_from_unix_truncates_a_fractional_second_like_time_format` | compatibility boundary: positive, negative and zero numeric instants keep the pre-phase answer |
+| `edge_time_format_of_a_fractional_number_still_truncates_toward_zero` | numeric boundary: `0.5`, `1.9`, `-0.5`, `-1.9` and `-0.0` across both numeric builtins |
+| `edge_time_unix_keeps_a_pre_epoch_fraction_even_though_from_unix_truncates` | pre-epoch fractional date still answers a signed fraction; legacy truncation is only number-to-date |
+| `edge_time_parse_refuses_a_year_sign_without_digits` | malformed input: a lone sign, a signed non-date and a sign before a space, each refused at its position |
 
 ## Mandatory edge-case matrix
 | Row | Status |
@@ -105,7 +124,7 @@ refused the same way rather than panicking in its display implementation.
 | boundary | covered — leap day 2024/2000, common-year 29 February, epoch `-1`, offset conversion, positive window boundary `+10000`, and a fraction in its final second refused |
 | out_of_bounds | covered — 30 February, month 13/00, day 32, hour 24, minute 60, offset hour/minute 24/60, more than nine fraction digits, out-of-window Unix seconds, and a fraction past the window edge |
 | type_mismatch | covered — `time.parse(5)`, a list, no argument, a numeric layout, and a date where a timestamp was expected |
-| numeric_boundary | covered — one to nine fraction digits after either mark, 1900 versus 2000 leap rules, pre-epoch fractional timestamp `-0.5`, shared Unix window |
+| numeric_boundary | covered — one to nine fraction digits after either mark, 1900 versus 2000 leap rules, pre-epoch fractional timestamp `-0.5`, truncation of `0.5`/`1.9`/`-0.5`/`-1.9`/`-0.0`, shared Unix window |
 | unicode | covered — trailing CJK text and full-width digits are refused with a position and no panic |
 | nesting_recursion | N/A — the parser is an iterative fixed field walk with no recursion |
 | duplicate_missing_keys | N/A — timestamps have fixed fields and no user-supplied keys |
@@ -117,7 +136,7 @@ refused the same way rather than panicking in its display implementation.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 77 test binaries, 2273 passed, 0 failed |
+| `cargo test --all-targets` | 77 test binaries, 2280 passed, 0 failed |
 | `../rbops/verify.sh phase-097` | pass |
 
 ## Invariants touched
@@ -136,10 +155,14 @@ refused the same way rather than panicking in its display implementation.
   unchanged.
 
 ## Existing test reconciliation
-- `tests/doc_blocks_runs.txt` re-anchors the dates block to `SPEC.md:1448` and
-  the regex block to `SPEC.md:1555`. Both moved again because the time
-  documentation gained the fractional-timestamp paragraph; both were executed
-  by the suite, not merely listed.
+- `tests/doc_blocks_runs.txt` re-anchors the dates block to `SPEC.md:1457` and
+  the regex block to `SPEC.md:1565`. Both moved again because the time
+  documentation changed the numeric-instant paragraph; both were executed by
+  the suite, not merely listed.
+- `tests/time_builtin_test.rs` restored the pre-existing
+  `edge_time_from_unix_truncates_a_fractional_second_like_time_format` name and
+  assertions instead of leaving the floor re-scope in place. The three tests
+  added by this run sit beside it.
 - `tests/unreviewed_work_ack_test.rs` adds `resume phase-097:` to
   `DELIVERY_SUBJECT_PREFIXES`, because the resumed delivery commit is the
   phase's own and cannot be pinned by SHA.
@@ -162,3 +185,9 @@ refused the same way rather than panicking in its display implementation.
 - `time.format` of a numeric timestamp still truncates a fractional second, the
   behaviour it had before this phase; only a date value carries the fraction
   into a layout.
+- A pre-epoch fractional timestamp does not round-trip through
+  `time.from_unix(time.unix(date))`, because the legacy number-to-date
+  conversion truncates toward zero: `-0.5` names the epoch second, while the
+  date it came from was in second `-1`. This is the pre-phase behaviour, kept
+  deliberately; the date-to-number direction still returns the fraction, and a
+  fix would have to change an input `time.format` already handled.

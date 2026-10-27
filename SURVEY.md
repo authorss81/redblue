@@ -266,7 +266,7 @@ Refused as `RuntimeError: Module 'text' has no function 'pad_left'`.
 duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
 `add_*` movers), plus `time.parse` added by phase-097. `src/runtime.rs:720`
 parses the ISO-8601 forms, including an offset and a fraction, into the date
-value; `src/runtime.rs:1704` formats a date or a numeric timestamp. `time.unix`
+value; `src/runtime.rs:1708` formats a date or a numeric timestamp. `time.unix`
 now reads the same parser and also accepts a date value, so a birthdate read
 from text can enter the arithmetic. `time.from_unix` remains the numeric inverse.
 - **What phase-097 changed**: text parsing and caller-chosen formatting are now
