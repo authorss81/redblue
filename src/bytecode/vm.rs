@@ -437,9 +437,9 @@ struct Frame {
     /// The loops in this block, found once when the frame was pushed.
     sites: Vec<LoopSite>,
     /// The cache entry this frame's eventual value belongs to: the decorated
-    /// function's name and the arguments it was called with. `None` for a call
-    /// that is not decorated.
-    cache: Option<(String, Vec<Value>)>,
+    /// function's identity and the arguments it was called with. `None` for a
+    /// call that is not decorated.
+    cache: Option<(usize, Vec<Value>)>,
     /// A `map` this frame started and has not finished.
     ///
     /// The map's callee is always the frame directly above this one, because
@@ -798,10 +798,11 @@ pub struct BytecodeVm {
     /// [`BytecodeVm::break_instructions`].
     skip_instructions: usize,
     call_depth: usize,
-    /// The `lru_cache`-decorated functions, by declaration name. Populated by
-    /// the internal call a compiled declaration emits, and read before a direct
-    /// call enters a frame. See [`crate::runtime::LruCache`].
-    caches: HashMap<String, crate::runtime::LruCache>,
+    /// The memory of each `lru_cache`-decorated function, by function identity
+    /// rather than declaration name. Populated by the internal call a compiled
+    /// declaration emits, and read before a call enters a frame. See
+    /// [`crate::runtime::LruCache`] and [`FunctionValue::id`].
+    caches: HashMap<usize, crate::runtime::LruCache>,
     max_call_depth: usize,
     steps: usize,
     max_steps: usize,
@@ -1664,8 +1665,8 @@ impl BytecodeVm {
         // Without this a cache filled only when the answer was spelled with
         // `give back`, so a body ending in an ordinary expression memoised on
         // one engine and not the other.
-        if let Some((name, args)) = frame.cache.clone() {
-            if let Some(cache) = self.caches.get_mut(&name) {
+        if let Some((id, args)) = frame.cache.clone() {
+            if let Some(cache) = self.caches.get_mut(&id) {
                 cache.insert(&args, value.clone());
             }
         }
@@ -2846,8 +2847,8 @@ impl BytecodeVm {
         let last = self.frames[frame].ip + 1 >= self.code_len(frame);
         self.stack.truncate(self.frames[frame].stack_base);
         if last {
-            if let Some((name, args)) = self.frames[frame].cache.clone() {
-                if let Some(cache) = self.caches.get_mut(&name) {
+            if let Some((id, args)) = self.frames[frame].cache.clone() {
+                if let Some(cache) = self.caches.get_mut(&id) {
                     cache.insert(&args, value.clone());
                 }
             }
@@ -2903,8 +2904,17 @@ impl BytecodeVm {
                     self.span(),
                 ));
             }
+            // The function the `STORE` just bound carries its own identity, so
+            // this cache belongs to that value and not to every declaration
+            // that happens to share its name.
+            let Some(Value::Function(function)) = self.get_var(declared) else {
+                return Err(Error::Runtime(
+                    format!("lru_cache declaration '{declared}' is not a function"),
+                    self.span(),
+                ));
+            };
             self.caches.insert(
-                declared.clone(),
+                function.id,
                 crate::runtime::LruCache::new(*capacity as usize),
             );
             self.push(Value::Nothing);
@@ -3175,7 +3185,7 @@ impl BytecodeVm {
         // the answer on the stack for the caller to advance over.
         if let Some(value) = self
             .caches
-            .get_mut(&function.name)
+            .get_mut(&function.id)
             .and_then(|cache| cache.get(args))
         {
             if self
@@ -3237,8 +3247,8 @@ impl BytecodeVm {
         new_frame.locals_base = locals_base;
         new_frame.stack_base = self.stack.len();
         new_frame.is_call = true;
-        if self.caches.contains_key(&function.name) {
-            new_frame.cache = Some((function.name.clone(), args.to_vec()));
+        if self.caches.contains_key(&function.id) {
+            new_frame.cache = Some((function.id, args.to_vec()));
         }
         self.call_depth += 1;
         self.frames.push(new_frame);
@@ -3249,15 +3259,15 @@ impl BytecodeVm {
     /// where the declaration is executed.
     fn make_function(&self, chunk: &Arc<Chunk>, path: &[u32], block: &Block) -> Value {
         let captured: Captured = self.locals.clone();
-        Value::Function(FunctionValue {
-            name: block.name.clone(),
-            params: block.params.clone(),
-            body: FunctionBody::Block {
+        Value::Function(FunctionValue::new(
+            block.name.clone(),
+            block.params.clone(),
+            FunctionBody::Block {
                 chunk: chunk.clone(),
                 path: path.to_vec(),
             },
-            captured: Arc::new(captured),
-        })
+            Arc::new(captured),
+        ))
     }
 
     /// `DEF_FUNCTION`: the closure whose body is `arg`'s block. The `STORE` the
@@ -3266,12 +3276,37 @@ impl BytecodeVm {
         let (chunk, path) = self.child_path(frame, instruction.arg)?;
         let block = self.block_of(&chunk, &path)?.clone();
         // A cache belongs to the declaration that asked for it. Defining the
-        // name again drops the old memory before the `STORE` binds the new
-        // function; a decorated declaration re-adds its own cache with the
-        // internal call the compiler emits after the store. Doing it here rather
-        // than with an extra instruction keeps an ordinary declaration's bytes
-        // unchanged, which is what the self-hosted compiler compares against.
-        self.caches.remove(&block.name);
+        // name again drops the memory of the value currently bound there; a
+        // decorated declaration re-adds its own cache with the internal call the
+        // compiler emits after the store. Doing it here rather than with an
+        // extra instruction keeps an ordinary declaration's bytes unchanged,
+        // which is what the self-hosted compiler compares against.
+        // The binding this declaration replaces, resolved exactly as the
+        // `STORE` after it will resolve the write: the nearest live local, or
+        // the global when no local holds the name (and outside a module body).
+        // An enclosing same-named binding that will be shadowed is not touched.
+        let replaced = if self.frames[frame].globals_only {
+            self.globals.get(&block.name)
+        } else {
+            self.locals
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&block.name))
+                .or_else(|| {
+                    if self.module_depth == 0 {
+                        self.globals.get(&block.name)
+                    } else {
+                        None
+                    }
+                })
+        }
+        .and_then(|value| match value {
+            Value::Function(function) => Some(function.id),
+            _ => None,
+        });
+        if let Some(previous) = replaced {
+            self.caches.remove(&previous);
+        }
         let closure = self.make_function(&chunk, &path, &block);
         self.push(closure);
         self.advance(frame);

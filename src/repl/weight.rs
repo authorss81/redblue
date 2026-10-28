@@ -512,12 +512,12 @@ mod tests {
     }
 
     fn function_with_body(body: FunctionBody) -> Value {
-        Value::Function(crate::value::FunctionValue {
-            name: "f".to_string(),
-            params: vec!["a".to_string()],
+        Value::Function(crate::value::FunctionValue::new(
+            "f".to_string(),
+            vec!["a".to_string()],
             body,
-            captured: std::sync::Arc::new(Vec::new()),
-        })
+            std::sync::Arc::new(Vec::new()),
+        ))
     }
 
     #[test]
@@ -599,12 +599,12 @@ mod tests {
 
         let mut captured = crate::value::CapturedScope::new();
         captured.insert("x".to_string(), text(5));
-        let function = crate::value::FunctionValue {
-            name: "f".to_string(),
-            params: vec!["a".to_string(), "bb".to_string()],
-            body: crate::value::FunctionBody::Statements(std::sync::Arc::new(Vec::new())),
-            captured: std::sync::Arc::new(vec![captured]),
-        };
+        let function = crate::value::FunctionValue::new(
+            "f".to_string(),
+            vec!["a".to_string(), "bb".to_string()],
+            crate::value::FunctionBody::Statements(std::sync::Arc::new(Vec::new())),
+            std::sync::Arc::new(vec![captured]),
+        );
         assert_eq!(
             value_bytes(&Value::Function(function)),
             "f".len() + "a".len() + "bb".len() + "x".len() + 5

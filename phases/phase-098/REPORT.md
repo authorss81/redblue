@@ -6,17 +6,20 @@
 | `src/runtime.rs` | +200 −5 | `chain`, `zip`, `enumerate`, `product`, `groupby`, `take`, `skip`, the shared `LruCache`, and the resumed run's fractional-count refusal |
 | `src/stdlib.rs` | +62 −2 | registers the seven helpers, their signatures (now saying the `take`/`skip` count is whole), and the hidden `__lru_cache_declare` name the bytecode VM emits |
 | `src/parser.rs` | +181 | `lru_cache(n) to ...` decorator parsing, `skip(...)` as a call in statement and expression position, and the cache capacity on a function declaration |
-| `src/interpreter.rs` | +39 | registers decorated declarations and performs tree-walker cache lookup/insertion |
+| `src/interpreter.rs` | +58 −10 | registers decorated declarations, keys tree-walker memory by function identity, and drops the replaced binding's memory on rebinding |
 | `src/bytecode/codegen.rs` | +30 | emits the hidden cache declaration after a decorated function is stored |
-| `src/bytecode/vm.rs` | +71 −7 | registers decorated declarations and carries a cache on the frame; this resumed run moved the hit check into `call_function` so `map`, method calls and direct calls all consult the same declaration cache |
+| `src/bytecode/vm.rs` | +106 −9 | keys the compiled engine's memory by function identity, carries it on the frame, and resolves the hidden declaration through the value the `STORE` just bound |
 | `src/formatter.rs` | +10 | prints the `lru_cache(n)` decorator |
+| `src/value.rs` | +35 −0 | gives `FunctionValue` a unique identity and a constructor that allocates it, so clones share memory and distinct closures never do |
 | `src/analyzer.rs` | +4 | accounts for the new function declaration field |
-| `src/repl/weight.rs` | +4 | accounts for the new function declaration field |
-| `SPEC.md` | +58 −4 | iteration-helper table, zip-shorter rule, group ordering, the memoisation contract, the fractional-count refusal, and that a cache belongs to the declaration rather than one call spelling |
+| `src/repl/weight.rs` | +10 −4 | accounts for the new function declaration field and the constructor |
+| `src/repl/render.rs` | +6 −5 | builds its display-only function through the constructor |
+| `SPEC.md` | +65 −4 | iteration-helper table, zip-shorter rule, group ordering, the memoisation contract, the fractional-count refusal, and that memory belongs to the function value rather than its name |
 | `SURVEY.md` | +36 −34 | builtin count 85 → 92 and re-anchored citations |
-| `tests/stdlib_module_docs_test.rs` | +497 +70 | iteration/memoisation tests, including the cross-engine map hit, failed-call, far-past-the-end, fractional-count, Unicode, record-grouping and structural cache-key tests |
+| `tests/stdlib_module_docs_test.rs` | +569 +70 | iteration/memoisation tests, including the cross-engine map hit, failed-call, far-past-the-end, fractional-count, Unicode, record-grouping, structural cache-key and same-named-closure tests |
 | `tests/formatter_test.rs` | +37 −? | constructor update for the cache field |
 | `tests/bytecode_test.rs` | +1 | constructor update for the cache field |
+| `tests/closure_capture_test.rs` | +6 −5 | hand-built function value goes through the constructor |
 | `tests/doc_blocks_runs.txt` | +2 | classifies the two new SPEC blocks |
 | `tests/unreviewed_work_ack_test.rs` | +1 | acknowledges the `resume phase-098:` delivery subject |
 
@@ -27,12 +30,20 @@ fractional count rather than truncating it; a negative count still clamps.
 `lru_cache` is not a reserved word: it is recognised only immediately before a `to` declaration, and a
 variable named `lru_cache` still works. The default capacity is 128.
 
-A cache belongs to the declaration. The resumed run fixed a cross-engine
-disagreement: the bytecode VM looked for a hit only on a direct `CALL`, so a
-decorated function passed to `map` ran its body once per element there while the
-tree-walker answered from memory. The lookup now lives in `call_function`, which
-every call path reaches, and a hit inside `map` is routed through `advance_map`
-exactly as a returned frame would be. Failed calls are not cached on either
+A cache belongs to the function value the declaration produces. The resumed run
+fixed two cross-engine disagreements. First, the bytecode VM looked for a hit
+only on a direct `CALL`, so a decorated function passed to `map` ran its body
+once per element there while the tree-walker answered from memory; the lookup now
+lives in `call_function`, which every call path reaches, and a hit inside `map`
+is routed through `advance_map` exactly as a returned frame would be. Second,
+both engines keyed the memory by declaration *name*, so two closures built by two
+calls to one factory shared one memory: the second closure could answer with the
+first closure's captured value, and a cache hit could hide a failure the second
+closure would have produced. The key is now `FunctionValue::id`, unique per value
+and preserved by cloning, so aliases and recursive reads share their own memory
+while same-named closures stay apart. A declaration that replaces the binding of
+a name drops that replaced value's memory, which keeps a cached declaration in a
+loop from accumulating unreachable caches. Failed calls are not cached on either
 engine.
 
 Phase-077 is not done in this tree (`.done` is absent), so it had not added `zip`
@@ -64,6 +75,9 @@ helpers are flat builtins only, which avoids creating a second spelling.
 | `edge_lru_cache_does_not_survive_a_bytecode_run` | cache is per run |
 | `iteration_helpers_agree_across_both_engines` | tree-walker and bytecode values compared as data |
 | `spec_says_each_iteration_helper_materialises` | SPEC table is present, complete and says "materialises" |
+| `edge_lru_cache_is_not_shared_by_two_same_named_closures` | identity: two closures from one factory over different captured values answer independently |
+| `edge_lru_cache_same_named_closures_fill_independently` | identity plus call count: each closure's second call is a hit of its own memory |
+| `edge_lru_cache_does_not_let_one_closure_answer_for_another` | identity and failure: a cached success in one closure cannot hide another's division by zero |
 
 Mandatory matrix:
 - empty — covered by `iteration_helpers_cover_the_empty_list`.
@@ -83,7 +97,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 2308 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | pass — 2311 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-098` | pass |
 
 ## Invariants touched
@@ -96,9 +110,9 @@ Mandatory matrix:
   need an iterator value, which the language does not have.
 - `lru_cache` capacity is fixed at declaration time; there is no runtime resize
   or inspection builtin.
-- The cache is keyed by declaration name. Two same-named declarations in
-  different scopes are not distinguished, matching the language's name-based
-  function lookup.
+- The cache is keyed by `FunctionValue::id`. Identities come from a
+  process-wide counter, so a value built by one process cannot be compared to
+  one built by another; nothing observable depends on the number itself.
 - The bytecode file format did not change. Decorated declarations emit a hidden
   call after the store, so older `.rbc` files still load.
 - Phase-077 has not landed, so there was no list-surface `zip`/`enumerate` to

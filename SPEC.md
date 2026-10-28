@@ -1658,9 +1658,13 @@ it is 128. A call whose arguments equal an earlier call's arguments answers from
 the cache without running the body; a miss runs the body and records its answer.
 When the cache is full, the least recently used entry is evicted. Only successful
 answers are recorded, so a failed call is tried again. The cache belongs to the
-declaration, not to one spelling of calling it: a direct call, a method call and
-an element of `map` all consult the same memory and answer a hit without running
-the body. `lru_cache` is not a reserved word: it is recognised only in front of a
+function value the declaration produces, not to one spelling of calling it or to
+its name: a direct call, a method call and an element of `map` all consult the
+same memory and answer a hit without running the body. Two closures produced by
+two executions of one declaration, or two same-named declarations in different
+scopes, have separate memories, and neither answers for the other. A declaration
+that replaces the binding of a name drops the memory of the function value it
+replaced. `lru_cache` is not a reserved word: it is recognised only in front of a
 `to` declaration, and a variable of that name still works.
 
 ---

@@ -1769,3 +1769,92 @@ fn edge_take_and_skip_saturate_a_count_far_past_the_end() {
     yields("take([1, 2, 3], -1e300)", "[]");
     yields("skip([1, 2, 3], -1e300)", "[1, 2, 3]");
 }
+
+/// A cache belongs to one function value, not to every declaration that shares
+/// its name. Two calls of one factory build two `add` closures over different
+/// offsets; a name-keyed memory answered the second closure with the first
+/// closure's result.
+#[test]
+fn edge_lru_cache_is_not_shared_by_two_same_named_closures() {
+    let source = r#"
+to make(offset)
+    lru_cache(10) to add(n)
+        give back n + offset
+    end
+    give back add
+end
+set hundreds to make(100)
+set ones to make(1)
+[hundreds(5), hundreds(5), ones(5), ones(5)]
+"#;
+    yields(source, "[105, 105, 6, 6]");
+}
+
+/// The same collision, observed through the call count: each closure's first
+/// call runs its body and its second call is a hit of *its own* memory. A shared
+/// cache answers the second closure with the first one's label and count.
+#[test]
+fn edge_lru_cache_same_named_closures_fill_independently() {
+    let source = r#"
+to make(label, calls)
+    lru_cache(10) to remember(n)
+        set calls to calls + 1
+        give back [label, calls]
+    end
+    give back remember
+end
+set first to make("first", 0)
+set second to make("second", 0)
+[first(1), first(1), second(1), second(1)]
+"#;
+    yields(source, "[[first, 1], [first, 1], [second, 1], [second, 1]]");
+}
+
+/// A cached value in one closure must never hide a failure in another closure
+/// of the same name. The first declaration caches `n / 1`; the second divides by
+/// zero, which is an error even though its argument equals the cached one.
+#[test]
+fn edge_lru_cache_does_not_let_one_closure_answer_for_another() {
+    let failing = r#"
+to make(divisor)
+    lru_cache(10) to divide(n)
+        give back n / divisor
+    end
+    give back divide
+end
+set safe to make(1)
+set broken to make(0)
+safe(7)
+broken(7)
+"#;
+    assert!(
+        run_source_value(failing).is_err(),
+        "the tree-walker should refuse the second closure's division by zero"
+    );
+
+    let chunk = compile_source(failing).expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    assert!(
+        vm.run(&chunk).is_err(),
+        "the bytecode VM should refuse the second closure's division by zero"
+    );
+
+    let caught = r#"
+to make(divisor)
+    lru_cache(10) to divide(n)
+        give back n / divisor
+    end
+    give back divide
+end
+set safe to make(1)
+set broken to make(0)
+set safe_answer to safe(7)
+try
+    set broken_answer to broken(7)
+catch error
+    set broken_answer to "refused"
+end
+[safe_answer, broken_answer]
+"#;
+    yields(caught, "[7, refused]");
+}

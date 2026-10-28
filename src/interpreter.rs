@@ -460,12 +460,15 @@ pub struct Vm {
     /// nothing else.
     debug_hook: Option<DebugHook>,
     call_depth: usize,
-    /// The `lru_cache`-decorated functions, by declaration name.
+    /// The memory of each `lru_cache`-decorated function, by function identity.
     ///
-    /// Held by the VM that runs the program, so two programs in one process
-    /// keep their own memories. The capacity is the one the decorator stated;
-    /// [`crate::runtime::LruCache`] is what evicts at it.
-    caches: std::collections::HashMap<String, crate::runtime::LruCache>,
+    /// The identity is [`crate::value::FunctionValue::id`], not the declaration
+    /// name: two factories can each declare a cached `add` over a different
+    /// captured value, and keying by name made one closure answer for the
+    /// other. Held by the VM that runs the program, so two programs in one
+    /// process keep their own memories. The capacity is the one the decorator
+    /// stated; [`crate::runtime::LruCache`] is what evicts at it.
+    caches: std::collections::HashMap<usize, crate::runtime::LruCache>,
     /// The user functions currently executing, outermost first — the frame list
     /// [`Vm::debug_before`] hands a hook as [`DebugEvent::call_stack`].
     ///
@@ -1739,12 +1742,12 @@ impl Vm {
     /// changes a global — a counter, a registry — is written to do.
     fn make_function(&self, name: &str, params: &[String], body: &[Stmt]) -> Value {
         let captured: Captured = self.locals.clone();
-        Value::Function(FunctionValue {
-            name: name.to_string(),
-            params: params.to_vec(),
-            body: FunctionBody::Statements(Arc::new(body.to_vec())),
-            captured: Arc::new(captured),
-        })
+        Value::Function(FunctionValue::new(
+            name.to_string(),
+            params.to_vec(),
+            FunctionBody::Statements(Arc::new(body.to_vec())),
+            Arc::new(captured),
+        ))
     }
 
     fn get_var(&self, name: &str) -> Option<Value> {
@@ -2241,15 +2244,33 @@ impl Vm {
                 body,
                 cache,
             } => {
+                // Rebinding a name drops the memory of the declaration that had
+                // it, so a loop that declares a cached function cannot grow an
+                // unreachable cache per turn. The lookup happens before the new
+                // binding exists, and only the binding this declaration will
+                // replace is dropped: a same-named declaration in an enclosing
+                // scope is shadowed, not replaced, and keeps its own memory.
+                let replaced = match self.locals.last() {
+                    Some(scope) => scope.get(name),
+                    None => self.globals.get(name),
+                }
+                .and_then(|value| match value {
+                    Value::Function(function) => Some(function.id),
+                    _ => None,
+                });
+                if let Some(previous) = replaced {
+                    self.caches.remove(&previous);
+                }
                 let function = self.make_function(name, params, body);
+                let key = match &function {
+                    Value::Function(function) => Some(function.id),
+                    _ => None,
+                };
                 self.declare(name);
                 self.set_var(name, function)?;
-                // The memory belongs to the declaration, so rebinding the name
-                // drops whatever an earlier decorated declaration left behind.
-                self.caches.remove(name);
-                if let Some(capacity) = cache {
+                if let (Some(capacity), Some(key)) = (cache, key) {
                     self.caches
-                        .insert(name.clone(), crate::runtime::LruCache::new(*capacity));
+                        .insert(key, crate::runtime::LruCache::new(*capacity));
                 }
 
                 Ok(Value::Nothing)
@@ -3001,7 +3022,7 @@ impl Vm {
         // body uses to reach itself.
         if let Some(value) = self
             .caches
-            .get_mut(&function.name)
+            .get_mut(&function.id)
             .and_then(|cache| cache.get(args))
         {
             return Ok(value);
@@ -3085,7 +3106,7 @@ impl Vm {
         self.call_stack.pop();
 
         if let Ok(value) = &result {
-            if let Some(cache) = self.caches.get_mut(&function.name) {
+            if let Some(cache) = self.caches.get_mut(&function.id) {
                 cache.insert(args, value.clone());
             }
         }
