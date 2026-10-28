@@ -426,7 +426,9 @@ impl Analyzer {
                     self.analyze_expr(e, &span);
                 }
             }
-            Statement::Function { name, params, body } => {
+            Statement::Function {
+                name, params, body, ..
+            } => {
                 self.declare(name);
                 self.functions.insert(name.clone(), params.clone());
                 self.push_scope();

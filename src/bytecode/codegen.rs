@@ -427,7 +427,12 @@ impl Compiler {
                 }
                 emit(code, Opcode::Return, 0, 0, line);
             }
-            Statement::Function { name, params, body } => {
+            Statement::Function {
+                name,
+                params,
+                body,
+                cache,
+            } => {
                 let block = self.nested(
                     Decl {
                         kind: BlockKind::Function,
@@ -441,8 +446,27 @@ impl Compiler {
                     blocks,
                 )?;
                 emit(code, Opcode::DefFunction, block, params.len() as u32, line);
-                let name = self.text(name);
-                emit(code, Opcode::Store, name, 0, line);
+                let stored = self.text(name);
+                emit(code, Opcode::Store, stored, 0, line);
+                // The decoration is a call rather than a field on the block, so
+                // the `.rbc` format does not change: a compiled declaration is
+                // still the same instructions followed by a call that records
+                // the cache under the name just bound. The tree-walking VM
+                // records it directly when it runs the declaration.
+                //
+                // An ordinary declaration emits nothing extra. `DEF_FUNCTION`
+                // drops any cache an earlier declaration of the same name left
+                // behind, so the bytes of an ordinary function are unchanged and
+                // the stored `.rbc` files keep their shape.
+                if let Some(capacity) = cache {
+                    let declared = self.text(name);
+                    let capacity = self.constant(Constant::Number(*capacity as f64));
+                    emit(code, Opcode::PushConst, declared, 0, line);
+                    emit(code, Opcode::PushConst, capacity, 0, line);
+                    let declare = self.text(crate::stdlib::LRU_CACHE_DECLARE);
+                    emit(code, Opcode::Call, declare, 2, line);
+                    emit(code, Opcode::Pop, 0, 0, line);
+                }
             }
             Statement::Method { name, params, body } => {
                 let block = self.nested(
