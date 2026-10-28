@@ -1353,6 +1353,102 @@ fn edge_take_and_skip_clamp_at_both_ends() {
     yields("skip([1, 2, 3], 99)", "[]");
 }
 
+/// A count is a number of whole items. A positive fraction has no meaning, so
+/// it is refused rather than silently truncated: `take(xs, 1.9)` used to answer
+/// one item, which makes the caller's arithmetic disappear without a word. A
+/// negative count is still the empty/whole-list clamp, fraction or not.
+#[test]
+fn edge_take_and_skip_refuse_a_fractional_count() {
+    for (source, name) in [
+        ("take([1, 2, 3], 1.5)", "take"),
+        ("skip([1, 2, 3], 2.5)", "skip"),
+    ] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains(name) && walked.contains("whole number"),
+            "the tree-walker should refuse `{source}` as a whole number, it said: {walked}"
+        );
+
+        let chunk = compile_source(source).expect("the failing program should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse a fractional count");
+        assert!(
+            compiled.message().contains(name) && compiled.message().contains("whole number"),
+            "the bytecode VM should refuse `{source}` as a whole number, it said: {}",
+            compiled.message()
+        );
+    }
+
+    // The negative clamp still wins over the whole-number rule, so the two
+    // edges stay separate rather than one swallowing the other.
+    yields("take([1, 2, 3], -1.5)", "[]");
+    yields("skip([1, 2, 3], -1.5)", "[1, 2, 3]");
+}
+
+/// The helpers move values without inspecting them, so text of any script has
+/// to survive unchanged. A byte-length or grapheme rewrite anywhere on the path
+/// would mangle an emoji, a CJK word, an RTL word or a combining mark.
+#[test]
+fn edge_iteration_helpers_preserve_unicode_items() {
+    yields("chain([\"日\", \"é\"], [\"🙂\"])", "[日, é, 🙂]");
+    yields("zip([\"日\"], [\"é\"])", "[[日, é]]");
+    yields("enumerate([\"🙂\", \"שלום\"])", "[[0, 🙂], [1, שלום]]");
+    yields("product([\"é\"], [\"🙂\"])", "[[é, 🙂]]");
+    yields(
+        "groupby([\"日\", \"é\", \"日\"])",
+        "[{key: 日, items: [日, 日]}, {key: é, items: [é]}]",
+    );
+    yields("take([\"日\", \"é\"], 1)", "[日]");
+    yields("skip([\"日\", \"é\"], 1)", "[é]");
+    yields("chain([], [\"e\u{301}\"])", "[e\u{301}]");
+}
+
+/// A key is compared with Redblue equality, so two records with the same fields
+/// and values share a group even when they were built separately, while a
+/// record with a different or missing field stays its own group.
+#[test]
+fn edge_groupby_groups_equal_records_and_keeps_missing_fields_distinct() {
+    yields(
+        "groupby([{a: 1}, {a: 2}, {a: 1}])",
+        "[{key: {a: 1}, items: [{a: 1}, {a: 1}]}, {key: {a: 2}, items: [{a: 2}]}]",
+    );
+    yields(
+        "groupby([{a: 1}, {b: 1}, {}])",
+        "[{key: {a: 1}, items: [{a: 1}]}, {key: {b: 1}, items: [{b: 1}]}, \
+         {key: {}, items: [{}]}]",
+    );
+}
+
+/// Two list arguments with equal contents are one cache key, and two records
+/// with equal fields are one key too; a different list or a record missing a
+/// field is a different key. The call counts are literal, so identity-only or
+/// never-hitting keys both fail.
+#[test]
+fn edge_lru_cache_keys_on_structural_argument_equality() {
+    let source = r#"
+set list_calls to 0
+lru_cache(10) to same_list(xs)
+    set list_calls to list_calls + 1
+    give back xs
+end
+same_list([1, 2])
+same_list([1, 2])
+same_list([2, 1])
+set record_calls to 0
+lru_cache(10) to same_record(r)
+    set record_calls to record_calls + 1
+    give back r
+end
+same_record({a: 1, b: 2})
+same_record({a: 1, b: 2})
+same_record({a: 1})
+[list_calls, record_calls]
+"#;
+    yields(source, "[2, 2]");
+}
+
 #[test]
 fn edge_iteration_helpers_refuse_wrong_types() {
     for (source, name) in [

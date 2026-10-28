@@ -3,8 +3,8 @@
 ## What changed
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +186 | `chain`, `zip`, `enumerate`, `product`, `groupby`, `take`, `skip`, and the shared `LruCache` |
-| `src/stdlib.rs` | +60 | registers the seven helpers, their signatures, and the hidden `__lru_cache_declare` name the bytecode VM emits |
+| `src/runtime.rs` | +200 −5 | `chain`, `zip`, `enumerate`, `product`, `groupby`, `take`, `skip`, the shared `LruCache`, and the resumed run's fractional-count refusal |
+| `src/stdlib.rs` | +62 −2 | registers the seven helpers, their signatures (now saying the `take`/`skip` count is whole), and the hidden `__lru_cache_declare` name the bytecode VM emits |
 | `src/parser.rs` | +181 | `lru_cache(n) to ...` decorator parsing, `skip(...)` as a call in statement and expression position, and the cache capacity on a function declaration |
 | `src/interpreter.rs` | +39 | registers decorated declarations and performs tree-walker cache lookup/insertion |
 | `src/bytecode/codegen.rs` | +30 | emits the hidden cache declaration after a decorated function is stored |
@@ -12,9 +12,9 @@
 | `src/formatter.rs` | +10 | prints the `lru_cache(n)` decorator |
 | `src/analyzer.rs` | +4 | accounts for the new function declaration field |
 | `src/repl/weight.rs` | +4 | accounts for the new function declaration field |
-| `SPEC.md` | +56 −2 | iteration-helper table, zip-shorter rule, group ordering, the memoisation contract, and that a cache belongs to the declaration rather than one call spelling |
+| `SPEC.md` | +58 −4 | iteration-helper table, zip-shorter rule, group ordering, the memoisation contract, the fractional-count refusal, and that a cache belongs to the declaration rather than one call spelling |
 | `SURVEY.md` | +36 −34 | builtin count 85 → 92 and re-anchored citations |
-| `tests/stdlib_module_docs_test.rs` | +401 +70 | iteration/memoisation tests; this resumed run adds the cross-engine map-hit test, the failed-call test and the far-past-the-end count test |
+| `tests/stdlib_module_docs_test.rs` | +497 +70 | iteration/memoisation tests, including the cross-engine map hit, failed-call, far-past-the-end, fractional-count, Unicode, record-grouping and structural cache-key tests |
 | `tests/formatter_test.rs` | +37 −? | constructor update for the cache field |
 | `tests/bytecode_test.rs` | +1 | constructor update for the cache field |
 | `tests/doc_blocks_runs.txt` | +2 | classifies the two new SPEC blocks |
@@ -22,8 +22,9 @@
 
 The helpers materialise lists because Redblue has no iterator value. `zip` stops
 at the shorter input and never pads. `groupby` uses Redblue equality and keeps
-first-appearance order. `take` and `skip` clamp both bounds. `lru_cache` is not a
-reserved word: it is recognised only immediately before a `to` declaration, and a
+first-appearance order. `take` and `skip` clamp both bounds and refuse a positive
+fractional count rather than truncating it; a negative count still clamps.
+`lru_cache` is not a reserved word: it is recognised only immediately before a `to` declaration, and a
 variable named `lru_cache` still works. The default capacity is 128.
 
 A cache belongs to the declaration. The resumed run fixed a cross-engine
@@ -46,6 +47,10 @@ helpers are flat builtins only, which avoids creating a second spelling.
 | `edge_zip_stops_at_the_shorter_input` | zip shorter-input rule, both directions |
 | `edge_take_and_skip_clamp_at_both_ends` | negative, zero and past-end counts |
 | `edge_take_and_skip_saturate_a_count_far_past_the_end` | numeric boundary: ±1e300 counts |
+| `edge_take_and_skip_refuse_a_fractional_count` | type coercion boundary; failure asserted on both engines |
+| `edge_iteration_helpers_preserve_unicode_items` | Unicode: emoji, CJK, RTL and a combining mark |
+| `edge_groupby_groups_equal_records_and_keeps_missing_fields_distinct` | duplicate/missing keys: equal records group, differing field sets do not |
+| `edge_lru_cache_keys_on_structural_argument_equality` | cache keys compare list and record contents by equality, asserted by call count |
 | `edge_groupby_keeps_first_appearance_order_and_groups_by_equality` | group order and equality, including lists |
 | `edge_iteration_helpers_refuse_wrong_types` | every helper's type-refusal channel |
 | `edge_lru_cache_evicts_at_its_capacity` | capacity bound and call-count rise after eviction |
@@ -67,9 +72,9 @@ Mandatory matrix:
 - out_of_bounds — covered by the take/skip clamping tests; the helpers do not index.
 - type_mismatch — covered by `edge_iteration_helpers_refuse_wrong_types`.
 - numeric_boundary — covered by the ±1e300 count test and the capacity refusals; a non-finite number cannot reach a helper because the language refuses one before it becomes a value.
-- unicode — N/A: the helpers treat list elements opaquely and never index or split text; text operations are tested by their own phases.
+- unicode — covered by `edge_iteration_helpers_preserve_unicode_items`, which moves emoji, CJK, RTL and a combining mark through every helper.
 - nesting_recursion — covered by the recursive Fibonacci test and groupby over equal nested lists.
-- duplicate_missing_keys — covered by groupby's repeated-key grouping; a produced group always has both `key` and `items`.
+- duplicate_missing_keys — covered by `edge_groupby_groups_equal_records_and_keeps_missing_fields_distinct` and the structural cache-key test; a produced group always has both `key` and `items`.
 - malformed_input — covered by the capacity and wrong-type refusal tests.
 - resource_limit — covered by the capacity/eviction tests; the cache does not add an unbounded store because the declared bound evicts.
 
@@ -78,7 +83,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 2304 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | pass — 2308 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-098` | pass |
 
 ## Invariants touched

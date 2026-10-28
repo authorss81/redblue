@@ -1390,11 +1390,11 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ),
     (
         "take",
-        "take(list, number) -> the first n items, or the whole list when n is past it",
+        "take(list, number) -> the first n items (a whole number), or the whole list when n is past it",
     ),
     (
         "skip",
-        "skip(list, number) -> the list without its first n items",
+        "skip(list, number) -> the list without its first n items (a whole number)",
     ),
     (
         "list_map",

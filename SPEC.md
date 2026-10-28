@@ -1623,8 +1623,8 @@ than assumed.
 | `enumerate(xs)` | materialises `[index, item]` pairs with indexes from zero | materialises |
 | `product(a, b)` | materialises every `[a-item, b-item]` combination, first input outermost | materialises |
 | `groupby(xs)` | materialises `{key, items}` records, in first-appearance order, grouping equal keys together | materialises |
-| `take(xs, n)` | materialises the first `n` items; `n` below zero is empty and past the end is the whole list | materialises |
-| `skip(xs, n)` | materialises the list without its first `n` items, bounded the same way | materialises |
+| `take(xs, n)` | materialises the first `n` items; `n` below zero is empty and past the end is the whole list; a positive fractional `n` is refused | materialises |
+| `skip(xs, n)` | materialises the list without its first `n` items, bounded the same way; a positive fractional `n` is refused | materialises |
 
 ```redblue
 set both to chain([1, 2], [3])                  // [1, 2, 3]

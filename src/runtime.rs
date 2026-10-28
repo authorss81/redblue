@@ -1571,11 +1571,14 @@ impl LruCache {
 
 /// A `take`/`skip` count as a whole number of items.
 ///
-/// The ends are clamped rather than refused: a negative count is zero and a
-/// count past the end is the whole list, which is what makes `take(xs, 0)`
-/// empty and `skip(xs, 999)` empty without either being an error. A count that
-/// is not a finite number is refused, because `NaN` and an infinity have no
-/// place in "the first n items".
+/// A positive count that is not a whole number is refused rather than silently
+/// truncated: there is no such thing as "the first 1.9 items", and rounding
+/// would make the caller's arithmetic disappear without a word. The ends are
+/// clamped rather than refused: a negative count is zero and a count past the
+/// end is the whole list, which is what makes `take(xs, 0)` empty and
+/// `skip(xs, 999)` empty without either being an error. A count that is not a
+/// finite number is refused, because `NaN` and an infinity have no place in
+/// "the first n items".
 fn iteration_count(name: &str, count: f64, span: Span) -> Result<usize> {
     if !count.is_finite() {
         return Err(Error::Runtime(
@@ -1585,6 +1588,12 @@ fn iteration_count(name: &str, count: f64, span: Span) -> Result<usize> {
     }
     if count <= 0.0 {
         return Ok(0);
+    }
+    if count.fract() != 0.0 {
+        return Err(Error::Runtime(
+            format!("{name} requires a whole number of items, got {count}"),
+            span,
+        ));
     }
     Ok(count.trunc() as usize)
 }
