@@ -1672,6 +1672,7 @@ fn edge_a_program_nested_past_the_block_limit_is_refused() {
                 name: "deep".to_string(),
                 params: Vec::new(),
                 body: statements,
+                cache: None,
             },
         }];
     }

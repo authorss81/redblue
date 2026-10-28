@@ -436,6 +436,10 @@ struct Frame {
     globals_only: bool,
     /// The loops in this block, found once when the frame was pushed.
     sites: Vec<LoopSite>,
+    /// The cache entry this frame's eventual value belongs to: the decorated
+    /// function's name and the arguments it was called with. `None` for a call
+    /// that is not decorated.
+    cache: Option<(String, Vec<Value>)>,
     /// A `map` this frame started and has not finished.
     ///
     /// The map's callee is always the frame directly above this one, because
@@ -794,6 +798,10 @@ pub struct BytecodeVm {
     /// [`BytecodeVm::break_instructions`].
     skip_instructions: usize,
     call_depth: usize,
+    /// The `lru_cache`-decorated functions, by declaration name. Populated by
+    /// the internal call a compiled declaration emits, and read before a direct
+    /// call enters a frame. See [`crate::runtime::LruCache`].
+    caches: HashMap<String, crate::runtime::LruCache>,
     max_call_depth: usize,
     steps: usize,
     max_steps: usize,
@@ -883,6 +891,7 @@ impl BytecodeVm {
             pending_objects: Vec::new(),
             outcome: Value::Nothing,
             call_depth: 0,
+            caches: HashMap::new(),
             break_instructions: 0,
             skip_instructions: 0,
             max_call_depth: resolve_max_call_depth(),
@@ -1072,6 +1081,7 @@ impl BytecodeVm {
         self.stack.clear();
         self.pending_objects.clear();
         self.locals.truncate(1);
+        self.caches.clear();
         self.outcome = Value::Nothing;
         self.abrupt_exit = false;
 
@@ -1156,6 +1166,7 @@ impl BytecodeVm {
             loop_owner: None,
             globals_only: false,
             sites,
+            cache: None,
             pending_map: None,
         }
     }
@@ -1648,6 +1659,16 @@ impl BytecodeVm {
             value = self.stack.pop().expect("the stack holds a value");
         }
         self.stack.truncate(frame.stack_base);
+        // A body that reaches its end without a final `RETURN` still produced
+        // this value, and a decorated call records it exactly as `RETURN` does.
+        // Without this a cache filled only when the answer was spelled with
+        // `give back`, so a body ending in an ordinary expression memoised on
+        // one engine and not the other.
+        if let Some((name, args)) = frame.cache.clone() {
+            if let Some(cache) = self.caches.get_mut(&name) {
+                cache.insert(&args, value.clone());
+            }
+        }
         if !frame.is_call {
             // The outermost frame *is* the program, and a program's value is the
             // value of its last statement: `1 + 2` is worth 3. Every other
@@ -2825,6 +2846,11 @@ impl BytecodeVm {
         let last = self.frames[frame].ip + 1 >= self.code_len(frame);
         self.stack.truncate(self.frames[frame].stack_base);
         if last {
+            if let Some((name, args)) = self.frames[frame].cache.clone() {
+                if let Some(cache) = self.caches.get_mut(&name) {
+                    cache.insert(&args, value.clone());
+                }
+            }
             self.stack.push(value);
             self.frames[frame].ip = usize::MAX;
         } else {
@@ -2859,6 +2885,32 @@ impl BytecodeVm {
             self.advance(frame);
             return Ok(());
         }
+        // The internal calls a compiled `lru_cache(n) to ...` emits. They are
+        // not language names, so they are answered here rather than registered
+        // as builtins a program could call.
+        if name == crate::stdlib::LRU_CACHE_DECLARE {
+            let [Value::Text(declared), Value::Number(capacity)] = args else {
+                return Err(Error::Runtime(
+                    "lru_cache declaration requires a name and a capacity".to_string(),
+                    self.span(),
+                ));
+            };
+            if !capacity.is_finite() || *capacity < 1.0 || capacity.fract() != 0.0 {
+                return Err(Error::Runtime(
+                    format!(
+                        "lru_cache capacity must be a whole number of at least 1, got {capacity}"
+                    ),
+                    self.span(),
+                ));
+            }
+            self.caches.insert(
+                declared.clone(),
+                crate::runtime::LruCache::new(*capacity as usize),
+            );
+            self.push(Value::Nothing);
+            self.advance(frame);
+            return Ok(());
+        }
         // `map` has to *call* a Redblue function, which the shared resolver
         // cannot do, so it is answered here and started on the frame — asked for
         // before the resolver, which would otherwise claim the name and refuse it
@@ -2888,6 +2940,15 @@ impl BytecodeVm {
         }
         match self.get_var(name) {
             Some(Value::Function(function)) => {
+                if let Some(value) = self
+                    .caches
+                    .get_mut(&function.name)
+                    .and_then(|cache| cache.get(args))
+                {
+                    self.push(value);
+                    self.advance(frame);
+                    return Ok(());
+                }
                 self.call_function(name, &function, args, None)?;
                 self.advance(frame);
                 Ok(())
@@ -3158,6 +3219,9 @@ impl BytecodeVm {
         new_frame.locals_base = locals_base;
         new_frame.stack_base = self.stack.len();
         new_frame.is_call = true;
+        if self.caches.contains_key(&function.name) {
+            new_frame.cache = Some((function.name.clone(), args.to_vec()));
+        }
         self.call_depth += 1;
         self.frames.push(new_frame);
         Ok(())
@@ -3183,6 +3247,13 @@ impl BytecodeVm {
     fn def_function(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let (chunk, path) = self.child_path(frame, instruction.arg)?;
         let block = self.block_of(&chunk, &path)?.clone();
+        // A cache belongs to the declaration that asked for it. Defining the
+        // name again drops the old memory before the `STORE` binds the new
+        // function; a decorated declaration re-adds its own cache with the
+        // internal call the compiler emits after the store. Doing it here rather
+        // than with an extra instruction keeps an ordinary declaration's bytes
+        // unchanged, which is what the self-hosted compiler compares against.
+        self.caches.remove(&block.name);
         let closure = self.make_function(&chunk, &path, &block);
         self.push(closure);
         self.advance(frame);

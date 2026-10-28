@@ -172,7 +172,9 @@ pub fn value_bytes(value: &Value) -> usize {
                             pending.push(Pending::Expression(value));
                         }
                     }
-                    Statement::Function { name, params, body }
+                    Statement::Function {
+                        name, params, body, ..
+                    }
                     | Statement::Method { name, params, body } => {
                         bytes += name.len() + params.iter().map(String::len).sum::<usize>();
                         pending.extend(body.iter().map(Pending::Statement));
