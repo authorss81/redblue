@@ -2940,15 +2940,6 @@ impl BytecodeVm {
         }
         match self.get_var(name) {
             Some(Value::Function(function)) => {
-                if let Some(value) = self
-                    .caches
-                    .get_mut(&function.name)
-                    .and_then(|cache| cache.get(args))
-                {
-                    self.push(value);
-                    self.advance(frame);
-                    return Ok(());
-                }
                 self.call_function(name, &function, args, None)?;
                 self.advance(frame);
                 Ok(())
@@ -3171,6 +3162,33 @@ impl BytecodeVm {
         args: &[Value],
         this: Option<Value>,
     ) -> Result<()> {
+        // A decorated function answers from memory wherever it is called from:
+        // a direct `CALL`, a method call, or one element of a `map`. Keeping
+        // the lookup here rather than only on the direct-call path is what
+        // makes a cache a property of the declaration instead of one spelling
+        // of calling it, and the tree-walking VM looks it up in the same place
+        // for the same reason.
+        //
+        // A hit does not enter the body, so it costs no frame and no call
+        // depth. A `map` element is routed on to its caller's `pending_map`,
+        // exactly as a frame that returned would be; every other hit leaves
+        // the answer on the stack for the caller to advance over.
+        if let Some(value) = self
+            .caches
+            .get_mut(&function.name)
+            .and_then(|cache| cache.get(args))
+        {
+            if self
+                .frames
+                .last()
+                .is_some_and(|frame| frame.pending_map.is_some())
+            {
+                self.advance_map(self.frames.len() - 1, value)?;
+            } else {
+                self.stack.push(value);
+            }
+            return Ok(());
+        }
         let Some((chunk, path)) = function.body.block() else {
             return Err(Error::Runtime(
                 format!(

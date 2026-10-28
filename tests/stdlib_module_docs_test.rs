@@ -1603,3 +1603,73 @@ fn spec_says_each_iteration_helper_materialises() {
         "SPEC.md should state that zip stops at the shorter input"
     );
 }
+
+/// A cache is a property of the declaration, not of one way of calling it. A
+/// decorated function passed to `map` is still the same function, so repeated
+/// arguments must be answered from memory on both engines. The bytecode VM
+/// looked for a hit only on a direct `CALL`, so `map([1, 1], f)` ran the body
+/// twice there while the tree-walker ran it once.
+#[test]
+fn edge_lru_cache_hits_inside_map_on_both_engines() {
+    let source = r#"
+set calls to 0
+lru_cache(10) to doubled(n)
+    set calls to calls + 1
+    give back n * 2
+end
+set mapped to map([1, 1, 1], doubled)
+[mapped, calls]
+"#;
+    yields(source, "[[2, 2, 2], 1]");
+}
+
+/// A failed call is not an answer, so it must not enter the cache. Both engines
+/// are asked directly for the failure first, then each attempt is caught and
+/// counted: the body runs on every attempt, which is the observable proof that
+/// nothing was remembered.
+#[test]
+fn edge_lru_cache_does_not_record_a_failed_call() {
+    let bad = "lru_cache(2) to boom(n)\n    give back 1 / n\nend\nboom(0)\n";
+    assert!(
+        run_source_value(bad).is_err(),
+        "the tree-walker should refuse a division by zero"
+    );
+    let chunk = compile_source(bad).expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    assert!(
+        vm.run(&chunk).is_err(),
+        "the bytecode VM should refuse a division by zero"
+    );
+
+    let source = r#"
+set calls to 0
+lru_cache(2) to boom(n)
+    set calls to calls + 1
+    give back 1 / n
+end
+try
+    boom(0)
+catch error
+    set caught to yes
+end
+try
+    boom(0)
+catch error
+    set caught to yes
+end
+calls
+"#;
+    yields(source, "2");
+}
+
+/// A count far past the end is still the whole list (or nothing, for `skip`),
+/// not an overflow. The cast from the finite number saturates instead of
+/// wrapping to a small count, so both ends keep the clamping rule the ordinary
+/// bounds test states.
+#[test]
+fn edge_take_and_skip_saturate_a_count_far_past_the_end() {
+    yields("take([1, 2, 3], 1e300)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], 1e300)", "[]");
+    yields("take([1, 2, 3], -1e300)", "[]");
+    yields("skip([1, 2, 3], -1e300)", "[1, 2, 3]");
+}
