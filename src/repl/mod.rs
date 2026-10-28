@@ -7089,6 +7089,8 @@ mod tests {
             "if 1 is greater than 0 then",
             "repeat 3 times",
             "to greet(name)",
+            "lru_cache(10) to cached(n)",
+            "lru_cache to cached(n)",
             "for each i from 1 to 10",
             "try",
             "while 1 is less than 10",

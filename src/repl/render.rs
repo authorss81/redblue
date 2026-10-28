@@ -470,12 +470,12 @@ mod tests {
 
     /// A function named `name`, with no body worth calling.
     fn function(name: &str) -> Value {
-        Value::Function(crate::value::FunctionValue {
-            name: name.to_string(),
-            params: Vec::new(),
-            body: crate::value::FunctionBody::Statements(std::sync::Arc::new(Vec::new())),
-            captured: std::sync::Arc::new(Vec::new()),
-        })
+        Value::Function(crate::value::FunctionValue::new(
+            name.to_string(),
+            Vec::new(),
+            crate::value::FunctionBody::Statements(std::sync::Arc::new(Vec::new())),
+            std::sync::Arc::new(Vec::new()),
+        ))
     }
 
     /// The lines of `text`, with the trailing newline removed.
