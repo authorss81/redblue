@@ -1512,6 +1512,83 @@ fn read_line(_args: &[Value], span: Span) -> Result<String> {
     ))
 }
 
+/// The memory behind one `lru_cache`-decorated function.
+///
+/// Entries are kept oldest-first. A hit moves its entry to the end and a miss
+/// inserts at the end, so the front is always the least recently used and is
+/// what eviction removes when the size would pass the stated capacity.
+///
+/// A linear scan rather than a hash map because a key is a `Vec<Value>` and a
+/// Redblue value may contain a list, a record or a function; the capacity is
+/// small enough that comparison is the right cost, and `Value`'s own equality
+/// is what makes two calls with equal arguments one entry.
+#[derive(Debug, Clone)]
+pub struct LruCache {
+    capacity: usize,
+    entries: Vec<(Vec<Value>, Value)>,
+}
+
+impl LruCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: Vec::new(),
+        }
+    }
+
+    /// The answer recorded for `args`, if one is remembered, made the most
+    /// recently used entry by the read.
+    pub fn get(&mut self, args: &[Value]) -> Option<Value> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(remembered, _)| remembered.as_slice() == args)?;
+        let entry = self.entries.remove(index);
+        let value = entry.1.clone();
+        self.entries.push(entry);
+        Some(value)
+    }
+
+    /// Records `value` for `args`, evicting the least recently used entry when
+    /// the cache is already at its capacity.
+    pub fn insert(&mut self, args: &[Value], value: Value) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(remembered, _)| remembered.as_slice() == args)
+        {
+            self.entries.remove(index);
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.remove(0);
+        }
+        self.entries.push((args.to_vec(), value));
+    }
+}
+
+/// A `take`/`skip` count as a whole number of items.
+///
+/// The ends are clamped rather than refused: a negative count is zero and a
+/// count past the end is the whole list, which is what makes `take(xs, 0)`
+/// empty and `skip(xs, 999)` empty without either being an error. A count that
+/// is not a finite number is refused, because `NaN` and an infinity have no
+/// place in "the first n items".
+fn iteration_count(name: &str, count: f64, span: Span) -> Result<usize> {
+    if !count.is_finite() {
+        return Err(Error::Runtime(
+            format!("{name} requires a finite number of items, got {count}"),
+            span,
+        ));
+    }
+    if count <= 0.0 {
+        return Ok(0);
+    }
+    Ok(count.trunc() as usize)
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -1566,6 +1643,115 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ))
             }
         }
+        // -- iteration helpers -------------------------------------------------
+        //
+        // Every one of these returns a new list rather than an iterator.
+        // Redblue has no iterator value, so a helper that wanted to be lazy
+        // would have nothing to hand back; SPEC.md § Iteration helpers states
+        // that for the reader rather than leaving it to be discovered.
+        "chain" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let mut items = left.as_ref().clone();
+                items.extend(right.iter().cloned());
+                Ok(Some(Value::list(items)))
+            }
+            _ => Err(Error::Runtime("chain requires two lists".to_string(), span)),
+        },
+        "zip" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let pairs = left
+                    .iter()
+                    .zip(right.iter())
+                    .map(|(a, b)| Value::list(vec![a.clone(), b.clone()]))
+                    .collect();
+                Ok(Some(Value::list(pairs)))
+            }
+            _ => Err(Error::Runtime("zip requires two lists".to_string(), span)),
+        },
+        "enumerate" => match args {
+            [Value::List(items)] => {
+                let indexed = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        Value::list(vec![Value::Number(index as f64), item.clone()])
+                    })
+                    .collect();
+                Ok(Some(Value::list(indexed)))
+            }
+            _ => Err(Error::Runtime(
+                "enumerate requires one list".to_string(),
+                span,
+            )),
+        },
+        "product" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let mut pairs = Vec::with_capacity(left.len().saturating_mul(right.len()));
+                for a in left.iter() {
+                    for b in right.iter() {
+                        pairs.push(Value::list(vec![a.clone(), b.clone()]));
+                    }
+                }
+                Ok(Some(Value::list(pairs)))
+            }
+            _ => Err(Error::Runtime(
+                "product requires two lists".to_string(),
+                span,
+            )),
+        },
+        // Groups are kept in the order their key first appeared, and a key is
+        // matched with `Value`'s equality, so two equal records or lists share
+        // one group rather than two. A group is a record — `key` and `items` —
+        // so a caller can reach either half by name.
+        "groupby" => match args {
+            [Value::List(items)] => {
+                let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+                for item in items.iter() {
+                    match groups.iter_mut().find(|(key, _)| key == item) {
+                        Some((_, bucket)) => bucket.push(item.clone()),
+                        None => groups.push((item.clone(), vec![item.clone()])),
+                    }
+                }
+                let records = groups
+                    .into_iter()
+                    .map(|(key, items)| {
+                        let mut fields = crate::value::Fields::new();
+                        fields.insert("key".to_string(), key);
+                        fields.insert("items".to_string(), Value::list(items));
+                        Value::record(fields)
+                    })
+                    .collect();
+                Ok(Some(Value::list(records)))
+            }
+            _ => Err(Error::Runtime(
+                "groupby requires one list".to_string(),
+                span,
+            )),
+        },
+        "take" => match args {
+            [Value::List(items), Value::Number(count)] => {
+                let count = iteration_count("take", *count, span)?;
+                Ok(Some(Value::list(
+                    items.iter().take(count).cloned().collect(),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "take requires a list and a number".to_string(),
+                span,
+            )),
+        },
+        "skip" => match args {
+            [Value::List(items), Value::Number(count)] => {
+                let count = iteration_count("skip", *count, span)?;
+                Ok(Some(Value::list(
+                    items.iter().skip(count).cloned().collect(),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "skip requires a list and a number".to_string(),
+                span,
+            )),
+        },
         "input" => read_line(args, span).map(|line| Some(Value::Text(line))),
         "random" => {
             let (min, max) = random_range(span, "random", args, 100.0)?;

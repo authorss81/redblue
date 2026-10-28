@@ -460,6 +460,12 @@ pub struct Vm {
     /// nothing else.
     debug_hook: Option<DebugHook>,
     call_depth: usize,
+    /// The `lru_cache`-decorated functions, by declaration name.
+    ///
+    /// Held by the VM that runs the program, so two programs in one process
+    /// keep their own memories. The capacity is the one the decorator stated;
+    /// [`crate::runtime::LruCache`] is what evicts at it.
+    caches: std::collections::HashMap<String, crate::runtime::LruCache>,
     /// The user functions currently executing, outermost first — the frame list
     /// [`Vm::debug_before`] hands a hook as [`DebugEvent::call_stack`].
     ///
@@ -711,6 +717,7 @@ impl Vm {
             statement_depth: 0,
             debug_hook: None,
             call_depth: 0,
+            caches: HashMap::new(),
             call_stack: Vec::new(),
             frame_scope_base: 0,
             frame_writes: Vec::new(),
@@ -1704,6 +1711,7 @@ impl Vm {
     /// *does* — a failure returns here in both, before any output is emitted,
     /// exactly as it did when [`Vm::run`] returned straight from the loop.
     fn run_statements(&mut self, program: &Program) -> Result<Value> {
+        self.caches.clear();
         let mut result = Value::Nothing;
 
         for statement in &program.statements {
@@ -2227,10 +2235,22 @@ impl Vm {
                 Some(e) => self.evaluate(e),
                 None => Ok(Value::Nothing),
             },
-            Statement::Function { name, params, body } => {
+            Statement::Function {
+                name,
+                params,
+                body,
+                cache,
+            } => {
                 let function = self.make_function(name, params, body);
                 self.declare(name);
                 self.set_var(name, function)?;
+                // The memory belongs to the declaration, so rebinding the name
+                // drops whatever an earlier decorated declaration left behind.
+                self.caches.remove(name);
+                if let Some(capacity) = cache {
+                    self.caches
+                        .insert(name.clone(), crate::runtime::LruCache::new(*capacity));
+                }
 
                 Ok(Value::Nothing)
             }
@@ -2975,6 +2995,17 @@ impl Vm {
         function: &FunctionValue,
         args: &[Value],
     ) -> Result<Value> {
+        // A decorated function is answered from memory before the call-depth
+        // guard: a hit does not enter the body, so it does not cost a frame.
+        // The lookup is by declaration name, which is the name a recursive
+        // body uses to reach itself.
+        if let Some(value) = self
+            .caches
+            .get_mut(&function.name)
+            .and_then(|cache| cache.get(args))
+        {
+            return Ok(value);
+        }
         if self.call_depth >= self.max_call_depth {
             return Err(Error::Limit(
                 format!(
@@ -3052,6 +3083,12 @@ impl Vm {
         self.frame_scope_base = caller_scope_base;
         self.frame_writes.pop();
         self.call_stack.pop();
+
+        if let Ok(value) = &result {
+            if let Some(cache) = self.caches.get_mut(&function.name) {
+                cache.insert(args, value.clone());
+            }
+        }
 
         result
     }

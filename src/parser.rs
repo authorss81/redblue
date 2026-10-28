@@ -225,6 +225,9 @@ pub enum Statement {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        /// The capacity an `lru_cache(n) to ...` decorator gave this
+        /// declaration, or `None` for an ordinary function.
+        cache: Option<usize>,
     },
 
     // to can method(args) ... end
@@ -583,6 +586,10 @@ impl Parser {
             None => return Ok(None),
         };
 
+        if self.lru_cache_declaration_ahead() {
+            return self.parse_cached_function();
+        }
+
         let stmt: Option<Statement> = match &token.kind {
             TokenKind::Say => {
                 self.advance();
@@ -606,6 +613,13 @@ impl Parser {
             TokenKind::Break => {
                 self.advance();
                 Some(Statement::Break)
+            }
+            // `skip(...)` is the builtin call, not the loop-control word.
+            // `skip` has no operand, so a `(` can only be the start of a call;
+            // reading it as loop control left the call unreachable.
+            TokenKind::Skip if matches!(self.current_at(1), Some(TokenKind::LeftParen)) => {
+                let expr = self.parse_expression()?;
+                Some(Statement::Expr(expr))
             }
             TokenKind::Skip => {
                 self.advance();
@@ -1190,7 +1204,113 @@ impl Parser {
         self.advance(); // consume 'to'
 
         let (name, params, body) = self.parse_callable()?;
-        Ok(Some(Statement::Function { name, params, body }))
+        Ok(Some(Statement::Function {
+            name,
+            params,
+            body,
+            cache: None,
+        }))
+    }
+
+    /// The capacity an `lru_cache` decorator gets when it names none.
+    const DEFAULT_LRU_CAPACITY: usize = 128;
+
+    /// Whether the tokens here are `lru_cache [ '(' number ')' ] to ...`.
+    ///
+    /// `lru_cache` stays an ordinary identifier rather than becoming a keyword,
+    /// because a program may already hold a variable of that name and `skip`
+    /// shows what reserving a word costs. The decorator is recognised by shape:
+    /// the identifier, an optional parenthesised capacity, and then `to` where
+    /// a declaration begins. A call such as `lru_cache(f, 2)` is followed by a
+    /// newline rather than `to`, so it stays an ordinary call.
+    fn lru_cache_declaration_ahead(&self) -> bool {
+        if !self.is_word_ahead(0, "lru_cache") {
+            return false;
+        }
+        if matches!(self.current_at(1), Some(TokenKind::To)) {
+            return true;
+        }
+        if !matches!(self.current_at(1), Some(TokenKind::LeftParen)) {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut offset = 1usize;
+        while let Some(kind) = self.current_at(offset) {
+            match kind {
+                TokenKind::LeftParen => depth += 1,
+                TokenKind::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.current_at(offset + 1), Some(TokenKind::To));
+                    }
+                }
+                _ => {}
+            }
+            offset += 1;
+        }
+        false
+    }
+
+    /// Parses the decorator form [`Parser::lru_cache_declaration_ahead`]
+    /// recognised. The capacity is a positive whole number; a cache of zero
+    /// can never answer from memory, so it is refused rather than accepted as
+    /// a decorator that silently does nothing.
+    fn parse_cached_function(&mut self) -> Result<Option<Stmt>> {
+        let span = self.span();
+        self.advance(); // consume 'lru_cache'
+
+        let capacity = if matches!(self.current_at(0), Some(TokenKind::LeftParen)) {
+            self.advance(); // consume '('
+            let capacity = match self.current() {
+                Some(Token {
+                    kind: TokenKind::Number(value),
+                    ..
+                }) if value.is_finite()
+                    && *value >= 1.0
+                    && value.fract() == 0.0
+                    && *value <= usize::MAX as f64 =>
+                {
+                    *value as usize
+                }
+                Some(Token {
+                    kind: TokenKind::Number(value),
+                    ..
+                }) => {
+                    return Err(Error::Parser(
+                        format!(
+                            "lru_cache capacity must be a whole number of at least 1, got {value}"
+                        ),
+                        self.span(),
+                    ))
+                }
+                _ => {
+                    return Err(Error::Parser(
+                        "lru_cache capacity must be a number, as in lru_cache(128)".to_string(),
+                        self.span(),
+                    ))
+                }
+            };
+            self.advance();
+            self.expect(&TokenKind::RightParen)?;
+            capacity
+        } else {
+            Self::DEFAULT_LRU_CAPACITY
+        };
+
+        self.expect(&TokenKind::To)?;
+        self.enter_block()?;
+        let parsed = self.parse_callable();
+        self.leave_block();
+        let (name, params, body) = parsed?;
+        Ok(Some(Stmt {
+            span,
+            statement: Statement::Function {
+                name,
+                params,
+                body,
+                cache: Some(capacity),
+            },
+        }))
     }
 
     /// Parses a `to can name(params) ... end` method declaration, the form
@@ -2683,6 +2803,12 @@ impl Parser {
             // always been, while `to (x) ... end` and `to ... end` after an
             // operator are the value SPEC.md documents.
             TokenKind::To => self.parse_function_literal(),
+            // A `skip` followed by `(` is the builtin call. The loop-control
+            // spelling has no operand, so the two never compete.
+            TokenKind::Skip if matches!(self.current_at(1), Some(TokenKind::LeftParen)) => {
+                self.advance();
+                Ok(Expr::Variable("skip".to_string(), token.span()))
+            }
             TokenKind::LeftParen => {
                 self.advance();
                 self.enter_nesting()?;
@@ -3053,9 +3179,10 @@ fn opens_block_at_statement_start(kind: &TokenKind) -> bool {
 pub fn open_block_depth(tokens: &[Token]) -> i32 {
     let mut depth = 0;
     let mut at_statement_start = true;
+    let mut index = 0;
 
-    for token in tokens {
-        match &token.kind {
+    while index < tokens.len() {
+        match &tokens[index].kind {
             TokenKind::Newline => at_statement_start = true,
             TokenKind::End => {
                 depth -= 1;
@@ -3074,15 +3201,61 @@ pub fn open_block_depth(tokens: &[Token]) -> i32 {
             TokenKind::Else | TokenKind::Catch | TokenKind::Finally => {
                 at_statement_start = true;
             }
+            // `lru_cache` is an identifier, so without this the `to` it decorates
+            // is not at a statement start and the block it opens is missed. The
+            // decorator itself is the opener here; the `to` that follows it is
+            // consumed below without counting a second block.
+            _ if at_statement_start && lru_cache_decorator_ahead(tokens, index) => {
+                depth += 1;
+                at_statement_start = false;
+            }
             kind if at_statement_start && opens_block_at_statement_start(kind) => {
                 depth += 1;
                 at_statement_start = false;
             }
             _ => at_statement_start = false,
         }
+        index += 1;
     }
 
     depth
+}
+
+/// Whether the tokens from `start` are the `lru_cache` decorator of a `to`
+/// declaration: the word, an optional parenthesised capacity, then `to`.
+fn lru_cache_decorator_ahead(tokens: &[Token], start: usize) -> bool {
+    if !matches!(
+        tokens.get(start).map(|token| &token.kind),
+        Some(TokenKind::Identifier(word)) if word == "lru_cache"
+    ) {
+        return false;
+    }
+    let Some(next) = tokens.get(start + 1).map(|token| &token.kind) else {
+        return false;
+    };
+    if matches!(next, TokenKind::To) {
+        return true;
+    }
+    if !matches!(next, TokenKind::LeftParen) {
+        return false;
+    }
+    let mut depth = 0usize;
+    for index in start + 1..tokens.len() {
+        match &tokens[index].kind {
+            TokenKind::LeftParen => depth += 1,
+            TokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return matches!(
+                        tokens.get(index + 1).map(|token| &token.kind),
+                        Some(TokenKind::To)
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -3148,6 +3321,8 @@ mod tests {
             "repeat 3 times",
             "while x is less than 10",
             "to greet(name)",
+            "lru_cache(10) to cached(n)",
+            "lru_cache to cached(n)",
             "object Person",
             "try",
             "test \"a name\"",

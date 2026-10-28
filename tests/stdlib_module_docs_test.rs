@@ -20,7 +20,9 @@
 use std::io::{Read, Write};
 use std::process::Command;
 
+use redblue::bytecode::compile_source;
 use redblue::bytecode::vm::BytecodeVm;
+use redblue::{run_source_value, Error, Value};
 
 /// The environment variables that decide whether `network` talks to a proxy.
 ///
@@ -700,6 +702,33 @@ say length(bytes.from_text("héllo"))"#
             "say list.map([1, 2], to (x) give back x + 1 end)".into(),
             "[2, 3]\n".into(),
         ),
+        (
+            "chain",
+            "say chain([1, 2], [3])".into(),
+            "[1, 2, 3]\n".into(),
+        ),
+        (
+            "zip",
+            r#"say zip([1, 2], ["a", "b"])"#.into(),
+            "[[1, a], [2, b]]\n".into(),
+        ),
+        (
+            "enumerate",
+            r#"say enumerate(["a", "b"])"#.into(),
+            "[[0, a], [1, b]]\n".into(),
+        ),
+        (
+            "product",
+            r#"say product([1, 2], ["a"])"#.into(),
+            "[[1, a], [2, a]]\n".into(),
+        ),
+        (
+            "groupby",
+            "say groupby([2, 1, 2, 1])".into(),
+            "[{key: 2, items: [2, 2]}, {key: 1, items: [1, 1]}]\n".into(),
+        ),
+        ("take", "say take([1, 2, 3], 2)".into(), "[1, 2]\n".into()),
+        ("skip", "say skip([1, 2, 3], 2)".into(), "[3]\n".into()),
         ("is_number", "say is_number(1)".into(), "yes\n".into()),
         ("is_text", r#"say is_text("a")"#.into(), "yes\n".into()),
         ("is_list", "say is_list([1])".into(), "yes\n".into()),
@@ -1200,5 +1229,377 @@ fn edge_regex_module_refuses_a_bad_pattern_by_name() {
         "docs_regex_bad_pattern",
         r#"say regex.match("x", "(")"#,
         "regex",
+    );
+}
+
+// ============================================================ phase-098 iteration helpers
+
+/// The tree-walking engine's value for `source`.
+#[track_caller]
+fn tree(source: &str) -> Value {
+    run_source_value(source)
+        .unwrap_or_else(|error| panic!("tree-walker should run:\n{source}\n{error:?}"))
+}
+
+/// The bytecode engine's value for `source`.
+#[track_caller]
+fn bytecode(source: &str) -> Value {
+    let chunk = compile_source(source)
+        .unwrap_or_else(|error| panic!("source should compile:\n{source}\n{error:?}"));
+    let mut vm = BytecodeVm::new();
+    vm.run(&chunk)
+        .unwrap_or_else(|error| panic!("bytecode VM should run:\n{source}\n{error:?}"))
+}
+
+/// Runs `source` on both engines and asserts they answer the same text, then
+/// returns the tree-walker's value.
+#[track_caller]
+fn both(source: &str) -> Value {
+    let walked = tree(source);
+    let compiled = bytecode(source);
+    assert_eq!(
+        walked.to_string(),
+        compiled.to_string(),
+        "the two engines disagree about:\n{source}"
+    );
+    walked
+}
+
+/// Asserts `source` answers `expected` on both engines.
+#[track_caller]
+fn yields(source: &str, expected: &str) {
+    let value = both(source);
+    assert_eq!(value.to_string(), expected, "wrong answer for:\n{source}");
+}
+
+/// The failure `source` produces on the tree-walker.
+#[track_caller]
+fn fails(source: &str) -> Error {
+    run_source_value(source).expect_err("source should fail")
+}
+
+fn message(error: &Error) -> String {
+    error.message().to_string()
+}
+
+#[test]
+fn iteration_helpers_cover_the_empty_list() {
+    yields("chain([], [])", "[]");
+    yields("zip([], [])", "[]");
+    yields("zip([1], [])", "[]");
+    yields("zip([], [1])", "[]");
+    yields("enumerate([])", "[]");
+    yields("product([], [])", "[]");
+    yields("product([1], [])", "[]");
+    yields("groupby([])", "[]");
+    yields("take([], 3)", "[]");
+    yields("skip([], 3)", "[]");
+}
+
+#[test]
+fn iteration_helpers_cover_singletons_and_many_elements() {
+    yields("chain([1], [2])", "[1, 2]");
+    yields("zip([1], [2])", "[[1, 2]]");
+    yields("enumerate([9])", "[[0, 9]]");
+    yields("product([1], [2])", "[[1, 2]]");
+    yields("groupby([7])", "[{key: 7, items: [7]}]");
+    yields("take([7], 1)", "[7]");
+    yields("skip([7], 0)", "[7]");
+
+    yields("chain([1, 2], [3, 4])", "[1, 2, 3, 4]");
+    yields("zip([1, 2, 3], [4, 5, 6])", "[[1, 4], [2, 5], [3, 6]]");
+    yields("enumerate([\"a\", \"b\"])", "[[0, a], [1, b]]");
+    yields(
+        "product([1, 2], [3, 4])",
+        "[[1, 3], [1, 4], [2, 3], [2, 4]]",
+    );
+    yields("take([1, 2, 3], 2)", "[1, 2]");
+    yields("skip([1, 2, 3], 1)", "[2, 3]");
+}
+
+#[test]
+fn edge_zip_stops_at_the_shorter_input() {
+    yields("zip([1, 2, 3], [\"a\"])", "[[1, a]]");
+    yields("zip([1], [\"a\", \"b\", \"c\"])", "[[1, a]]");
+    // The rule is not padding with a missing value, so the answer is exactly
+    // as long as the shorter side and no longer.
+    assert_eq!(
+        tree("length(zip([1, 2, 3, 4], [\"a\", \"b\"]))").to_string(),
+        "2"
+    );
+}
+
+#[test]
+fn edge_groupby_keeps_first_appearance_order_and_groups_by_equality() {
+    // 2 appears first, so its group is first even though 1 is smaller. The
+    // two lists equal to ["a"] share a group instead of making separate ones.
+    yields(
+        "groupby([2, 1, 2, 1, 3])",
+        "[{key: 2, items: [2, 2]}, {key: 1, items: [1, 1]}, {key: 3, items: [3]}]",
+    );
+    yields(
+        "groupby([[\"a\"], [\"b\"], [\"a\"]])",
+        "[{key: [a], items: [[a], [a]]}, {key: [b], items: [[b]]}]",
+    );
+}
+
+#[test]
+fn edge_take_and_skip_clamp_at_both_ends() {
+    yields("take([1, 2, 3], 0)", "[]");
+    yields("take([1, 2, 3], -2)", "[]");
+    yields("take([1, 2, 3], 99)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], 0)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], -2)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], 99)", "[]");
+}
+
+#[test]
+fn edge_iteration_helpers_refuse_wrong_types() {
+    for (source, name) in [
+        ("chain([1], \"two\")", "chain"),
+        ("zip([1], 2)", "zip"),
+        ("enumerate(\"text\")", "enumerate"),
+        ("product([1], {a: 1})", "product"),
+        ("groupby(1)", "groupby"),
+        ("take(\"text\", 1)", "take"),
+        ("skip([1], \"one\")", "skip"),
+    ] {
+        let text = message(&fails(source));
+        assert!(
+            text.contains(name),
+            "the refusal for `{source}` should name `{name}`, it said: {text}"
+        );
+    }
+}
+
+/// Two Fibonacci functions, one cached and one not: the same result, fewer
+/// calls for the cached one. The call counts are asserted literally, so a cache
+/// that never hits fails instead of passing on the result alone.
+#[test]
+fn lru_cache_makes_fewer_recursive_calls_than_uncached() {
+    let source = r#"
+set cached_calls to 0
+lru_cache(50) to cached_fib(n)
+    set cached_calls to cached_calls + 1
+    set answer to n
+    if n >= 2 then
+        set answer to cached_fib(n - 1) + cached_fib(n - 2)
+    end
+    give back answer
+end
+set plain_calls to 0
+to plain_fib(n)
+    set plain_calls to plain_calls + 1
+    set answer to n
+    if n >= 2 then
+        set answer to plain_fib(n - 1) + plain_fib(n - 2)
+    end
+    give back answer
+end
+set cached to cached_fib(10)
+set plain to plain_fib(10)
+[cached_calls < plain_calls, cached is plain, cached_calls, plain_calls]
+"#;
+    yields(source, "[yes, yes, 11, 177]");
+}
+
+/// At capacity two, the sequence visits three distinct arguments and then the
+/// first one again. With no eviction the last call would be a hit and the count
+/// would be 3; the answer 4 is the proof that the entry was evicted.
+#[test]
+fn edge_lru_cache_evicts_at_its_capacity() {
+    let source = r#"
+set calls to 0
+lru_cache(2) to f(n)
+    set calls to calls + 1
+    give back n
+end
+f(1)
+f(1)
+f(2)
+f(3)
+f(1)
+calls
+"#;
+    yields(source, "4");
+}
+
+#[test]
+fn edge_lru_cache_requires_a_positive_capacity() {
+    let zero = message(&fails("lru_cache(0) to f(n)\n    give back n\nend\nf(1)\n"));
+    assert!(
+        zero.contains("at least 1"),
+        "a zero capacity should be refused, it said: {zero}"
+    );
+
+    let fractional = message(&fails(
+        "lru_cache(1.5) to f(n)\n    give back n\nend\nf(1)\n",
+    ));
+    assert!(
+        fractional.contains("whole number"),
+        "a fractional capacity should be refused, it said: {fractional}"
+    );
+
+    let non_numeric = message(&fails(
+        "lru_cache(\"x\") to f(n)\n    give back n\nend\nf(1)\n",
+    ));
+    assert!(
+        non_numeric.contains("must be a number"),
+        "a non-numeric capacity should be refused, it said: {non_numeric}"
+    );
+}
+
+#[test]
+fn lru_cache_defaults_to_a_capacity_of_128() {
+    // 128 distinct arguments fit; the 129th evicts the least recently used
+    // entry. Then asking for the first argument again is a miss, which is the
+    // proof that the omitted capacity really was 128 and not unbounded.
+    let source = r#"
+set calls to 0
+lru_cache to f(n)
+    set calls to calls + 1
+    give back n
+end
+for each i from 1 to 128
+    f(i)
+end
+set filled to calls
+f(129)
+f(1)
+[filled, calls]
+"#;
+    yields(source, "[128, 130]");
+}
+
+#[test]
+fn edge_lru_cache_memoises_a_body_that_ends_in_an_expression() {
+    // The body's last statement is an ordinary expression rather than `give
+    // back`; the compiled engine finishes such a frame in `unwind_frame`, which
+    // must record the answer too or only one engine memoises.
+    let source = r#"
+set calls to 0
+lru_cache(10) to f(n)
+    set calls to calls + 1
+    n
+end
+f(1)
+f(1)
+calls
+"#;
+    yields(source, "1");
+}
+
+#[test]
+fn edge_redeclaring_a_cached_function_undecorated_drops_its_memory() {
+    // A cache belongs to the declaration that asked for it. Rebinding the name
+    // with an ordinary `to` must not let the old declaration answer for the new
+    // one on either engine.
+    let source = r#"
+lru_cache(10) to f(n)
+    give back n
+end
+f(1)
+to f(n)
+    give back n + 100
+end
+f(1)
+"#;
+    yields(source, "101");
+}
+
+#[test]
+fn edge_lru_cache_does_not_survive_a_bytecode_run() {
+    let mut vm = BytecodeVm::new();
+    let first = compile_source(
+        "lru_cache(10) to f(n)\n\
+             say \"called\"\n\
+             give back n\n\
+         end\n\
+         f(1)",
+    )
+    .expect("the first program should compile");
+    assert_eq!(
+        vm.run(&first)
+            .expect("the first run should work")
+            .to_string(),
+        "1"
+    );
+    assert_eq!(vm.take_output(), vec!["called".to_string()]);
+
+    let second = compile_source("f(1)").expect("the second program should compile");
+    assert_eq!(
+        vm.run(&second)
+            .expect("the second run should work")
+            .to_string(),
+        "1"
+    );
+    assert_eq!(
+        vm.take_output(),
+        vec!["called".to_string()],
+        "a cache from the previous run must not skip this run's body"
+    );
+}
+
+#[test]
+fn edge_a_user_function_named_like_the_internal_cache_call_still_runs() {
+    // The internal declaration call must be a name no source can spell, or a
+    // legal identifier would run the user's body on one engine and be
+    // intercepted on the other.
+    let source =
+        "to __lru_cache_declare(a, b)\n    give back a + b\nend\n__lru_cache_declare(2, 3)\n";
+    yields(source, "5");
+}
+
+#[test]
+fn edge_a_variable_named_lru_cache_still_works() {
+    // `lru_cache` is not reserved: a variable of that name is an ordinary
+    // binding, and only the decorator shape in front of `to` changes meaning.
+    yields("set lru_cache to 5\nlru_cache + 1", "6");
+}
+
+#[test]
+fn iteration_helpers_agree_across_both_engines() {
+    for source in [
+        "chain([1, 2], [3])",
+        "zip([1, 2, 3], [4, 5])",
+        "enumerate([\"a\", \"b\", \"c\"])",
+        "product([1, 2], [3, 4])",
+        "groupby([3, 1, 3, 2, 1])",
+        "take([1, 2, 3], 2)",
+        "skip([1, 2, 3], 1)",
+    ] {
+        both(source);
+    }
+}
+
+/// SPEC.md is the language's contract, so the laziness statement has to be
+/// there and has to name each helper. If a helper is later made lazy, this
+/// fails until the document says so — which is the point of writing the answer
+/// down rather than leaving it to be inferred.
+#[test]
+fn spec_says_each_iteration_helper_materialises() {
+    let spec = include_str!("../SPEC.md");
+    for name in [
+        "chain",
+        "zip",
+        "enumerate",
+        "product",
+        "groupby",
+        "take",
+        "skip",
+    ] {
+        let needle = format!("| `{name}(");
+        let line = spec
+            .lines()
+            .find(|line| line.contains(&needle))
+            .unwrap_or_else(|| panic!("SPEC.md § Iteration helpers has no row for `{name}`"));
+        assert!(
+            line.contains("materialis"),
+            "the row for `{name}` should say it materialises: {line}"
+        );
+    }
+    assert!(
+        spec.contains("zip") && spec.contains("stops at the shorter"),
+        "SPEC.md should state that zip stops at the shorter input"
     );
 }
