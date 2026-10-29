@@ -16,6 +16,7 @@
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1512,6 +1513,264 @@ fn read_line(_args: &[Value], span: Span) -> Result<String> {
     ))
 }
 
+/// The memory behind one `lru_cache`-decorated function.
+///
+/// Entries are kept oldest-first. A hit moves its entry to the end and a miss
+/// inserts at the end, so the front is always the least recently used and is
+/// what eviction removes when the size would pass the stated capacity.
+///
+/// A linear scan rather than a hash map because a key is a `Vec<Value>` and a
+/// Redblue value may contain a list, a record or a function; the capacity is
+/// small enough that comparison is the right cost. Two calls with equal
+/// arguments are one entry, with function values matched by identity rather
+/// than by the language's structural equality; see [`cache_key_eq`].
+#[derive(Debug, Clone)]
+pub struct LruCache {
+    capacity: usize,
+    entries: Vec<(Vec<Value>, Value)>,
+}
+
+impl LruCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: Vec::new(),
+        }
+    }
+
+    /// The answer recorded for `args`, if one is remembered, made the most
+    /// recently used entry by the read.
+    pub fn get(&mut self, args: &[Value]) -> Option<Value> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(remembered, _)| cache_key_eq(remembered, args))?;
+        let entry = self.entries.remove(index);
+        let value = entry.1.clone();
+        self.entries.push(entry);
+        Some(value)
+    }
+
+    /// Drops every remembered answer, keeping the capacity for the next run.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Records `value` for `args`, evicting the least recently used entry when
+    /// the cache is already at its capacity.
+    pub fn insert(&mut self, args: &[Value], value: Value) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(remembered, _)| cache_key_eq(remembered, args))
+        {
+            self.entries.remove(index);
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.remove(0);
+        }
+        self.entries.push((args.to_vec(), value));
+    }
+}
+
+/// Whether two argument lists are the same `lru_cache` key.
+///
+/// The language's `is` compares two function values by name, parameters and
+/// captured bindings, because two closures from one declaration over equal
+/// environments are interchangeable. A cache key cannot use that equality: two
+/// different declarations can produce functions with the same name, parameters
+/// and captures but different bodies, and one must never answer from the
+/// other's entry. A function in a key is therefore matched by its identity, and
+/// the rule reaches through lists and records because a function can be an
+/// item or a field. Every other kind of value keeps the language's equality.
+fn cache_key_eq(left: &[Value], right: &[Value]) -> bool {
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| cache_value_eq(a, b))
+}
+
+fn cache_value_eq(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Function(a), Value::Function(b)) => a.id == b.id,
+        (Value::List(a), Value::List(b)) => cache_key_eq(a, b),
+        (Value::Record(a), Value::Record(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(name, value)| {
+                    b.get(name)
+                        .is_some_and(|other| cache_value_eq(value, other))
+                })
+        }
+        (Value::Object(an, af), Value::Object(bn, bf)) => {
+            an == bn
+                && af.len() == bf.len()
+                && af.iter().all(|(name, value)| {
+                    bf.get(name)
+                        .is_some_and(|other| cache_value_eq(value, other))
+                })
+        }
+        _ => left == right,
+    }
+}
+
+/// A `take`/`skip` count as a whole number of items.
+///
+/// A positive count that is not a whole number is refused rather than silently
+/// truncated: there is no such thing as "the first 1.9 items", and rounding
+/// would make the caller's arithmetic disappear without a word. The ends are
+/// clamped rather than refused: a negative count is zero and a count past the
+/// end is the whole list, which is what makes `take(xs, 0)` empty and
+/// `skip(xs, 999)` empty without either being an error. A count that is not a
+/// finite number is refused, because `NaN` and an infinity have no place in
+/// "the first n items".
+fn iteration_count(name: &str, count: f64, span: Span) -> Result<usize> {
+    if !count.is_finite() {
+        return Err(Error::Runtime(
+            format!("{name} requires a finite number of items, got {count}"),
+            span,
+        ));
+    }
+    if count <= 0.0 {
+        return Ok(0);
+    }
+    if count.fract() != 0.0 {
+        return Err(Error::Runtime(
+            format!("{name} requires a whole number of items, got {count}"),
+            span,
+        ));
+    }
+    Ok(count.trunc() as usize)
+}
+
+/// The most pairs one `product` call may materialise.
+///
+/// A builtin call is charged as one step, so the step budget cannot stop a
+/// list whose length is the product of its inputs. Two lists of 100,000 items
+/// are each buildable under the loop cap, but their product is ten billion
+/// pairs — enough to exhaust the host before any guard can run. This bound is
+/// the one that call checks before it reserves anything, and exceeding it is a
+/// [`Error::Limit`], not a panic.
+pub const MAX_PRODUCT_ITEMS: usize = 1_000_000;
+
+const HASH_NOTHING: u8 = 1;
+const HASH_NUMBER: u8 = 2;
+const HASH_TEXT: u8 = 3;
+const HASH_YES_NO: u8 = 4;
+const HASH_LIST: u8 = 5;
+const HASH_RECORD: u8 = 6;
+const HASH_OBJECT_NAME: u8 = 7;
+const HASH_OBJECT_FIELDS: u8 = 8;
+const HASH_FUNCTION_NAME: u8 = 9;
+const HASH_FUNCTION_PARAMS_LEN: u8 = 10;
+const HASH_FUNCTION_PARAM: u8 = 11;
+const HASH_FUNCTION_SCOPES_LEN: u8 = 12;
+const HASH_FIELD_NAME: u8 = 13;
+const HASH_BUILTIN: u8 = 14;
+const HASH_DATE: u8 = 15;
+const HASH_DURATION: u8 = 16;
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn hash_tagged_bytes(tag: u8, bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET ^ u64::from(tag);
+    hash = hash.wrapping_mul(FNV_PRIME);
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn hash_tagged_u64(tag: u8, value: u64) -> u64 {
+    hash_tagged_bytes(tag, &value.to_le_bytes())
+}
+
+fn combine_hash(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(FNV_PRIME)
+}
+
+/// A deterministic hash whose only invariant is that `a == b` implies
+/// `hash(a) == hash(b)`.
+///
+/// `groupby` uses it to find candidate groups without comparing every item
+/// with every earlier key. Equality is still [`Value`]'s own, so a collision
+/// costs one comparison rather than changing the answer. Record and object
+/// fields are combined commutatively because their `IndexMap` equality is
+/// order-independent; captured scopes are combined in order because a
+/// function's captured stack is.
+fn group_value_hash(value: &Value) -> u64 {
+    match value {
+        Value::Nothing => hash_tagged_u64(HASH_NOTHING, 0),
+        Value::Number(number) => {
+            let bits = if *number == 0.0 {
+                0.0f64.to_bits()
+            } else {
+                number.to_bits()
+            };
+            hash_tagged_u64(HASH_NUMBER, bits)
+        }
+        Value::Text(text) => hash_tagged_bytes(HASH_TEXT, text.as_bytes()),
+        Value::YesNo(flag) => hash_tagged_u64(HASH_YES_NO, u64::from(*flag)),
+        Value::List(items) => {
+            let mut hash = hash_tagged_u64(HASH_LIST, items.len() as u64);
+            for item in items.iter() {
+                hash = combine_hash(hash, group_value_hash(item));
+            }
+            hash
+        }
+        Value::Record(fields) => group_fields_hash(HASH_RECORD, fields),
+        Value::Object(name, fields) => {
+            let mut hash = hash_tagged_bytes(HASH_OBJECT_NAME, name.as_bytes());
+            hash = combine_hash(hash, group_fields_hash(HASH_OBJECT_FIELDS, fields));
+            hash
+        }
+        Value::Function(function) => group_function_hash(function),
+        Value::Builtin(name) => hash_tagged_bytes(HASH_BUILTIN, name.as_bytes()),
+        Value::Date(date) => hash_tagged_bytes(HASH_DATE, format!("{:?}", date).as_bytes()),
+        Value::Duration(duration) => {
+            hash_tagged_bytes(HASH_DURATION, format!("{:?}", duration).as_bytes())
+        }
+    }
+}
+
+fn group_fields_hash(tag: u8, fields: &crate::value::Fields) -> u64 {
+    let hash = hash_tagged_u64(tag, fields.len() as u64);
+    let mut entries = 0u64;
+    for (name, value) in fields.iter() {
+        let key = hash_tagged_bytes(HASH_FIELD_NAME, name.as_bytes());
+        entries = entries.wrapping_add(combine_hash(key, group_value_hash(value)));
+    }
+    combine_hash(hash, entries)
+}
+
+fn group_function_hash(function: &crate::value::FunctionValue) -> u64 {
+    let mut hash = hash_tagged_bytes(HASH_FUNCTION_NAME, function.name.as_bytes());
+    hash = combine_hash(
+        hash,
+        hash_tagged_u64(HASH_FUNCTION_PARAMS_LEN, function.params.len() as u64),
+    );
+    for param in &function.params {
+        hash = combine_hash(
+            hash,
+            hash_tagged_bytes(HASH_FUNCTION_PARAM, param.as_bytes()),
+        );
+    }
+    hash = combine_hash(
+        hash,
+        hash_tagged_u64(HASH_FUNCTION_SCOPES_LEN, function.captured.len() as u64),
+    );
+    for scope in function.captured.iter() {
+        let mut entries = 0u64;
+        for (name, value) in scope.iter() {
+            let key = hash_tagged_bytes(HASH_FIELD_NAME, name.as_bytes());
+            entries = entries.wrapping_add(combine_hash(key, group_value_hash(value)));
+        }
+        hash = combine_hash(hash, entries);
+    }
+    hash
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -1566,6 +1825,151 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ))
             }
         }
+        // -- iteration helpers -------------------------------------------------
+        //
+        // Every one of these returns a new list rather than an iterator.
+        // Redblue has no iterator value, so a helper that wanted to be lazy
+        // would have nothing to hand back; SPEC.md § Iteration helpers states
+        // that for the reader rather than leaving it to be discovered.
+        //
+        // `chain` takes any number of lists, so joining three or more needs no
+        // nesting and joining none is the empty list.
+        "chain" => {
+            let mut items = Vec::new();
+            for arg in args {
+                match arg {
+                    Value::List(list) => items.extend(list.iter().cloned()),
+                    _ => {
+                        return Err(Error::Runtime("chain requires lists".to_string(), span));
+                    }
+                }
+            }
+            Ok(Some(Value::list(items)))
+        }
+        "zip" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let pairs = left
+                    .iter()
+                    .zip(right.iter())
+                    .map(|(a, b)| Value::list(vec![a.clone(), b.clone()]))
+                    .collect();
+                Ok(Some(Value::list(pairs)))
+            }
+            _ => Err(Error::Runtime("zip requires two lists".to_string(), span)),
+        },
+        "enumerate" => match args {
+            [Value::List(items)] => {
+                let indexed = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        Value::list(vec![Value::Number(index as f64), item.clone()])
+                    })
+                    .collect();
+                Ok(Some(Value::list(indexed)))
+            }
+            _ => Err(Error::Runtime(
+                "enumerate requires one list".to_string(),
+                span,
+            )),
+        },
+        "product" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let count = match left.len().checked_mul(right.len()) {
+                    Some(count) if count <= MAX_PRODUCT_ITEMS => count,
+                    _ => {
+                        return Err(Error::Limit(
+                            format!(
+                                "product materialises at most {MAX_PRODUCT_ITEMS} pairs; \
+                                 {} items times {} items is past that limit",
+                                left.len(),
+                                right.len()
+                            ),
+                            span,
+                        ))
+                    }
+                };
+                let mut pairs = Vec::with_capacity(count);
+                for a in left.iter() {
+                    for b in right.iter() {
+                        pairs.push(Value::list(vec![a.clone(), b.clone()]));
+                    }
+                }
+                Ok(Some(Value::list(pairs)))
+            }
+            _ => Err(Error::Runtime(
+                "product requires two lists".to_string(),
+                span,
+            )),
+        },
+        // Groups are kept in the order their key first appeared, and a key is
+        // matched with `Value`'s equality, so two equal records or lists share
+        // one group rather than two. A group is a record — `key` and `items` —
+        // so a caller can reach either half by name. The index maps a hash to
+        // the groups that share it, so grouping is linear rather than comparing
+        // each item with every earlier key; a collision is resolved by the same
+        // equality a linear scan used.
+        "groupby" => match args {
+            [Value::List(items)] => {
+                let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+                let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
+                for item in items.iter() {
+                    let hash = group_value_hash(item);
+                    let existing = index.get(&hash).and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|&candidate| groups[candidate].0 == *item)
+                    });
+                    match existing {
+                        Some(candidate) => groups[candidate].1.push(item.clone()),
+                        None => {
+                            let candidate = groups.len();
+                            index.entry(hash).or_default().push(candidate);
+                            groups.push((item.clone(), vec![item.clone()]));
+                        }
+                    }
+                }
+                let records = groups
+                    .into_iter()
+                    .map(|(key, items)| {
+                        let mut fields = crate::value::Fields::new();
+                        fields.insert("key".to_string(), key);
+                        fields.insert("items".to_string(), Value::list(items));
+                        Value::record(fields)
+                    })
+                    .collect();
+                Ok(Some(Value::list(records)))
+            }
+            _ => Err(Error::Runtime(
+                "groupby requires one list".to_string(),
+                span,
+            )),
+        },
+        "take" => match args {
+            [Value::List(items), Value::Number(count)] => {
+                let count = iteration_count("take", *count, span)?;
+                Ok(Some(Value::list(
+                    items.iter().take(count).cloned().collect(),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "take requires a list and a number".to_string(),
+                span,
+            )),
+        },
+        "skip" => match args {
+            [Value::List(items), Value::Number(count)] => {
+                let count = iteration_count("skip", *count, span)?;
+                Ok(Some(Value::list(
+                    items.iter().skip(count).cloned().collect(),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "skip requires a list and a number".to_string(),
+                span,
+            )),
+        },
         "input" => read_line(args, span).map(|line| Some(Value::Text(line))),
         "random" => {
             let (min, max) = random_range(span, "random", args, 100.0)?;
@@ -2782,6 +3186,49 @@ mod tests {
         }
         assert_eq!(json_stringify(&Value::Number(42.0)), "42");
         assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
+    }
+
+    /// A cache key cannot use the language's `is` for a function: that compares
+    /// name, parameters and captured bindings, so two declarations can produce
+    /// same-shaped functions with different bodies. A function in a key is
+    /// matched by identity, including when it is nested in a list.
+    #[test]
+    fn edge_lru_cache_keys_function_arguments_by_identity() {
+        use crate::value::{FunctionBody, FunctionValue};
+        use std::sync::Arc;
+
+        let function = |name: &str| {
+            Value::Function(FunctionValue::new(
+                name.to_string(),
+                vec!["x".to_string()],
+                FunctionBody::Statements(Arc::new(Vec::new())),
+                Arc::new(Vec::new()),
+            ))
+        };
+        let first = function("f");
+        let second = function("f");
+        assert_eq!(
+            first, second,
+            "the language's `is` treats two same-shaped functions as equal"
+        );
+
+        let mut cache = LruCache::new(4);
+        cache.insert(&[first.clone(), Value::Number(1.0)], Value::Number(2.0));
+        assert_eq!(
+            cache.get(&[second.clone(), Value::Number(1.0)]),
+            None,
+            "a distinct function value must not answer from another's entry"
+        );
+
+        cache.insert(
+            &[Value::list(vec![first]), Value::Number(1.0)],
+            Value::Number(3.0),
+        );
+        assert_eq!(
+            cache.get(&[Value::list(vec![second]), Value::Number(1.0)]),
+            None,
+            "a function nested in a list key is still matched by identity"
+        );
     }
 
     /// A clock set before 1970 is the one host state that makes every clock

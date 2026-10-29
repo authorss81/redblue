@@ -14,8 +14,8 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
-    expect_range_number, expect_repeat_count, finite_number, range_has_next, Captured,
-    CapturedScope, Fields, FunctionBody, FunctionValue, Value,
+    expect_range_number, expect_repeat_count, finite_number, range_has_next, reset_caches,
+    Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Value,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -1704,6 +1704,24 @@ impl Vm {
     /// *does* — a failure returns here in both, before any output is emitted,
     /// exactly as it did when [`Vm::run`] returned straight from the loop.
     fn run_statements(&mut self, program: &Program) -> Result<Value> {
+        for value in self.globals.values() {
+            reset_caches(value);
+        }
+        for scope in &self.locals {
+            for value in scope.values() {
+                reset_caches(value);
+            }
+        }
+        for module in self.context.declared_modules.values() {
+            for (_, _, value) in &module.members {
+                reset_caches(value);
+            }
+        }
+        for object in self.context.objects.values() {
+            for method in object.methods.values() {
+                reset_caches(method);
+            }
+        }
         let mut result = Value::Nothing;
 
         for statement in &program.statements {
@@ -1731,12 +1749,12 @@ impl Vm {
     /// changes a global — a counter, a registry — is written to do.
     fn make_function(&self, name: &str, params: &[String], body: &[Stmt]) -> Value {
         let captured: Captured = self.locals.clone();
-        Value::Function(FunctionValue {
-            name: name.to_string(),
-            params: params.to_vec(),
-            body: FunctionBody::Statements(Arc::new(body.to_vec())),
-            captured: Arc::new(captured),
-        })
+        Value::Function(FunctionValue::new(
+            name.to_string(),
+            params.to_vec(),
+            FunctionBody::Statements(Arc::new(body.to_vec())),
+            Arc::new(captured),
+        ))
     }
 
     fn get_var(&self, name: &str) -> Option<Value> {
@@ -2227,15 +2245,40 @@ impl Vm {
                 Some(e) => self.evaluate(e),
                 None => Ok(Value::Nothing),
             },
-            Statement::Function { name, params, body } => {
-                let function = self.make_function(name, params, body);
+            Statement::Function {
+                name,
+                params,
+                body,
+                cache,
+            } => {
+                // The cache lives in the function value, so rebinding a name
+                // drops the memory of the declaration that had it and a loop
+                // that declares a cached function cannot grow an unreachable
+                // cache per turn. A closure that escaped keeps its own memory
+                // because the clone it escaped as shares this value's cache.
+                let function = match (cache, self.make_function(name, params, body)) {
+                    (Some(capacity), Value::Function(function)) => {
+                        Value::Function(function.with_cache(*capacity))
+                    }
+                    (_, function) => function,
+                };
                 self.declare(name);
                 self.set_var(name, function)?;
 
                 Ok(Value::Nothing)
             }
-            Statement::Method { name, params, body } => {
-                let method = self.make_function(name, params, body);
+            Statement::Method {
+                name,
+                params,
+                body,
+                cache,
+            } => {
+                let method = match (cache, self.make_function(name, params, body)) {
+                    (Some(capacity), Value::Function(function)) => {
+                        Value::Function(function.with_cache(*capacity))
+                    }
+                    (_, method) => method,
+                };
                 self.set_var(name, method)?;
                 Ok(Value::Nothing)
             }
@@ -2905,8 +2948,14 @@ impl Vm {
                     name: method,
                     params,
                     body,
+                    cache,
                 } => {
-                    let function = self.make_function(method, params, body);
+                    let function = match (cache, self.make_function(method, params, body)) {
+                        (Some(capacity), Value::Function(function)) => {
+                            Value::Function(function.with_cache(*capacity))
+                        }
+                        (_, function) => function,
+                    };
                     methods.insert(method.clone(), function);
                 }
                 _ => rest.push(stmt.clone()),
@@ -2975,6 +3024,13 @@ impl Vm {
         function: &FunctionValue,
         args: &[Value],
     ) -> Result<Value> {
+        // A decorated function is answered from memory before the call-depth
+        // guard: a hit does not enter the body, so it does not cost a frame.
+        // The lookup is by function identity, so two same-named declarations
+        // never share a cache.
+        if let Some(value) = function.cached(args) {
+            return Ok(value);
+        }
         if self.call_depth >= self.max_call_depth {
             return Err(Error::Limit(
                 format!(
@@ -3052,6 +3108,10 @@ impl Vm {
         self.frame_scope_base = caller_scope_base;
         self.frame_writes.pop();
         self.call_stack.pop();
+
+        if let Ok(value) = &result {
+            function.remember(args, value.clone());
+        }
 
         result
     }

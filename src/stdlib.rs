@@ -377,6 +377,19 @@ pub fn builtins() -> HashMap<String, Value> {
     globals.insert("map".to_string(), Value::Builtin("map".to_string()));
     globals.insert("filter".to_string(), Value::Builtin("filter".to_string()));
     globals.insert("reduce".to_string(), Value::Builtin("reduce".to_string()));
+    // The iteration helpers. They are flat builtins rather than members of
+    // `list`, because they are not list methods and phase-077 owns that surface.
+    for name in [
+        "chain",
+        "zip",
+        "enumerate",
+        "product",
+        "groupby",
+        "take",
+        "skip",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
     // `list.map`, the module spelling SPEC.md § list writes for the same
     // builtin. It is a higher-order call, so the VM resolves it rather than
     // `runtime::builtin`.
@@ -1157,6 +1170,27 @@ pub fn resolve(qualified: &str) -> &str {
     module_member_name(qualified).unwrap_or(qualified)
 }
 
+/// The internal name a compiled `lru_cache(n) to ...` calls after binding the
+/// function.
+///
+/// It is not part of the language surface: the tree-walker records the cache
+/// when it executes the declaration, and the bytecode compiler emits this call
+/// so both engines end up with the same registry entry. The leading NUL is a
+/// character the lexer cannot put in an identifier, so no program can spell the
+/// name and intercept the declaration — a legal-looking name such as
+/// `__lru_cache_declare` would be callable and would mean different things to
+/// the two engines. It is not in [`BUILTIN_NAMES`].
+pub const LRU_CACHE_DECLARE: &str = "\u{0}lru_cache_declare";
+
+/// The internal name a compiled `lru_cache(n) to can ...` calls after the
+/// object that owns the method is registered.
+///
+/// A method is stored on its object type rather than bound to a name, so it
+/// needs a three-argument declaration — object, method and capacity — and the
+/// call is emitted after `DEF_OBJECT`/`STORE` has registered the type. Like
+/// [`LRU_CACHE_DECLARE`] the leading NUL keeps any program from spelling it.
+pub const LRU_CACHE_DECLARE_METHOD: &str = "\u{0}lru_cache_declare_method";
+
 /// Every name [`builtins`] registers.
 ///
 /// This is the list a registered-but-unreachable builtin shows up against, and
@@ -1191,6 +1225,13 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "map",
     "filter",
     "reduce",
+    "chain",
+    "zip",
+    "enumerate",
+    "product",
+    "groupby",
+    "take",
+    "skip",
     "list_map",
     "is_number",
     "is_text",
@@ -1336,6 +1377,34 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "filter(list, predicate) -> the items the predicate accepts",
     ),
     ("reduce", "reduce(list, function, start) -> one value"),
+    (
+        "chain",
+        "chain(list, list, ...) -> a list of every argument list's items in the order given",
+    ),
+    (
+        "zip",
+        "zip(list, list) -> a list of [a, b] pairs, stopping at the shorter list",
+    ),
+    (
+        "enumerate",
+        "enumerate(list) -> a list of [index, item] pairs, indexes from zero",
+    ),
+    (
+        "product",
+        "product(list, list) -> a list of [a, b] pairs, one for each combination",
+    ),
+    (
+        "groupby",
+        "groupby(list) -> a list of {key, items} records in first-appearance order",
+    ),
+    (
+        "take",
+        "take(list, number) -> the first n items (a whole number), or the whole list when n is past it",
+    ),
+    (
+        "skip",
+        "skip(list, number) -> the list without its first n items (a whole number)",
+    ),
     (
         "list_map",
         "list_map(list, function) -> a list; the `list.map` spelling",
