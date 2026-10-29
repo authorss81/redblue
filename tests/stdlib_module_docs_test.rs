@@ -1858,3 +1858,66 @@ end
 "#;
     yields(caught, "[7, refused]");
 }
+
+/// A cache belongs to the closure value, so declaring a same-named closure in
+/// a sibling call must not take the first closure's memory with it. The count
+/// is the observable half: both closures compute once and answer from memory
+/// after that, on both engines.
+#[test]
+fn edge_lru_cache_survives_sibling_closure_declarations() {
+    let source = r#"
+set calls to 0
+to factory(offset)
+    lru_cache(2) to add(n)
+        set calls to calls + 1
+        give back n + offset
+    end
+    give back add
+end
+set first to factory(10)
+set second to factory(20)
+[first(1), first(1), second(1), second(1), calls]
+"#;
+    yields(source, "[11, 11, 21, 21, 2]");
+}
+
+/// A hit is a use, so it refreshes the entry's place in the LRU order. With a
+/// capacity of two, reading `1` again after adding `2` must make `2` the
+/// eviction victim; the fourth call then recomputes `2` and the count says so.
+#[test]
+fn edge_lru_cache_hit_refreshes_recency() {
+    let source = r#"
+set calls to 0
+lru_cache(2) to track(n)
+    set calls to calls + 1
+    give back n
+end
+[track(1), track(2), track(1), track(3), track(2), calls]
+"#;
+    yields(source, "[1, 2, 1, 3, 2, 4]");
+}
+
+/// Both helpers name what they cannot take, and neither engine truncates a
+/// text into a count or panics on it. This is the failure channel for the
+/// take/skip argument check.
+#[test]
+fn edge_take_and_skip_refuse_a_text_count() {
+    for source in ["take([1, 2, 3], \"2\")", "skip([1, 2, 3], \"2\")"] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains("requires a list and a number"),
+            "the tree-walker should refuse `{source}` by name, it said: {walked}"
+        );
+
+        let chunk = compile_source(source).expect("the failing program should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse a text count");
+        assert!(
+            compiled.message().contains("requires a list and a number"),
+            "the bytecode VM should refuse `{source}` by name, it said: {}",
+            compiled.message()
+        );
+    }
+}

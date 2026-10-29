@@ -3281,24 +3281,21 @@ impl BytecodeVm {
         // compiler emits after the store. Doing it here rather than with an
         // extra instruction keeps an ordinary declaration's bytes unchanged,
         // which is what the self-hosted compiler compares against.
-        // The binding this declaration replaces, resolved exactly as the
-        // `STORE` after it will resolve the write: the nearest live local, or
-        // the global when no local holds the name (and outside a module body).
-        // An enclosing same-named binding that will be shadowed is not touched.
+        // The binding this declaration replaces is resolved the way the
+        // tree-walking VM resolves it: only the innermost local scope, or the
+        // global scope when there is no local one. A same-named binding in an
+        // enclosing frame is shadowed rather than replaced, so its cache stays
+        // with the closure value that already owns it. The old lookup walked
+        // every live local, so a same-named declaration inside a sibling call
+        // could drop an earlier closure's memory even though that closure was
+        // still reachable and still had its own cache.
         let replaced = if self.frames[frame].globals_only {
             self.globals.get(&block.name)
         } else {
-            self.locals
-                .iter()
-                .rev()
-                .find_map(|scope| scope.get(&block.name))
-                .or_else(|| {
-                    if self.module_depth == 0 {
-                        self.globals.get(&block.name)
-                    } else {
-                        None
-                    }
-                })
+            match self.locals.last() {
+                Some(scope) => scope.get(&block.name),
+                None => self.globals.get(&block.name),
+            }
         }
         .and_then(|value| match value {
             Value::Function(function) => Some(function.id),
@@ -3308,6 +3305,17 @@ impl BytecodeVm {
             self.caches.remove(&previous);
         }
         let closure = self.make_function(&chunk, &path, &block);
+        // Bind the name in the current scope before the `STORE`, exactly as the
+        // tree-walker's `declare` does. Without this a declaration inside a call
+        // fell through `set_var` to the global scope, where a sibling call's
+        // same-named declaration replaced it and took the earlier closure's
+        // cache with it. A module's `globals_only` frame still binds globally,
+        // because that is how its members are published.
+        if !self.frames[frame].globals_only {
+            if let Some(scope) = self.locals.last_mut() {
+                scope.insert(block.name.clone(), Value::Nothing);
+            }
+        }
         self.push(closure);
         self.advance(frame);
         Ok(())

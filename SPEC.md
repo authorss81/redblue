@@ -1659,8 +1659,10 @@ the cache without running the body; a miss runs the body and records its answer.
 When the cache is full, the least recently used entry is evicted. Only successful
 answers are recorded, so a failed call is tried again. The cache belongs to the
 function value the declaration produces, not to one spelling of calling it or to
-its name: a direct call, a method call and an element of `map` all consult the
-same memory and answer a hit without running the body. Two closures produced by
+its name: a direct call and an element of `map` all consult the same memory and
+answer a hit without running the body. The decorator is written on a plain `to`
+declaration; a `to can` method is not decorated, and a method-shaped call reaches
+a cache only when the value it calls was produced by a decorated declaration. Two closures produced by
 two executions of one declaration, or two same-named declarations in different
 scopes, have separate memories, and neither answers for the other. A declaration
 that replaces the binding of a name drops the memory of the function value it
