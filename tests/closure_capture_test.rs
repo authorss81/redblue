@@ -690,12 +690,12 @@ fn a_hand_built_function_value_is_usable_and_displayed() {
     let program = redblue::parser::parse(tokens).expect("program");
     let body = program.statements;
 
-    let function = Value::Function(FunctionValue {
-        name: "hand_made".to_string(),
-        params: Vec::new(),
-        body: redblue::FunctionBody::Statements(std::sync::Arc::new(body)),
-        captured: std::sync::Arc::new(Vec::new()),
-    });
+    let function = Value::Function(FunctionValue::new(
+        "hand_made".to_string(),
+        Vec::new(),
+        redblue::FunctionBody::Statements(std::sync::Arc::new(body)),
+        std::sync::Arc::new(Vec::new()),
+    ));
 
     assert_eq!(function.to_string(), "<function hand_made>");
     assert!(function.is_truthy());

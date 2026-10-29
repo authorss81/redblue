@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use chrono::{NaiveDateTime, TimeDelta};
@@ -79,6 +80,15 @@ impl FunctionBody {
 /// same name overwrote each other.
 #[derive(Debug, Clone)]
 pub struct FunctionValue {
+    /// An identity unique to this function value.
+    ///
+    /// Name, parameters and captured bindings are not an identity: a factory
+    /// executed twice can build two closures with the same name and the same
+    /// parameter list that closed over different values, and a memoisation
+    /// cache keyed by name alone would let one answer for the other. Cloning a
+    /// value keeps this number, so every reference to one declaration's
+    /// closure shares its memory, while a second declaration never does.
+    pub id: usize,
     /// The name in the declaration. Used for display and error messages.
     pub name: String,
     /// The declared parameter names, in order.
@@ -92,6 +102,32 @@ pub struct FunctionValue {
     pub body: FunctionBody,
     /// The local scopes live where the declaration was executed.
     pub captured: Arc<Captured>,
+}
+
+/// The next identity [`FunctionValue::new`] hands out.
+///
+/// One counter for the process rather than per run: an identity has to be
+/// unique across two runs sharing one VM, and the value is only used as a cache
+/// key, never printed, so a number that differs between processes changes no
+/// observable answer.
+static NEXT_FUNCTION_ID: AtomicUsize = AtomicUsize::new(1);
+
+impl FunctionValue {
+    /// Builds a function value with a fresh identity.
+    pub fn new(
+        name: String,
+        params: Vec<String>,
+        body: FunctionBody,
+        captured: Arc<Captured>,
+    ) -> Self {
+        Self {
+            id: NEXT_FUNCTION_ID.fetch_add(1, Ordering::Relaxed),
+            name,
+            params,
+            body,
+            captured,
+        }
+    }
 }
 
 /// Two function values are the same function when they were declared with the

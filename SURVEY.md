@@ -6,15 +6,15 @@ phase-095; rank 6 gained date arithmetic in phase-096 and text parsing and
 formatting in phase-097; the entries are kept so the ranking and its history
 stay readable.
 
-- **Builtins in the registry**: 85 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1165`,
-  which closes with `"input"` at `src/stdlib.rs:1250`.
+- **Builtins in the registry**: 92 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1200`,
+  which closes with `"input"` at `src/stdlib.rs:1292`.
 - **Modules a dotted call may name**: 12 — `stdlib::MODULES` at `src/stdlib.rs:19`.
 - **Dotted members those modules accept**: 63 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:63`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
 of what a dotted call is allowed to reach, because a name not in them is refused
-before a call happens (`src/stdlib.rs:160`, `module_has_member`). So the ceiling
+before a call happens (`src/stdlib.rs:162`, `module_has_member`). So the ceiling
 of the language is knowable by reading one file, and that is what this survey
 reads.
 
@@ -104,7 +104,7 @@ survey measures against, and it is short.
 Two observations from that table that the rest of this document depends on:
 
 - **`text` has no way to take a piece of a text.** `split` and `join` can get
-  there with loss (`src/stdlib.rs:699` — the separator is a literal, so
+  there with loss (`src/stdlib.rs:712` — the separator is a literal, so
   `split("a1b22c", "2")` loses the separators), but there is no `slice`, no
   `index_of`, no `pad_left`. Every "extract the field between the colons" task is
   rank 5.
@@ -136,12 +136,12 @@ Python prints.
 
 - **Blocked programs**: 6 — 1, 12, 14, 16, 17, 18
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:91` — the `list` row is `map` and `length`, and
+- **Evidence**: `src/stdlib.rs:92` — the `list` row is `map` and `length`, and
   the comment above it at `src/stdlib.rs:74` records that `filter` and `reduce`
-  are registered at `src/stdlib.rs:887` and answer nothing. The two programs that
+  are registered at `src/stdlib.rs:378` and `src/stdlib.rs:379` and answer nothing. The two programs that
   prove it are pinned as gaps at `tests/stdlib_module_docs_test.rs:1013`.
-- **Also missing**: `any`, `all`, `flatten`, `zip`, `chunk`, `enumerate`,
-  `unique`, `group_by`, `sort_by`, `take`, `skip`, `reverse`.
+- **Also missing**: `any`, `all`, `flatten`, `chunk`, `unique`, `group_by`,
+  `sort_by`, `reverse`.
 - **Why it ranks first**: six of the thirty-two. Anything that counts, selects,
   folds, groups or pairs a collection needs one of these, and `map` alone cannot
   produce a shorter list. The blocker is not expressive power — `map` already
@@ -159,7 +159,7 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:861` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:874` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -193,7 +193,7 @@ Before phase-095 the same program was refused as
   inside `if let Value::List(items)`, so a record is not a list and the loop body
   never runs. `src/runtime.rs:1525` — `length` refuses a record outright with
   *"length requires a list or text"*. And the registry holds no `keys` and no
-  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:1250` without one.
+  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:1292` without one.
 - **Why it matters more than it looks**: a record is Redblue's only map type. A
   program cannot count a record, iterate it, merge one into another, or turn one
   back into text. Grouping is the operation almost every data program performs
@@ -215,8 +215,8 @@ Prints nothing and exits 0. The same record answers `r.a` and refuses `length(r)
 
 - **Blocked programs**: 4 — 4, 8, 19, 26
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:91` — `map` and `length` are the whole `list`
-  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:860`) holds no `sort`, `sort_by`,
+- **Evidence**: `src/stdlib.rs:92` — `map` and `length` are the whole `list`
+  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:1200`) holds no `sort`, `sort_by`,
   `reverse`, `min`, `max`, `sum`, `first` or `last`. The refusal for any of them
   is `src/interpreter.rs:2411`, which formats `Unknown function '{}'`.
 - **What is missing**: `sort`, `sort_by`, `reverse`, `min`, `max`, `sum`,
@@ -235,11 +235,11 @@ Refused as `RuntimeError: Unknown function 'sort'`.
 
 - **Blocked programs**: 4 — 21, 23, 24, 25
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:100` — the `text` row is ten names, none of which
+- **Evidence**: `src/stdlib.rs:106` — the `text` row is ten names, none of which
   takes an index or produces a substring: `uppercase`, `lowercase`, `trim`,
   `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`.
-  `split` is documented at `src/stdlib.rs:975` as taking a literal separator, and
-  `src/stdlib.rs:699` is the comment explaining why there is no pattern to give
+  `split` is documented at `src/stdlib.rs:1337` as taking a literal separator, and
+  `src/stdlib.rs:712` is the comment explaining why there is no pattern to give
   it. `length` counts **characters**, not bytes (`src/runtime.rs:1522`), so a
   slicing design has a defined unit to slice by; the gap is that no slicing call
   exists at all.
@@ -289,15 +289,15 @@ say time.add_days(born, 365)
 - **Blocked programs**: 4 — 2, 6, 12, 13
 - **Implementable**: binding-required
 - **Rust crate**: `walkdir`, `glob`
-- **Evidence**: `src/stdlib.rs:66` — the `files` row is eight names, every one of
+- **Evidence**: `src/stdlib.rs:67` — the `files` row is eight names, every one of
   them taking a whole path as text: `read`, `write`, `append`, `exists`, `lines`,
   `delete`, `copy`, `rename`. There is no `list_dir`, no `mkdir`, no `glob`, no
   `size`, no `modified`. Nothing in the language can ask what is in a directory:
-  `src/stdlib.rs:66` is the whole of the module.
+  `src/stdlib.rs:67` is the whole of the module.
 - **Why**: four programs in the sample start with "go and look at the files".
   A script that cannot enumerate a directory cannot process a repository, a
   downloads folder, or a log directory — which is most of what scripts are for.
-  `network` has no timeout control either (`src/stdlib.rs:98`), so program 29 is
+  `network` has no timeout control either (`src/stdlib.rs:99`), so program 29 is
   blocked here as well.
 
 ```redblue
@@ -311,7 +311,7 @@ Refused as `RuntimeError: Module 'files' has no function 'glob'`.
 - **Blocked programs**: 3 — 20, 21, 30
 - **Implementable**: binding-required
 - **Rust crate**: `base64`, `hex`, `percent-encoding`, `sha2`
-- **Evidence**: `src/stdlib.rs:63` — the `bytes` module is three names,
+- **Evidence**: `src/stdlib.rs:64` — the `bytes` module is three names,
   `from_text`, `text` and `write`, all conversions between a text and a file. The
   dependency block at `Cargo.toml:30` holds `regex`, `chrono`, `reqwest`,
   `indexmap` and `rustyline`; there is no encoding or digest crate in it, so
@@ -321,7 +321,7 @@ Refused as `RuntimeError: Module 'files' has no function 'glob'`.
   that cannot be worked around by any amount of loop.
 - **Note**: `bytes` cannot even report its own length or compare two of them; the
   registry has no `bytes_length`: the three `bytes` names are at
-  `src/stdlib.rs:552` through `src/stdlib.rs:560`.
+  `src/stdlib.rs:568` through `src/stdlib.rs:579`.
 
 ```redblue
 say base64.decode("aGk=")
@@ -333,11 +333,11 @@ Refused as `AnalyzerError: Unknown variable 'base64'`.
 
 - **Blocked programs**: 2 — 10, 22
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:894` and `src/stdlib.rs:895` — `to_text` and
+- **Evidence**: `src/stdlib.rs:414` and `src/stdlib.rs:416` — `to_text` and
   `to_number` are the only two conversions between a number and anything else,
   and neither takes a second argument. There is no precision, no base, no
   thousands separator and no padding. The nearest thing to formatting is
-  `src/stdlib.rs:1026`, `to_text(any) -> text`, which is the default rendering.
+  `src/stdlib.rs:1417`, `to_text(any) -> text`, which is the default rendering.
 - **Why**: "print $1,234.50" is the last line of a money program, and
   "parse the integer after the marker" is a step of program 10. Both need the
   same thing — a format the caller states.
@@ -353,8 +353,8 @@ Refused as `RuntimeError: Unknown function 'to_fixed'`.
 - **Blocked programs**: 2 — 5, 27
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:65` — the `csv` row is one name, `parse`.
-  `src/stdlib.rs:72` — `json` has both directions, and
-  `src/stdlib.rs:1079` gives `json.stringify`'s whole shape —
+  `src/stdlib.rs:73` — `json` has both directions, and
+  `src/stdlib.rs:1514` gives `json.stringify`'s whole shape —
   `json_stringify(any) -> text` — so it takes no indent argument, so the output is one line regardless.
 - **Why**: reading data is solved and writing it back is not. A program that
   normalises, filters or summarises a CSV has nowhere to put its result. The
@@ -376,13 +376,13 @@ entries first.
 
 | Gap | Evidence | Blocks |
 |---|---|---|
-| No `sys` surface but `argv`: no environment variables, exit code, cwd, platform | `src/stdlib.rs:99` | 31, 32 |
-| No set algebra: `unique`, `flatten`, `reverse`, intersection | `src/stdlib.rs:91` | 3 |
-| No statistics or integer maths: no `min`/`max`, `sum`, `mean`, `gcd`, `log2`, inverse trig | `src/stdlib.rs:92` | 8 |
-| No UUID or token generation; `random_choice`/`random_shuffle` exist but no uuid-shaped call | `src/stdlib.rs:923` | 28 |
-| No concurrency, no timeout or retry control on `network.get` | `src/stdlib.rs:98` | 29 |
-| No logging beyond `console.log`/`error`: no levels, no file output, no timestamps | `src/stdlib.rs:64` | — |
-| No `inspect`-style pretty printer, no diff, no assertion library beyond `expect`/`assert` | `src/stdlib.rs:915` | — |
+| No `sys` surface but `argv`: no environment variables, exit code, cwd, platform | `src/stdlib.rs:104` | 31, 32 |
+| No set algebra: `unique`, `flatten`, `reverse`, intersection | `src/stdlib.rs:92` | 3 |
+| No statistics or integer maths: no `min`/`max`, `sum`, `mean`, `gcd`, `log2`, inverse trig | `src/stdlib.rs:94` | 8 |
+| No UUID or token generation; `random_choice`/`random_shuffle` exist but no uuid-shaped call | `src/stdlib.rs:554` | 28 |
+| No concurrency, no timeout or retry control on `network.get` | `src/stdlib.rs:99` | 29 |
+| No logging beyond `console.log`/`error`: no levels, no file output, no timestamps | `src/stdlib.rs:65` | — |
+| No `inspect`-style pretty printer, no diff, no assertion library beyond `expect`/`assert` | `src/stdlib.rs:563` | — |
 | No TOML/YAML/XML reader or writer | `src/stdlib.rs:19` | — |
 
 Four limits of this survey, stated so they are not mistaken for more:

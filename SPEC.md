@@ -1606,6 +1606,69 @@ pattern that backtracks catastrophically in another engine cannot hang a
 Redblue program. `text.split` is unchanged: its separator is still literal, and
 `regex.split` is the pattern form.
 
+## Iteration and memoisation
+
+### Iteration helpers
+
+The helpers below take lists and answer lists. None of them is lazy: Redblue has
+no iterator value, so there is nothing for a lazy helper to hand back, and each
+one builds and returns a new list when it is called. The table says so per
+helper because on a list-valued language that has to be written down rather
+than assumed.
+
+| Helper | Answer | Lazy? |
+|---|---|---|
+| `chain(a, b)` | materialises a list of `a`'s items followed by `b`'s | materialises |
+| `zip(a, b)` | materialises `[a-item, b-item]` pairs; it **stops at the shorter** input and never pads with `nothing` | materialises |
+| `enumerate(xs)` | materialises `[index, item]` pairs with indexes from zero | materialises |
+| `product(a, b)` | materialises every `[a-item, b-item]` combination, first input outermost | materialises |
+| `groupby(xs)` | materialises `{key, items}` records, in first-appearance order, grouping equal keys together | materialises |
+| `take(xs, n)` | materialises the first `n` items; `n` below zero is empty and past the end is the whole list; a positive fractional `n` is refused | materialises |
+| `skip(xs, n)` | materialises the list without its first `n` items, bounded the same way; a positive fractional `n` is refused | materialises |
+
+```redblue
+set both to chain([1, 2], [3])                  // [1, 2, 3]
+set pairs to zip([1, 2], ["a", "b"])            // [[1, a], [2, b]]
+set indexed to enumerate(["a", "b"])            // [[0, a], [1, b]]
+set grid to product([1, 2], ["a"])              // [[1, a], [2, a]]
+set buckets to groupby([2, 1, 2])               // [{key: 2, items: [2, 2]}, {key: 1, items: [1]}]
+set first to take([1, 2, 3], 2)                 // [1, 2]
+set rest to skip([1, 2, 3], 2)                  // [3]
+```
+
+`groupby` compares keys with Redblue equality, so two equal lists or records
+share a group. Its groups are ordered by where their key first appeared, not by
+the key's value, so `groupby([2, 1, 2])` lists the `2` group first.
+
+### Memoisation
+
+A function declaration may be decorated with an LRU cache:
+
+```redblue
+lru_cache(128) to fib(n)
+    if n < 2 then
+        give back n
+    end
+    give back fib(n - 1) + fib(n - 2)
+end
+```
+
+The capacity is a whole number of at least one and may be omitted, in which case
+it is 128. A call whose arguments equal an earlier call's arguments answers from
+the cache without running the body; a miss runs the body and records its answer.
+When the cache is full, the least recently used entry is evicted. Only successful
+answers are recorded, so a failed call is tried again. The cache belongs to the
+function value the declaration produces, not to one spelling of calling it or to
+its name: a direct call and an element of `map` all consult the same memory and
+answer a hit without running the body. The decorator is written on a plain `to`
+declaration; a `to can` method is not decorated, and a method-shaped call reaches
+a cache only when the value it calls was produced by a decorated declaration. Two closures produced by
+two executions of one declaration, or two same-named declarations in different
+scopes, have separate memories, and neither answers for the other. A declaration
+that replaces the binding of a name drops the memory of the function value it
+replaced. `lru_cache` is not a reserved word: it is recognised only in front of a
+`to` declaration, and a variable of that name still works.
+
 ---
 
 ## Grammar

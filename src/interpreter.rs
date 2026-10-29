@@ -460,6 +460,15 @@ pub struct Vm {
     /// nothing else.
     debug_hook: Option<DebugHook>,
     call_depth: usize,
+    /// The memory of each `lru_cache`-decorated function, by function identity.
+    ///
+    /// The identity is [`crate::value::FunctionValue::id`], not the declaration
+    /// name: two factories can each declare a cached `add` over a different
+    /// captured value, and keying by name made one closure answer for the
+    /// other. Held by the VM that runs the program, so two programs in one
+    /// process keep their own memories. The capacity is the one the decorator
+    /// stated; [`crate::runtime::LruCache`] is what evicts at it.
+    caches: std::collections::HashMap<usize, crate::runtime::LruCache>,
     /// The user functions currently executing, outermost first — the frame list
     /// [`Vm::debug_before`] hands a hook as [`DebugEvent::call_stack`].
     ///
@@ -711,6 +720,7 @@ impl Vm {
             statement_depth: 0,
             debug_hook: None,
             call_depth: 0,
+            caches: HashMap::new(),
             call_stack: Vec::new(),
             frame_scope_base: 0,
             frame_writes: Vec::new(),
@@ -1704,6 +1714,7 @@ impl Vm {
     /// *does* — a failure returns here in both, before any output is emitted,
     /// exactly as it did when [`Vm::run`] returned straight from the loop.
     fn run_statements(&mut self, program: &Program) -> Result<Value> {
+        self.caches.clear();
         let mut result = Value::Nothing;
 
         for statement in &program.statements {
@@ -1731,12 +1742,12 @@ impl Vm {
     /// changes a global — a counter, a registry — is written to do.
     fn make_function(&self, name: &str, params: &[String], body: &[Stmt]) -> Value {
         let captured: Captured = self.locals.clone();
-        Value::Function(FunctionValue {
-            name: name.to_string(),
-            params: params.to_vec(),
-            body: FunctionBody::Statements(Arc::new(body.to_vec())),
-            captured: Arc::new(captured),
-        })
+        Value::Function(FunctionValue::new(
+            name.to_string(),
+            params.to_vec(),
+            FunctionBody::Statements(Arc::new(body.to_vec())),
+            Arc::new(captured),
+        ))
     }
 
     fn get_var(&self, name: &str) -> Option<Value> {
@@ -2227,10 +2238,40 @@ impl Vm {
                 Some(e) => self.evaluate(e),
                 None => Ok(Value::Nothing),
             },
-            Statement::Function { name, params, body } => {
+            Statement::Function {
+                name,
+                params,
+                body,
+                cache,
+            } => {
+                // Rebinding a name drops the memory of the declaration that had
+                // it, so a loop that declares a cached function cannot grow an
+                // unreachable cache per turn. The lookup happens before the new
+                // binding exists, and only the binding this declaration will
+                // replace is dropped: a same-named declaration in an enclosing
+                // scope is shadowed, not replaced, and keeps its own memory.
+                let replaced = match self.locals.last() {
+                    Some(scope) => scope.get(name),
+                    None => self.globals.get(name),
+                }
+                .and_then(|value| match value {
+                    Value::Function(function) => Some(function.id),
+                    _ => None,
+                });
+                if let Some(previous) = replaced {
+                    self.caches.remove(&previous);
+                }
                 let function = self.make_function(name, params, body);
+                let key = match &function {
+                    Value::Function(function) => Some(function.id),
+                    _ => None,
+                };
                 self.declare(name);
                 self.set_var(name, function)?;
+                if let (Some(capacity), Some(key)) = (cache, key) {
+                    self.caches
+                        .insert(key, crate::runtime::LruCache::new(*capacity));
+                }
 
                 Ok(Value::Nothing)
             }
@@ -2975,6 +3016,17 @@ impl Vm {
         function: &FunctionValue,
         args: &[Value],
     ) -> Result<Value> {
+        // A decorated function is answered from memory before the call-depth
+        // guard: a hit does not enter the body, so it does not cost a frame.
+        // The lookup is by declaration name, which is the name a recursive
+        // body uses to reach itself.
+        if let Some(value) = self
+            .caches
+            .get_mut(&function.id)
+            .and_then(|cache| cache.get(args))
+        {
+            return Ok(value);
+        }
         if self.call_depth >= self.max_call_depth {
             return Err(Error::Limit(
                 format!(
@@ -3052,6 +3104,12 @@ impl Vm {
         self.frame_scope_base = caller_scope_base;
         self.frame_writes.pop();
         self.call_stack.pop();
+
+        if let Ok(value) = &result {
+            if let Some(cache) = self.caches.get_mut(&function.id) {
+                cache.insert(args, value.clone());
+            }
+        }
 
         result
     }
