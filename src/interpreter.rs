@@ -14,8 +14,8 @@ use crate::parser::{BinaryOp, Expr, Program, Statement, Stmt, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
-    expect_range_number, expect_repeat_count, finite_number, range_has_next, Captured,
-    CapturedScope, Fields, FunctionBody, FunctionValue, Value,
+    expect_range_number, expect_repeat_count, finite_number, range_has_next, reset_caches,
+    Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Value,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -460,15 +460,6 @@ pub struct Vm {
     /// nothing else.
     debug_hook: Option<DebugHook>,
     call_depth: usize,
-    /// The memory of each `lru_cache`-decorated function, by function identity.
-    ///
-    /// The identity is [`crate::value::FunctionValue::id`], not the declaration
-    /// name: two factories can each declare a cached `add` over a different
-    /// captured value, and keying by name made one closure answer for the
-    /// other. Held by the VM that runs the program, so two programs in one
-    /// process keep their own memories. The capacity is the one the decorator
-    /// stated; [`crate::runtime::LruCache`] is what evicts at it.
-    caches: std::collections::HashMap<usize, crate::runtime::LruCache>,
     /// The user functions currently executing, outermost first — the frame list
     /// [`Vm::debug_before`] hands a hook as [`DebugEvent::call_stack`].
     ///
@@ -720,7 +711,6 @@ impl Vm {
             statement_depth: 0,
             debug_hook: None,
             call_depth: 0,
-            caches: HashMap::new(),
             call_stack: Vec::new(),
             frame_scope_base: 0,
             frame_writes: Vec::new(),
@@ -1714,7 +1704,19 @@ impl Vm {
     /// *does* — a failure returns here in both, before any output is emitted,
     /// exactly as it did when [`Vm::run`] returned straight from the loop.
     fn run_statements(&mut self, program: &Program) -> Result<Value> {
-        self.caches.clear();
+        for value in self.globals.values() {
+            reset_caches(value);
+        }
+        for scope in &self.locals {
+            for value in scope.values() {
+                reset_caches(value);
+            }
+        }
+        for module in self.context.declared_modules.values() {
+            for (_, _, value) in &module.members {
+                reset_caches(value);
+            }
+        }
         let mut result = Value::Nothing;
 
         for statement in &program.statements {
@@ -2244,34 +2246,19 @@ impl Vm {
                 body,
                 cache,
             } => {
-                // Rebinding a name drops the memory of the declaration that had
-                // it, so a loop that declares a cached function cannot grow an
-                // unreachable cache per turn. The lookup happens before the new
-                // binding exists, and only the binding this declaration will
-                // replace is dropped: a same-named declaration in an enclosing
-                // scope is shadowed, not replaced, and keeps its own memory.
-                let replaced = match self.locals.last() {
-                    Some(scope) => scope.get(name),
-                    None => self.globals.get(name),
-                }
-                .and_then(|value| match value {
-                    Value::Function(function) => Some(function.id),
-                    _ => None,
-                });
-                if let Some(previous) = replaced {
-                    self.caches.remove(&previous);
-                }
-                let function = self.make_function(name, params, body);
-                let key = match &function {
-                    Value::Function(function) => Some(function.id),
-                    _ => None,
+                // The cache lives in the function value, so rebinding a name
+                // drops the memory of the declaration that had it and a loop
+                // that declares a cached function cannot grow an unreachable
+                // cache per turn. A closure that escaped keeps its own memory
+                // because the clone it escaped as shares this value's cache.
+                let function = match (cache, self.make_function(name, params, body)) {
+                    (Some(capacity), Value::Function(function)) => {
+                        Value::Function(function.with_cache(*capacity))
+                    }
+                    (_, function) => function,
                 };
                 self.declare(name);
                 self.set_var(name, function)?;
-                if let (Some(capacity), Some(key)) = (cache, key) {
-                    self.caches
-                        .insert(key, crate::runtime::LruCache::new(*capacity));
-                }
 
                 Ok(Value::Nothing)
             }
@@ -3018,13 +3005,9 @@ impl Vm {
     ) -> Result<Value> {
         // A decorated function is answered from memory before the call-depth
         // guard: a hit does not enter the body, so it does not cost a frame.
-        // The lookup is by declaration name, which is the name a recursive
-        // body uses to reach itself.
-        if let Some(value) = self
-            .caches
-            .get_mut(&function.id)
-            .and_then(|cache| cache.get(args))
-        {
+        // The lookup is by function identity, so two same-named declarations
+        // never share a cache.
+        if let Some(value) = function.cached(args) {
             return Ok(value);
         }
         if self.call_depth >= self.max_call_depth {
@@ -3106,9 +3089,7 @@ impl Vm {
         self.call_stack.pop();
 
         if let Ok(value) = &result {
-            if let Some(cache) = self.caches.get_mut(&function.id) {
-                cache.insert(args, value.clone());
-            }
+            function.remember(args, value.clone());
         }
 
         result

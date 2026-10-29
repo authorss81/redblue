@@ -1,6 +1,6 @@
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{NaiveDateTime, TimeDelta};
 use indexmap::IndexMap;
@@ -8,6 +8,7 @@ use indexmap::IndexMap;
 use crate::bytecode::Chunk;
 use crate::error::{Error, Result, Span};
 use crate::parser::Stmt;
+use crate::runtime::LruCache;
 
 /// Field storage for records and objects.
 ///
@@ -102,6 +103,15 @@ pub struct FunctionValue {
     pub body: FunctionBody,
     /// The local scopes live where the declaration was executed.
     pub captured: Arc<Captured>,
+    /// The memory an `lru_cache` declaration gave this function, shared by every
+    /// clone of it.
+    ///
+    /// Kept here rather than in a table on the VM so that it dies with the last
+    /// reference to the function. A declaration inside a loop creates a new
+    /// function value on every turn; a VM-level table keyed by identity would
+    /// keep every turn's cache alive for the rest of the run even though no
+    /// value could reach it.
+    cache: Arc<OnceLock<Mutex<LruCache>>>,
 }
 
 /// The next identity [`FunctionValue::new`] hands out.
@@ -126,7 +136,59 @@ impl FunctionValue {
             params,
             body,
             captured,
+            cache: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Gives this function a memory of `capacity` entries, if it has none yet.
+    pub fn attach_cache(&self, capacity: usize) {
+        if self.cache.get().is_none() {
+            self.cache
+                .set(Mutex::new(LruCache::new(capacity)))
+                .expect("an empty cache slot accepts a cache");
+        }
+    }
+
+    /// Gives this function an empty memory of `capacity` entries.
+    pub fn with_cache(self, capacity: usize) -> Self {
+        self.attach_cache(capacity);
+        self
+    }
+
+    /// Whether this function has an `lru_cache` memory.
+    pub fn has_cache(&self) -> bool {
+        self.cache.get().is_some()
+    }
+
+    /// Drops every answer this function remembers, keeping its capacity.
+    pub fn reset_cache(&self) {
+        let Some(cache) = self.cache.get() else {
+            return;
+        };
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    /// The answer this function remembers for `args`, if any.
+    pub fn cached(&self, args: &[Value]) -> Option<Value> {
+        let cache = self.cache.get()?;
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.get(args)
+    }
+
+    /// Records `value` as this function's answer for `args`.
+    pub fn remember(&self, args: &[Value], value: Value) {
+        let Some(cache) = self.cache.get() else {
+            return;
+        };
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(args, value);
     }
 }
 
@@ -140,6 +202,44 @@ impl FunctionValue {
 impl PartialEq for FunctionValue {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.params == other.params && self.captured == other.captured
+    }
+}
+
+/// Drops every `lru_cache` answer reachable from `value`.
+///
+/// A run starts with empty memories even when the VM still holds a function it
+/// declared in an earlier run. The caches live in the function values now, so
+/// clearing them means walking the bindings a program can still reach rather
+/// than clearing one table on the VM.
+pub fn reset_caches(value: &Value) {
+    let mut seen = std::collections::HashSet::new();
+    reset_caches_in(value, &mut seen);
+}
+
+fn reset_caches_in(value: &Value, seen: &mut std::collections::HashSet<usize>) {
+    match value {
+        Value::Function(function) => {
+            if !seen.insert(function.id) {
+                return;
+            }
+            function.reset_cache();
+            for scope in function.captured.iter() {
+                for captured in scope.values() {
+                    reset_caches_in(captured, seen);
+                }
+            }
+        }
+        Value::List(items) => {
+            for item in items.iter() {
+                reset_caches_in(item, seen);
+            }
+        }
+        Value::Record(fields) | Value::Object(_, fields) => {
+            for field in fields.values() {
+                reset_caches_in(field, seen);
+            }
+        }
+        _ => {}
     }
 }
 

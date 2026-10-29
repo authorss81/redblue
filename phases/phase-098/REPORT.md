@@ -4,6 +4,7 @@
 | File | Lines | What |
 |---|---|---|
 | `src/runtime.rs` | +200 −5 | `chain`, `zip`, `enumerate`, `product`, `groupby`, `take`, `skip`, the shared `LruCache`, and the resumed run's fractional-count refusal |
+| `src/runtime.rs` (resumed run 2) | +85 −4 | cache keys match function arguments by identity, including a function nested in a list or record, so one declaration can never answer from another's body |
 | `src/stdlib.rs` | +62 −2 | registers the seven helpers, their signatures (now saying the `take`/`skip` count is whole), and the hidden `__lru_cache_declare` name the bytecode VM emits |
 | `src/parser.rs` | +181 | `lru_cache(n) to ...` decorator parsing, `skip(...)` as a call in statement and expression position, and the cache capacity on a function declaration |
 | `src/interpreter.rs` | +58 −10 | registers decorated declarations, keys tree-walker memory by function identity, and drops the replaced binding's memory on rebinding |
@@ -16,8 +17,11 @@
 | `src/repl/weight.rs` | +10 −4 | accounts for the new function declaration field and the constructor |
 | `src/repl/render.rs` | +6 −5 | builds its display-only function through the constructor |
 | `SPEC.md` | +65 −4 | iteration-helper table, zip-shorter rule, group ordering, the memoisation contract, the fractional-count refusal, and that memory belongs to the function value rather than its name; the resumed run also says the decorator is on a plain `to` declaration, not a `to can` method |
+| `SPEC.md` (resumed run 2) | +4 | says a function argument is matched by identity, not by the language's `is`, and that the rule reaches a function nested in a list or record |
 | `SURVEY.md` | +36 −34 | builtin count 85 → 92 and re-anchored citations |
 | `tests/stdlib_module_docs_test.rs` | +632 +70 | iteration/memoisation tests, including the cross-engine map hit, failed-call, far-past-the-end, fractional-count, Unicode, record-grouping, structural cache-key and same-named-closure tests |
+| `src/runtime.rs` (tests, resumed run 2) | +38 | unit test that a function argument is keyed by identity and that the rule reaches a list-nested function |
+| `tests/stdlib_module_docs_test.rs` (resumed run 2) | +70 | capacity-boundary refusal, `nothing` refusals for the seven helpers, and the SPEC identity-rule check |
 | `tests/formatter_test.rs` | +37 −? | constructor update for the cache field |
 | `tests/bytecode_test.rs` | +1 | constructor update for the cache field |
 | `tests/closure_capture_test.rs` | +6 −5 | hand-built function value goes through the constructor |
@@ -46,6 +50,14 @@ while same-named closures stay apart. A declaration that replaces the binding of
 a name drops that replaced value's memory, which keeps a cached declaration in a
 loop from accumulating unreachable caches. Failed calls are not cached on either
 engine.
+
+The second resumed run made the key safe for function arguments. The language's
+`is` compares two functions by name, parameters and captured bindings, and that
+equality cannot be a cache key: two declarations can produce same-shaped
+functions with different bodies, so one could answer from the other's entry. A
+function argument is now matched by `FunctionValue::id`, and the rule reaches a
+function nested in a list or record. Every other value keeps the language's
+equality, so the structural cache-key test is unchanged.
 
 The resumed run fixed a third cross-engine disagreement. A function declaration
 inside a call was bound by the bytecode VM's `STORE` in the global scope (the
@@ -94,13 +106,17 @@ helpers are flat builtins only, which avoids creating a second spelling.
 | `edge_lru_cache_survives_sibling_closure_declarations` | identity: a second factory call keeps the first closure's memory; call count compared across engines |
 | `edge_lru_cache_hit_refreshes_recency` | boundary: a hit moves its entry to the recent end of the LRU order, proved by eviction and call count |
 | `edge_take_and_skip_refuse_a_text_count` | type mismatch: both helpers refuse a text count by name on both engines |
+| `edge_lru_cache_keys_function_arguments_by_identity` | identity: two same-shaped function values are equal to `is` but are separate cache keys, including a list-nested function |
+| `edge_lru_cache_refuses_a_capacity_beyond_a_count_it_can_hold` | numeric boundary; failure asserted on both engines for `1e300`, and a negative capacity is refused by name |
+| `edge_iteration_helpers_refuse_nothing` | type mismatch: `nothing` is refused by name by all seven helpers |
+| `spec_says_a_cache_matches_function_arguments_by_identity` | the SPEC identity statement is present |
 
 Mandatory matrix:
 - empty — covered by `iteration_helpers_cover_the_empty_list`.
 - singleton — covered by `iteration_helpers_cover_singletons_and_many_elements`.
 - boundary — covered by `edge_take_and_skip_clamp_at_both_ends` and `edge_zip_stops_at_the_shorter_input`.
 - out_of_bounds — covered by the take/skip clamping tests; the helpers do not index.
-- type_mismatch — covered by `edge_iteration_helpers_refuse_wrong_types`.
+- type_mismatch — covered by `edge_iteration_helpers_refuse_wrong_types` and `edge_iteration_helpers_refuse_nothing`.
 - numeric_boundary — covered by the ±1e300 count test and the capacity refusals; a non-finite number cannot reach a helper because the language refuses one before it becomes a value.
 - unicode — covered by `edge_iteration_helpers_preserve_unicode_items`, which moves emoji, CJK, RTL and a combining mark through every helper.
 - nesting_recursion — covered by the recursive Fibonacci test and groupby over equal nested lists.
@@ -113,13 +129,15 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 2314 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | pass — 2318 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-098` | pass |
 
 ## Invariants touched
-- None. The helpers are new builtin names, `lru_cache` is a shape before `to`
-  rather than a keyword, and no existing `Value`, `Error`, or grammar spelling
-  changed.
+- None to `Value`, `Error` or the grammar. The helpers are new builtin names and
+  `lru_cache` is a shape before `to` rather than a keyword.
+- Cache keys now match a function argument by identity rather than by the
+  language's `is`; `is` itself is unchanged. SPEC.md § Memoisation states the
+  distinction.
 
 ## Known gaps / follow-ups
 - The helpers are eager, and `SPEC.md` says so for every row. A lazy form would

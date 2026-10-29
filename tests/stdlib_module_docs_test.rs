@@ -1719,6 +1719,53 @@ set mapped to map([1, 1, 1], doubled)
     yields(source, "[[2, 2, 2], 1]");
 }
 
+/// A `map` over one repeated value is all cache hits after the first element.
+/// The bytecode VM used to route every hit through the next element's call, so
+/// a large list recursed once per element in Rust and overflowed the host stack
+/// instead of finishing. The count is literal so a map that stopped early — or
+/// stopped answering from memory — is caught too.
+#[test]
+fn edge_lru_cache_map_of_a_large_repeated_value_does_not_recurse() {
+    let count = 100_000;
+    let repeated = std::iter::repeat_n("1", count)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let source = format!(
+        "set calls to 0\n\
+         lru_cache(1) to once(n)\n\
+             set calls to calls + 1\n\
+             give back n\n\
+         end\n\
+         set mapped to map(text.split(\"{repeated}\", \" \"), once)\n\
+         [length(mapped), calls]\n"
+    );
+    yields(&source, &format!("[{count}, 1]"));
+}
+
+/// Cached declarations inside a loop create a new function value every turn.
+/// A closure that escapes keeps its own memory, while the turns that did not
+/// escape must not leave their caches behind. The call count is the observable
+/// half: three escaped closures answer their second call from memory.
+#[test]
+fn edge_lru_cache_in_a_loop_keeps_only_escaped_closures_memory() {
+    let source = r#"
+set calls to 0
+set saved to []
+for each turn from 1 to 3
+    lru_cache(10) to add(n)
+        set calls to calls + 1
+        give back n
+    end
+    set saved to push(saved, add)
+end
+set first to saved[0]
+set second to saved[1]
+set third to saved[2]
+[first(1), first(1), second(1), second(1), third(1), third(1), calls]
+"#;
+    yields(source, "[1, 1, 1, 1, 1, 1, 3]");
+}
+
 /// A failed call is not an answer, so it must not enter the cache. Both engines
 /// are asked directly for the failure first, then each attempt is caught and
 /// counted: the body runs on every attempt, which is the observable proof that
@@ -1895,6 +1942,76 @@ end
 [track(1), track(2), track(1), track(3), track(2), calls]
 "#;
     yields(source, "[1, 2, 1, 3, 2, 4]");
+}
+
+/// A capacity beyond `usize::MAX` cannot index a cache, so the parser refuses
+/// it instead of saturating the cast to a size the declaration never stated.
+/// This is the numeric boundary of the decorator's capacity.
+#[test]
+fn edge_lru_cache_refuses_a_capacity_beyond_a_count_it_can_hold() {
+    let too_large_source = "lru_cache(1e300) to f(n)
+    give back n
+end
+f(1)
+";
+    assert!(
+        run_source_value(too_large_source).is_err(),
+        "the tree-walker should refuse a capacity past usize::MAX"
+    );
+    assert!(
+        compile_source(too_large_source).is_err(),
+        "the compiler should refuse a capacity past usize::MAX"
+    );
+    let too_large = message(&fails(too_large_source));
+    assert!(
+        too_large.contains("at least 1") && too_large.contains("whole number"),
+        "a capacity past usize::MAX should be refused, it said: {too_large}"
+    );
+
+    let negative = message(&fails(
+        "lru_cache(-1) to f(n)
+    give back n
+end
+f(1)
+",
+    ));
+    assert!(
+        negative.contains("lru_cache capacity"),
+        "a negative capacity should be refused by name, it said: {negative}"
+    );
+}
+
+/// SPEC.md must say what a function argument means as a cache key, because the
+/// answer is deliberately different from the language's `is`.
+#[test]
+fn spec_says_a_cache_matches_function_arguments_by_identity() {
+    let spec = include_str!("../SPEC.md");
+    assert!(
+        spec.contains("matched by identity"),
+        "SPEC.md § Memoisation should say a function argument is matched by identity"
+    );
+}
+
+/// `nothing` is a value the helpers cannot use as either a list or a count.
+/// Each refusal names the helper rather than surfacing as `Unknown function` or
+/// a panic, which is the same channel the wrong-type test uses for other kinds.
+#[test]
+fn edge_iteration_helpers_refuse_nothing() {
+    for (source, name) in [
+        ("chain(nothing, [1])", "chain"),
+        ("zip([1], nothing)", "zip"),
+        ("enumerate(nothing)", "enumerate"),
+        ("product(nothing, [1])", "product"),
+        ("groupby(nothing)", "groupby"),
+        ("take([1], nothing)", "take"),
+        ("skip(nothing, 1)", "skip"),
+    ] {
+        let text = message(&fails(source));
+        assert!(
+            text.contains(name),
+            "the refusal for `{source}` should name `{name}`, it said: {text}"
+        );
+    }
 }
 
 /// Both helpers name what they cannot take, and neither engine truncates a

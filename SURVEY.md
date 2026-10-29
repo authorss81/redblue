@@ -6,8 +6,8 @@ phase-095; rank 6 gained date arithmetic in phase-096 and text parsing and
 formatting in phase-097; the entries are kept so the ranking and its history
 stay readable.
 
-- **Builtins in the registry**: 92 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1200`,
-  which closes with `"input"` at `src/stdlib.rs:1292`.
+- **Builtins in the registry**: 92 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1190`,
+  which closes with `"input"` at `src/stdlib.rs:1282`.
 - **Modules a dotted call may name**: 12 — `stdlib::MODULES` at `src/stdlib.rs:19`.
 - **Dotted members those modules accept**: 63 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:63`.
@@ -193,7 +193,7 @@ Before phase-095 the same program was refused as
   inside `if let Value::List(items)`, so a record is not a list and the loop body
   never runs. `src/runtime.rs:1525` — `length` refuses a record outright with
   *"length requires a list or text"*. And the registry holds no `keys` and no
-  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:1292` without one.
+  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:1282` without one.
 - **Why it matters more than it looks**: a record is Redblue's only map type. A
   program cannot count a record, iterate it, merge one into another, or turn one
   back into text. Grouping is the operation almost every data program performs
@@ -216,7 +216,7 @@ Prints nothing and exits 0. The same record answers `r.a` and refuses `length(r)
 - **Blocked programs**: 4 — 4, 8, 19, 26
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:92` — `map` and `length` are the whole `list`
-  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:1200`) holds no `sort`, `sort_by`,
+  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:1190`) holds no `sort`, `sort_by`,
   `reverse`, `min`, `max`, `sum`, `first` or `last`. The refusal for any of them
   is `src/interpreter.rs:2411`, which formats `Unknown function '{}'`.
 - **What is missing**: `sort`, `sort_by`, `reverse`, `min`, `max`, `sum`,

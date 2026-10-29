@@ -1656,6 +1656,10 @@ end
 The capacity is a whole number of at least one and may be omitted, in which case
 it is 128. A call whose arguments equal an earlier call's arguments answers from
 the cache without running the body; a miss runs the body and records its answer.
+A function value among the arguments is matched by identity rather than by the
+language's `is`: two declarations can produce functions with the same name,
+parameters and captures but different bodies, and neither may answer from the
+other's entry. The same rule reaches a function nested in a list or a record.
 When the cache is full, the least recently used entry is evicted. Only successful
 answers are recorded, so a failed call is tried again. The cache belongs to the
 function value the declaration produces, not to one spelling of calling it or to
