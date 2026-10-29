@@ -20,7 +20,9 @@
 use std::io::{Read, Write};
 use std::process::Command;
 
+use redblue::bytecode::compile_source;
 use redblue::bytecode::vm::BytecodeVm;
+use redblue::{run_source_value, Error, Value};
 
 /// The environment variables that decide whether `network` talks to a proxy.
 ///
@@ -700,6 +702,33 @@ say length(bytes.from_text("héllo"))"#
             "say list.map([1, 2], to (x) give back x + 1 end)".into(),
             "[2, 3]\n".into(),
         ),
+        (
+            "chain",
+            "say chain([1, 2], [3])".into(),
+            "[1, 2, 3]\n".into(),
+        ),
+        (
+            "zip",
+            r#"say zip([1, 2], ["a", "b"])"#.into(),
+            "[[1, a], [2, b]]\n".into(),
+        ),
+        (
+            "enumerate",
+            r#"say enumerate(["a", "b"])"#.into(),
+            "[[0, a], [1, b]]\n".into(),
+        ),
+        (
+            "product",
+            r#"say product([1, 2], ["a"])"#.into(),
+            "[[1, a], [2, a]]\n".into(),
+        ),
+        (
+            "groupby",
+            "say groupby([2, 1, 2, 1])".into(),
+            "[{key: 2, items: [2, 2]}, {key: 1, items: [1, 1]}]\n".into(),
+        ),
+        ("take", "say take([1, 2, 3], 2)".into(), "[1, 2]\n".into()),
+        ("skip", "say skip([1, 2, 3], 2)".into(), "[3]\n".into()),
         ("is_number", "say is_number(1)".into(), "yes\n".into()),
         ("is_text", r#"say is_text("a")"#.into(), "yes\n".into()),
         ("is_list", "say is_list([1])".into(), "yes\n".into()),
@@ -1201,4 +1230,993 @@ fn edge_regex_module_refuses_a_bad_pattern_by_name() {
         r#"say regex.match("x", "(")"#,
         "regex",
     );
+}
+
+// ============================================================ phase-098 iteration helpers
+
+/// The tree-walking engine's value for `source`.
+#[track_caller]
+fn tree(source: &str) -> Value {
+    run_source_value(source)
+        .unwrap_or_else(|error| panic!("tree-walker should run:\n{source}\n{error:?}"))
+}
+
+/// The bytecode engine's value for `source`.
+#[track_caller]
+fn bytecode(source: &str) -> Value {
+    let chunk = compile_source(source)
+        .unwrap_or_else(|error| panic!("source should compile:\n{source}\n{error:?}"));
+    let mut vm = BytecodeVm::new();
+    vm.run(&chunk)
+        .unwrap_or_else(|error| panic!("bytecode VM should run:\n{source}\n{error:?}"))
+}
+
+/// Runs `source` on both engines and asserts they answer the same text, then
+/// returns the tree-walker's value.
+#[track_caller]
+fn both(source: &str) -> Value {
+    let walked = tree(source);
+    let compiled = bytecode(source);
+    assert_eq!(
+        walked.to_string(),
+        compiled.to_string(),
+        "the two engines disagree about:\n{source}"
+    );
+    walked
+}
+
+/// Asserts `source` answers `expected` on both engines.
+#[track_caller]
+fn yields(source: &str, expected: &str) {
+    let value = both(source);
+    assert_eq!(value.to_string(), expected, "wrong answer for:\n{source}");
+}
+
+/// The failure `source` produces on the tree-walker.
+#[track_caller]
+fn fails(source: &str) -> Error {
+    run_source_value(source).expect_err("source should fail")
+}
+
+fn message(error: &Error) -> String {
+    error.message().to_string()
+}
+
+#[test]
+fn iteration_helpers_cover_the_empty_list() {
+    yields("chain([], [])", "[]");
+    yields("zip([], [])", "[]");
+    yields("zip([1], [])", "[]");
+    yields("zip([], [1])", "[]");
+    yields("enumerate([])", "[]");
+    yields("product([], [])", "[]");
+    yields("product([1], [])", "[]");
+    yields("groupby([])", "[]");
+    yields("take([], 3)", "[]");
+    yields("skip([], 3)", "[]");
+}
+
+#[test]
+fn iteration_helpers_cover_singletons_and_many_elements() {
+    yields("chain([1], [2])", "[1, 2]");
+    yields("zip([1], [2])", "[[1, 2]]");
+    yields("enumerate([9])", "[[0, 9]]");
+    yields("product([1], [2])", "[[1, 2]]");
+    yields("groupby([7])", "[{key: 7, items: [7]}]");
+    yields("take([7], 1)", "[7]");
+    yields("skip([7], 0)", "[7]");
+
+    yields("chain([1, 2], [3, 4])", "[1, 2, 3, 4]");
+    yields("zip([1, 2, 3], [4, 5, 6])", "[[1, 4], [2, 5], [3, 6]]");
+    yields("enumerate([\"a\", \"b\"])", "[[0, a], [1, b]]");
+    yields(
+        "product([1, 2], [3, 4])",
+        "[[1, 3], [1, 4], [2, 3], [2, 4]]",
+    );
+    yields("take([1, 2, 3], 2)", "[1, 2]");
+    yields("skip([1, 2, 3], 1)", "[2, 3]");
+}
+
+#[test]
+fn edge_zip_stops_at_the_shorter_input() {
+    yields("zip([1, 2, 3], [\"a\"])", "[[1, a]]");
+    yields("zip([1], [\"a\", \"b\", \"c\"])", "[[1, a]]");
+    // The rule is not padding with a missing value, so the answer is exactly
+    // as long as the shorter side and no longer.
+    assert_eq!(
+        tree("length(zip([1, 2, 3, 4], [\"a\", \"b\"]))").to_string(),
+        "2"
+    );
+}
+
+#[test]
+fn edge_groupby_keeps_first_appearance_order_and_groups_by_equality() {
+    // 2 appears first, so its group is first even though 1 is smaller. The
+    // two lists equal to ["a"] share a group instead of making separate ones.
+    yields(
+        "groupby([2, 1, 2, 1, 3])",
+        "[{key: 2, items: [2, 2]}, {key: 1, items: [1, 1]}, {key: 3, items: [3]}]",
+    );
+    yields(
+        "groupby([[\"a\"], [\"b\"], [\"a\"]])",
+        "[{key: [a], items: [[a], [a]]}, {key: [b], items: [[b]]}]",
+    );
+}
+
+#[test]
+fn edge_take_and_skip_clamp_at_both_ends() {
+    yields("take([1, 2, 3], 0)", "[]");
+    yields("take([1, 2, 3], -2)", "[]");
+    yields("take([1, 2, 3], 99)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], 0)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], -2)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], 99)", "[]");
+}
+
+/// A count is a number of whole items. A positive fraction has no meaning, so
+/// it is refused rather than silently truncated: `take(xs, 1.9)` used to answer
+/// one item, which makes the caller's arithmetic disappear without a word. A
+/// negative count is still the empty/whole-list clamp, fraction or not.
+#[test]
+fn edge_take_and_skip_refuse_a_fractional_count() {
+    for (source, name) in [
+        ("take([1, 2, 3], 1.5)", "take"),
+        ("skip([1, 2, 3], 2.5)", "skip"),
+    ] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains(name) && walked.contains("whole number"),
+            "the tree-walker should refuse `{source}` as a whole number, it said: {walked}"
+        );
+
+        let chunk = compile_source(source).expect("the failing program should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse a fractional count");
+        assert!(
+            compiled.message().contains(name) && compiled.message().contains("whole number"),
+            "the bytecode VM should refuse `{source}` as a whole number, it said: {}",
+            compiled.message()
+        );
+    }
+
+    // The negative clamp still wins over the whole-number rule, so the two
+    // edges stay separate rather than one swallowing the other.
+    yields("take([1, 2, 3], -1.5)", "[]");
+    yields("skip([1, 2, 3], -1.5)", "[1, 2, 3]");
+}
+
+/// The helpers move values without inspecting them, so text of any script has
+/// to survive unchanged. A byte-length or grapheme rewrite anywhere on the path
+/// would mangle an emoji, a CJK word, an RTL word or a combining mark.
+#[test]
+fn edge_iteration_helpers_preserve_unicode_items() {
+    yields("chain([\"日\", \"é\"], [\"🙂\"])", "[日, é, 🙂]");
+    yields("zip([\"日\"], [\"é\"])", "[[日, é]]");
+    yields("enumerate([\"🙂\", \"שלום\"])", "[[0, 🙂], [1, שלום]]");
+    yields("product([\"é\"], [\"🙂\"])", "[[é, 🙂]]");
+    yields(
+        "groupby([\"日\", \"é\", \"日\"])",
+        "[{key: 日, items: [日, 日]}, {key: é, items: [é]}]",
+    );
+    yields("take([\"日\", \"é\"], 1)", "[日]");
+    yields("skip([\"日\", \"é\"], 1)", "[é]");
+    yields("chain([], [\"e\u{301}\"])", "[e\u{301}]");
+}
+
+/// A key is compared with Redblue equality, so two records with the same fields
+/// and values share a group even when they were built separately, while a
+/// record with a different or missing field stays its own group.
+#[test]
+fn edge_groupby_groups_equal_records_and_keeps_missing_fields_distinct() {
+    yields(
+        "groupby([{a: 1}, {a: 2}, {a: 1}])",
+        "[{key: {a: 1}, items: [{a: 1}, {a: 1}]}, {key: {a: 2}, items: [{a: 2}]}]",
+    );
+    yields(
+        "groupby([{a: 1}, {b: 1}, {}])",
+        "[{key: {a: 1}, items: [{a: 1}]}, {key: {b: 1}, items: [{b: 1}]}, \
+         {key: {}, items: [{}]}]",
+    );
+}
+
+/// A builtin is one step, so the step budget cannot bound a list whose length
+/// is the product of its inputs. Two lists of 1,001 items are each well inside
+/// the loop cap, but their product is past the materialised-output limit; both
+/// engines must refuse it on the resource-limit channel rather than reserve
+/// the whole product or abort.
+#[test]
+fn edge_product_refuses_a_product_past_the_materialised_limit() {
+    let source = r#"
+set xs to []
+repeat 1001 times
+    set xs to push(xs, 1)
+end
+set ys to []
+repeat 1001 times
+    set ys to push(ys, 1)
+end
+product(xs, ys)
+"#;
+    let walked = run_source_value(source).expect_err("the tree-walker should refuse the product");
+    assert!(
+        walked.is_resource_limit(),
+        "the tree-walker should refuse `product` as a resource limit, it said: {walked:?}"
+    );
+
+    let chunk = compile_source(source).expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    let compiled = vm
+        .run(&chunk)
+        .expect_err("the bytecode VM should refuse the product");
+    assert!(
+        compiled.is_resource_limit(),
+        "the bytecode VM should refuse `product` as a resource limit, it said: {compiled:?}"
+    );
+}
+
+/// Grouping must not compare every item with every earlier key. Fifty thousand
+/// distinct keys would be more than a billion comparisons under a linear scan,
+/// so this program would hang there; a keyed lookup answers in input order.
+#[test]
+fn edge_groupby_of_many_distinct_keys_keeps_first_appearance_order() {
+    let source = r#"
+set items to [0]
+repeat 16 times
+    set start to length(items)
+    set items to chain(items, map(items, to (x) give back x + start end))
+end
+set groups to groupby(items)
+[length(groups), groups[0].key, groups[65535].key]
+"#;
+    yields(source, "[65536, 0, 65535]");
+}
+
+/// Two list arguments with equal contents are one cache key, and two records
+/// with equal fields are one key too; a different list or a record missing a
+/// field is a different key. The call counts are literal, so identity-only or
+/// never-hitting keys both fail.
+#[test]
+fn edge_lru_cache_keys_on_structural_argument_equality() {
+    let source = r#"
+set list_calls to 0
+lru_cache(10) to same_list(xs)
+    set list_calls to list_calls + 1
+    give back xs
+end
+same_list([1, 2])
+same_list([1, 2])
+same_list([2, 1])
+set record_calls to 0
+lru_cache(10) to same_record(r)
+    set record_calls to record_calls + 1
+    give back r
+end
+same_record({a: 1, b: 2})
+same_record({a: 1, b: 2})
+same_record({a: 1})
+[list_calls, record_calls]
+"#;
+    yields(source, "[2, 2]");
+}
+
+#[test]
+fn edge_iteration_helpers_refuse_wrong_types() {
+    for (source, name) in [
+        ("chain([1], \"two\")", "chain"),
+        ("zip([1], 2)", "zip"),
+        ("enumerate(\"text\")", "enumerate"),
+        ("product([1], {a: 1})", "product"),
+        ("groupby(1)", "groupby"),
+        ("take(\"text\", 1)", "take"),
+        ("skip([1], \"one\")", "skip"),
+    ] {
+        let text = message(&fails(source));
+        assert!(
+            text.contains(name),
+            "the refusal for `{source}` should name `{name}`, it said: {text}"
+        );
+    }
+}
+
+/// Two Fibonacci functions, one cached and one not: the same result, fewer
+/// calls for the cached one. The call counts are asserted literally, so a cache
+/// that never hits fails instead of passing on the result alone.
+#[test]
+fn lru_cache_makes_fewer_recursive_calls_than_uncached() {
+    let source = r#"
+set cached_calls to 0
+lru_cache(50) to cached_fib(n)
+    set cached_calls to cached_calls + 1
+    set answer to n
+    if n >= 2 then
+        set answer to cached_fib(n - 1) + cached_fib(n - 2)
+    end
+    give back answer
+end
+set plain_calls to 0
+to plain_fib(n)
+    set plain_calls to plain_calls + 1
+    set answer to n
+    if n >= 2 then
+        set answer to plain_fib(n - 1) + plain_fib(n - 2)
+    end
+    give back answer
+end
+set cached to cached_fib(10)
+set plain to plain_fib(10)
+[cached_calls < plain_calls, cached is plain, cached_calls, plain_calls]
+"#;
+    yields(source, "[yes, yes, 11, 177]");
+}
+
+/// At capacity two, the sequence visits three distinct arguments and then the
+/// first one again. With no eviction the last call would be a hit and the count
+/// would be 3; the answer 4 is the proof that the entry was evicted.
+#[test]
+fn edge_lru_cache_evicts_at_its_capacity() {
+    let source = r#"
+set calls to 0
+lru_cache(2) to f(n)
+    set calls to calls + 1
+    give back n
+end
+f(1)
+f(1)
+f(2)
+f(3)
+f(1)
+calls
+"#;
+    yields(source, "4");
+}
+
+#[test]
+fn edge_lru_cache_requires_a_positive_capacity() {
+    let zero = message(&fails("lru_cache(0) to f(n)\n    give back n\nend\nf(1)\n"));
+    assert!(
+        zero.contains("at least 1"),
+        "a zero capacity should be refused, it said: {zero}"
+    );
+
+    let fractional = message(&fails(
+        "lru_cache(1.5) to f(n)\n    give back n\nend\nf(1)\n",
+    ));
+    assert!(
+        fractional.contains("whole number"),
+        "a fractional capacity should be refused, it said: {fractional}"
+    );
+
+    let non_numeric = message(&fails(
+        "lru_cache(\"x\") to f(n)\n    give back n\nend\nf(1)\n",
+    ));
+    assert!(
+        non_numeric.contains("must be a number"),
+        "a non-numeric capacity should be refused, it said: {non_numeric}"
+    );
+}
+
+#[test]
+fn lru_cache_defaults_to_a_capacity_of_128() {
+    // 128 distinct arguments fit; the 129th evicts the least recently used
+    // entry. Then asking for the first argument again is a miss, which is the
+    // proof that the omitted capacity really was 128 and not unbounded.
+    let source = r#"
+set calls to 0
+lru_cache to f(n)
+    set calls to calls + 1
+    give back n
+end
+for each i from 1 to 128
+    f(i)
+end
+set filled to calls
+f(129)
+f(1)
+[filled, calls]
+"#;
+    yields(source, "[128, 130]");
+}
+
+#[test]
+fn edge_lru_cache_memoises_a_body_that_ends_in_an_expression() {
+    // The body's last statement is an ordinary expression rather than `give
+    // back`; the compiled engine finishes such a frame in `unwind_frame`, which
+    // must record the answer too or only one engine memoises.
+    let source = r#"
+set calls to 0
+lru_cache(10) to f(n)
+    set calls to calls + 1
+    n
+end
+f(1)
+f(1)
+calls
+"#;
+    yields(source, "1");
+}
+
+#[test]
+fn edge_redeclaring_a_cached_function_undecorated_drops_its_memory() {
+    // A cache belongs to the declaration that asked for it. Rebinding the name
+    // with an ordinary `to` must not let the old declaration answer for the new
+    // one on either engine.
+    let source = r#"
+lru_cache(10) to f(n)
+    give back n
+end
+f(1)
+to f(n)
+    give back n + 100
+end
+f(1)
+"#;
+    yields(source, "101");
+}
+
+#[test]
+fn edge_lru_cache_does_not_survive_a_bytecode_run() {
+    let mut vm = BytecodeVm::new();
+    let first = compile_source(
+        "lru_cache(10) to f(n)\n\
+             say \"called\"\n\
+             give back n\n\
+         end\n\
+         f(1)",
+    )
+    .expect("the first program should compile");
+    assert_eq!(
+        vm.run(&first)
+            .expect("the first run should work")
+            .to_string(),
+        "1"
+    );
+    assert_eq!(vm.take_output(), vec!["called".to_string()]);
+
+    let second = compile_source("f(1)").expect("the second program should compile");
+    assert_eq!(
+        vm.run(&second)
+            .expect("the second run should work")
+            .to_string(),
+        "1"
+    );
+    assert_eq!(
+        vm.take_output(),
+        vec!["called".to_string()],
+        "a cache from the previous run must not skip this run's body"
+    );
+}
+
+#[test]
+fn edge_a_user_function_named_like_the_internal_cache_call_still_runs() {
+    // The internal declaration call must be a name no source can spell, or a
+    // legal identifier would run the user's body on one engine and be
+    // intercepted on the other.
+    let source =
+        "to __lru_cache_declare(a, b)\n    give back a + b\nend\n__lru_cache_declare(2, 3)\n";
+    yields(source, "5");
+}
+
+#[test]
+fn edge_a_variable_named_lru_cache_still_works() {
+    // `lru_cache` is not reserved: a variable of that name is an ordinary
+    // binding, and only the decorator shape in front of `to` changes meaning.
+    yields("set lru_cache to 5\nlru_cache + 1", "6");
+}
+
+#[test]
+fn iteration_helpers_agree_across_both_engines() {
+    for source in [
+        "chain([1, 2], [3])",
+        "zip([1, 2, 3], [4, 5])",
+        "enumerate([\"a\", \"b\", \"c\"])",
+        "product([1, 2], [3, 4])",
+        "groupby([3, 1, 3, 2, 1])",
+        "take([1, 2, 3], 2)",
+        "skip([1, 2, 3], 1)",
+    ] {
+        both(source);
+    }
+}
+
+/// SPEC.md is the language's contract, so the laziness statement has to be
+/// there and has to name each helper. If a helper is later made lazy, this
+/// fails until the document says so — which is the point of writing the answer
+/// down rather than leaving it to be inferred.
+#[test]
+fn spec_says_each_iteration_helper_materialises() {
+    let spec = include_str!("../SPEC.md");
+    for name in [
+        "chain",
+        "zip",
+        "enumerate",
+        "product",
+        "groupby",
+        "take",
+        "skip",
+    ] {
+        let needle = format!("| `{name}(");
+        let line = spec
+            .lines()
+            .find(|line| line.contains(&needle))
+            .unwrap_or_else(|| panic!("SPEC.md § Iteration helpers has no row for `{name}`"));
+        assert!(
+            line.contains("materialis"),
+            "the row for `{name}` should say it materialises: {line}"
+        );
+    }
+    assert!(
+        spec.contains("zip") && spec.contains("stops at the shorter"),
+        "SPEC.md should state that zip stops at the shorter input"
+    );
+}
+
+/// A cache is a property of the declaration, not of one way of calling it. A
+/// decorated function passed to `map` is still the same function, so repeated
+/// arguments must be answered from memory on both engines. The bytecode VM
+/// looked for a hit only on a direct `CALL`, so `map([1, 1], f)` ran the body
+/// twice there while the tree-walker ran it once.
+#[test]
+fn edge_lru_cache_hits_inside_map_on_both_engines() {
+    let source = r#"
+set calls to 0
+lru_cache(10) to doubled(n)
+    set calls to calls + 1
+    give back n * 2
+end
+set mapped to map([1, 1, 1], doubled)
+[mapped, calls]
+"#;
+    yields(source, "[[2, 2, 2], 1]");
+}
+
+/// A `map` over one repeated value is all cache hits after the first element.
+/// The bytecode VM used to route every hit through the next element's call, so
+/// a large list recursed once per element in Rust and overflowed the host stack
+/// instead of finishing. The count is literal so a map that stopped early — or
+/// stopped answering from memory — is caught too.
+#[test]
+fn edge_lru_cache_map_of_a_large_repeated_value_does_not_recurse() {
+    let count = 100_000;
+    let repeated = std::iter::repeat_n("1", count)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let source = format!(
+        "set calls to 0\n\
+         lru_cache(1) to once(n)\n\
+             set calls to calls + 1\n\
+             give back n\n\
+         end\n\
+         set mapped to map(text.split(\"{repeated}\", \" \"), once)\n\
+         [length(mapped), calls]\n"
+    );
+    yields(&source, &format!("[{count}, 1]"));
+}
+
+/// Cached declarations inside a loop create a new function value every turn.
+/// A closure that escapes keeps its own memory, while the turns that did not
+/// escape must not leave their caches behind. The call count is the observable
+/// half: three escaped closures answer their second call from memory.
+#[test]
+fn edge_lru_cache_in_a_loop_keeps_only_escaped_closures_memory() {
+    let source = r#"
+set calls to 0
+set saved to []
+for each turn from 1 to 3
+    lru_cache(10) to add(n)
+        set calls to calls + 1
+        give back n
+    end
+    set saved to push(saved, add)
+end
+set first to saved[0]
+set second to saved[1]
+set third to saved[2]
+[first(1), first(1), second(1), second(1), third(1), third(1), calls]
+"#;
+    yields(source, "[1, 1, 1, 1, 1, 1, 3]");
+}
+
+/// A failed call is not an answer, so it must not enter the cache. Both engines
+/// are asked directly for the failure first, then each attempt is caught and
+/// counted: the body runs on every attempt, which is the observable proof that
+/// nothing was remembered.
+#[test]
+fn edge_lru_cache_does_not_record_a_failed_call() {
+    let bad = "lru_cache(2) to boom(n)\n    give back 1 / n\nend\nboom(0)\n";
+    assert!(
+        run_source_value(bad).is_err(),
+        "the tree-walker should refuse a division by zero"
+    );
+    let chunk = compile_source(bad).expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    assert!(
+        vm.run(&chunk).is_err(),
+        "the bytecode VM should refuse a division by zero"
+    );
+
+    let source = r#"
+set calls to 0
+lru_cache(2) to boom(n)
+    set calls to calls + 1
+    give back 1 / n
+end
+try
+    boom(0)
+catch error
+    set caught to yes
+end
+try
+    boom(0)
+catch error
+    set caught to yes
+end
+calls
+"#;
+    yields(source, "2");
+}
+
+/// A count far past the end is still the whole list (or nothing, for `skip`),
+/// not an overflow. The cast from the finite number saturates instead of
+/// wrapping to a small count, so both ends keep the clamping rule the ordinary
+/// bounds test states.
+#[test]
+fn edge_take_and_skip_saturate_a_count_far_past_the_end() {
+    yields("take([1, 2, 3], 1e300)", "[1, 2, 3]");
+    yields("skip([1, 2, 3], 1e300)", "[]");
+    yields("take([1, 2, 3], -1e300)", "[]");
+    yields("skip([1, 2, 3], -1e300)", "[1, 2, 3]");
+}
+
+/// A cache belongs to one function value, not to every declaration that shares
+/// its name. Two calls of one factory build two `add` closures over different
+/// offsets; a name-keyed memory answered the second closure with the first
+/// closure's result.
+#[test]
+fn edge_lru_cache_is_not_shared_by_two_same_named_closures() {
+    let source = r#"
+to make(offset)
+    lru_cache(10) to add(n)
+        give back n + offset
+    end
+    give back add
+end
+set hundreds to make(100)
+set ones to make(1)
+[hundreds(5), hundreds(5), ones(5), ones(5)]
+"#;
+    yields(source, "[105, 105, 6, 6]");
+}
+
+/// The same collision, observed through the call count: each closure's first
+/// call runs its body and its second call is a hit of *its own* memory. A shared
+/// cache answers the second closure with the first one's label and count.
+#[test]
+fn edge_lru_cache_same_named_closures_fill_independently() {
+    let source = r#"
+to make(label, calls)
+    lru_cache(10) to remember(n)
+        set calls to calls + 1
+        give back [label, calls]
+    end
+    give back remember
+end
+set first to make("first", 0)
+set second to make("second", 0)
+[first(1), first(1), second(1), second(1)]
+"#;
+    yields(source, "[[first, 1], [first, 1], [second, 1], [second, 1]]");
+}
+
+/// A cached value in one closure must never hide a failure in another closure
+/// of the same name. The first declaration caches `n / 1`; the second divides by
+/// zero, which is an error even though its argument equals the cached one.
+#[test]
+fn edge_lru_cache_does_not_let_one_closure_answer_for_another() {
+    let failing = r#"
+to make(divisor)
+    lru_cache(10) to divide(n)
+        give back n / divisor
+    end
+    give back divide
+end
+set safe to make(1)
+set broken to make(0)
+safe(7)
+broken(7)
+"#;
+    assert!(
+        run_source_value(failing).is_err(),
+        "the tree-walker should refuse the second closure's division by zero"
+    );
+
+    let chunk = compile_source(failing).expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    assert!(
+        vm.run(&chunk).is_err(),
+        "the bytecode VM should refuse the second closure's division by zero"
+    );
+
+    let caught = r#"
+to make(divisor)
+    lru_cache(10) to divide(n)
+        give back n / divisor
+    end
+    give back divide
+end
+set safe to make(1)
+set broken to make(0)
+set safe_answer to safe(7)
+try
+    set broken_answer to broken(7)
+catch error
+    set broken_answer to "refused"
+end
+[safe_answer, broken_answer]
+"#;
+    yields(caught, "[7, refused]");
+}
+
+/// A cache belongs to the closure value, so declaring a same-named closure in
+/// a sibling call must not take the first closure's memory with it. The count
+/// is the observable half: both closures compute once and answer from memory
+/// after that, on both engines.
+#[test]
+fn edge_lru_cache_survives_sibling_closure_declarations() {
+    let source = r#"
+set calls to 0
+to factory(offset)
+    lru_cache(2) to add(n)
+        set calls to calls + 1
+        give back n + offset
+    end
+    give back add
+end
+set first to factory(10)
+set second to factory(20)
+[first(1), first(1), second(1), second(1), calls]
+"#;
+    yields(source, "[11, 11, 21, 21, 2]");
+}
+
+/// A hit is a use, so it refreshes the entry's place in the LRU order. With a
+/// capacity of two, reading `1` again after adding `2` must make `2` the
+/// eviction victim; the fourth call then recomputes `2` and the count says so.
+#[test]
+fn edge_lru_cache_hit_refreshes_recency() {
+    let source = r#"
+set calls to 0
+lru_cache(2) to track(n)
+    set calls to calls + 1
+    give back n
+end
+[track(1), track(2), track(1), track(3), track(2), calls]
+"#;
+    yields(source, "[1, 2, 1, 3, 2, 4]");
+}
+
+/// A capacity beyond `usize::MAX` cannot index a cache, so the parser refuses
+/// it instead of saturating the cast to a size the declaration never stated.
+/// This is the numeric boundary of the decorator's capacity.
+#[test]
+fn edge_lru_cache_refuses_a_capacity_beyond_a_count_it_can_hold() {
+    // 2^64 is exactly representable as an `f64` and rounds to itself from
+    // `usize::MAX as f64` on a 64-bit target, so it is the boundary a `<=`
+    // comparison with that conversion wrongly admitted. The largest count
+    // below it is the last capacity a `usize` can hold.
+    for capacity in ["1e300", "18446744073709551616"] {
+        let too_large_source = format!(
+            "lru_cache({capacity}) to f(n)
+    give back n
+end
+f(1)
+"
+        );
+        assert!(
+            run_source_value(&too_large_source).is_err(),
+            "the tree-walker should refuse a capacity of {capacity} past usize::MAX"
+        );
+        assert!(
+            compile_source(&too_large_source).is_err(),
+            "the compiler should refuse a capacity of {capacity} past usize::MAX"
+        );
+        let too_large = message(&fails(&too_large_source));
+        assert!(
+            too_large.contains("at least 1") && too_large.contains("whole number"),
+            "a capacity of {capacity} past usize::MAX should be refused, it said: {too_large}"
+        );
+    }
+
+    let negative = message(&fails(
+        "lru_cache(-1) to f(n)
+    give back n
+end
+f(1)
+",
+    ));
+    assert!(
+        negative.contains("lru_cache capacity"),
+        "a negative capacity should be refused by name, it said: {negative}"
+    );
+}
+
+/// SPEC.md must say what a function argument means as a cache key, because the
+/// answer is deliberately different from the language's `is`.
+#[test]
+fn spec_says_a_cache_matches_function_arguments_by_identity() {
+    let spec = include_str!("../SPEC.md");
+    assert!(
+        spec.contains("matched by identity"),
+        "SPEC.md § Memoisation should say a function argument is matched by identity"
+    );
+}
+
+/// `nothing` is a value the helpers cannot use as either a list or a count.
+/// Each refusal names the helper rather than surfacing as `Unknown function` or
+/// a panic, which is the same channel the wrong-type test uses for other kinds.
+#[test]
+fn edge_iteration_helpers_refuse_nothing() {
+    for (source, name) in [
+        ("chain(nothing, [1])", "chain"),
+        ("zip([1], nothing)", "zip"),
+        ("enumerate(nothing)", "enumerate"),
+        ("product(nothing, [1])", "product"),
+        ("groupby(nothing)", "groupby"),
+        ("take([1], nothing)", "take"),
+        ("skip(nothing, 1)", "skip"),
+    ] {
+        let text = message(&fails(source));
+        assert!(
+            text.contains(name),
+            "the refusal for `{source}` should name `{name}`, it said: {text}"
+        );
+    }
+}
+
+/// Both helpers name what they cannot take, and neither engine truncates a
+/// text into a count or panics on it. This is the failure channel for the
+/// take/skip argument check.
+#[test]
+fn edge_take_and_skip_refuse_a_text_count() {
+    for source in ["take([1, 2, 3], \"2\")", "skip([1, 2, 3], \"2\")"] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains("requires a list and a number"),
+            "the tree-walker should refuse `{source}` by name, it said: {walked}"
+        );
+
+        let chunk = compile_source(source).expect("the failing program should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse a text count");
+        assert!(
+            compiled.message().contains("requires a list and a number"),
+            "the bytecode VM should refuse `{source}` by name, it said: {}",
+            compiled.message()
+        );
+    }
+}
+
+/// A decorated `to can` method is memoised on both engines: the second call
+/// with the same argument answers from the method's own memory instead of
+/// running its body again.
+#[test]
+fn lru_cache_memoises_an_object_method_on_both_engines() {
+    let source = r#"
+set calls to 0
+object Box
+    has base default 10
+    lru_cache(10) to can add(n)
+        set calls to calls + 1
+        give back this.base + n
+    end
+end
+[Box.add(1), Box.add(1), calls]
+"#;
+    yields(source, "[11, 11, 1]");
+}
+
+/// The capacity on a decorated method is the same bound a decorated function
+/// has, so a capacity of one evicts the previous argument and the second visit
+/// to it runs the body again.
+#[test]
+fn edge_lru_cache_evicts_an_object_methods_entries() {
+    let source = r#"
+set calls to 0
+object Track
+    lru_cache(1) to can f(n)
+        set calls to calls + 1
+        give back n
+    end
+end
+[Track.f(1), Track.f(2), Track.f(1), calls]
+"#;
+    yields(source, "[1, 2, 1, 3]");
+}
+
+/// The method decorator goes through the same capacity check as a function
+/// decorator, so a cache that could never answer is refused rather than
+/// accepted as a no-op.
+#[test]
+fn edge_lru_cache_refuses_a_bad_capacity_on_a_method() {
+    for (source, expected) in [
+        (
+            "object Bad\n    lru_cache(0) to can f(n)\n        give back n\n    end\nend\nBad.f(1)\n",
+            "at least 1",
+        ),
+        (
+            "object Bad\n    lru_cache(1.5) to can f(n)\n        give back n\n    end\nend\nBad.f(1)\n",
+            "whole number",
+        ),
+    ] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains(expected),
+            "the tree-walker should refuse `{source}` with `{expected}`, it said: {walked}"
+        );
+        assert!(
+            compile_source(source).is_err(),
+            "the compiler should refuse `{source}` too"
+        );
+    }
+}
+
+/// A method's memory belongs to the run that filled it. A second program on the
+/// same VM must run the body again rather than answering from the first run's
+/// method cache.
+#[test]
+fn edge_a_method_cache_does_not_survive_a_bytecode_run() {
+    let mut vm = BytecodeVm::new();
+    let first = compile_source(
+        "set calls to 0\n\
+         object Box\n\
+             has base default 0\n\
+             lru_cache(10) to can tick(n)\n\
+                 set calls to calls + 1\n\
+                 give back n\n\
+             end\n\
+         end\n\
+         Box.tick(1)\n\
+         Box.tick(1)\n\
+         calls\n",
+    )
+    .expect("the first program should compile");
+    assert_eq!(
+        vm.run(&first)
+            .expect("the first run should work")
+            .to_string(),
+        "1"
+    );
+
+    // The second program is compiled on its own, so the analyzer cannot know
+    // about the object the first run left registered. Binding `Box` here is
+    // enough for the name to be known; the VM still resolves the method
+    // against the type it registered in the first run.
+    let second = compile_source("set calls to 0\nset Box to 0\nBox.tick(1)\ncalls\n")
+        .expect("the second program should compile");
+    assert_eq!(
+        vm.run(&second)
+            .expect("the second run should work")
+            .to_string(),
+        "1",
+        "a method cache from the previous run must not skip this run's body"
+    );
+}
+
+/// A `to can` declaration written outside an object is an ordinary binding, so
+/// the decorator reaches it through the same name-based declaration a function
+/// uses. Both engines must answer from that memory.
+#[test]
+fn lru_cache_memoises_a_top_level_can_declaration() {
+    let source = r#"
+set calls to 0
+lru_cache(10) to can doubled(n)
+    set calls to calls + 1
+    give back n * 2
+end
+[doubled(2), doubled(2), calls]
+"#;
+    yields(source, "[4, 4, 1]");
 }

@@ -1,5 +1,6 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{NaiveDateTime, TimeDelta};
 use indexmap::IndexMap;
@@ -7,6 +8,7 @@ use indexmap::IndexMap;
 use crate::bytecode::Chunk;
 use crate::error::{Error, Result, Span};
 use crate::parser::Stmt;
+use crate::runtime::LruCache;
 
 /// Field storage for records and objects.
 ///
@@ -79,6 +81,15 @@ impl FunctionBody {
 /// same name overwrote each other.
 #[derive(Debug, Clone)]
 pub struct FunctionValue {
+    /// An identity unique to this function value.
+    ///
+    /// Name, parameters and captured bindings are not an identity: a factory
+    /// executed twice can build two closures with the same name and the same
+    /// parameter list that closed over different values, and a memoisation
+    /// cache keyed by name alone would let one answer for the other. Cloning a
+    /// value keeps this number, so every reference to one declaration's
+    /// closure shares its memory, while a second declaration never does.
+    pub id: usize,
     /// The name in the declaration. Used for display and error messages.
     pub name: String,
     /// The declared parameter names, in order.
@@ -92,6 +103,93 @@ pub struct FunctionValue {
     pub body: FunctionBody,
     /// The local scopes live where the declaration was executed.
     pub captured: Arc<Captured>,
+    /// The memory an `lru_cache` declaration gave this function, shared by every
+    /// clone of it.
+    ///
+    /// Kept here rather than in a table on the VM so that it dies with the last
+    /// reference to the function. A declaration inside a loop creates a new
+    /// function value on every turn; a VM-level table keyed by identity would
+    /// keep every turn's cache alive for the rest of the run even though no
+    /// value could reach it.
+    cache: Arc<OnceLock<Mutex<LruCache>>>,
+}
+
+/// The next identity [`FunctionValue::new`] hands out.
+///
+/// One counter for the process rather than per run: an identity has to be
+/// unique across two runs sharing one VM, and the value is only used as a cache
+/// key, never printed, so a number that differs between processes changes no
+/// observable answer.
+static NEXT_FUNCTION_ID: AtomicUsize = AtomicUsize::new(1);
+
+impl FunctionValue {
+    /// Builds a function value with a fresh identity.
+    pub fn new(
+        name: String,
+        params: Vec<String>,
+        body: FunctionBody,
+        captured: Arc<Captured>,
+    ) -> Self {
+        Self {
+            id: NEXT_FUNCTION_ID.fetch_add(1, Ordering::Relaxed),
+            name,
+            params,
+            body,
+            captured,
+            cache: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Gives this function a memory of `capacity` entries, if it has none yet.
+    pub fn attach_cache(&self, capacity: usize) {
+        if self.cache.get().is_none() {
+            self.cache
+                .set(Mutex::new(LruCache::new(capacity)))
+                .expect("an empty cache slot accepts a cache");
+        }
+    }
+
+    /// Gives this function an empty memory of `capacity` entries.
+    pub fn with_cache(self, capacity: usize) -> Self {
+        self.attach_cache(capacity);
+        self
+    }
+
+    /// Whether this function has an `lru_cache` memory.
+    pub fn has_cache(&self) -> bool {
+        self.cache.get().is_some()
+    }
+
+    /// Drops every answer this function remembers, keeping its capacity.
+    pub fn reset_cache(&self) {
+        let Some(cache) = self.cache.get() else {
+            return;
+        };
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    /// The answer this function remembers for `args`, if any.
+    pub fn cached(&self, args: &[Value]) -> Option<Value> {
+        let cache = self.cache.get()?;
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.get(args)
+    }
+
+    /// Records `value` as this function's answer for `args`.
+    pub fn remember(&self, args: &[Value], value: Value) {
+        let Some(cache) = self.cache.get() else {
+            return;
+        };
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(args, value);
+    }
 }
 
 /// Two function values are the same function when they were declared with the
@@ -104,6 +202,44 @@ pub struct FunctionValue {
 impl PartialEq for FunctionValue {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.params == other.params && self.captured == other.captured
+    }
+}
+
+/// Drops every `lru_cache` answer reachable from `value`.
+///
+/// A run starts with empty memories even when the VM still holds a function it
+/// declared in an earlier run. The caches live in the function values now, so
+/// clearing them means walking the bindings a program can still reach rather
+/// than clearing one table on the VM.
+pub fn reset_caches(value: &Value) {
+    let mut seen = std::collections::HashSet::new();
+    reset_caches_in(value, &mut seen);
+}
+
+fn reset_caches_in(value: &Value, seen: &mut std::collections::HashSet<usize>) {
+    match value {
+        Value::Function(function) => {
+            if !seen.insert(function.id) {
+                return;
+            }
+            function.reset_cache();
+            for scope in function.captured.iter() {
+                for captured in scope.values() {
+                    reset_caches_in(captured, seen);
+                }
+            }
+        }
+        Value::List(items) => {
+            for item in items.iter() {
+                reset_caches_in(item, seen);
+            }
+        }
+        Value::Record(fields) | Value::Object(_, fields) => {
+            for field in fields.values() {
+                reset_caches_in(field, seen);
+            }
+        }
+        _ => {}
     }
 }
 
