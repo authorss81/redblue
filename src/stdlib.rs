@@ -1182,6 +1182,15 @@ pub fn resolve(qualified: &str) -> &str {
 /// the two engines. It is not in [`BUILTIN_NAMES`].
 pub const LRU_CACHE_DECLARE: &str = "\u{0}lru_cache_declare";
 
+/// The internal name a compiled `lru_cache(n) to can ...` calls after the
+/// object that owns the method is registered.
+///
+/// A method is stored on its object type rather than bound to a name, so it
+/// needs a three-argument declaration — object, method and capacity — and the
+/// call is emitted after `DEF_OBJECT`/`STORE` has registered the type. Like
+/// [`LRU_CACHE_DECLARE`] the leading NUL keeps any program from spelling it.
+pub const LRU_CACHE_DECLARE_METHOD: &str = "\u{0}lru_cache_declare_method";
+
 /// Every name [`builtins`] registers.
 ///
 /// This is the list a registered-but-unreachable builtin shows up against, and

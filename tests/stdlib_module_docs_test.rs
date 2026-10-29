@@ -1421,6 +1421,58 @@ fn edge_groupby_groups_equal_records_and_keeps_missing_fields_distinct() {
     );
 }
 
+/// A builtin is one step, so the step budget cannot bound a list whose length
+/// is the product of its inputs. Two lists of 1,001 items are each well inside
+/// the loop cap, but their product is past the materialised-output limit; both
+/// engines must refuse it on the resource-limit channel rather than reserve
+/// the whole product or abort.
+#[test]
+fn edge_product_refuses_a_product_past_the_materialised_limit() {
+    let source = r#"
+set xs to []
+repeat 1001 times
+    set xs to push(xs, 1)
+end
+set ys to []
+repeat 1001 times
+    set ys to push(ys, 1)
+end
+product(xs, ys)
+"#;
+    let walked = run_source_value(source).expect_err("the tree-walker should refuse the product");
+    assert!(
+        walked.is_resource_limit(),
+        "the tree-walker should refuse `product` as a resource limit, it said: {walked:?}"
+    );
+
+    let chunk = compile_source(source).expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    let compiled = vm
+        .run(&chunk)
+        .expect_err("the bytecode VM should refuse the product");
+    assert!(
+        compiled.is_resource_limit(),
+        "the bytecode VM should refuse `product` as a resource limit, it said: {compiled:?}"
+    );
+}
+
+/// Grouping must not compare every item with every earlier key. Fifty thousand
+/// distinct keys would be more than a billion comparisons under a linear scan,
+/// so this program would hang there; a keyed lookup answers in input order.
+#[test]
+fn edge_groupby_of_many_distinct_keys_keeps_first_appearance_order() {
+    let source = r#"
+set items to [0]
+repeat 16 times
+    set start to length(items)
+    set items to chain(items, map(items, to (x) give back x + start end))
+end
+set groups to groupby(items)
+[length(groups), groups[0].key, groups[65535].key]
+"#;
+    yields(source, "[65536, 0, 65535]");
+}
+
 /// Two list arguments with equal contents are one cache key, and two records
 /// with equal fields are one key too; a different list or a record missing a
 /// field is a different key. The call counts are literal, so identity-only or
@@ -1949,24 +2001,32 @@ end
 /// This is the numeric boundary of the decorator's capacity.
 #[test]
 fn edge_lru_cache_refuses_a_capacity_beyond_a_count_it_can_hold() {
-    let too_large_source = "lru_cache(1e300) to f(n)
+    // 2^64 is exactly representable as an `f64` and rounds to itself from
+    // `usize::MAX as f64` on a 64-bit target, so it is the boundary a `<=`
+    // comparison with that conversion wrongly admitted. The largest count
+    // below it is the last capacity a `usize` can hold.
+    for capacity in ["1e300", "18446744073709551616"] {
+        let too_large_source = format!(
+            "lru_cache({capacity}) to f(n)
     give back n
 end
 f(1)
-";
-    assert!(
-        run_source_value(too_large_source).is_err(),
-        "the tree-walker should refuse a capacity past usize::MAX"
-    );
-    assert!(
-        compile_source(too_large_source).is_err(),
-        "the compiler should refuse a capacity past usize::MAX"
-    );
-    let too_large = message(&fails(too_large_source));
-    assert!(
-        too_large.contains("at least 1") && too_large.contains("whole number"),
-        "a capacity past usize::MAX should be refused, it said: {too_large}"
-    );
+"
+        );
+        assert!(
+            run_source_value(&too_large_source).is_err(),
+            "the tree-walker should refuse a capacity of {capacity} past usize::MAX"
+        );
+        assert!(
+            compile_source(&too_large_source).is_err(),
+            "the compiler should refuse a capacity of {capacity} past usize::MAX"
+        );
+        let too_large = message(&fails(&too_large_source));
+        assert!(
+            too_large.contains("at least 1") && too_large.contains("whole number"),
+            "a capacity of {capacity} past usize::MAX should be refused, it said: {too_large}"
+        );
+    }
 
     let negative = message(&fails(
         "lru_cache(-1) to f(n)
@@ -2037,4 +2097,126 @@ fn edge_take_and_skip_refuse_a_text_count() {
             compiled.message()
         );
     }
+}
+
+/// A decorated `to can` method is memoised on both engines: the second call
+/// with the same argument answers from the method's own memory instead of
+/// running its body again.
+#[test]
+fn lru_cache_memoises_an_object_method_on_both_engines() {
+    let source = r#"
+set calls to 0
+object Box
+    has base default 10
+    lru_cache(10) to can add(n)
+        set calls to calls + 1
+        give back this.base + n
+    end
+end
+[Box.add(1), Box.add(1), calls]
+"#;
+    yields(source, "[11, 11, 1]");
+}
+
+/// The capacity on a decorated method is the same bound a decorated function
+/// has, so a capacity of one evicts the previous argument and the second visit
+/// to it runs the body again.
+#[test]
+fn edge_lru_cache_evicts_an_object_methods_entries() {
+    let source = r#"
+set calls to 0
+object Track
+    lru_cache(1) to can f(n)
+        set calls to calls + 1
+        give back n
+    end
+end
+[Track.f(1), Track.f(2), Track.f(1), calls]
+"#;
+    yields(source, "[1, 2, 1, 3]");
+}
+
+/// The method decorator goes through the same capacity check as a function
+/// decorator, so a cache that could never answer is refused rather than
+/// accepted as a no-op.
+#[test]
+fn edge_lru_cache_refuses_a_bad_capacity_on_a_method() {
+    for (source, expected) in [
+        (
+            "object Bad\n    lru_cache(0) to can f(n)\n        give back n\n    end\nend\nBad.f(1)\n",
+            "at least 1",
+        ),
+        (
+            "object Bad\n    lru_cache(1.5) to can f(n)\n        give back n\n    end\nend\nBad.f(1)\n",
+            "whole number",
+        ),
+    ] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains(expected),
+            "the tree-walker should refuse `{source}` with `{expected}`, it said: {walked}"
+        );
+        assert!(
+            compile_source(source).is_err(),
+            "the compiler should refuse `{source}` too"
+        );
+    }
+}
+
+/// A method's memory belongs to the run that filled it. A second program on the
+/// same VM must run the body again rather than answering from the first run's
+/// method cache.
+#[test]
+fn edge_a_method_cache_does_not_survive_a_bytecode_run() {
+    let mut vm = BytecodeVm::new();
+    let first = compile_source(
+        "set calls to 0\n\
+         object Box\n\
+             has base default 0\n\
+             lru_cache(10) to can tick(n)\n\
+                 set calls to calls + 1\n\
+                 give back n\n\
+             end\n\
+         end\n\
+         Box.tick(1)\n\
+         Box.tick(1)\n\
+         calls\n",
+    )
+    .expect("the first program should compile");
+    assert_eq!(
+        vm.run(&first)
+            .expect("the first run should work")
+            .to_string(),
+        "1"
+    );
+
+    // The second program is compiled on its own, so the analyzer cannot know
+    // about the object the first run left registered. Binding `Box` here is
+    // enough for the name to be known; the VM still resolves the method
+    // against the type it registered in the first run.
+    let second = compile_source("set calls to 0\nset Box to 0\nBox.tick(1)\ncalls\n")
+        .expect("the second program should compile");
+    assert_eq!(
+        vm.run(&second)
+            .expect("the second run should work")
+            .to_string(),
+        "1",
+        "a method cache from the previous run must not skip this run's body"
+    );
+}
+
+/// A `to can` declaration written outside an object is an ordinary binding, so
+/// the decorator reaches it through the same name-based declaration a function
+/// uses. Both engines must answer from that memory.
+#[test]
+fn lru_cache_memoises_a_top_level_can_declaration() {
+    let source = r#"
+set calls to 0
+lru_cache(10) to can doubled(n)
+    set calls to calls + 1
+    give back n * 2
+end
+[doubled(2), doubled(2), calls]
+"#;
+    yields(source, "[4, 4, 1]");
 }

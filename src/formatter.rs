@@ -450,7 +450,15 @@ impl Formatter {
                 self.format_block(body);
                 self.write_keyword_line("end");
             }
-            Statement::Method { name, params, body } => {
+            Statement::Method {
+                name,
+                params,
+                body,
+                cache,
+            } => {
+                if let Some(capacity) = cache {
+                    self.write(&format!("lru_cache({capacity}) "));
+                }
                 self.write_signature("to can ", name, params);
                 self.open_line(stmt.span.line);
                 self.format_block(body);

@@ -235,6 +235,9 @@ pub enum Statement {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        /// The capacity an `lru_cache(n) to can ...` decorator gave this
+        /// method, or `None` for an ordinary method.
+        cache: Option<usize>,
     },
 
     // has name [default <expr>] — a field declaration, only inside an object
@@ -1261,6 +1264,11 @@ impl Parser {
 
         let capacity = if matches!(self.current_at(0), Some(TokenKind::LeftParen)) {
             self.advance(); // consume '('
+                            // 2^BITS is the first count a `usize` cannot hold, and `f64` holds
+                            // it exactly. `usize::MAX as f64` is not that bound on a 64-bit
+                            // target — it rounds up to 2^64 — so comparing with `<=` let the
+                            // very value that saturates in the cast through.
+            let capacity_ceiling = 2f64.powi(usize::BITS as i32);
             let capacity = match self.current() {
                 Some(Token {
                     kind: TokenKind::Number(value),
@@ -1268,7 +1276,7 @@ impl Parser {
                 }) if value.is_finite()
                     && *value >= 1.0
                     && value.fract() == 0.0
-                    && *value <= usize::MAX as f64 =>
+                    && *value < capacity_ceiling =>
                 {
                     *value as usize
                 }
@@ -1299,18 +1307,32 @@ impl Parser {
 
         self.expect(&TokenKind::To)?;
         self.enter_block()?;
+        let is_method = matches!(
+            self.current().map(|token| &token.kind),
+            Some(TokenKind::Can)
+        );
+        if is_method {
+            self.advance(); // consume 'can'
+        }
         let parsed = self.parse_callable();
         self.leave_block();
         let (name, params, body) = parsed?;
-        Ok(Some(Stmt {
-            span,
-            statement: Statement::Function {
+        let statement = if is_method {
+            Statement::Method {
                 name,
                 params,
                 body,
                 cache: Some(capacity),
-            },
-        }))
+            }
+        } else {
+            Statement::Function {
+                name,
+                params,
+                body,
+                cache: Some(capacity),
+            }
+        };
+        Ok(Some(Stmt { span, statement }))
     }
 
     /// Parses a `to can name(params) ... end` method declaration, the form
@@ -1326,7 +1348,12 @@ impl Parser {
         let (name, params, body) = self.parse_callable()?;
         Ok(Some(Stmt {
             span,
-            statement: Statement::Method { name, params, body },
+            statement: Statement::Method {
+                name,
+                params,
+                body,
+                cache: None,
+            },
         }))
     }
 

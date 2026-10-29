@@ -1717,6 +1717,11 @@ impl Vm {
                 reset_caches(value);
             }
         }
+        for object in self.context.objects.values() {
+            for method in object.methods.values() {
+                reset_caches(method);
+            }
+        }
         let mut result = Value::Nothing;
 
         for statement in &program.statements {
@@ -2262,8 +2267,18 @@ impl Vm {
 
                 Ok(Value::Nothing)
             }
-            Statement::Method { name, params, body } => {
-                let method = self.make_function(name, params, body);
+            Statement::Method {
+                name,
+                params,
+                body,
+                cache,
+            } => {
+                let method = match (cache, self.make_function(name, params, body)) {
+                    (Some(capacity), Value::Function(function)) => {
+                        Value::Function(function.with_cache(*capacity))
+                    }
+                    (_, method) => method,
+                };
                 self.set_var(name, method)?;
                 Ok(Value::Nothing)
             }
@@ -2933,8 +2948,14 @@ impl Vm {
                     name: method,
                     params,
                     body,
+                    cache,
                 } => {
-                    let function = self.make_function(method, params, body);
+                    let function = match (cache, self.make_function(method, params, body)) {
+                        (Some(capacity), Value::Function(function)) => {
+                            Value::Function(function.with_cache(*capacity))
+                        }
+                        (_, function) => function,
+                    };
                     methods.insert(method.clone(), function);
                 }
                 _ => rest.push(stmt.clone()),

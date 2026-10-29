@@ -283,13 +283,15 @@ fn same_statement(a: &Statement, b: &Statement) -> bool {
                 name: n1,
                 params: p1,
                 body: b1,
+                cache: c1,
             },
             Statement::Method {
                 name: n2,
                 params: p2,
                 body: b2,
+                cache: c2,
             },
-        ) => n1 == n2 && p1 == p2 && same_stmts(b1, b2),
+        ) => n1 == n2 && p1 == p2 && c1 == c2 && same_stmts(b1, b2),
         (
             Statement::Has {
                 name: n1,
@@ -1630,6 +1632,41 @@ say cached(7)
         run_program(&formatted),
         "7\n",
         "the formatted cached function must still run:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn edge_a_cached_method_formats_into_a_program_that_still_runs() {
+    // A method's decorator is the same shape as a function's, and the `to can`
+    // that follows it has to stay on one line for the parser to see the
+    // decoration rather than an ordinary call.
+    let source = "\
+object Box
+    lru_cache(2) to can f(n)
+        give back n
+    end
+end
+say Box.f(7)
+";
+
+    let formatted = assert_idempotent(source, "an lru_cache method decorator");
+
+    assert!(
+        formatted.contains("lru_cache(2) to can f(n)"),
+        "the decorator and `to can` must stay on one line:\n{}",
+        formatted
+    );
+    assert!(
+        same_program(&parse(source), &parse(&formatted)),
+        "the decorated method must survive formatting:\n{}",
+        formatted
+    );
+    assert_eq!(run_program(source), "7\n");
+    assert_eq!(
+        run_program(&formatted),
+        "7\n",
+        "the formatted cached method must still run:\n{}",
         formatted
     );
 }

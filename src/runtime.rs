@@ -16,6 +16,7 @@
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1641,6 +1642,135 @@ fn iteration_count(name: &str, count: f64, span: Span) -> Result<usize> {
     Ok(count.trunc() as usize)
 }
 
+/// The most pairs one `product` call may materialise.
+///
+/// A builtin call is charged as one step, so the step budget cannot stop a
+/// list whose length is the product of its inputs. Two lists of 100,000 items
+/// are each buildable under the loop cap, but their product is ten billion
+/// pairs — enough to exhaust the host before any guard can run. This bound is
+/// the one that call checks before it reserves anything, and exceeding it is a
+/// [`Error::Limit`], not a panic.
+pub const MAX_PRODUCT_ITEMS: usize = 1_000_000;
+
+const HASH_NOTHING: u8 = 1;
+const HASH_NUMBER: u8 = 2;
+const HASH_TEXT: u8 = 3;
+const HASH_YES_NO: u8 = 4;
+const HASH_LIST: u8 = 5;
+const HASH_RECORD: u8 = 6;
+const HASH_OBJECT_NAME: u8 = 7;
+const HASH_OBJECT_FIELDS: u8 = 8;
+const HASH_FUNCTION_NAME: u8 = 9;
+const HASH_FUNCTION_PARAMS_LEN: u8 = 10;
+const HASH_FUNCTION_PARAM: u8 = 11;
+const HASH_FUNCTION_SCOPES_LEN: u8 = 12;
+const HASH_FIELD_NAME: u8 = 13;
+const HASH_BUILTIN: u8 = 14;
+const HASH_DATE: u8 = 15;
+const HASH_DURATION: u8 = 16;
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn hash_tagged_bytes(tag: u8, bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET ^ u64::from(tag);
+    hash = hash.wrapping_mul(FNV_PRIME);
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn hash_tagged_u64(tag: u8, value: u64) -> u64 {
+    hash_tagged_bytes(tag, &value.to_le_bytes())
+}
+
+fn combine_hash(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(FNV_PRIME)
+}
+
+/// A deterministic hash whose only invariant is that `a == b` implies
+/// `hash(a) == hash(b)`.
+///
+/// `groupby` uses it to find candidate groups without comparing every item
+/// with every earlier key. Equality is still [`Value`]'s own, so a collision
+/// costs one comparison rather than changing the answer. Record and object
+/// fields are combined commutatively because their `IndexMap` equality is
+/// order-independent; captured scopes are combined in order because a
+/// function's captured stack is.
+fn group_value_hash(value: &Value) -> u64 {
+    match value {
+        Value::Nothing => hash_tagged_u64(HASH_NOTHING, 0),
+        Value::Number(number) => {
+            let bits = if *number == 0.0 {
+                0.0f64.to_bits()
+            } else {
+                number.to_bits()
+            };
+            hash_tagged_u64(HASH_NUMBER, bits)
+        }
+        Value::Text(text) => hash_tagged_bytes(HASH_TEXT, text.as_bytes()),
+        Value::YesNo(flag) => hash_tagged_u64(HASH_YES_NO, u64::from(*flag)),
+        Value::List(items) => {
+            let mut hash = hash_tagged_u64(HASH_LIST, items.len() as u64);
+            for item in items.iter() {
+                hash = combine_hash(hash, group_value_hash(item));
+            }
+            hash
+        }
+        Value::Record(fields) => group_fields_hash(HASH_RECORD, fields),
+        Value::Object(name, fields) => {
+            let mut hash = hash_tagged_bytes(HASH_OBJECT_NAME, name.as_bytes());
+            hash = combine_hash(hash, group_fields_hash(HASH_OBJECT_FIELDS, fields));
+            hash
+        }
+        Value::Function(function) => group_function_hash(function),
+        Value::Builtin(name) => hash_tagged_bytes(HASH_BUILTIN, name.as_bytes()),
+        Value::Date(date) => hash_tagged_bytes(HASH_DATE, format!("{:?}", date).as_bytes()),
+        Value::Duration(duration) => {
+            hash_tagged_bytes(HASH_DURATION, format!("{:?}", duration).as_bytes())
+        }
+    }
+}
+
+fn group_fields_hash(tag: u8, fields: &crate::value::Fields) -> u64 {
+    let hash = hash_tagged_u64(tag, fields.len() as u64);
+    let mut entries = 0u64;
+    for (name, value) in fields.iter() {
+        let key = hash_tagged_bytes(HASH_FIELD_NAME, name.as_bytes());
+        entries = entries.wrapping_add(combine_hash(key, group_value_hash(value)));
+    }
+    combine_hash(hash, entries)
+}
+
+fn group_function_hash(function: &crate::value::FunctionValue) -> u64 {
+    let mut hash = hash_tagged_bytes(HASH_FUNCTION_NAME, function.name.as_bytes());
+    hash = combine_hash(
+        hash,
+        hash_tagged_u64(HASH_FUNCTION_PARAMS_LEN, function.params.len() as u64),
+    );
+    for param in &function.params {
+        hash = combine_hash(
+            hash,
+            hash_tagged_bytes(HASH_FUNCTION_PARAM, param.as_bytes()),
+        );
+    }
+    hash = combine_hash(
+        hash,
+        hash_tagged_u64(HASH_FUNCTION_SCOPES_LEN, function.captured.len() as u64),
+    );
+    for scope in function.captured.iter() {
+        let mut entries = 0u64;
+        for (name, value) in scope.iter() {
+            let key = hash_tagged_bytes(HASH_FIELD_NAME, name.as_bytes());
+            entries = entries.wrapping_add(combine_hash(key, group_value_hash(value)));
+        }
+        hash = combine_hash(hash, entries);
+    }
+    hash
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -1738,7 +1868,21 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         },
         "product" => match args {
             [Value::List(left), Value::List(right)] => {
-                let mut pairs = Vec::with_capacity(left.len().saturating_mul(right.len()));
+                let count = match left.len().checked_mul(right.len()) {
+                    Some(count) if count <= MAX_PRODUCT_ITEMS => count,
+                    _ => {
+                        return Err(Error::Limit(
+                            format!(
+                                "product materialises at most {MAX_PRODUCT_ITEMS} pairs; \
+                                 {} items times {} items is past that limit",
+                                left.len(),
+                                right.len()
+                            ),
+                            span,
+                        ))
+                    }
+                };
+                let mut pairs = Vec::with_capacity(count);
                 for a in left.iter() {
                     for b in right.iter() {
                         pairs.push(Value::list(vec![a.clone(), b.clone()]));
@@ -1754,14 +1898,29 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         // Groups are kept in the order their key first appeared, and a key is
         // matched with `Value`'s equality, so two equal records or lists share
         // one group rather than two. A group is a record — `key` and `items` —
-        // so a caller can reach either half by name.
+        // so a caller can reach either half by name. The index maps a hash to
+        // the groups that share it, so grouping is linear rather than comparing
+        // each item with every earlier key; a collision is resolved by the same
+        // equality a linear scan used.
         "groupby" => match args {
             [Value::List(items)] => {
                 let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+                let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
                 for item in items.iter() {
-                    match groups.iter_mut().find(|(key, _)| key == item) {
-                        Some((_, bucket)) => bucket.push(item.clone()),
-                        None => groups.push((item.clone(), vec![item.clone()])),
+                    let hash = group_value_hash(item);
+                    let existing = index.get(&hash).and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|&candidate| groups[candidate].0 == *item)
+                    });
+                    match existing {
+                        Some(candidate) => groups[candidate].1.push(item.clone()),
+                        None => {
+                            let candidate = groups.len();
+                            index.entry(hash).or_default().push(candidate);
+                            groups.push((item.clone(), vec![item.clone()]));
+                        }
                     }
                 }
                 let records = groups

@@ -1088,6 +1088,11 @@ impl BytecodeVm {
                 reset_caches(value);
             }
         }
+        for object in self.objects.values() {
+            for method in object.methods.values() {
+                reset_caches(method);
+            }
+        }
         self.outcome = Value::Nothing;
         self.abrupt_exit = false;
 
@@ -2923,6 +2928,43 @@ impl BytecodeVm {
             let Some(Value::Function(function)) = declared_function else {
                 return Err(Error::Runtime(
                     format!("lru_cache declaration '{declared}' is not a function"),
+                    self.span(),
+                ));
+            };
+            function.attach_cache(*capacity as usize);
+            self.push(Value::Nothing);
+            self.advance(frame);
+            return Ok(());
+        }
+        // The internal call a compiled `lru_cache(n) to can ...` emits after the
+        // object that owns the method is registered. A method is stored on its
+        // type rather than bound to a name, so this carries the object and the
+        // method as well as the capacity.
+        if name == crate::stdlib::LRU_CACHE_DECLARE_METHOD {
+            let [Value::Text(object), Value::Text(method), Value::Number(capacity)] = args else {
+                return Err(Error::Runtime(
+                    "lru_cache method declaration requires an object, a method and a capacity"
+                        .to_string(),
+                    self.span(),
+                ));
+            };
+            if !capacity.is_finite() || *capacity < 1.0 || capacity.fract() != 0.0 {
+                return Err(Error::Runtime(
+                    format!(
+                        "lru_cache capacity must be a whole number of at least 1, got {capacity}"
+                    ),
+                    self.span(),
+                ));
+            }
+            let Some(object) = self.objects.get_mut(object) else {
+                return Err(Error::Runtime(
+                    format!("lru_cache declaration names unknown object '{object}'"),
+                    self.span(),
+                ));
+            };
+            let Some(Value::Function(function)) = object.methods.get_mut(method) else {
+                return Err(Error::Runtime(
+                    format!("lru_cache declaration '{method}' is not a method"),
                     self.span(),
                 ));
             };

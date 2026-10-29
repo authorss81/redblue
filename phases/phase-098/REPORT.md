@@ -3,37 +3,41 @@
 ## What changed
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +200 −5 | `chain`, `zip`, `enumerate`, `product`, `groupby`, `take`, `skip`, the shared `LruCache`, and the resumed run's fractional-count refusal |
-| `src/runtime.rs` (resumed run 2) | +85 −4 | cache keys match function arguments by identity, including a function nested in a list or record, so one declaration can never answer from another's body |
-| `src/stdlib.rs` | +62 −2 | registers the seven helpers, their signatures (now saying the `take`/`skip` count is whole), and the hidden `__lru_cache_declare` name the bytecode VM emits |
-| `src/parser.rs` | +181 | `lru_cache(n) to ...` decorator parsing, `skip(...)` as a call in statement and expression position, and the cache capacity on a function declaration |
-| `src/interpreter.rs` | +58 −10 | registers decorated declarations, keys tree-walker memory by function identity, and drops the replaced binding's memory on rebinding |
-| `src/bytecode/codegen.rs` | +30 | emits the hidden cache declaration after a decorated function is stored |
-| `src/bytecode/vm.rs` | +106 −9 | keys the compiled engine's memory by function identity, carries it on the frame, and resolves the hidden declaration through the value the `STORE` just bound |
-| `src/bytecode/vm.rs` (resumed run) | +23 −15 | binds a function declaration in the declaring frame's own scope, so a sibling closure declaration no longer replaces the earlier closure's cache |
-| `src/formatter.rs` | +10 | prints the `lru_cache(n)` decorator |
-| `src/value.rs` | +35 −0 | gives `FunctionValue` a unique identity and a constructor that allocates it, so clones share memory and distinct closures never do |
-| `src/analyzer.rs` | +4 | accounts for the new function declaration field |
-| `src/repl/weight.rs` | +10 −4 | accounts for the new function declaration field and the constructor |
-| `src/repl/render.rs` | +6 −5 | builds its display-only function through the constructor |
-| `SPEC.md` | +65 −4 | iteration-helper table, zip-shorter rule, group ordering, the memoisation contract, the fractional-count refusal, and that memory belongs to the function value rather than its name; the resumed run also says the decorator is on a plain `to` declaration, not a `to can` method |
-| `SPEC.md` (resumed run 2) | +4 | says a function argument is matched by identity, not by the language's `is`, and that the rule reaches a function nested in a list or record |
-| `SURVEY.md` | +36 −34 | builtin count 85 → 92 and re-anchored citations |
-| `tests/stdlib_module_docs_test.rs` | +632 +70 | iteration/memoisation tests, including the cross-engine map hit, failed-call, far-past-the-end, fractional-count, Unicode, record-grouping, structural cache-key and same-named-closure tests |
-| `src/runtime.rs` (tests, resumed run 2) | +38 | unit test that a function argument is keyed by identity and that the rule reaches a list-nested function |
-| `tests/stdlib_module_docs_test.rs` (resumed run 2) | +70 | capacity-boundary refusal, `nothing` refusals for the seven helpers, and the SPEC identity-rule check |
-| `tests/formatter_test.rs` | +37 −? | constructor update for the cache field |
-| `tests/bytecode_test.rs` | +1 | constructor update for the cache field |
-| `tests/closure_capture_test.rs` | +6 −5 | hand-built function value goes through the constructor |
-| `tests/doc_blocks_runs.txt` | +2 | classifies the two new SPEC blocks |
-| `tests/unreviewed_work_ack_test.rs` | +1 | acknowledges the `resume phase-098:` delivery subject |
+| `src/runtime.rs` | +281 −0 | `chain`, `zip`, `enumerate`, `product`, `groupby`, `take`, `skip`, the shared `LruCache`, the fractional-count refusal, and the identity-aware cache key |
+| `src/stdlib.rs` | +69 −0 | registers the seven helpers and their signatures, plus the hidden `__lru_cache_declare` and `__lru_cache_declare_method` names the bytecode VM emits |
+| `src/parser.rs` | +201 −4 | `lru_cache(n) to ...` and `lru_cache(n) to can ...` decorator parsing, the cache capacity on function and method declarations, and `skip(...)` as a call in statement and expression position |
+| `src/interpreter.rs` | +73 −13 | registers decorated functions and methods, keys tree-walker memory by function identity, drops a replaced binding's memory, and clears object-method memory between runs |
+| `src/bytecode/codegen.rs` | +76 −6 | emits the hidden cache declaration after a decorated function is stored, and the hidden method declaration after the owning object is registered |
+| `src/bytecode/vm.rs` | +202 −31 | keys the compiled engine's memory by function identity, carries it on the frame, resolves both hidden declarations, and clears object-method memory between runs |
+| `src/value.rs` | +137 −1 | gives `FunctionValue` a unique identity, a constructor that allocates it, and the cache shared by every clone of one value |
+| `src/formatter.rs` | +18 −2 | prints the `lru_cache(n)` decorator on both functions and methods |
+| `src/analyzer.rs` | +4 −1 | accounts for the cache field on function and method declarations |
+| `src/repl/weight.rs` | +17 −13 | accounts for the new declaration fields and the constructor |
+| `src/repl/render.rs` | +6 −6 | builds its display-only function through the constructor |
+| `src/repl/mod.rs` | +2 −0 | registers the cache-related REPL plumbing |
+| `SPEC.md` | +70 −0 | iteration-helper table, zip-shorter rule, group ordering, the memoisation contract (including `to can`), the fractional-count refusal, and that memory belongs to the function value rather than its name |
+| `SURVEY.md` | +31 −31 | builtin count 85 → 92 and re-anchored citations |
+| `tests/stdlib_module_docs_test.rs` | +958 −0 | iteration, memoisation, cross-engine, identity, capacity, Unicode, type-refusal and method-cache tests |
+| `tests/formatter_test.rs` | +74 −2 | cache-field constructors and a formatted `lru_cache` method round trip |
+| `tests/bytecode_test.rs` | +1 −0 | constructor update for the cache field |
+| `tests/bytecode_vm_test.rs` | +44 −0 | a module cache declaration is not shadowed by an importer local |
+| `tests/closure_capture_test.rs` | +6 −6 | hand-built function value goes through the constructor |
+| `tests/doc_blocks_runs.txt` | +2 −0 | classifies the new SPEC blocks |
+| `tests/unreviewed_work_ack_test.rs` | +1 −0 | acknowledges the `resume phase-098:` delivery subject |
+| `phases/phase-098/FINDINGS.md` | +13 −0 | records the remaining cache follow-ups |
 
 The helpers materialise lists because Redblue has no iterator value. `zip` stops
 at the shorter input and never pads. `groupby` uses Redblue equality and keeps
-first-appearance order. `take` and `skip` clamp both bounds and refuse a positive
-fractional count rather than truncating it; a negative count still clamps.
-`lru_cache` is not a reserved word: it is recognised only immediately before a `to` declaration, and a
-variable named `lru_cache` still works. The default capacity is 128.
+first-appearance order, and finds a group through a keyed lookup so its cost
+grows with the input rather than comparing every item with every earlier key.
+`product` refuses to materialise more than 1,000,000 pairs and reports
+`Error::Limit`; a builtin call is one step, so the step budget cannot bound an
+answer whose length is the product of two lists. `take` and `skip` clamp both
+bounds and refuse a positive fractional count rather than truncating it; a
+negative count still clamps.
+`lru_cache` is not a reserved word: it is recognised only immediately before a
+`to` declaration (plain or `to can`), and a variable named `lru_cache` still
+works. The default capacity is 128.
 
 A cache belongs to the function value the declaration produces. The resumed run
 fixed two cross-engine disagreements. First, the bytecode VM looked for a hit
@@ -71,6 +75,17 @@ local one — and declares the new name in the current scope before the `STORE`.
 Two sibling factory calls each keep their own memory, and the call-count test
 now agrees across both engines.
 
+The resumed run also closed the method gap. `lru_cache(n) to can f` is now
+parsed as a decorated method. The tree-walker attaches the capacity when it
+builds the method value; the compiled engine emits a hidden three-argument
+declaration after `DEF_OBJECT`/`STORE`, so the object is already registered when
+the cache is attached and the `.rbc` format does not change. Both engines clear
+object-method memory at the start of a run, the same way they clear function
+memory, so a second program on one VM cannot answer from the first run's method
+cache. A top-level `to can` declaration is an ordinary binding and uses the
+same hidden call a decorated function does. SPEC.md now says the decorator is
+also written on a `to can` declaration.
+
 Phase-077 is not done in this tree (`.done` is absent), so it had not added `zip`
 or `enumerate` to the list surface. This phase added no list members; the
 helpers are flat builtins only, which avoids creating a second spelling.
@@ -88,6 +103,8 @@ helpers are flat builtins only, which avoids creating a second spelling.
 | `edge_groupby_groups_equal_records_and_keeps_missing_fields_distinct` | duplicate/missing keys: equal records group, differing field sets do not |
 | `edge_lru_cache_keys_on_structural_argument_equality` | cache keys compare list and record contents by equality, asserted by call count |
 | `edge_groupby_keeps_first_appearance_order_and_groups_by_equality` | group order and equality, including lists |
+| `edge_groupby_of_many_distinct_keys_keeps_first_appearance_order` | resource: 65,536 distinct keys keep first-appearance order through the keyed lookup |
+| `edge_product_refuses_a_product_past_the_materialised_limit` | resource limit: a 1,001 × 1,001 product is refused on both engines instead of being reserved |
 | `edge_iteration_helpers_refuse_wrong_types` | every helper's type-refusal channel |
 | `edge_lru_cache_evicts_at_its_capacity` | capacity bound and call-count rise after eviction |
 | `edge_lru_cache_requires_a_positive_capacity` | zero, fractional and non-numeric capacities |
@@ -107,9 +124,17 @@ helpers are flat builtins only, which avoids creating a second spelling.
 | `edge_lru_cache_hit_refreshes_recency` | boundary: a hit moves its entry to the recent end of the LRU order, proved by eviction and call count |
 | `edge_take_and_skip_refuse_a_text_count` | type mismatch: both helpers refuse a text count by name on both engines |
 | `edge_lru_cache_keys_function_arguments_by_identity` | identity: two same-shaped function values are equal to `is` but are separate cache keys, including a list-nested function |
-| `edge_lru_cache_refuses_a_capacity_beyond_a_count_it_can_hold` | numeric boundary; failure asserted on both engines for `1e300`, and a negative capacity is refused by name |
+| `edge_lru_cache_refuses_a_capacity_beyond_a_count_it_can_hold` | numeric boundary; failure asserted on both engines for `1e300` and the exact 2^64 `f64` boundary, and a negative capacity is refused by name |
 | `edge_iteration_helpers_refuse_nothing` | type mismatch: `nothing` is refused by name by all seven helpers |
 | `spec_says_a_cache_matches_function_arguments_by_identity` | the SPEC identity statement is present |
+| `edge_lru_cache_map_of_a_large_repeated_value_does_not_recurse` | resource/recursion: 100,000 cache hits in `map` do not overflow the host stack |
+| `edge_lru_cache_in_a_loop_keeps_only_escaped_closures_memory` | resource: only escaped closures keep a memory; call count is literal |
+| `lru_cache_memoises_an_object_method_on_both_engines` | method memoisation, call count compared across engines |
+| `edge_lru_cache_evicts_an_object_methods_entries` | boundary: a method cache of capacity one evicts on the stated bound |
+| `edge_lru_cache_refuses_a_bad_capacity_on_a_method` | failure: zero and fractional method capacities are refused by both parser paths |
+| `edge_a_method_cache_does_not_survive_a_bytecode_run` | resource/state: method memory is cleared between runs |
+| `lru_cache_memoises_a_top_level_can_declaration` | a decorated `to can` outside an object is memoised on both engines |
+| `edge_a_cached_method_formats_into_a_program_that_still_runs` | formatter: the method decorator round trips and the formatted program still runs |
 
 Mandatory matrix:
 - empty — covered by `iteration_helpers_cover_the_empty_list`.
@@ -122,14 +147,14 @@ Mandatory matrix:
 - nesting_recursion — covered by the recursive Fibonacci test and groupby over equal nested lists.
 - duplicate_missing_keys — covered by `edge_groupby_groups_equal_records_and_keeps_missing_fields_distinct` and the structural cache-key test; a produced group always has both `key` and `items`.
 - malformed_input — covered by the capacity and wrong-type refusal tests.
-- resource_limit — covered by the capacity/eviction tests; the cache does not add an unbounded store because the declared bound evicts.
+- resource_limit — covered by the capacity/eviction tests and the product limit; the cache does not add an unbounded store because the declared bound evicts, and method memory is cleared with the run. The 100,000-hit `map` test covers the cache-hit path without host recursion, and the 65,536-key `groupby` test covers grouping without a quadratic scan.
 
 ## Gates
 | Gate | Result |
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 2318 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | pass — 2329 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-098` | pass |
 
 ## Invariants touched
@@ -138,6 +163,9 @@ Mandatory matrix:
 - Cache keys now match a function argument by identity rather than by the
   language's `is`; `is` itself is unchanged. SPEC.md § Memoisation states the
   distinction.
+- `lru_cache` now decorates `to can` as well as plain `to` declarations. The
+  bytecode format did not change: the method cache is attached by a hidden
+  declaration call after the object is registered.
 
 ## Known gaps / follow-ups
 - The helpers are eager, and `SPEC.md` says so for every row. A lazy form would
@@ -151,8 +179,6 @@ Mandatory matrix:
   call after the store, so older `.rbc` files still load.
 - Phase-077 has not landed, so there was no list-surface `zip`/`enumerate` to
   extend; none was added here.
-- A decorated `to can` method still cannot be written: `lru_cache to can f`
-  is refused because the decorator parser recognises a plain function name.
-  The memoisation contract therefore covers function declarations and calls
-  through those values, not object methods; adding method caching would need
-  the method's capacity carried into the compiled block format. → FINDINGS.md
+- An inherited `to can` method shares the parent method value's cache, because a
+  cache belongs to the function value and the child inherits that value. A child
+  that needs independent memory declares its own decorated method. → FINDINGS.md

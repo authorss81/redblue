@@ -1,8 +1,13 @@
 # Phase 098 findings
 
-- `lru_cache` cannot decorate a `to can` object method: `modules/` users can
-  only cache plain function declarations. SPEC.md line 1661 says a method call
-  consults the same memory, which is true for a function value called through a
-  method-shaped path but not for a method declared with `to can`. Supporting it
-  would mean carrying the capacity on `Statement::Method` and in the compiled
-  block, changing the `.rbc` format. Not in this phase's scope.
+- `lru_cache` now decorates a `to can` method as well as a plain `to`
+  declaration. The compiled engine attaches the method's memory after
+  `DEF_OBJECT`/`STORE`, through a hidden declaration call, so the `.rbc` format
+  did not change.
+- The capacity is fixed at declaration time; there is no runtime resize or
+  inspection builtin. A caller that needs a different bound must declare a new
+  function or method.
+- `to can` methods that are inherited share the parent method value's cache, as
+  they share the method value itself. That follows from a cache belonging to the
+  function value, but a child that needs its own memory must declare its own
+  decorated method.

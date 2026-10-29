@@ -1638,7 +1638,14 @@ set rest to skip([1, 2, 3], 2)                  // [3]
 
 `groupby` compares keys with Redblue equality, so two equal lists or records
 share a group. Its groups are ordered by where their key first appeared, not by
-the key's value, so `groupby([2, 1, 2])` lists the `2` group first.
+the key's value, so `groupby([2, 1, 2])` lists the `2` group first. A keyed
+lookup finds a group, so the work grows with the input rather than comparing
+every item with every earlier key.
+
+`product` materialises at most 1,000,000 pairs in one call. A call whose answer
+would be longer is refused with a resource-limit failure instead of trying to
+build it: the step budget charges a builtin call once, so it cannot be the guard
+for a result whose length is the product of its two inputs.
 
 ### Memoisation
 
@@ -1665,13 +1672,16 @@ answers are recorded, so a failed call is tried again. The cache belongs to the
 function value the declaration produces, not to one spelling of calling it or to
 its name: a direct call and an element of `map` all consult the same memory and
 answer a hit without running the body. The decorator is written on a plain `to`
-declaration; a `to can` method is not decorated, and a method-shaped call reaches
-a cache only when the value it calls was produced by a decorated declaration. Two closures produced by
-two executions of one declaration, or two same-named declarations in different
-scopes, have separate memories, and neither answers for the other. A declaration
-that replaces the binding of a name drops the memory of the function value it
-replaced. `lru_cache` is not a reserved word: it is recognised only in front of a
-`to` declaration, and a variable of that name still works.
+declaration or on a `to can` declaration, inside an object or on its own; a
+decorated method's memory belongs to the method value, just as a decorated
+function's belongs to the function value, and it is cleared with the run like
+every other cache. A method-shaped call reaches a cache when the value it calls
+was produced by a decorated declaration or method. Two closures produced by two executions of one
+declaration, or two same-named declarations in different scopes, have separate
+memories, and neither answers for the other. A declaration that replaces the
+binding of a name drops the memory of the function value it replaced.
+`lru_cache` is not a reserved word: it is recognised only in front of a `to`
+declaration, including `to can`, and a variable of that name still works.
 
 ---
 

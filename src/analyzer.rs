@@ -442,6 +442,7 @@ impl Analyzer {
                 name: _,
                 params,
                 body,
+                ..
             } => {
                 self.push_scope();
                 self.declare("this");
