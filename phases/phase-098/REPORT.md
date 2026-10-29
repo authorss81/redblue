@@ -29,9 +29,15 @@
 | `src/stdlib.rs` | +1 −1 | resumed run: `chain` signature says `list, list, ...` |
 | `SPEC.md` | +1 −1 | resumed run: `chain` row states the open arity |
 | `tests/stdlib_module_docs_test.rs` | +58 −0 | resumed run: three `chain` arity and refusal tests |
+| `src/runtime.rs` | +22 −9 | final resumed run: `zip` joins any number of lists, at least two, and stops at the shortest |
+| `src/stdlib.rs` | +1 −1 | final resumed run: `zip` signature says `list, list, ...` and describes rows |
+| `SPEC.md` | +2 −1 | final resumed run: the `zip` row states the open arity, and the example shows a three-list row |
+| `tests/stdlib_module_docs_test.rs` | +81 −1 | final resumed run: four variadic-`zip` tests, and `both` now compares values as data as well as text |
+| `tests/doc_blocks_runs.txt` | +1 −1 | final resumed run: re-anchors the memoisation SPEC block after the example line moved |
 
-The helpers materialise lists because Redblue has no iterator value. `zip` stops
-at the shorter input and never pads. `groupby` uses Redblue equality and keeps
+The helpers materialise lists because Redblue has no iterator value. `zip` takes
+at least two lists, produces one row per position with one item from each list,
+stops at the shortest input and never pads. `groupby` uses Redblue equality and keeps
 first-appearance order, and finds a group through a keyed lookup so its cost
 grows with the input rather than comparing every item with every earlier key.
 `product` refuses to materialise more than 1,000,000 pairs and reports
@@ -142,13 +148,17 @@ helpers are flat builtins only, which avoids creating a second spelling.
 | `edge_chain_joins_any_number_of_lists` | empty, singleton and multi-list arity, including Unicode items, on both engines |
 | `edge_chain_refuses_a_non_list_among_its_arguments` | type mismatch: a non-list in any position is refused by name on both engines |
 | `edge_chain_of_no_or_one_list_is_an_ordinary_answer` | boundary: zero arguments is a real empty answer and one argument is a copy |
+| `edge_zip_joins_more_than_two_lists_and_stops_at_the_shortest` | three- and four-list rows, with a different list shortest in each position |
+| `edge_zip_covers_singletons_and_many_inputs` | singleton and five-input arity, plus a Unicode row on both engines |
+| `edge_zip_refuses_fewer_than_two_lists` | failure: zero and one argument are refused by name on both engines |
+| `edge_zip_refuses_a_non_list_among_its_arguments` | type mismatch: a non-list in any position of a longer call is refused by name on both engines |
 
 Mandatory matrix:
 - empty — covered by `iteration_helpers_cover_the_empty_list`.
 - singleton — covered by `iteration_helpers_cover_singletons_and_many_elements`.
-- boundary — covered by `edge_take_and_skip_clamp_at_both_ends` and `edge_zip_stops_at_the_shorter_input`.
-- out_of_bounds — covered by the take/skip clamping tests; the helpers do not index.
-- type_mismatch — covered by `edge_iteration_helpers_refuse_wrong_types` and `edge_iteration_helpers_refuse_nothing`.
+- boundary — covered by `edge_take_and_skip_clamp_at_both_ends`, `edge_zip_stops_at_the_shorter_input` and the variadic `zip` tests, which make each input shortest in turn.
+- out_of_bounds — covered by the take/skip clamping tests; `zip` builds only `0..shortest` rows, so it never indexes past an input; the other helpers do not index.
+- type_mismatch — covered by `edge_iteration_helpers_refuse_wrong_types`, `edge_iteration_helpers_refuse_nothing`, and the two variadic-`zip` refusal tests.
 - numeric_boundary — covered by the ±1e300 count test and the capacity refusals; a non-finite number cannot reach a helper because the language refuses one before it becomes a value.
 - unicode — covered by `edge_iteration_helpers_preserve_unicode_items`, which moves emoji, CJK, RTL and a combining mark through every helper.
 - nesting_recursion — covered by the recursive Fibonacci test and groupby over equal nested lists.
@@ -161,7 +171,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 2332 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | pass — 2336 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-098` | pass |
 
 ## Invariants touched
@@ -173,6 +183,9 @@ Mandatory matrix:
 - `lru_cache` now decorates `to can` as well as plain `to` declarations. The
   bytecode format did not change: the method cache is attached by a hidden
   declaration call after the object is registered.
+- `zip` now takes any number of lists (at least two) instead of exactly two.
+  A two-list call keeps its old answer, and the shortest-input rule is
+  unchanged; this is an additive arity extension, not a second spelling.
 
 ## Known gaps / follow-ups
 - The helpers are eager, and `SPEC.md` says so for every row. A lazy form would
@@ -189,3 +202,8 @@ Mandatory matrix:
 - An inherited `to can` method shares the parent method value's cache, because a
   cache belongs to the function value and the child inherits that value. A child
   that needs independent memory declares its own decorated method. → FINDINGS.md
+- `zip` materialises every row, so a call with two very large lists is bounded
+  by the loop and value sizes rather than by its own limit. `product` is the one
+  helper with a materialised-answer limit because its length is a product;
+  extending that same limit to `zip` would cap a list that a loop could already
+  build. No follow-up is needed for this phase.
