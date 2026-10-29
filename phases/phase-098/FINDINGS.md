@@ -11,3 +11,12 @@
   they share the method value itself. That follows from a cache belonging to the
   function value, but a child that needs its own memory must declare its own
   decorated method.
+
+## Resumed run note
+
+The original finding (no chain/zip/enumerate/product/groupby helpers and no
+memoisation) no longer reproduces: the prior attempt's implementation is in
+`HEAD`, and the full suite exercises it. This run did not invent a replacement
+for it. It closed the two remaining gaps in that work: `zip` now joins any
+number of lists rather than exactly two, and the cross-engine iteration test
+compares `Value`s as data rather than only their display text.

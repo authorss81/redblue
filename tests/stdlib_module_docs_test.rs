@@ -1260,7 +1260,14 @@ fn both(source: &str) -> Value {
     assert_eq!(
         walked.to_string(),
         compiled.to_string(),
-        "the two engines disagree about:\n{source}"
+        "the two engines disagree about the text of:\n{source}"
+    );
+    // The display agrees, and so must the value as data: two functions with the
+    // same name and captures display alike even when their bodies differ, so a
+    // string comparison alone cannot say the engines produced the same answer.
+    assert_eq!(
+        walked, compiled,
+        "the two engines disagree about the value of:\n{source}"
     );
     walked
 }
@@ -2263,4 +2270,81 @@ fn edge_chain_of_no_or_one_list_is_an_ordinary_answer() {
     yields("chain([3, 1, 2])", "[3, 1, 2]");
     both("chain()");
     both("chain([\"a\"])");
+}
+
+/// `zip` walks its inputs together rather than only pairing two, and the rule
+/// that it stops at the shorter one holds for every input: the answer is as
+/// long as the shortest list and each row has one item from each list.
+#[test]
+fn edge_zip_joins_more_than_two_lists_and_stops_at_the_shortest() {
+    yields(
+        "zip([1, 2], [\"a\", \"b\"], [yes, no])",
+        "[[1, a, yes], [2, b, no]]",
+    );
+    yields(
+        "zip([1, 2, 3], [\"a\"], [yes, no, yes], [10, 20, 30])",
+        "[[1, a, yes, 10]]",
+    );
+    yields("zip([], [1], [2])", "[]");
+    yields("zip([1], [], [2])", "[]");
+    yields("zip([1], [2], [])", "[]");
+}
+
+/// The single-element and many-input shapes of a variadic `zip`, on both
+/// engines and with a Unicode row, so the extension is pinned literally rather
+/// than only by the three-list example.
+#[test]
+fn edge_zip_covers_singletons_and_many_inputs() {
+    yields("zip([9], [\"x\"], [yes])", "[[9, x, yes]]");
+    yields("zip([1], [2], [3], [4], [5])", "[[1, 2, 3, 4, 5]]");
+    yields("zip([\"é\"], [\"日本\"], [\"🙂\"])", "[[é, 日本, 🙂]]");
+    both("zip([1], [2], [3])");
+}
+
+/// A zip needs something to walk; fewer than two lists is refused by name on
+/// both engines instead of answering a surprising row shape.
+#[test]
+fn edge_zip_refuses_fewer_than_two_lists() {
+    for source in ["zip()", "zip([1])"] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains("zip"),
+            "the tree-walker should refuse `{source}` by name, it said: {walked}"
+        );
+
+        let chunk = compile_source(source).expect("the failing program should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse an under-arity zip");
+        assert!(
+            compiled.message().contains("zip"),
+            "the bytecode VM should refuse `{source}` by name, it said: {}",
+            compiled.message()
+        );
+    }
+}
+
+/// The arity is open, not the item type: one non-list among valid lists is
+/// refused by name on both engines rather than being skipped or coerced.
+#[test]
+fn edge_zip_refuses_a_non_list_among_its_arguments() {
+    for source in ["zip([1], 2, [3])", "zip([1], [2], nothing)"] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains("zip"),
+            "the tree-walker should refuse `{source}` by name, it said: {walked}"
+        );
+
+        let chunk = compile_source(source).expect("the failing program should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse a non-list argument");
+        assert!(
+            compiled.message().contains("zip"),
+            "the bytecode VM should refuse `{source}` by name, it said: {}",
+            compiled.message()
+        );
+    }
 }

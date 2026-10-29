@@ -1383,7 +1383,7 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ),
     (
         "zip",
-        "zip(list, list) -> a list of [a, b] pairs, stopping at the shorter list",
+        "zip(list, list, ...) -> a list of rows, one item from each list, stopping at the shortest",
     ),
     (
         "enumerate",

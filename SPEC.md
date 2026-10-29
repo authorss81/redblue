@@ -1619,7 +1619,7 @@ than assumed.
 | Helper | Answer | Lazy? |
 |---|---|---|
 | `chain(a, b, ...)` | materialises a list of every argument list's items in the order given; no lists is the empty list | materialises |
-| `zip(a, b)` | materialises `[a-item, b-item]` pairs; it **stops at the shorter** input and never pads with `nothing` | materialises |
+| `zip(a, b, ...)` | materialises `[a-item, b-item, ...]` rows, one item from each list; it takes at least two lists and **stops at the shorter** input, never padding with `nothing` | materialises |
 | `enumerate(xs)` | materialises `[index, item]` pairs with indexes from zero | materialises |
 | `product(a, b)` | materialises every `[a-item, b-item]` combination, first input outermost | materialises |
 | `groupby(xs)` | materialises `{key, items}` records, in first-appearance order, grouping equal keys together | materialises |
@@ -1629,6 +1629,7 @@ than assumed.
 ```redblue
 set both to chain([1, 2], [3])                  // [1, 2, 3]
 set pairs to zip([1, 2], ["a", "b"])            // [[1, a], [2, b]]
+set rows to zip([1, 2], ["a", "b"], [yes, no])  // [[1, a, yes], [2, b, no]]
 set indexed to enumerate(["a", "b"])            // [[0, a], [1, b]]
 set grid to product([1, 2], ["a"])              // [[1, a], [2, a]]
 set buckets to groupby([2, 1, 2])               // [{key: 2, items: [2, 2]}, {key: 1, items: [1]}]

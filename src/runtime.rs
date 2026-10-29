@@ -1846,17 +1846,33 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             }
             Ok(Some(Value::list(items)))
         }
-        "zip" => match args {
-            [Value::List(left), Value::List(right)] => {
-                let pairs = left
-                    .iter()
-                    .zip(right.iter())
-                    .map(|(a, b)| Value::list(vec![a.clone(), b.clone()]))
-                    .collect();
-                Ok(Some(Value::list(pairs)))
+        "zip" => {
+            let mut lists: Vec<&[Value]> = Vec::with_capacity(args.len());
+            for arg in args {
+                match arg {
+                    Value::List(items) => lists.push(items),
+                    _ => {
+                        return Err(Error::Runtime(
+                            "zip requires at least two lists".to_string(),
+                            span,
+                        ))
+                    }
+                }
             }
-            _ => Err(Error::Runtime("zip requires two lists".to_string(), span)),
-        },
+            if lists.len() < 2 {
+                return Err(Error::Runtime(
+                    "zip requires at least two lists".to_string(),
+                    span,
+                ));
+            }
+            // The answer is as long as the shortest input, so a row never
+            // reaches past any list it draws from.
+            let shortest = lists.iter().map(|list| list.len()).min().unwrap_or(0);
+            let rows = (0..shortest)
+                .map(|index| Value::list(lists.iter().map(|list| list[index].clone()).collect()))
+                .collect();
+            Ok(Some(Value::list(rows)))
+        }
         "enumerate" => match args {
             [Value::List(items)] => {
                 let indexed = items
