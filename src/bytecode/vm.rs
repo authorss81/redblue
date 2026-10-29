@@ -57,8 +57,8 @@ use crate::parser::{self, BinaryOp, Program, Statement, UnaryOp};
 use crate::runtime;
 use crate::stdlib;
 use crate::value::{
-    expect_range_number, expect_repeat_count, finite_number, range_has_next, Captured,
-    CapturedScope, Fields, FunctionBody, FunctionValue, Shared, Value,
+    expect_range_number, expect_repeat_count, finite_number, range_has_next, reset_caches,
+    Captured, CapturedScope, Fields, FunctionBody, FunctionValue, Shared, Value,
 };
 
 /// The block at `path` of `chunk`, or `None` when a name a file wrote points past
@@ -436,6 +436,9 @@ struct Frame {
     globals_only: bool,
     /// The loops in this block, found once when the frame was pushed.
     sites: Vec<LoopSite>,
+    /// The decorated function this frame's eventual value belongs to, and the
+    /// arguments it was called with. `None` for a call that is not decorated.
+    cache: Option<(FunctionValue, Vec<Value>)>,
     /// A `map` this frame started and has not finished.
     ///
     /// The map's callee is always the frame directly above this one, because
@@ -1072,6 +1075,19 @@ impl BytecodeVm {
         self.stack.clear();
         self.pending_objects.clear();
         self.locals.truncate(1);
+        for value in self.globals.values() {
+            reset_caches(value);
+        }
+        for scope in &self.locals {
+            for value in scope.values() {
+                reset_caches(value);
+            }
+        }
+        for module in self.declared_modules.values() {
+            for (_, _, value) in &module.members {
+                reset_caches(value);
+            }
+        }
         self.outcome = Value::Nothing;
         self.abrupt_exit = false;
 
@@ -1156,6 +1172,7 @@ impl BytecodeVm {
             loop_owner: None,
             globals_only: false,
             sites,
+            cache: None,
             pending_map: None,
         }
     }
@@ -1648,6 +1665,14 @@ impl BytecodeVm {
             value = self.stack.pop().expect("the stack holds a value");
         }
         self.stack.truncate(frame.stack_base);
+        // A body that reaches its end without a final `RETURN` still produced
+        // this value, and a decorated call records it exactly as `RETURN` does.
+        // Without this a cache filled only when the answer was spelled with
+        // `give back`, so a body ending in an ordinary expression memoised on
+        // one engine and not the other.
+        if let Some((function, args)) = frame.cache.clone() {
+            function.remember(&args, value.clone());
+        }
         if !frame.is_call {
             // The outermost frame *is* the program, and a program's value is the
             // value of its last statement: `1 + 2` is worth 3. Every other
@@ -2825,6 +2850,9 @@ impl BytecodeVm {
         let last = self.frames[frame].ip + 1 >= self.code_len(frame);
         self.stack.truncate(self.frames[frame].stack_base);
         if last {
+            if let Some((function, args)) = self.frames[frame].cache.clone() {
+                function.remember(&args, value.clone());
+            }
             self.stack.push(value);
             self.frames[frame].ip = usize::MAX;
         } else {
@@ -2855,6 +2883,50 @@ impl BytecodeVm {
                 self.refuse_constant_rebind(target)?;
             }
             runtime::append_through(span, target, self.get_var_mut(target), args[1].clone())?;
+            self.push(Value::Nothing);
+            self.advance(frame);
+            return Ok(());
+        }
+        // The internal calls a compiled `lru_cache(n) to ...` emits. They are
+        // not language names, so they are answered here rather than registered
+        // as builtins a program could call.
+        if name == crate::stdlib::LRU_CACHE_DECLARE {
+            let [Value::Text(declared), Value::Number(capacity)] = args else {
+                return Err(Error::Runtime(
+                    "lru_cache declaration requires a name and a capacity".to_string(),
+                    self.span(),
+                ));
+            };
+            if !capacity.is_finite() || *capacity < 1.0 || capacity.fract() != 0.0 {
+                return Err(Error::Runtime(
+                    format!(
+                        "lru_cache capacity must be a whole number of at least 1, got {capacity}"
+                    ),
+                    self.span(),
+                ));
+            }
+            // The function the `STORE` just bound carries its own identity, so
+            // this cache belongs to that value and not to every declaration
+            // that happens to share its name.
+            //
+            // A file module runs in a `globals_only` frame, whose `DEF_FUNCTION`
+            // and `STORE` bind only globals. Reading through `get_var` there
+            // would find a same-named local or parameter of the importing
+            // program first, attach the cache to that function instead, and
+            // leave the module's own function uncached — or refuse the import
+            // outright when the local is not a function.
+            let declared_function = if self.frames[frame].globals_only {
+                self.globals.get(declared).cloned()
+            } else {
+                self.get_var(declared)
+            };
+            let Some(Value::Function(function)) = declared_function else {
+                return Err(Error::Runtime(
+                    format!("lru_cache declaration '{declared}' is not a function"),
+                    self.span(),
+                ));
+            };
+            function.attach_cache(*capacity as usize);
             self.push(Value::Nothing);
             self.advance(frame);
             return Ok(());
@@ -3054,24 +3126,17 @@ impl BytecodeVm {
             self.push(Value::list(Vec::new()));
             return Ok(());
         }
-        // The first element is read from the list the caller handed over rather
-        // than copied out of it, and every later one the same way: a `map` reads
-        // its receiver, it does not take it, so the handle is shared for as long
-        // as the map lasts and each element is cloned on its own turn. See
-        // [`crate::value::Shared`].
-        let first = items[0].clone();
+        // Every element is read from the list the caller handed over rather
+        // than copied out of it: a `map` reads its receiver, it does not take
+        // it, so the handle is shared for as long as the map lasts and each
+        // element is cloned on its own turn. See [`crate::value::Shared`].
         self.frames[frame].pending_map = Some(PendingMap {
             items,
-            next: 1,
+            next: 0,
             mapped: Vec::new(),
-            function: function.clone(),
+            function,
         });
-        self.call_function(
-            &function.name,
-            &function,
-            std::slice::from_ref(&first),
-            None,
-        )
+        self.run_map(frame)
     }
 
     /// Carries the finished callee's `value` on to the `map` `frame` started.
@@ -3080,16 +3145,46 @@ impl BytecodeVm {
             return Ok(());
         };
         map.mapped.push(value);
-        if map.next >= map.items.len() {
-            let mapped = Value::list(std::mem::take(&mut map.mapped));
-            self.frames[frame].pending_map = None;
-            self.push(mapped);
-            return Ok(());
+        self.run_map(frame)
+    }
+
+    /// Runs the next element of `frame`'s `map`, looping over cache hits.
+    ///
+    /// A hit does not enter a body, so it must not become a Rust stack frame.
+    /// Recursing through [`Self::call_function`] for each consecutive hit made a
+    /// large `map` of one repeated value overflow the host stack before the
+    /// call-depth guard could report a limit. The driver loops over the hits
+    /// itself and only calls into a body on a miss.
+    fn run_map(&mut self, frame: usize) -> Result<()> {
+        loop {
+            let (item, function) = {
+                let Some(map) = self.frames[frame].pending_map.as_mut() else {
+                    return Ok(());
+                };
+                if map.next >= map.items.len() {
+                    let mapped = Value::list(std::mem::take(&mut map.mapped));
+                    self.frames[frame].pending_map = None;
+                    self.push(mapped);
+                    return Ok(());
+                }
+                let item = map.items[map.next].clone();
+                map.next += 1;
+                (item, map.function.clone())
+            };
+            if let Some(answer) = function.cached(std::slice::from_ref(&item)) {
+                let Some(map) = self.frames[frame].pending_map.as_mut() else {
+                    return Ok(());
+                };
+                map.mapped.push(answer);
+                continue;
+            }
+            return self.call_function(
+                &function.name,
+                &function,
+                std::slice::from_ref(&item),
+                None,
+            );
         }
-        let next = map.items[map.next].clone();
-        map.next += 1;
-        let function = map.function.clone();
-        self.call_function(&function.name, &function, std::slice::from_ref(&next), None)
     }
 
     /// Runs a closure's block, binding `args` to its parameters.
@@ -3110,6 +3205,22 @@ impl BytecodeVm {
         args: &[Value],
         this: Option<Value>,
     ) -> Result<()> {
+        // A decorated function answers from memory wherever it is called from:
+        // a direct `CALL`, a method call, or one element of a `map`. Keeping
+        // the lookup here rather than only on the direct-call path is what
+        // makes a cache a property of the declaration instead of one spelling
+        // of calling it, and the tree-walking VM looks it up in the same place
+        // for the same reason.
+        //
+        // A hit does not enter the body, so it costs no frame and no call
+        // depth. A `map` checks the cache itself before reaching here, so a hit
+        // leaves the answer on the stack for the caller to advance over. See
+        // [`Self::run_map`] for why the map driver must not route hits through
+        // this function one Rust frame at a time.
+        if let Some(value) = function.cached(args) {
+            self.stack.push(value);
+            return Ok(());
+        }
         let Some((chunk, path)) = function.body.block() else {
             return Err(Error::Runtime(
                 format!(
@@ -3158,6 +3269,9 @@ impl BytecodeVm {
         new_frame.locals_base = locals_base;
         new_frame.stack_base = self.stack.len();
         new_frame.is_call = true;
+        if function.has_cache() {
+            new_frame.cache = Some((function.clone(), args.to_vec()));
+        }
         self.call_depth += 1;
         self.frames.push(new_frame);
         Ok(())
@@ -3167,15 +3281,15 @@ impl BytecodeVm {
     /// where the declaration is executed.
     fn make_function(&self, chunk: &Arc<Chunk>, path: &[u32], block: &Block) -> Value {
         let captured: Captured = self.locals.clone();
-        Value::Function(FunctionValue {
-            name: block.name.clone(),
-            params: block.params.clone(),
-            body: FunctionBody::Block {
+        Value::Function(FunctionValue::new(
+            block.name.clone(),
+            block.params.clone(),
+            FunctionBody::Block {
                 chunk: chunk.clone(),
                 path: path.to_vec(),
             },
-            captured: Arc::new(captured),
-        })
+            Arc::new(captured),
+        ))
     }
 
     /// `DEF_FUNCTION`: the closure whose body is `arg`'s block. The `STORE` the
@@ -3183,7 +3297,22 @@ impl BytecodeVm {
     fn def_function(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let (chunk, path) = self.child_path(frame, instruction.arg)?;
         let block = self.block_of(&chunk, &path)?.clone();
+        // A cache belongs to the function value that declared it, so defining
+        // the name again drops the memory of the value currently bound there
+        // with that value. A closure that escaped keeps its own memory, because
+        // the clone it escaped as shares the same cache.
         let closure = self.make_function(&chunk, &path, &block);
+        // Bind the name in the current scope before the `STORE`, exactly as the
+        // tree-walker's `declare` does. Without this a declaration inside a call
+        // fell through `set_var` to the global scope, where a sibling call's
+        // same-named declaration replaced it and took the earlier closure's
+        // cache with it. A module's `globals_only` frame still binds globally,
+        // because that is how its members are published.
+        if !self.frames[frame].globals_only {
+            if let Some(scope) = self.locals.last_mut() {
+                scope.insert(block.name.clone(), Value::Nothing);
+            }
+        }
         self.push(closure);
         self.advance(frame);
         Ok(())

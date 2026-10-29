@@ -1512,6 +1512,135 @@ fn read_line(_args: &[Value], span: Span) -> Result<String> {
     ))
 }
 
+/// The memory behind one `lru_cache`-decorated function.
+///
+/// Entries are kept oldest-first. A hit moves its entry to the end and a miss
+/// inserts at the end, so the front is always the least recently used and is
+/// what eviction removes when the size would pass the stated capacity.
+///
+/// A linear scan rather than a hash map because a key is a `Vec<Value>` and a
+/// Redblue value may contain a list, a record or a function; the capacity is
+/// small enough that comparison is the right cost. Two calls with equal
+/// arguments are one entry, with function values matched by identity rather
+/// than by the language's structural equality; see [`cache_key_eq`].
+#[derive(Debug, Clone)]
+pub struct LruCache {
+    capacity: usize,
+    entries: Vec<(Vec<Value>, Value)>,
+}
+
+impl LruCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: Vec::new(),
+        }
+    }
+
+    /// The answer recorded for `args`, if one is remembered, made the most
+    /// recently used entry by the read.
+    pub fn get(&mut self, args: &[Value]) -> Option<Value> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(remembered, _)| cache_key_eq(remembered, args))?;
+        let entry = self.entries.remove(index);
+        let value = entry.1.clone();
+        self.entries.push(entry);
+        Some(value)
+    }
+
+    /// Drops every remembered answer, keeping the capacity for the next run.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Records `value` for `args`, evicting the least recently used entry when
+    /// the cache is already at its capacity.
+    pub fn insert(&mut self, args: &[Value], value: Value) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(remembered, _)| cache_key_eq(remembered, args))
+        {
+            self.entries.remove(index);
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.remove(0);
+        }
+        self.entries.push((args.to_vec(), value));
+    }
+}
+
+/// Whether two argument lists are the same `lru_cache` key.
+///
+/// The language's `is` compares two function values by name, parameters and
+/// captured bindings, because two closures from one declaration over equal
+/// environments are interchangeable. A cache key cannot use that equality: two
+/// different declarations can produce functions with the same name, parameters
+/// and captures but different bodies, and one must never answer from the
+/// other's entry. A function in a key is therefore matched by its identity, and
+/// the rule reaches through lists and records because a function can be an
+/// item or a field. Every other kind of value keeps the language's equality.
+fn cache_key_eq(left: &[Value], right: &[Value]) -> bool {
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| cache_value_eq(a, b))
+}
+
+fn cache_value_eq(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Function(a), Value::Function(b)) => a.id == b.id,
+        (Value::List(a), Value::List(b)) => cache_key_eq(a, b),
+        (Value::Record(a), Value::Record(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(name, value)| {
+                    b.get(name)
+                        .is_some_and(|other| cache_value_eq(value, other))
+                })
+        }
+        (Value::Object(an, af), Value::Object(bn, bf)) => {
+            an == bn
+                && af.len() == bf.len()
+                && af.iter().all(|(name, value)| {
+                    bf.get(name)
+                        .is_some_and(|other| cache_value_eq(value, other))
+                })
+        }
+        _ => left == right,
+    }
+}
+
+/// A `take`/`skip` count as a whole number of items.
+///
+/// A positive count that is not a whole number is refused rather than silently
+/// truncated: there is no such thing as "the first 1.9 items", and rounding
+/// would make the caller's arithmetic disappear without a word. The ends are
+/// clamped rather than refused: a negative count is zero and a count past the
+/// end is the whole list, which is what makes `take(xs, 0)` empty and
+/// `skip(xs, 999)` empty without either being an error. A count that is not a
+/// finite number is refused, because `NaN` and an infinity have no place in
+/// "the first n items".
+fn iteration_count(name: &str, count: f64, span: Span) -> Result<usize> {
+    if !count.is_finite() {
+        return Err(Error::Runtime(
+            format!("{name} requires a finite number of items, got {count}"),
+            span,
+        ));
+    }
+    if count <= 0.0 {
+        return Ok(0);
+    }
+    if count.fract() != 0.0 {
+        return Err(Error::Runtime(
+            format!("{name} requires a whole number of items, got {count}"),
+            span,
+        ));
+    }
+    Ok(count.trunc() as usize)
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -1566,6 +1695,115 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ))
             }
         }
+        // -- iteration helpers -------------------------------------------------
+        //
+        // Every one of these returns a new list rather than an iterator.
+        // Redblue has no iterator value, so a helper that wanted to be lazy
+        // would have nothing to hand back; SPEC.md § Iteration helpers states
+        // that for the reader rather than leaving it to be discovered.
+        "chain" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let mut items = left.as_ref().clone();
+                items.extend(right.iter().cloned());
+                Ok(Some(Value::list(items)))
+            }
+            _ => Err(Error::Runtime("chain requires two lists".to_string(), span)),
+        },
+        "zip" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let pairs = left
+                    .iter()
+                    .zip(right.iter())
+                    .map(|(a, b)| Value::list(vec![a.clone(), b.clone()]))
+                    .collect();
+                Ok(Some(Value::list(pairs)))
+            }
+            _ => Err(Error::Runtime("zip requires two lists".to_string(), span)),
+        },
+        "enumerate" => match args {
+            [Value::List(items)] => {
+                let indexed = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        Value::list(vec![Value::Number(index as f64), item.clone()])
+                    })
+                    .collect();
+                Ok(Some(Value::list(indexed)))
+            }
+            _ => Err(Error::Runtime(
+                "enumerate requires one list".to_string(),
+                span,
+            )),
+        },
+        "product" => match args {
+            [Value::List(left), Value::List(right)] => {
+                let mut pairs = Vec::with_capacity(left.len().saturating_mul(right.len()));
+                for a in left.iter() {
+                    for b in right.iter() {
+                        pairs.push(Value::list(vec![a.clone(), b.clone()]));
+                    }
+                }
+                Ok(Some(Value::list(pairs)))
+            }
+            _ => Err(Error::Runtime(
+                "product requires two lists".to_string(),
+                span,
+            )),
+        },
+        // Groups are kept in the order their key first appeared, and a key is
+        // matched with `Value`'s equality, so two equal records or lists share
+        // one group rather than two. A group is a record — `key` and `items` —
+        // so a caller can reach either half by name.
+        "groupby" => match args {
+            [Value::List(items)] => {
+                let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+                for item in items.iter() {
+                    match groups.iter_mut().find(|(key, _)| key == item) {
+                        Some((_, bucket)) => bucket.push(item.clone()),
+                        None => groups.push((item.clone(), vec![item.clone()])),
+                    }
+                }
+                let records = groups
+                    .into_iter()
+                    .map(|(key, items)| {
+                        let mut fields = crate::value::Fields::new();
+                        fields.insert("key".to_string(), key);
+                        fields.insert("items".to_string(), Value::list(items));
+                        Value::record(fields)
+                    })
+                    .collect();
+                Ok(Some(Value::list(records)))
+            }
+            _ => Err(Error::Runtime(
+                "groupby requires one list".to_string(),
+                span,
+            )),
+        },
+        "take" => match args {
+            [Value::List(items), Value::Number(count)] => {
+                let count = iteration_count("take", *count, span)?;
+                Ok(Some(Value::list(
+                    items.iter().take(count).cloned().collect(),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "take requires a list and a number".to_string(),
+                span,
+            )),
+        },
+        "skip" => match args {
+            [Value::List(items), Value::Number(count)] => {
+                let count = iteration_count("skip", *count, span)?;
+                Ok(Some(Value::list(
+                    items.iter().skip(count).cloned().collect(),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "skip requires a list and a number".to_string(),
+                span,
+            )),
+        },
         "input" => read_line(args, span).map(|line| Some(Value::Text(line))),
         "random" => {
             let (min, max) = random_range(span, "random", args, 100.0)?;
@@ -2782,6 +3020,49 @@ mod tests {
         }
         assert_eq!(json_stringify(&Value::Number(42.0)), "42");
         assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
+    }
+
+    /// A cache key cannot use the language's `is` for a function: that compares
+    /// name, parameters and captured bindings, so two declarations can produce
+    /// same-shaped functions with different bodies. A function in a key is
+    /// matched by identity, including when it is nested in a list.
+    #[test]
+    fn edge_lru_cache_keys_function_arguments_by_identity() {
+        use crate::value::{FunctionBody, FunctionValue};
+        use std::sync::Arc;
+
+        let function = |name: &str| {
+            Value::Function(FunctionValue::new(
+                name.to_string(),
+                vec!["x".to_string()],
+                FunctionBody::Statements(Arc::new(Vec::new())),
+                Arc::new(Vec::new()),
+            ))
+        };
+        let first = function("f");
+        let second = function("f");
+        assert_eq!(
+            first, second,
+            "the language's `is` treats two same-shaped functions as equal"
+        );
+
+        let mut cache = LruCache::new(4);
+        cache.insert(&[first.clone(), Value::Number(1.0)], Value::Number(2.0));
+        assert_eq!(
+            cache.get(&[second.clone(), Value::Number(1.0)]),
+            None,
+            "a distinct function value must not answer from another's entry"
+        );
+
+        cache.insert(
+            &[Value::list(vec![first]), Value::Number(1.0)],
+            Value::Number(3.0),
+        );
+        assert_eq!(
+            cache.get(&[Value::list(vec![second]), Value::Number(1.0)]),
+            None,
+            "a function nested in a list key is still matched by identity"
+        );
     }
 
     /// A clock set before 1970 is the one host state that makes every clock

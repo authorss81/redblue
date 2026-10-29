@@ -436,7 +436,15 @@ impl Formatter {
                     self.format_expression(e);
                 }
             }
-            Statement::Function { name, params, body } => {
+            Statement::Function {
+                name,
+                params,
+                body,
+                cache,
+            } => {
+                if let Some(capacity) = cache {
+                    self.write(&format!("lru_cache({capacity}) "));
+                }
                 self.write_signature("to ", name, params);
                 self.open_line(stmt.span.line);
                 self.format_block(body);

@@ -4037,6 +4037,50 @@ fn edge_a_missing_module_member_is_refused_the_same_way_on_both_vms() {
     );
 }
 
+/// A module file's `lru_cache` declaration belongs to the function the module
+/// just stored, even when the importing program has a local of the same name.
+///
+/// A file module runs in a `globals_only` frame, whose declarations bind only
+/// globals. Resolving the decorated name through the ordinary local-first lookup
+/// found the importer's `cached` instead: the cache was attached to that value
+/// (or the import refused because it was not a function) and the module's own
+/// function stayed uncached.
+#[test]
+fn edge_a_module_cache_declaration_is_not_shadowed_by_an_importer_local() {
+    let dir = scratch_dir("module-cache-shadow");
+    fs::create_dir_all(dir.join("modules")).expect("modules directory should be creatable");
+    fs::write(
+        dir.join("modules/CacheMod.rb"),
+        "module CacheMod\n    lru_cache(10) to cached(n)\n        give back n + 1\n    end\n    export cached\nend\n",
+    )
+    .expect("module file should be writable");
+    let program = "to run_it()\n    set cached to 99\n    import CacheMod\n    give back [CacheMod.cached(1), cached]\nend\nsay run_it()\n";
+    fs::write(dir.join("main.rb"), program).expect("program should be writable");
+
+    let walked = rb_in(&dir, &["run", "main.rb"]);
+    assert_eq!(
+        String::from_utf8_lossy(&walked.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["[2, 99]"],
+        "the tree-walker must keep the module's cache and the importer's local apart: {walked:?}"
+    );
+
+    let compiled = rb_in(&dir, &["compile", "main.rb"]);
+    assert!(
+        compiled.status.success(),
+        "the importing program must compile: {compiled:?}"
+    );
+    let bytecoded = rb_in(&dir, &["vm", "main.rbc"]);
+    assert_eq!(
+        String::from_utf8_lossy(&bytecoded.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["[2, 99]"],
+        "the bytecode VM must attach the cache to the module's function, not the importer's local: {bytecoded:?}"
+    );
+}
+
 /// A module that reaches itself through an import is a clean error, not a hang.
 ///
 /// The loader recorded a module as loaded *before* running it, so a self-import
