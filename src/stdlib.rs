@@ -1379,7 +1379,7 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("reduce", "reduce(list, function, start) -> one value"),
     (
         "chain",
-        "chain(list, list) -> a list of the first list's items then the second's",
+        "chain(list, list, ...) -> a list of every argument list's items in the order given",
     ),
     (
         "zip",

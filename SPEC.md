@@ -1618,7 +1618,7 @@ than assumed.
 
 | Helper | Answer | Lazy? |
 |---|---|---|
-| `chain(a, b)` | materialises a list of `a`'s items followed by `b`'s | materialises |
+| `chain(a, b, ...)` | materialises a list of every argument list's items in the order given; no lists is the empty list | materialises |
 | `zip(a, b)` | materialises `[a-item, b-item]` pairs; it **stops at the shorter** input and never pads with `nothing` | materialises |
 | `enumerate(xs)` | materialises `[index, item]` pairs with indexes from zero | materialises |
 | `product(a, b)` | materialises every `[a-item, b-item]` combination, first input outermost | materialises |

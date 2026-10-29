@@ -25,6 +25,10 @@
 | `tests/doc_blocks_runs.txt` | +2 −0 | classifies the new SPEC blocks |
 | `tests/unreviewed_work_ack_test.rs` | +1 −0 | acknowledges the `resume phase-098:` delivery subject |
 | `phases/phase-098/FINDINGS.md` | +13 −0 | records the remaining cache follow-ups |
+| `src/runtime.rs` | +13 −7 | resumed run: `chain` now joins any number of lists (none is the empty list) instead of exactly two |
+| `src/stdlib.rs` | +1 −1 | resumed run: `chain` signature says `list, list, ...` |
+| `SPEC.md` | +1 −1 | resumed run: `chain` row states the open arity |
+| `tests/stdlib_module_docs_test.rs` | +58 −0 | resumed run: three `chain` arity and refusal tests |
 
 The helpers materialise lists because Redblue has no iterator value. `zip` stops
 at the shorter input and never pads. `groupby` uses Redblue equality and keeps
@@ -135,6 +139,9 @@ helpers are flat builtins only, which avoids creating a second spelling.
 | `edge_a_method_cache_does_not_survive_a_bytecode_run` | resource/state: method memory is cleared between runs |
 | `lru_cache_memoises_a_top_level_can_declaration` | a decorated `to can` outside an object is memoised on both engines |
 | `edge_a_cached_method_formats_into_a_program_that_still_runs` | formatter: the method decorator round trips and the formatted program still runs |
+| `edge_chain_joins_any_number_of_lists` | empty, singleton and multi-list arity, including Unicode items, on both engines |
+| `edge_chain_refuses_a_non_list_among_its_arguments` | type mismatch: a non-list in any position is refused by name on both engines |
+| `edge_chain_of_no_or_one_list_is_an_ordinary_answer` | boundary: zero arguments is a real empty answer and one argument is a copy |
 
 Mandatory matrix:
 - empty — covered by `iteration_helpers_cover_the_empty_list`.
@@ -154,7 +161,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 2329 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | pass — 2332 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-098` | pass |
 
 ## Invariants touched

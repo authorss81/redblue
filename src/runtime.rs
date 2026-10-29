@@ -1831,14 +1831,21 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         // Redblue has no iterator value, so a helper that wanted to be lazy
         // would have nothing to hand back; SPEC.md § Iteration helpers states
         // that for the reader rather than leaving it to be discovered.
-        "chain" => match args {
-            [Value::List(left), Value::List(right)] => {
-                let mut items = left.as_ref().clone();
-                items.extend(right.iter().cloned());
-                Ok(Some(Value::list(items)))
+        //
+        // `chain` takes any number of lists, so joining three or more needs no
+        // nesting and joining none is the empty list.
+        "chain" => {
+            let mut items = Vec::new();
+            for arg in args {
+                match arg {
+                    Value::List(list) => items.extend(list.iter().cloned()),
+                    _ => {
+                        return Err(Error::Runtime("chain requires lists".to_string(), span));
+                    }
+                }
             }
-            _ => Err(Error::Runtime("chain requires two lists".to_string(), span)),
-        },
+            Ok(Some(Value::list(items)))
+        }
         "zip" => match args {
             [Value::List(left), Value::List(right)] => {
                 let pairs = left

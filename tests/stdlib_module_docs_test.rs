@@ -2220,3 +2220,47 @@ end
 "#;
     yields(source, "[4, 4, 1]");
 }
+
+/// `chain` joins sequences, so it takes any number of lists rather than
+/// exactly two. No arguments is the empty list and one argument is a copy of
+/// that list, which keeps the helper total at both ends of its arity.
+#[test]
+fn edge_chain_joins_any_number_of_lists() {
+    yields("chain()", "[]");
+    yields("chain([1])", "[1]");
+    yields("chain([1], [2], [3])", "[1, 2, 3]");
+    yields("chain([], [1], [], [2])", "[1, 2]");
+    yields("chain([\"é\"], [\"日本\"], [\"🙂\"])", "[é, 日本, 🙂]");
+}
+
+/// The arity is open, not the item type: every argument must still be a list,
+/// and a non-list names the helper instead of being skipped or coerced.
+#[test]
+fn edge_chain_refuses_a_non_list_among_its_arguments() {
+    let walked = message(&fails("chain([1], 2, [3])"));
+    assert!(
+        walked.contains("chain requires lists"),
+        "the tree-walker should refuse the middle argument by name, it said: {walked}"
+    );
+
+    let chunk = compile_source("chain([1], 2, [3])").expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    let compiled = vm
+        .run(&chunk)
+        .expect_err("the bytecode VM should refuse a non-list argument");
+    assert!(
+        compiled.message().contains("chain requires lists"),
+        "the bytecode VM should refuse the middle argument by name, it said: {}",
+        compiled.message()
+    );
+}
+
+/// A zero-argument chain is a real call and not an arity error, and a
+/// one-argument chain answers the items in the order given on both engines.
+#[test]
+fn edge_chain_of_no_or_one_list_is_an_ordinary_answer() {
+    yields("length(chain())", "0");
+    yields("chain([3, 1, 2])", "[3, 1, 2]");
+    both("chain()");
+    both("chain([\"a\"])");
+}
