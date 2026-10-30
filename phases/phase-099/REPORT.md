@@ -15,12 +15,33 @@ definition of done still lacked: a structural cost test for `list.shift` against
 a deque work queue, a single-entry Counter test, a linear deque constructor, and
 balanced deque rebalancing that keeps alternating pops from rebuilding the untouched side.
 
+The final resume fixed the one part of the deque claim the preserved work did not
+actually meet. Every operation used to walk every node of both ends, so a deque
+was O(n) per push or pop despite the tree structure. A deque is now an opaque
+`Object` that Redblue source cannot construct; its trees are trusted after
+construction, while a hand-written record with the same fields is still
+accepted and still validated all the way down. That preserves every forged-tree
+refusal and removes the per-operation walk from the module's own deques. The
+result is measured, not asserted: the 35-test `collections_test` binary ran in
+285 s on the previous tree and ran in 4.2 s before the cap-refusal tests were
+added; the 38-test binary still finishes in seconds.
+
+The review then closed the budget and representation gaps that resume left. A
+deque now enforces `MAX_DEQUE_ITEMS` in the constructor and after every push,
+so a list longer than the cap is refused before any tree is built and a push at
+the cap cannot produce a deque no operation can use. An over-budget refusal
+names the limit and the length that crossed it rather than calling the value a
+non-deque, and the trusted object path now requires the same `kind: "deque"`
+marker the record path does. `json.stringify` refuses a deque instead of
+silently writing `null` for it, and `SPEC.md` names the `kind: "deque"` marker a
+hand-written record needs.
+
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +698 −1 | `collection_pairs`, the Counter/defaultdict/deque helpers, persistent stack trees for deque ends, named-record validation, the thirteen `collections.*` arms, a linear `stack_from_values` deque constructor, and `deque_rebalance`, which splits a non-empty side across both ends instead of reversing the whole remainder; deque ends are validated recursively down every branch; the resume replaced a manual `div_ceil` spelling with the standard method so clippy stays warning-free |
+| `src/runtime.rs` | +72 −28 (resume and review) | `collection_pairs`, the Counter/defaultdict/deque helpers, persistent stack trees for deque ends, named-record validation, the thirteen `collections.*` arms, a linear `stack_from_values` deque constructor, and `deque_rebalance`, which splits a non-empty side across both ends instead of reversing the whole remainder. The resume makes `deque_value` build an opaque `Object` and splits `deque_parts` into a trusted object path (cheap shape and budget checks) and an untrusted record path (full `validate_stack_tree` walk), so module deques no longer re-walk every node per operation while hand-written records are still refused node by node. The review enforces the item budget in the constructor and after each push, splits malformed-value errors from a dedicated budget error that names the limit and supplied length, requires the `kind: "deque"` marker on the trusted object path as well as the record path, corrects the `stack_cons` trust-boundary comment, and makes `json_stringify` refuse a deque rather than write `null` |
 | `src/stdlib.rs` | +116 −1 | registers the `collections` module, its 13 members, builtin names, signatures and the module table |
-| `tests/collections_test.rs` | +753 −0 | 28 tests, all running the program on both engines and comparing values as data as well as text; includes the shared-node deque/list comparison, the linear-construction boundary sweep, a counter's own missing value, signed-zero key equality, list and record defaultdict keys, and forged deque trees whose size disagrees with their children or whose children are malformed |
-| `SPEC.md` | +56 −0 | documents the missing-key behaviour of Counter and defaultdict, their lookup cost, the `put` spelling, deque ends, named fields and field errors |
+| `tests/collections_test.rs` | +296 −19 (resume and review) | 38 tests, all running the program on both engines and comparing values as data as well as text; the resume adds the opaque-object contract, a malformed-grandchild refusal on the untrusted record path, and a 1,500-item both-ends order test that exercises the trusted path; the review adds the constructor-budget refusal, push-at-cap refusals for both a module deque and a forged record at the cap, the object-path `kind` marker check, and the `json.stringify` refusal |
+| `SPEC.md` | +15 −6 (resume and review) | documents the missing-key behaviour of Counter and defaultdict, their lookup cost, the `put` spelling, deque ends, named fields and field errors; the resume changes the deque description from an opaque record to an opaque value and states the trusted-object rule; the review names the `kind: "deque"` marker, the item budget and the JSON refusal |
 | `README.md` | +28 −0 | the user-facing collections section |
 | `SURVEY.md` | +50 −49 | builtin count 92 → 105, modules 12 → 13, members 63 → 76, and re-anchored citations |
 | `tests/stdlib_module_docs_test.rs` | +69 −0 | one answerable row per new builtin |
@@ -44,11 +65,14 @@ because `set` is a reserved word, so `collections.set(...)` is not a legal
 property name. The factory is a value, not a callable; that limit is stated in
 `SPEC.md` and is a known follow-up below.
 
-A deque is `{kind: "deque", front, back}`. The two ends are persistent stacks
-whose spines hold complete binary trees rather than one record per item, so a
-deque of n items nests O(log n) levels instead of n. Pushing at an empty end
-moves the other side across once; empty pops answer `nothing`. The `kind` field
-marks a record the module made, so a bare record or one missing an end is
+A deque is an opaque object holding `front` and `back`. The two ends are
+persistent stacks whose spines hold complete binary trees rather than one
+record per item, so a deque of n items nests O(log n) levels instead of n.
+Pushing at an empty end moves the other side across once; empty pops answer
+`nothing`. Because source cannot construct an `Object`, a value made by this
+module is trusted and is not re-walked on every operation. A hand-written record
+with `kind: "deque"`, `front` and `back` is still read, but every node is
+validated before use, so a bare record, a missing end or a malformed tree is
 refused rather than treated as an empty deque.
 
 `collections.namedtuple(names, values)` builds an ordinary record, so fields are
@@ -72,9 +96,11 @@ so the constructor is linear instead of paying a spine copy per item. When one
 end empties, `deque_rebalance` reads the other side's pop order once and splits
 it so both ends retain roughly half the items. Alternating pops at opposite ends
 then share the trees at the end they did not touch; moving the whole remainder
-would rebuild it on every other pop and add a second quadratic term. Validation
-walks every node of both ends on each operation so a forged tree is refused
-immediately, which is a separate linear cost per operation. The
+would rebuild it on every other pop and add a second quadratic term. A forged
+record still has every node of both ends validated before use, so it is refused
+immediately; a deque made by the module is an `Object` source cannot build, so
+its trees are trusted and an operation pays only the shape and budget checks.
+The
 boundary sweep pops both ends of deques built from every length in
 `{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127}` and
 checks the literal order against `0..n` and its reverse.
@@ -90,6 +116,16 @@ remaining node is shared with the deque it came from, while `skip(xs, 1)`
 allocates new list storage. A loaded or differently optimized runner cannot
 flip that comparison, and the same test still runs 8,000 operations through both
 engines and checks the answers as data.
+
+The measured cost of `list.shift` today is therefore: `shift` itself is a
+constant-time read and is *not* the quadratic spelling; `skip(xs, 1)` is, because
+it copies the remaining `n-1` items on every call. The deque's value is not a
+comment. On the preserved tree the whole `collections_test` binary took 285 s,
+most of it this 8,000-operation comparison and the per-operation deep walks; on
+this tree the 38 tests finish in seconds even with the million-item cap-refusal
+setup, and the deque half is now dominated by the deliberately quadratic `skip`
+side of the comparison rather than by the deque. A loaded runner cannot flip the structural sharing assertion, so the
+evidence does not depend on that wall-clock number.
 
 ## Tests added
 
@@ -123,6 +159,16 @@ engines and checks the answers as data.
 | `edge_a_defaultdict_uses_list_and_record_keys_without_collapsing_them` | nesting_recursion and mixed key types: list and record keys create separate entries and an equal list key is found on a later read |
 | `edge_a_forged_deque_tree_with_a_wrong_size_is_refused` | failure: a deque tree whose `size` disagrees with its children is refused with the documented catchable deque error |
 | `edge_a_forged_deque_tree_with_a_self_consistent_root_but_malformed_children_is_refused` | failure: a tree whose root agrees with its children's claimed sizes but whose children are leaves claiming size 3 is refused by the first `pop_left`, not only by a later operation |
+| `edge_a_forged_deque_record_with_a_malformed_grandchild_is_refused` | failure: the untrusted-record path still validates every node of both ends, so a malformed grandchild is refused before the first pop |
+| `edge_a_valid_deque_tree_may_share_one_child_under_both_branches` | nesting_recursion: a valid DAG reusing one child under both branches pops every logical value rather than hanging or dropping one |
+| `edge_a_forged_deque_tree_beyond_the_node_budget_is_refused_before_it_is_walked` | resource_limit: a forged tree claiming more than `MAX_DEQUE_ITEMS` is refused by the budget before the walk starts, and the refusal names the limit and claimed length |
+| `edge_an_object_named_deque_still_needs_the_kind_marker` | representation boundary: an object named `deque` without `kind: "deque"`, or with the wrong kind, is refused instead of trusted |
+| `edge_a_deque_is_an_opaque_value_rather_than_a_forgeable_record` | representation boundary: a module deque is an `Object` source cannot construct, and both ends still pop in order from it |
+| `edge_a_deque_of_many_items_keeps_order_through_both_ends` | resource_limit and order: 1,500 pushes and pops through each end on the trusted path, with both empty pops answering `nothing` |
+| `edge_a_deque_constructor_refuses_more_items_than_the_budget` | resource_limit: a list of 1,000,001 items is refused by the constructor instead of building a deque no operation can use, and the refusal names both the limit and the supplied length |
+| `edge_a_deque_at_the_cap_refuses_another_push` | resource_limit: a module deque holding exactly `MAX_DEQUE_ITEMS` refuses both `push_left` and `push_right`, naming the limit and the length the push would produce |
+| `edge_a_forged_deque_record_at_the_cap_refuses_another_push` | resource_limit: a forged record at the cap, built from structurally valid shared trees, is refused by both pushes after validation rather than only by the constructor |
+| `edge_json_stringify_refuses_a_deque_rather_than_writing_null` | representation boundary: a deque, alone or nested in a record, is refused by `json.stringify` rather than silently written as `null` |
 
 Mandatory matrix:
 
@@ -158,14 +204,19 @@ Mandatory matrix:
   `defaultdict.get` creation, and duplicate named fields being refused.
 - malformed_input — covered by the four malformed-input refusal tests, the
   forged-count refusal, and
-  `edge_a_forged_deque_tree_with_a_wrong_size_is_refused` and
-  `edge_a_forged_deque_tree_with_a_self_consistent_root_but_malformed_children_is_refused`.
+  `edge_a_forged_deque_tree_with_a_wrong_size_is_refused`,
+  `edge_a_forged_deque_tree_with_a_self_consistent_root_but_malformed_children_is_refused`
+  and `edge_a_forged_deque_record_with_a_malformed_grandchild_is_refused`.
 - resource_limit — covered by the 4,000-item depth test, which measures both a
-  pushed deque and one built by `collections.deque(list)`, and by the
-  8,000-operation shared-node test; the deque stores one tree node per item at
-  most, and
-  Counter/defaultdict append one entry per distinct key. No new limit is needed
-  because these builtins are one VM step and do not recurse into user code.
+  pushed deque and one built by `collections.deque(list)`, by the
+  8,000-operation shared-node test, by the 1,500-item both-ends test on the
+  trusted path, by the constructor-budget refusal at 1,000,001 items, by the
+  module deque at exactly the cap refusing both pushes, by the forged record at
+  exactly the cap refusing both pushes, and by the forged tree beyond the node
+  budget being refused before it is walked; the deque stores one tree node per
+  item at most, and Counter/defaultdict append one entry per distinct key. The
+  constructor and every push enforce the same `MAX_DEQUE_ITEMS` bound
+  `deque_parts` checks, so a deque that exists is one every operation can use.
 
 ## Gates
 
@@ -173,7 +224,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2364 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 2374 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-099` | pass |
 
 ## Invariants touched
@@ -192,10 +243,16 @@ Mandatory matrix:
 - `list.shift` is a constant-time read and does not remove the first item; the
   quadratic spelling is `skip(xs, 1)`. The test pins the storage-sharing
   relationship, not a wall-clock time.
-- A deque's `kind` marker makes an ordinary record fail the module's own shape
-  check, but a caller who writes the marker by hand can still construct the
-  record shape. Every operation validates every node of both ends recursively
-  before returning a deque, so a forged record with a malformed node anywhere is
-  refused by the first operation rather than trusted. That validation makes an
-  operation linear in the deque's size; the structural sharing still keeps a
-  pop from rebuilding the untouched side, which the resource tests pin.
+- A deque made by `collections.deque` is an `Object`; Redblue source has no
+  literal for one, so it cannot forge a trusted deque. A hand-written record
+  with `kind: "deque"`, `front` and `back` is still accepted for compatibility,
+  but every operation validates both stacks node by node, so a malformed tree
+  anywhere is refused by the first operation. That validation is linear in the
+  record's size; module deques skip it and pay only O(log n) spine work plus the
+  amortised side reversal, which is why the 8,000-operation test dropped from
+  minutes to seconds. The `size` fields still bound every walk, so no forged
+  record can make one operation visit more than `MAX_DEQUE_ITEMS` logical items.
+  The constructor and every push apply the same bound, so the module cannot
+  build a deque that its own operations then refuse. A deque has no JSON form,
+  so `json.stringify` refuses one rather than writing `null`, which would say
+  it is `nothing`.

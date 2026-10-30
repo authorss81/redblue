@@ -115,7 +115,7 @@ fn write_json(value: &Value, depth: usize, out: &mut String) -> Result<(), Strin
         // Everything else — a number, a text, a yes/no, `nothing` — is a leaf,
         // and a leaf is written by the language's own JSON writer so that the
         // escaping is the escaping `json.stringify` uses.
-        leaf => out.push_str(&crate::runtime::json_stringify(leaf)),
+        leaf => out.push_str(&crate::runtime::json_stringify(leaf)?),
     }
     Ok(())
 }
@@ -194,7 +194,7 @@ fn write_pretty(value: &Value, depth: usize, out: &mut String) -> Result<(), Str
         // Everything else — a number, a text, a yes/no, `nothing` — is a leaf,
         // and a leaf is written by the language's own JSON writer so that the
         // escaping is the escaping `json.stringify` uses.
-        leaf => out.push_str(&crate::runtime::json_stringify(leaf)),
+        leaf => out.push_str(&crate::runtime::json_stringify(leaf)?),
     }
     Ok(())
 }

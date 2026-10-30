@@ -1890,8 +1890,17 @@ fn defaultdict_answer(value: Value, dictionary: Value) -> Value {
 }
 
 fn deque_error(span: Span) -> Error {
+    Error::Runtime("a value made by collections.deque".to_string(), span)
+}
+
+/// Refuses a deque that would hold more than [`MAX_DEQUE_ITEMS`].
+///
+/// The message names both the limit and the length that crossed it, so a
+/// constructor or push refusal says what to remove rather than only saying the
+/// value is not a deque.
+fn deque_budget_error(span: Span, length: usize) -> Error {
     Error::Runtime(
-        "a deque is a record made by collections.deque".to_string(),
+        format!("a deque holds at most {MAX_DEQUE_ITEMS} items, but this one would hold {length}"),
         span,
     )
 }
@@ -1901,24 +1910,54 @@ fn deque_value(front: Value, back: Value) -> Value {
     fields.insert("kind".to_string(), Value::Text("deque".to_string()));
     fields.insert("front".to_string(), front);
     fields.insert("back".to_string(), back);
-    Value::record(fields)
+    // An `Object` rather than a `Record` because source cannot build one: a
+    // deque made here is trusted, while a hand-written record with the same
+    // field names is not. Both are accepted by `deque_parts`, but only the
+    // trusted object skips the full tree walk on every operation.
+    Value::object("deque".to_string(), fields)
 }
 
+/// The two stacks of a deque, and whether they came from this module.
+///
+/// A value made by `collections.deque` is an `Object`, which no Redblue source
+/// can construct, so its trees are known good and an operation may trust them.
+/// A hand-written record is still accepted for compatibility and for the
+/// forged-tree tests, but it is validated all the way down before use: its
+/// `size` fields may disagree with its children, and walking every node is what
+/// refuses it rather than trusting a `kind` a program can write.
 fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
-    let Value::Record(fields) = deque else {
-        return Err(deque_error(span));
-    };
-    let Some(Value::Text(kind)) = fields.get("kind") else {
-        return Err(deque_error(span));
-    };
-    if kind != "deque" {
-        return Err(deque_error(span));
-    }
-    let Some(front) = fields.get("front") else {
-        return Err(deque_error(span));
-    };
-    let Some(back) = fields.get("back") else {
-        return Err(deque_error(span));
+    let (front, back, trusted) = match deque {
+        Value::Object(name, fields) if name == "deque" => {
+            let Some(Value::Text(kind)) = fields.get("kind") else {
+                return Err(deque_error(span));
+            };
+            if kind != "deque" {
+                return Err(deque_error(span));
+            }
+            let Some(front) = fields.get("front") else {
+                return Err(deque_error(span));
+            };
+            let Some(back) = fields.get("back") else {
+                return Err(deque_error(span));
+            };
+            (front, back, true)
+        }
+        Value::Record(fields) => {
+            let Some(Value::Text(kind)) = fields.get("kind") else {
+                return Err(deque_error(span));
+            };
+            if kind != "deque" {
+                return Err(deque_error(span));
+            }
+            let Some(front) = fields.get("front") else {
+                return Err(deque_error(span));
+            };
+            let Some(back) = fields.get("back") else {
+                return Err(deque_error(span));
+            };
+            (front, back, false)
+        }
+        _ => return Err(deque_error(span)),
     };
     if !matches!(front, Value::List(_)) || !matches!(back, Value::List(_)) {
         return Err(deque_error(span));
@@ -1932,9 +1971,11 @@ fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
             let size = stack_tree_budget(span, tree)?;
             total = total.checked_add(size).ok_or_else(|| deque_error(span))?;
             if total > MAX_DEQUE_ITEMS {
-                return Err(deque_error(span));
+                return Err(deque_budget_error(span, total));
             }
-            validate_stack_tree(span, tree)?;
+            if !trusted {
+                validate_stack_tree(span, tree)?;
+            }
         }
     }
     Ok((front.clone(), back.clone()))
@@ -2028,7 +2069,7 @@ fn stack_tree_node_parts(span: Span, tree: &Value) -> Result<StackTreeParts> {
 fn stack_tree_budget(span: Span, tree: &Value) -> Result<usize> {
     let size = stack_tree_size(span, tree)?;
     if size > MAX_DEQUE_ITEMS {
-        return Err(deque_error(span));
+        return Err(deque_budget_error(span, size));
     }
     Ok(size)
 }
@@ -2123,8 +2164,10 @@ fn stack_from_values(values: &[Value]) -> Value {
 }
 
 /// Pushes `value` onto a stack. Two equal-sized top trees merge into one, so the
-/// spine holds O(log n) trees and every node has O(log n) depth. Validation of
-/// the whole deque still reads every physical node before the structural change.
+/// spine holds O(log n) trees and every node has O(log n) depth. Only the top
+/// tree of each spine entry is checked here: a module deque's deeper nodes were
+/// checked when it was built, and `deque_parts` already walked a hand-written
+/// record all the way down before this runs.
 fn stack_cons(span: Span, stack: &Value, value: Value) -> Result<Value> {
     let Value::List(trees) = stack else {
         return Err(deque_error(span));
@@ -2186,12 +2229,12 @@ fn stack_pop_order(span: Span, stack: &Value) -> Result<Vec<Value>> {
             .checked_add(size)
             .ok_or_else(|| deque_error(span))?;
         if total > MAX_DEQUE_ITEMS {
-            return Err(deque_error(span));
+            return Err(deque_budget_error(span, total));
         }
         let mut pending = vec![tree.clone()];
         while let Some(node) = pending.pop() {
             if values.len() == MAX_DEQUE_ITEMS {
-                return Err(deque_error(span));
+                return Err(deque_budget_error(span, MAX_DEQUE_ITEMS + 1));
             }
             let parts = stack_tree_node_parts(span, &node)?;
             values.push(parts.value);
@@ -2580,20 +2623,25 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 span,
             )),
         },
-        // A deque is a record of two persistent stacks, `front` and `back`. The
-        // front stack holds its items in reverse. Each stack is a spine of
-        // complete binary trees, so the structural change for a push or pop
-        // touches O(log n) nodes instead of rebuilding an n-deep chain of
-        // `{value, next}` records; validation reads every node first. Reversing one
-        // side into the other when it empties reads that side's pop order once
-        // and builds the other side in one pass, so it is linear in the side's
-        // length and amortised over the pops that emptied it.
+        // A deque is an opaque object holding two persistent stacks, `front`
+        // and `back`. The front stack holds its items in reverse. Each stack is
+        // a spine of complete binary trees, so the structural change for a push
+        // or pop touches O(log n) nodes instead of rebuilding an n-deep chain of
+        // `{value, next}` records. Because source cannot build the object, its
+        // trees are trusted after construction; a hand-written record with the
+        // same fields is validated all the way down before use instead.
+        // Reversing one side into the other when it empties reads that side's
+        // pop order once and builds the other side in one pass, so it is linear
+        // in the side's length and amortised over the pops that emptied it.
         "collections_deque" => match args {
             [] => Ok(Some(deque_value(
                 Value::list(Vec::new()),
                 Value::list(Vec::new()),
             ))),
             [Value::List(items)] => {
+                if items.len() > MAX_DEQUE_ITEMS {
+                    return Err(deque_budget_error(span, items.len()));
+                }
                 // The stack pops the last item of the list first, so its pop
                 // order is the list reversed.
                 let pop_order = items.iter().rev().cloned().collect::<Vec<_>>();
@@ -2609,7 +2657,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             [deque, value] => {
                 let (front, back) = deque_parts(span, deque)?;
                 let front = stack_cons(span, &front, value.clone())?;
-                Ok(Some(deque_value(front, back)))
+                let updated = deque_value(front, back);
+                deque_parts(span, &updated)?;
+                Ok(Some(updated))
             }
             _ => Err(Error::Runtime(
                 "collections.push_left requires a deque and a value".to_string(),
@@ -2620,7 +2670,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             [deque, value] => {
                 let (front, back) = deque_parts(span, deque)?;
                 let back = stack_cons(span, &back, value.clone())?;
-                Ok(Some(deque_value(front, back)))
+                let updated = deque_value(front, back);
+                deque_parts(span, &updated)?;
+                Ok(Some(updated))
             }
             _ => Err(Error::Runtime(
                 "collections.push_right requires a deque and a value".to_string(),
@@ -3119,7 +3171,8 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            Ok(Some(Value::Text(json_stringify(&value))))
+            let text = json_stringify(&value).map_err(|message| Error::Runtime(message, span))?;
+            Ok(Some(Value::Text(text)))
         }
         "csv_parse" => {
             let text = match args.first() {
@@ -3863,19 +3916,20 @@ fn split_json_elements(content: &str) -> Vec<&str> {
     split_json_pairs(content)
 }
 
-/// Writes `value` as JSON, on one line.
+/// Writes `value` as JSON, on one line, or refuses an opaque deque.
 ///
 /// `pub(crate)` because the REPL's `.json` command prints the same document:
 /// one writer means the REPL and `json.stringify` cannot disagree about what
-/// a value looks like in JSON.
-pub(crate) fn json_stringify(value: &Value) -> String {
+/// a value looks like in JSON. A deque has no JSON form, and writing `null`
+/// for one would say it is `nothing`, so it is refused instead.
+pub(crate) fn json_stringify(value: &Value) -> std::result::Result<String, String> {
     match value {
-        Value::Nothing => "null".to_string(),
+        Value::Nothing => Ok("null".to_string()),
         Value::YesNo(b) => {
             if *b {
-                "true".to_string()
+                Ok("true".to_string())
             } else {
-                "false".to_string()
+                Ok("false".to_string())
             }
         }
         Value::Number(n) => {
@@ -3883,30 +3937,42 @@ pub(crate) fn json_stringify(value: &Value) -> String {
             // written as `null`, which is what every JSON writer emits for one.
             // No Redblue program can reach this branch: see SPEC.md.
             if !n.is_finite() {
-                "null".to_string()
+                Ok("null".to_string())
             } else if n.fract() == 0.0 && n.abs() < 1e15 {
-                format!("{}", *n as i64)
+                Ok(format!("{}", *n as i64))
             } else {
-                format!("{}", n)
+                Ok(format!("{}", n))
             }
         }
-        Value::Text(s) => json_escape_text(s),
+        Value::Text(s) => Ok(json_escape_text(s)),
         Value::List(items) => {
-            let elements: Vec<String> = items.iter().map(json_stringify).collect();
-            format!("[{}]", elements.join(", "))
+            let elements = items
+                .iter()
+                .map(json_stringify)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(format!("[{}]", elements.join(", ")))
         }
         Value::Record(fields) => {
-            let pairs: Vec<String> = fields
-                .iter()
-                .map(|(k, v)| format!("{}: {}", json_escape_text(k), json_stringify(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
+            let mut pairs = Vec::with_capacity(fields.len());
+            for (key, field) in fields.iter() {
+                pairs.push(format!(
+                    "{}: {}",
+                    json_escape_text(key),
+                    json_stringify(field)?
+                ));
+            }
+            Ok(format!("{{{}}}", pairs.join(", ")))
         }
-        Value::Function(_) => "null".to_string(),
-        Value::Builtin(_) => "null".to_string(),
-        Value::Object(_, _) => "null".to_string(),
-        Value::Date(date) => json_escape_text(&crate::value::date_text(*date)),
-        Value::Duration(duration) => format!("{}", duration.as_seconds_f64()),
+        Value::Function(_) => Ok("null".to_string()),
+        Value::Builtin(_) => Ok("null".to_string()),
+        Value::Object(name, _) if name == "deque" => Err(
+            "JSON has no literal for a deque, and null would say 'nothing' about a \
+             value that is not nothing"
+                .to_string(),
+        ),
+        Value::Object(_, _) => Ok("null".to_string()),
+        Value::Date(date) => Ok(json_escape_text(&crate::value::date_text(*date))),
+        Value::Duration(duration) => Ok(format!("{}", duration.as_seconds_f64())),
     }
 }
 
@@ -3926,7 +3992,7 @@ mod tests {
             (f64::NEG_INFINITY, "negative infinity"),
         ] {
             assert_eq!(
-                json_stringify(&Value::Number(value)),
+                json_stringify(&Value::Number(value)).unwrap(),
                 "null",
                 "{} must be written as null, not as a JSON number",
                 what
@@ -3934,11 +4000,11 @@ mod tests {
         }
         // The widest finite numbers are numbers, and must not be nulled.
         for finite in [f64::MAX, f64::MIN, f64::MIN_POSITIVE, 0.0, -0.0, 1.5] {
-            let written = json_stringify(&Value::Number(finite));
+            let written = json_stringify(&Value::Number(finite)).unwrap();
             assert_ne!(written, "null", "{} should still be written", finite);
         }
-        assert_eq!(json_stringify(&Value::Number(42.0)), "42");
-        assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
+        assert_eq!(json_stringify(&Value::Number(42.0)).unwrap(), "42");
+        assert_eq!(json_stringify(&Value::Number(1.5)).unwrap(), "1.5");
     }
 
     /// A cache key cannot use the language's `is` for a function: that compares

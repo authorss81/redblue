@@ -282,37 +282,49 @@ fn edge_a_malformed_defaultdict_is_refused() {
 #[test]
 fn edge_a_malformed_deque_is_refused() {
     both_refuse("say collections.deque(1)", "zero or one list");
-    both_refuse("say collections.push_left(1, 2)", "deque is a record");
-    both_refuse("say collections.pop_left(1)", "deque is a record");
-    both_refuse("say collections.pop_left({})", "deque is a record");
-    both_refuse("say collections.push_left({}, 1)", "deque is a record");
+    both_refuse(
+        "say collections.push_left(1, 2)",
+        "value made by collections.deque",
+    );
+    both_refuse(
+        "say collections.pop_left(1)",
+        "value made by collections.deque",
+    );
+    both_refuse(
+        "say collections.pop_left({})",
+        "value made by collections.deque",
+    );
+    both_refuse(
+        "say collections.push_left({}, 1)",
+        "value made by collections.deque",
+    );
     both_refuse(
         "say collections.pop_left(collections.namedtuple([\"front\", \"back\"], [[], []]))",
-        "deque is a record",
+        "value made by collections.deque",
     );
     both_refuse(
         "say collections.pop_left(collections.namedtuple([\"kind\", \"front\"], [\"deque\", []]))",
-        "deque is a record",
+        "value made by collections.deque",
     );
     both_refuse(
         "say collections.pop_left(collections.namedtuple([\"kind\", \"front\", \"back\"], [\"deque\", 1, []]))",
-        "deque is a record",
+        "value made by collections.deque",
     );
     both_refuse(
         "set q to collections.namedtuple([\"kind\", \"front\", \"back\"], [\"deque\", [1], []])\n\
          say collections.push_left(q, 2)",
-        "deque is a record",
+        "value made by collections.deque",
     );
     both_refuse(
         "set q to collections.namedtuple([\"kind\", \"front\", \"back\"], [\"deque\", [], [1]])\n\
          say collections.push_right(q, 2)",
-        "deque is a record",
+        "value made by collections.deque",
     );
     both_refuse(
         "set q to collections.namedtuple([\"kind\", \"front\", \"back\"], \
          [\"deque\", [], [{size: 1, value: 1}, {size: 1, value: 2}, 3]])\n\
          say collections.push_right(q, 4)",
-        "deque is a record",
+        "value made by collections.deque",
     );
 }
 
@@ -408,15 +420,86 @@ fn builtin_value(name: &str, args: &[Value]) -> Value {
         .unwrap_or_else(|| panic!("{name} should be a builtin"))
 }
 
+/// A named record made through the same builtin a program uses.
+#[track_caller]
+fn named_record(names: &[&str], values: Vec<Value>) -> Value {
+    builtin_value(
+        "collections_namedtuple",
+        &[
+            Value::list(
+                names
+                    .iter()
+                    .map(|name| Value::Text((*name).to_string()))
+                    .collect(),
+            ),
+            Value::list(values),
+        ],
+    )
+}
+
+/// A structurally valid perfect tree whose two children are the same node.
+///
+/// Sharing the child keeps the physical node count logarithmic while its
+/// `size` still claims every logical item, which is how a forged record can sit
+/// exactly at the deque budget without allocating a million records.
+fn forged_shared_tree(size: usize) -> Value {
+    assert!(
+        size >= 1 && (size + 1).is_power_of_two(),
+        "a perfect tree size is 2^k - 1, got {size}"
+    );
+    let mut node = named_record(
+        &["size", "value"],
+        vec![Value::Number(1.0), Value::Number(0.0)],
+    );
+    let mut current = 1usize;
+    while current < size {
+        current = current * 2 + 1;
+        node = named_record(
+            &["size", "value", "left", "right"],
+            vec![
+                Value::Number(current as f64),
+                Value::Number(0.0),
+                node.clone(),
+                node,
+            ],
+        );
+    }
+    node
+}
+
+/// A forged record whose two ends hold exactly `MAX_DEQUE_ITEMS` logical items.
+fn forged_deque_at_cap() -> Value {
+    let mut remaining = 1_000_000usize;
+    let mut trees = Vec::new();
+    while remaining > 0 {
+        let mut size = 1usize;
+        while size * 2 < remaining {
+            size = size * 2 + 1;
+        }
+        trees.push(forged_shared_tree(size));
+        remaining -= size;
+    }
+    named_record(
+        &["kind", "front", "back"],
+        vec![
+            Value::Text("deque".to_string()),
+            Value::list(trees),
+            Value::list(Vec::new()),
+        ],
+    )
+}
+
 /// One field of a record value.
 #[track_caller]
 fn record_field<'a>(value: &'a Value, name: &str) -> &'a Value {
-    match value {
-        Value::Record(fields) => fields
-            .get(name)
-            .unwrap_or_else(|| panic!("record has no field '{name}': {value:?}")),
-        other => panic!("expected a record, got {other:?}"),
-    }
+    let fields = match value {
+        Value::Record(fields) => fields,
+        Value::Object(_, fields) => fields,
+        other => panic!("expected a record or object, got {other:?}"),
+    };
+    fields
+        .get(name)
+        .unwrap_or_else(|| panic!("value has no field '{name}': {value:?}"))
 }
 
 /// The identity of every tree node at both ends of a deque.
@@ -731,7 +814,7 @@ fn edge_a_forged_deque_tree_with_a_wrong_size_is_refused() {
         "a tree whose size disagrees with its children must be refused rather \
          than popped"
     );
-    both_refuse(source, "deque is a record");
+    both_refuse(source, "value made by collections.deque");
 }
 
 #[test]
@@ -749,7 +832,7 @@ fn edge_a_forged_deque_tree_with_a_self_consistent_root_but_malformed_children_i
          children are themselves malformed must be refused by the first pop, \
          not answered and refused only by a later operation"
     );
-    both_refuse(source, "deque is a record");
+    both_refuse(source, "value made by collections.deque");
 }
 
 #[test]
@@ -797,5 +880,199 @@ fn edge_a_forged_deque_tree_beyond_the_node_budget_is_refused_before_it_is_walke
                   set q to collections.namedtuple(\
                   [\"kind\", \"front\", \"back\"], [\"deque\", [node], []])\n\
                   say collections.pop_left(q)";
-    both_refuse(source, "deque is a record");
+    both_refuse(source, "holds at most 1000000 items");
+}
+
+#[test]
+fn edge_a_deque_is_an_opaque_value_rather_than_a_forgeable_record() {
+    let deque = builtin_value(
+        "collections_deque",
+        &[Value::list(vec![
+            Value::Number(1.0),
+            Value::Number(2.0),
+            Value::Number(3.0),
+        ])],
+    );
+    assert!(
+        matches!(&deque, Value::Object(name, _) if name == "deque"),
+        "a deque must be an opaque value made by the module, not a record whose \
+         trees a program can replace: {deque:?}"
+    );
+    let popped = builtin_value("collections_pop_left", &[deque]);
+    assert_eq!(record_field(&popped, "value"), &Value::Number(1.0));
+    let popped = builtin_value(
+        "collections_pop_right",
+        &[record_field(&popped, "deque").clone()],
+    );
+    assert_eq!(record_field(&popped, "value"), &Value::Number(3.0));
+}
+
+#[test]
+fn edge_an_object_named_deque_still_needs_the_kind_marker() {
+    for (how, fields) in [
+        (
+            "without a kind",
+            named_record(
+                &["front", "back"],
+                vec![Value::list(Vec::new()), Value::list(Vec::new())],
+            ),
+        ),
+        (
+            "with the wrong kind",
+            named_record(
+                &["kind", "front", "back"],
+                vec![
+                    Value::Text("not a deque".to_string()),
+                    Value::list(Vec::new()),
+                    Value::list(Vec::new()),
+                ],
+            ),
+        ),
+    ] {
+        let Value::Record(fields) = fields else {
+            panic!("named_record builds a record")
+        };
+        let forged = Value::object("deque".to_string(), (*fields).clone());
+        let error = redblue::stdlib::builtin(Span::new(1, 1), "collections_pop_left", &[forged])
+            .expect_err("an object named deque must still carry the kind marker");
+        assert!(
+            error
+                .to_string()
+                .contains("value made by collections.deque"),
+            "an object named deque {how} must not be trusted: {error}"
+        );
+    }
+}
+
+#[test]
+fn edge_a_forged_deque_record_with_a_malformed_grandchild_is_refused() {
+    let source = "set bad to collections.namedtuple([\"size\", \"value\"], [3, 9])\n\
+                  set middle to collections.namedtuple(\
+                  [\"size\", \"value\", \"left\", \"right\"], [7, 1, bad, bad])\n\
+                  set root to collections.namedtuple(\
+                  [\"size\", \"value\", \"left\", \"right\"], [15, 2, middle, middle])\n\
+                  set q to collections.namedtuple(\
+                  [\"kind\", \"front\", \"back\"], [\"deque\", [root], []])\n\
+                  say collections.pop_left(q)";
+    let refused = redblue::run_source_value(source);
+    assert!(
+        refused.is_err(),
+        "a hand-written deque record must be validated all the way down, so a \
+         malformed grandchild is refused before the first pop"
+    );
+    both_refuse(source, "value made by collections.deque");
+}
+
+#[test]
+fn edge_a_deque_of_many_items_keeps_order_through_both_ends() {
+    let n = 1500usize;
+    let value = both(&format!(
+        "set q to collections.deque([])\n\
+         set i to 0\n\
+         repeat {n} times\n\
+             set q to collections.push_right(q, i)\n\
+             set i to i + 1\n\
+         end\n\
+         set left_total to 0\n\
+         repeat {n} times\n\
+             set p to collections.pop_left(q)\n\
+             set left_total to left_total + p.value\n\
+             set q to p.deque\n\
+         end\n\
+         set left_empty to collections.pop_left(q).value\n\
+         set q to collections.deque([])\n\
+         set i to 0\n\
+         repeat {n} times\n\
+             set q to collections.push_left(q, i)\n\
+             set i to i + 1\n\
+         end\n\
+         set right_total to 0\n\
+         repeat {n} times\n\
+             set p to collections.pop_right(q)\n\
+             set right_total to right_total + p.value\n\
+             set q to p.deque\n\
+         end\n\
+         [left_total, right_total, left_empty, collections.pop_right(q).value]"
+    ));
+    let sum = (n * (n - 1) / 2).to_string();
+    assert_eq!(
+        value.to_string(),
+        format!("[{sum}, {sum}, nothing, nothing]"),
+        "a large deque must keep its order through both ends, and both ends must \
+         answer nothing once the deque is empty"
+    );
+}
+
+#[test]
+fn edge_a_deque_constructor_refuses_more_items_than_the_budget() {
+    let items = (0..=1_000_000)
+        .map(|n| Value::Number(n as f64))
+        .collect::<Vec<_>>();
+    let error =
+        redblue::stdlib::builtin(Span::new(1, 1), "collections_deque", &[Value::list(items)])
+            .expect_err("a list longer than the deque budget must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("holds at most 1000000 items"),
+        "the constructor must enforce the same budget every operation does, \
+         rather than build a deque no operation can use: {error}"
+    );
+    assert!(
+        message.contains("1000001"),
+        "the refusal must name the supplied length so the user knows how many \
+         items to remove: {error}"
+    );
+}
+
+#[test]
+fn edge_a_deque_at_the_cap_refuses_another_push() {
+    let items = (0..1_000_000)
+        .map(|n| Value::Number(n as f64))
+        .collect::<Vec<_>>();
+    let deque = builtin_value("collections_deque", &[Value::list(items)]);
+    for name in ["collections_push_left", "collections_push_right"] {
+        let error =
+            redblue::stdlib::builtin(Span::new(1, 1), name, &[deque.clone(), Value::Number(0.0)])
+                .expect_err("a push at the deque budget must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("holds at most 1000000 items"),
+            "{name} must name the limit when a push would cross it: {error}"
+        );
+        assert!(
+            message.contains("1000001"),
+            "{name} must name the length the push would produce: {error}"
+        );
+    }
+}
+
+#[test]
+fn edge_a_forged_deque_record_at_the_cap_refuses_another_push() {
+    let deque = forged_deque_at_cap();
+    for name in ["collections_push_left", "collections_push_right"] {
+        let error =
+            redblue::stdlib::builtin(Span::new(1, 1), name, &[deque.clone(), Value::Number(0.0)])
+                .expect_err("a push on a forged record at the deque budget must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("holds at most 1000000 items"),
+            "{name} must name the limit when a forged record at the cap is pushed: {error}"
+        );
+        assert!(
+            message.contains("1000001"),
+            "{name} must name the length the push would produce: {error}"
+        );
+    }
+}
+
+#[test]
+fn edge_json_stringify_refuses_a_deque_rather_than_writing_null() {
+    both_refuse(
+        "set q to collections.deque([1, 2])\nsay json.stringify(q)",
+        "JSON has no literal for a deque",
+    );
+    both_refuse(
+        "set q to collections.deque([1, 2])\nsay json.stringify({held: q})",
+        "JSON has no literal for a deque",
+    );
 }

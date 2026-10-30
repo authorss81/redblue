@@ -1431,15 +1431,23 @@ copy of it: `collections.defaultdict([])` gives each new key its own empty list,
 and a program that wants a different value for each key writes it with
 `collections.put`.
 
-A deque is an opaque record of two persistent stacks, `front` and `back`, with
-the front stack holding its items in reverse. Each stack is a spine of complete
-binary trees rather than one record per item, so the nesting depth of a deque of
-n items is logarithmic and a program can say, compare or drop a large deque
-without recursing once per item. A pop answers `{value, deque}` so the shorter
-deque is the one to bind; an empty deque answers `nothing` as the value rather
-than refusing. This is what a list work queue does not have: `shift` reads the
-first item but does not remove it, so the only removal from the front is
-`skip(xs, 1)`, which copies the rest of the list on every call.
+A deque is an opaque value holding two persistent stacks, `front` and `back`,
+with the front stack holding its items in reverse. A deque made by
+`collections.deque` is an object source cannot construct, so its trees are
+trusted and an operation does not walk them again; a hand-written record
+carrying `kind: "deque"`, `front` and `back` is still read, but every node is
+validated before use. Each stack is a spine of complete binary trees rather
+than one record per item, so the nesting depth of a deque of n items is
+logarithmic and a program can say, compare or drop a large deque without
+recursing once per item. A deque holds at most 1,000,000 items: the constructor
+and every push refuse a larger one, so a deque that exists is one every
+operation can use. A pop answers `{value, deque}` so the shorter deque is the
+one to bind; an empty deque answers `nothing` as the value rather than refusing.
+This is what a list work queue does not have: `shift` reads the first item but
+does not remove it, so the only removal from the front is `skip(xs, 1)`, which
+copies the rest of the list on every call. A deque has no JSON form, so
+`json.stringify` refuses one rather than writing `null`, which would say it is
+`nothing`; the REPL's `.json` refuses it for the same reason.
 
 A named tuple is an ordinary record whose fields are named at run time:
 `collections.namedtuple(names, values)` refuses a name that is not text, a
