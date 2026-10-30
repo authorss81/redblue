@@ -26,7 +26,7 @@ use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, T
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
-use crate::value::Value;
+use crate::value::{Fields, Value};
 
 /// Parses a module file into the program its top level declares.
 ///
@@ -1771,6 +1771,388 @@ fn group_function_hash(function: &crate::value::FunctionValue) -> u64 {
     hash
 }
 
+/// The `[key, value]` pairs a Counter or a defaultdict stores.
+fn collection_pairs(span: Span, value: &Value, what: &str) -> Result<Vec<(Value, Value)>> {
+    let Value::List(pairs) = value else {
+        return Err(Error::Runtime(
+            format!("{what} requires a list of [key, value] pairs"),
+            span,
+        ));
+    };
+    let mut out = Vec::with_capacity(pairs.len());
+    for pair in pairs.iter() {
+        let Value::List(pair) = pair else {
+            return Err(Error::Runtime(
+                format!("{what} requires [key, value] pairs"),
+                span,
+            ));
+        };
+        let [key, value] = pair.as_slice() else {
+            return Err(Error::Runtime(
+                format!("{what} requires [key, value] pairs"),
+                span,
+            ));
+        };
+        out.push((key.clone(), value.clone()));
+    }
+    Ok(out)
+}
+
+fn counter_value(pairs: Vec<(Value, Value)>) -> Value {
+    let counts = pairs
+        .into_iter()
+        .map(|(key, count)| Value::list(vec![key, count]))
+        .collect();
+    let mut fields = Fields::new();
+    fields.insert("counts".to_string(), Value::list(counts));
+    fields.insert("missing".to_string(), Value::Number(0.0));
+    Value::record(fields)
+}
+
+fn counter_parts(span: Span, counter: &Value) -> Result<(Vec<(Value, Value)>, Value)> {
+    let Value::Record(fields) = counter else {
+        return Err(Error::Runtime(
+            "a counter is a record made by collections.counter".to_string(),
+            span,
+        ));
+    };
+    let Some(counts) = fields.get("counts") else {
+        return Err(Error::Runtime(
+            "a counter is a record made by collections.counter".to_string(),
+            span,
+        ));
+    };
+    let pairs = collection_pairs(span, counts, "a counter")?;
+    for (_, count) in &pairs {
+        counter_number(span, count)?;
+    }
+    let Some(missing) = fields.get("missing") else {
+        return Err(Error::Runtime(
+            "a counter is a record made by collections.counter".to_string(),
+            span,
+        ));
+    };
+    Ok((pairs, missing.clone()))
+}
+
+fn counter_number(span: Span, value: &Value) -> Result<f64> {
+    match value {
+        Value::Number(number) if number.is_finite() && *number >= 0.0 && number.fract() == 0.0 => {
+            Ok(*number)
+        }
+        _ => Err(Error::Runtime(
+            "a counter's count must be a non-negative integer".to_string(),
+            span,
+        )),
+    }
+}
+
+fn defaultdict_value(pairs: Vec<(Value, Value)>, factory: Value) -> Value {
+    let entries = pairs
+        .into_iter()
+        .map(|(key, value)| Value::list(vec![key, value]))
+        .collect();
+    let mut fields = Fields::new();
+    fields.insert("entries".to_string(), Value::list(entries));
+    fields.insert("factory".to_string(), factory);
+    Value::record(fields)
+}
+
+fn defaultdict_parts(span: Span, dictionary: &Value) -> Result<(Vec<(Value, Value)>, Value)> {
+    let Value::Record(fields) = dictionary else {
+        return Err(Error::Runtime(
+            "a defaultdict is a record made by collections.defaultdict".to_string(),
+            span,
+        ));
+    };
+    let Some(entries) = fields.get("entries") else {
+        return Err(Error::Runtime(
+            "a defaultdict is a record made by collections.defaultdict".to_string(),
+            span,
+        ));
+    };
+    let pairs = collection_pairs(span, entries, "a defaultdict")?;
+    let Some(factory) = fields.get("factory") else {
+        return Err(Error::Runtime(
+            "a defaultdict is a record made by collections.defaultdict".to_string(),
+            span,
+        ));
+    };
+    Ok((pairs, factory.clone()))
+}
+
+fn defaultdict_answer(value: Value, dictionary: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("value".to_string(), value);
+    fields.insert("dict".to_string(), dictionary);
+    Value::record(fields)
+}
+
+fn deque_error(span: Span) -> Error {
+    Error::Runtime(
+        "a deque is a record made by collections.deque".to_string(),
+        span,
+    )
+}
+
+fn deque_value(front: Value, back: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("kind".to_string(), Value::Text("deque".to_string()));
+    fields.insert("front".to_string(), front);
+    fields.insert("back".to_string(), back);
+    Value::record(fields)
+}
+
+fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
+    let Value::Record(fields) = deque else {
+        return Err(deque_error(span));
+    };
+    let Some(Value::Text(kind)) = fields.get("kind") else {
+        return Err(deque_error(span));
+    };
+    if kind != "deque" {
+        return Err(deque_error(span));
+    }
+    let Some(front) = fields.get("front") else {
+        return Err(deque_error(span));
+    };
+    let Some(back) = fields.get("back") else {
+        return Err(deque_error(span));
+    };
+    if !matches!(front, Value::List(_)) || !matches!(back, Value::List(_)) {
+        return Err(deque_error(span));
+    }
+    for stack in [front, back] {
+        let Value::List(trees) = stack else {
+            return Err(deque_error(span));
+        };
+        for tree in trees.iter() {
+            stack_tree_parts(span, tree)?;
+        }
+    }
+    Ok((front.clone(), back.clone()))
+}
+
+/// The size of one node in a deque's persistent stack.
+fn stack_tree_size(span: Span, tree: &Value) -> Result<usize> {
+    let Value::Record(fields) = tree else {
+        return Err(deque_error(span));
+    };
+    let Some(Value::Number(size)) = fields.get("size") else {
+        return Err(deque_error(span));
+    };
+    if !size.is_finite() || *size < 1.0 || size.fract() != 0.0 || *size > usize::MAX as f64 {
+        return Err(deque_error(span));
+    }
+    Ok(*size as usize)
+}
+
+/// A leaf stack node holding `value`.
+fn stack_tree(value: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("size".to_string(), Value::Number(1.0));
+    fields.insert("value".to_string(), value);
+    Value::record(fields)
+}
+
+/// An internal stack node holding `value` and two equal-sized child trees.
+fn stack_node(value: Value, left: Value, right: Value, size: usize) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("size".to_string(), Value::Number(size as f64));
+    fields.insert("value".to_string(), value);
+    fields.insert("left".to_string(), left);
+    fields.insert("right".to_string(), right);
+    Value::record(fields)
+}
+
+struct StackTreeParts {
+    value: Value,
+    children: Option<(Value, Value)>,
+}
+
+/// One stack node's value and children, refusing a malformed node.
+fn stack_tree_parts(span: Span, tree: &Value) -> Result<StackTreeParts> {
+    let Value::Record(fields) = tree else {
+        return Err(deque_error(span));
+    };
+    let Some(value) = fields.get("value") else {
+        return Err(deque_error(span));
+    };
+    let size = stack_tree_size(span, tree)?;
+    match (fields.get("left"), fields.get("right")) {
+        (None, None) => {
+            if size != 1 {
+                return Err(deque_error(span));
+            }
+            Ok(StackTreeParts {
+                value: value.clone(),
+                children: None,
+            })
+        }
+        (Some(left), Some(right)) => {
+            let left_size = stack_tree_size(span, left)?;
+            let right_size = stack_tree_size(span, right)?;
+            let expected = left_size
+                .checked_add(right_size)
+                .and_then(|size| size.checked_add(1))
+                .ok_or_else(|| deque_error(span))?;
+            if left_size != right_size || size != expected {
+                return Err(deque_error(span));
+            }
+            Ok(StackTreeParts {
+                value: value.clone(),
+                children: Some((left.clone(), right.clone())),
+            })
+        }
+        _ => Err(deque_error(span)),
+    }
+}
+
+/// The largest perfect tree size (`2^k - 1`) that fits in `items`.
+fn largest_perfect_size(items: usize) -> usize {
+    let mut size = 1;
+    while size * 2 < items {
+        size = size * 2 + 1;
+    }
+    size
+}
+
+/// A perfect tree whose pop order is `values`.
+///
+/// `values` has `2^k - 1` items, so the root is the first to pop and the two
+/// equal halves are the left and right subtrees. Building it directly costs one
+/// visit per item; pushing the same items one at a time costs a spine copy per
+/// push.
+fn stack_tree_from_values(values: &[Value]) -> Value {
+    if values.len() == 1 {
+        return stack_tree(values[0].clone());
+    }
+    let half = values.len() / 2;
+    let left = stack_tree_from_values(&values[1..=half]);
+    let right = stack_tree_from_values(&values[half + 1..]);
+    stack_node(values[0].clone(), left, right, values.len())
+}
+
+/// A stack whose pop order is `values`, built in one pass.
+///
+/// The forest uses the largest perfect tree that fits at each step, so
+/// `collections.deque(list)` is linear in the list's length rather than paying
+/// a spine copy for every item. Each tree still validates through the same
+/// `stack_tree_parts` a pushed stack does.
+fn stack_from_values(values: &[Value]) -> Value {
+    let mut trees = Vec::new();
+    let mut rest = values;
+    while !rest.is_empty() {
+        let size = largest_perfect_size(rest.len());
+        let (head, tail) = rest.split_at(size);
+        trees.push(stack_tree_from_values(head));
+        rest = tail;
+    }
+    Value::list(trees)
+}
+
+/// Pushes `value` onto a stack. Two equal-sized top trees merge into one, so the
+/// spine holds O(log n) trees and every node has O(log n) depth.
+fn stack_cons(span: Span, stack: &Value, value: Value) -> Result<Value> {
+    let Value::List(trees) = stack else {
+        return Err(deque_error(span));
+    };
+    for tree in trees.iter() {
+        stack_tree_parts(span, tree)?;
+    }
+    let mut trees = trees.as_ref().clone();
+    if trees.len() >= 2 {
+        let first_size = stack_tree_size(span, &trees[0])?;
+        let second_size = stack_tree_size(span, &trees[1])?;
+        if first_size == second_size {
+            let left = trees.remove(0);
+            let right = trees.remove(0);
+            let size = first_size
+                .checked_add(second_size)
+                .and_then(|size| size.checked_add(1))
+                .ok_or_else(|| deque_error(span))?;
+            trees.insert(0, stack_node(value, left, right, size));
+            return Ok(Value::list(trees));
+        }
+    }
+    trees.insert(0, stack_tree(value));
+    Ok(Value::list(trees))
+}
+
+/// Pops the top of a stack, answering `None` when it is empty.
+fn stack_uncons(span: Span, stack: &Value) -> Result<Option<(Value, Value)>> {
+    let Value::List(trees) = stack else {
+        return Err(deque_error(span));
+    };
+    let Some(first) = trees.first() else {
+        return Ok(None);
+    };
+    let parts = stack_tree_parts(span, first)?;
+    let rest = trees.iter().skip(1).cloned().collect::<Vec<_>>();
+    match parts.children {
+        None => Ok(Some((parts.value, Value::list(rest)))),
+        Some((left, right)) => {
+            let mut next = Vec::with_capacity(rest.len() + 2);
+            next.push(left);
+            next.push(right);
+            next.extend(rest);
+            Ok(Some((parts.value, Value::list(next))))
+        }
+    }
+}
+
+/// Every value a stack holds, in the order it would pop them.
+fn stack_pop_order(span: Span, stack: &Value) -> Result<Vec<Value>> {
+    let Value::List(trees) = stack else {
+        return Err(deque_error(span));
+    };
+    let mut values = Vec::new();
+    for tree in trees.iter() {
+        let mut pending = vec![tree.clone()];
+        while let Some(node) = pending.pop() {
+            let parts = stack_tree_parts(span, &node)?;
+            values.push(parts.value);
+            if let Some((left, right)) = parts.children {
+                pending.push(right);
+                pending.push(left);
+            }
+        }
+    }
+    Ok(values)
+}
+
+/// Splits the one non-empty stack across both ends when the other end empties.
+///
+/// Moving every item across would make alternating pops at opposite ends
+/// reverse the whole remaining deque on every other pop, which is quadratic.
+/// Keeping roughly half at each end means those pops share the trees they do
+/// not touch, and each remaining item is rebuilt only a constant number of
+/// times as the two ends shrink together.
+fn deque_rebalance(span: Span, stack: &Value, wants_left: bool) -> Result<(Value, Value)> {
+    let mut values = stack_pop_order(span, stack)?;
+    if wants_left {
+        values.reverse();
+    }
+    let front_count = if wants_left {
+        (values.len() + 1) / 2
+    } else {
+        values.len() / 2
+    };
+    let (front_values, back_values) = values.split_at(front_count);
+    let front = stack_from_values(front_values);
+    let mut back_values = back_values.to_vec();
+    back_values.reverse();
+    let back = stack_from_values(&back_values);
+    Ok((front, back))
+}
+
+fn deque_pop(value: Value, deque: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("value".to_string(), value);
+    fields.insert("deque".to_string(), deque);
+    Value::record(fields)
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -1983,6 +2365,277 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             }
             _ => Err(Error::Runtime(
                 "skip requires a list and a number".to_string(),
+                span,
+            )),
+        },
+        // -- collections -------------------------------------------------------
+        //
+        // A Counter is a record `{counts: [[key, count], ...], missing: 0}`.
+        // The pairs are in first-appearance order, so `most_common` can sort
+        // them stably by count and a tie keeps the order its key first appeared
+        // in. The missing value is written into the record rather than assumed,
+        // so `collections.count` answers the record's own documented default.
+        "collections_counter" => match args {
+            [Value::List(items)] => {
+                let mut counts: Vec<(Value, f64)> = Vec::new();
+                let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
+                for item in items.iter() {
+                    let hash = group_value_hash(item);
+                    let existing = index.get(&hash).and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|&candidate| counts[candidate].0 == *item)
+                    });
+                    match existing {
+                        Some(candidate) => counts[candidate].1 += 1.0,
+                        None => {
+                            let candidate = counts.len();
+                            index.entry(hash).or_default().push(candidate);
+                            counts.push((item.clone(), 1.0));
+                        }
+                    }
+                }
+                let pairs = counts
+                    .into_iter()
+                    .map(|(key, count)| (key, Value::Number(count)))
+                    .collect();
+                Ok(Some(counter_value(pairs)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.counter requires one list".to_string(),
+                span,
+            )),
+        },
+        "collections_count" => match args {
+            [counter, key] => {
+                let (pairs, missing) = counter_parts(span, counter)?;
+                let found = pairs
+                    .into_iter()
+                    .find(|(candidate, _)| candidate == key)
+                    .map(|(_, count)| count);
+                Ok(Some(found.unwrap_or(missing)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.count requires a counter and a key".to_string(),
+                span,
+            )),
+        },
+        "collections_most_common" => match args {
+            [counter] => {
+                let (pairs, _) = counter_parts(span, counter)?;
+                let mut ordered: Vec<(Value, f64)> = pairs
+                    .into_iter()
+                    .map(|(key, count)| counter_number(span, &count).map(|count| (key, count)))
+                    .collect::<Result<_>>()?;
+                // A stable sort, so equal counts keep the order their keys first
+                // appeared in the counter rather than an order that depends on
+                // the sort implementation.
+                ordered.sort_by(|left, right| {
+                    right
+                        .1
+                        .partial_cmp(&left.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let answer = ordered
+                    .into_iter()
+                    .map(|(key, count)| Value::list(vec![key, Value::Number(count)]))
+                    .collect();
+                Ok(Some(Value::list(answer)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.most_common requires one counter".to_string(),
+                span,
+            )),
+        },
+        // A defaultdict is a record `{entries: [[key, value], ...], factory}`.
+        // Redblue values are copied, so the factory is a *value*: every entry
+        // the first read creates is a copy of it. That is written down in
+        // SPEC.md rather than left to be discovered.
+        "collections_defaultdict" => match args {
+            [factory] => {
+                let mut fields = Fields::new();
+                fields.insert("entries".to_string(), Value::list(Vec::new()));
+                fields.insert("factory".to_string(), factory.clone());
+                Ok(Some(Value::record(fields)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.defaultdict requires one factory value".to_string(),
+                span,
+            )),
+        },
+        "collections_get" => match args {
+            [dictionary, key] => {
+                let (pairs, factory) = defaultdict_parts(span, dictionary)?;
+                if let Some((_, value)) = pairs.iter().find(|(candidate, _)| candidate == key) {
+                    return Ok(Some(defaultdict_answer(value.clone(), dictionary.clone())));
+                }
+                let value = factory.clone();
+                let mut updated = pairs;
+                updated.push((key.clone(), value.clone()));
+                Ok(Some(defaultdict_answer(
+                    value,
+                    defaultdict_value(updated, factory),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "collections.get requires a defaultdict and a key".to_string(),
+                span,
+            )),
+        },
+        "collections_put" => match args {
+            [dictionary, key, value] => {
+                let (mut pairs, factory) = defaultdict_parts(span, dictionary)?;
+                match pairs.iter_mut().find(|(candidate, _)| candidate == key) {
+                    Some((_, entry)) => *entry = value.clone(),
+                    None => pairs.push((key.clone(), value.clone())),
+                }
+                Ok(Some(defaultdict_value(pairs, factory)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.put requires a defaultdict, a key and a value".to_string(),
+                span,
+            )),
+        },
+        // A deque is a record of two persistent stacks, `front` and `back`. The
+        // front stack holds its items in reverse. Each stack is a spine of
+        // complete binary trees, so a push or pop touches O(log n) nodes instead
+        // of building an n-deep chain of `{value, next}` records. Reversing one
+        // side into the other when it empties reads that side's pop order once
+        // and builds the other side in one pass, so it is linear in the side's
+        // length and amortised over the pops that emptied it.
+        "collections_deque" => match args {
+            [] => Ok(Some(deque_value(
+                Value::list(Vec::new()),
+                Value::list(Vec::new()),
+            ))),
+            [Value::List(items)] => {
+                // The stack pops the last item of the list first, so its pop
+                // order is the list reversed.
+                let pop_order = items.iter().rev().cloned().collect::<Vec<_>>();
+                let back = stack_from_values(&pop_order);
+                Ok(Some(deque_value(Value::list(Vec::new()), back)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.deque requires zero or one list".to_string(),
+                span,
+            )),
+        },
+        "collections_push_left" => match args {
+            [deque, value] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let front = stack_cons(span, &front, value.clone())?;
+                Ok(Some(deque_value(front, back)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.push_left requires a deque and a value".to_string(),
+                span,
+            )),
+        },
+        "collections_push_right" => match args {
+            [deque, value] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let back = stack_cons(span, &back, value.clone())?;
+                Ok(Some(deque_value(front, back)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.push_right requires a deque and a value".to_string(),
+                span,
+            )),
+        },
+        "collections_pop_left" => match args {
+            [deque] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let (value, front, back) = match stack_uncons(span, &front)? {
+                    Some((value, rest)) => (value, rest, back),
+                    None => {
+                        let (front, back) = deque_rebalance(span, &back, true)?;
+                        match stack_uncons(span, &front)? {
+                            Some((value, rest)) => (value, rest, back),
+                            None => (
+                                Value::Nothing,
+                                Value::list(Vec::new()),
+                                Value::list(Vec::new()),
+                            ),
+                        }
+                    }
+                };
+                Ok(Some(deque_pop(value, deque_value(front, back))))
+            }
+            _ => Err(Error::Runtime(
+                "collections.pop_left requires one deque".to_string(),
+                span,
+            )),
+        },
+        "collections_pop_right" => match args {
+            [deque] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let (value, front, back) = match stack_uncons(span, &back)? {
+                    Some((value, rest)) => (value, front, rest),
+                    None => {
+                        let (front, back) = deque_rebalance(span, &front, false)?;
+                        match stack_uncons(span, &back)? {
+                            Some((value, rest)) => (value, front, rest),
+                            None => (
+                                Value::Nothing,
+                                Value::list(Vec::new()),
+                                Value::list(Vec::new()),
+                            ),
+                        }
+                    }
+                };
+                Ok(Some(deque_pop(value, deque_value(front, back))))
+            }
+            _ => Err(Error::Runtime(
+                "collections.pop_right requires one deque".to_string(),
+                span,
+            )),
+        },
+        "collections_namedtuple" => match args {
+            [Value::List(names), Value::List(values)] => {
+                if names.len() != values.len() {
+                    return Err(Error::Runtime(
+                        format!(
+                            "collections.namedtuple needs one value per name: {} names and {} values",
+                            names.len(),
+                            values.len()
+                        ),
+                        span,
+                    ));
+                }
+                let mut fields = Fields::new();
+                for (index, name) in names.iter().enumerate() {
+                    let Value::Text(name) = name else {
+                        return Err(Error::Runtime(
+                            "collections.namedtuple field names must be text".to_string(),
+                            span,
+                        ));
+                    };
+                    if fields.contains_key(name) {
+                        return Err(Error::Runtime(
+                            format!("collections.namedtuple has duplicate field '{name}'"),
+                            span,
+                        ));
+                    }
+                    fields.insert(name.clone(), values[index].clone());
+                }
+                Ok(Some(Value::record(fields)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.namedtuple requires a list of names and a list of values".to_string(),
+                span,
+            )),
+        },
+        "collections_field" => match args {
+            [Value::Record(fields), Value::Text(name)] => match fields.get(name) {
+                Some(value) => Ok(Some(value.clone())),
+                None => Err(Error::Runtime(
+                    format!("Named record has no field '{name}'"),
+                    span,
+                )),
+            },
+            _ => Err(Error::Runtime(
+                "collections.field requires a named record and a text field name".to_string(),
                 span,
             )),
         },

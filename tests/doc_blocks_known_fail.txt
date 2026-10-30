@@ -22,8 +22,8 @@
 #   <doc>:<line><TAB><first line of stderr>
 #
 # COUNTS, as of the run that wrote this file
-#   SPEC.md 7 · PHILOSOPHY.md 1 · HANDOUT.md 6 · docs/GRAMMAR.md 0 · README.md 0
-#   14 of 103 blocks.
+#   SPEC.md 7 · PHILOSOPHY.md 1 · HANDOUT.md 4 · docs/GRAMMAR.md 0 · README.md 0
+#   12 of 110 blocks.
 
 # --- SPEC.md ---------------------------------------------------------------
 

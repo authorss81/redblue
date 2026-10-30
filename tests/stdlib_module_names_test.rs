@@ -1255,6 +1255,11 @@ fn every_module_the_documents_name_answers_a_call() {
             r#"say length(bytes.from_text("hi"))"#.to_string(),
             "2\n".to_string(),
         ),
+        (
+            "collections",
+            r#"say collections.count(collections.counter(["a", "a"]), "a")"#.to_string(),
+            "2\n".to_string(),
+        ),
         // `console.log` writes its argument and answers `nothing`, which `say`
         // then prints. Both lines are in SPEC.md § console.
         (
