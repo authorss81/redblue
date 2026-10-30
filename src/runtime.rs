@@ -1823,6 +1823,9 @@ fn counter_parts(span: Span, counter: &Value) -> Result<(Vec<(Value, Value)>, Va
         ));
     };
     let pairs = collection_pairs(span, counts, "a counter")?;
+    for (_, count) in &pairs {
+        counter_number(span, count)?;
+    }
     let Some(missing) = fields.get("missing") else {
         return Err(Error::Runtime(
             "a counter is a record made by collections.counter".to_string(),
@@ -1834,9 +1837,11 @@ fn counter_parts(span: Span, counter: &Value) -> Result<(Vec<(Value, Value)>, Va
 
 fn counter_number(span: Span, value: &Value) -> Result<f64> {
     match value {
-        Value::Number(number) if number.is_finite() && *number >= 0.0 => Ok(*number),
+        Value::Number(number) if number.is_finite() && *number >= 0.0 && number.fract() == 0.0 => {
+            Ok(*number)
+        }
         _ => Err(Error::Runtime(
-            "a counter's count must be a non-negative number".to_string(),
+            "a counter's count must be a non-negative integer".to_string(),
             span,
         )),
     }
@@ -1917,6 +1922,14 @@ fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
     if !matches!(front, Value::List(_)) || !matches!(back, Value::List(_)) {
         return Err(deque_error(span));
     }
+    for stack in [front, back] {
+        let Value::List(trees) = stack else {
+            return Err(deque_error(span));
+        };
+        for tree in trees.iter() {
+            stack_tree_parts(span, tree)?;
+        }
+    }
     Ok((front.clone(), back.clone()))
 }
 
@@ -1995,12 +2008,58 @@ fn stack_tree_parts(span: Span, tree: &Value) -> Result<StackTreeParts> {
     }
 }
 
+/// The largest perfect tree size (`2^k - 1`) that fits in `items`.
+fn largest_perfect_size(items: usize) -> usize {
+    let mut size = 1;
+    while size * 2 < items {
+        size = size * 2 + 1;
+    }
+    size
+}
+
+/// A perfect tree whose pop order is `values`.
+///
+/// `values` has `2^k - 1` items, so the root is the first to pop and the two
+/// equal halves are the left and right subtrees. Building it directly costs one
+/// visit per item; pushing the same items one at a time costs a spine copy per
+/// push.
+fn stack_tree_from_values(values: &[Value]) -> Value {
+    if values.len() == 1 {
+        return stack_tree(values[0].clone());
+    }
+    let half = values.len() / 2;
+    let left = stack_tree_from_values(&values[1..=half]);
+    let right = stack_tree_from_values(&values[half + 1..]);
+    stack_node(values[0].clone(), left, right, values.len())
+}
+
+/// A stack whose pop order is `values`, built in one pass.
+///
+/// The forest uses the largest perfect tree that fits at each step, so
+/// `collections.deque(list)` is linear in the list's length rather than paying
+/// a spine copy for every item. Each tree still validates through the same
+/// `stack_tree_parts` a pushed stack does.
+fn stack_from_values(values: &[Value]) -> Value {
+    let mut trees = Vec::new();
+    let mut rest = values;
+    while !rest.is_empty() {
+        let size = largest_perfect_size(rest.len());
+        let (head, tail) = rest.split_at(size);
+        trees.push(stack_tree_from_values(head));
+        rest = tail;
+    }
+    Value::list(trees)
+}
+
 /// Pushes `value` onto a stack. Two equal-sized top trees merge into one, so the
 /// spine holds O(log n) trees and every node has O(log n) depth.
 fn stack_cons(span: Span, stack: &Value, value: Value) -> Result<Value> {
     let Value::List(trees) = stack else {
         return Err(deque_error(span));
     };
+    for tree in trees.iter() {
+        stack_tree_parts(span, tree)?;
+    }
     let mut trees = trees.as_ref().clone();
     if trees.len() >= 2 {
         let first_size = stack_tree_size(span, &trees[0])?;
@@ -2042,15 +2101,49 @@ fn stack_uncons(span: Span, stack: &Value) -> Result<Option<(Value, Value)>> {
     }
 }
 
-/// Moves every item from one stack to the other, reversing their order.
-fn deque_reverse(span: Span, stack: &Value) -> Result<Value> {
-    let mut reversed = Value::list(Vec::new());
-    let mut current = stack.clone();
-    while let Some((value, rest)) = stack_uncons(span, &current)? {
-        reversed = stack_cons(span, &reversed, value)?;
-        current = rest;
+/// Every value a stack holds, in the order it would pop them.
+fn stack_pop_order(span: Span, stack: &Value) -> Result<Vec<Value>> {
+    let Value::List(trees) = stack else {
+        return Err(deque_error(span));
+    };
+    let mut values = Vec::new();
+    for tree in trees.iter() {
+        let mut pending = vec![tree.clone()];
+        while let Some(node) = pending.pop() {
+            let parts = stack_tree_parts(span, &node)?;
+            values.push(parts.value);
+            if let Some((left, right)) = parts.children {
+                pending.push(right);
+                pending.push(left);
+            }
+        }
     }
-    Ok(reversed)
+    Ok(values)
+}
+
+/// Splits the one non-empty stack across both ends when the other end empties.
+///
+/// Moving every item across would make alternating pops at opposite ends
+/// reverse the whole remaining deque on every other pop, which is quadratic.
+/// Keeping roughly half at each end means those pops share the trees they do
+/// not touch, and each remaining item is rebuilt only a constant number of
+/// times as the two ends shrink together.
+fn deque_rebalance(span: Span, stack: &Value, wants_left: bool) -> Result<(Value, Value)> {
+    let mut values = stack_pop_order(span, stack)?;
+    if wants_left {
+        values.reverse();
+    }
+    let front_count = if wants_left {
+        (values.len() + 1) / 2
+    } else {
+        values.len() / 2
+    };
+    let (front_values, back_values) = values.split_at(front_count);
+    let front = stack_from_values(front_values);
+    let mut back_values = back_values.to_vec();
+    back_values.reverse();
+    let back = stack_from_values(&back_values);
+    Ok((front, back))
 }
 
 fn deque_pop(value: Value, deque: Value) -> Value {
@@ -2408,18 +2501,19 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         // front stack holds its items in reverse. Each stack is a spine of
         // complete binary trees, so a push or pop touches O(log n) nodes instead
         // of building an n-deep chain of `{value, next}` records. Reversing one
-        // side into the other when it empties is linear once and amortised over
-        // the pops that emptied it.
+        // side into the other when it empties reads that side's pop order once
+        // and builds the other side in one pass, so it is linear in the side's
+        // length and amortised over the pops that emptied it.
         "collections_deque" => match args {
             [] => Ok(Some(deque_value(
                 Value::list(Vec::new()),
                 Value::list(Vec::new()),
             ))),
             [Value::List(items)] => {
-                let mut back = Value::list(Vec::new());
-                for item in items.iter() {
-                    back = stack_cons(span, &back, item.clone())?;
-                }
+                // The stack pops the last item of the list first, so its pop
+                // order is the list reversed.
+                let pop_order = items.iter().rev().cloned().collect::<Vec<_>>();
+                let back = stack_from_values(&pop_order);
                 Ok(Some(deque_value(Value::list(Vec::new()), back)))
             }
             _ => Err(Error::Runtime(
@@ -2455,9 +2549,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 let (value, front, back) = match stack_uncons(span, &front)? {
                     Some((value, rest)) => (value, rest, back),
                     None => {
-                        let reversed = deque_reverse(span, &back)?;
-                        match stack_uncons(span, &reversed)? {
-                            Some((value, rest)) => (value, rest, Value::list(Vec::new())),
+                        let (front, back) = deque_rebalance(span, &back, true)?;
+                        match stack_uncons(span, &front)? {
+                            Some((value, rest)) => (value, rest, back),
                             None => (
                                 Value::Nothing,
                                 Value::list(Vec::new()),
@@ -2479,9 +2573,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 let (value, front, back) = match stack_uncons(span, &back)? {
                     Some((value, rest)) => (value, front, rest),
                     None => {
-                        let reversed = deque_reverse(span, &front)?;
-                        match stack_uncons(span, &reversed)? {
-                            Some((value, rest)) => (value, Value::list(Vec::new()), rest),
+                        let (front, back) = deque_rebalance(span, &front, false)?;
+                        match stack_uncons(span, &back)? {
+                            Some((value, rest)) => (value, front, rest),
                             None => (
                                 Value::Nothing,
                                 Value::list(Vec::new()),

@@ -12,9 +12,12 @@
 //! the test still asks both engines so a future change cannot answer on one and
 //! refuse on the other.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use redblue::bytecode::compile_source;
 use redblue::bytecode::vm::BytecodeVm;
-use redblue::{run_source_value, Value};
+use redblue::{run_source_value, Span, Value};
 
 /// The tree-walking engine's value for `source`.
 #[track_caller]
@@ -145,14 +148,22 @@ fn defaultdict_get_creates_a_missing_entry_and_returns_the_factory_value() {
 }
 
 #[test]
-fn defaultdict_hands_each_missing_key_its_own_copy_of_the_factory_value() {
+fn defaultdict_writes_one_missing_key_without_changing_the_others() {
     let value = both(
         "set d to collections.defaultdict([])\n\
          set first to collections.get(d, \"x\")\n\
          set second to collections.get(first.dict, \"y\")\n\
-         [first.value, second.value]",
+         set changed to collections.put(second.dict, \"x\", 7)\n\
+         set again_x to collections.get(changed, \"x\")\n\
+         set again_y to collections.get(changed, \"y\")\n\
+         [first.value, second.value, again_x.value, again_y.value, changed]",
     );
-    assert_eq!(value.to_string(), "[[], []]");
+    assert_eq!(
+        value.to_string(),
+        "[[], [], 7, [], {entries: [[x, 7], [y, []]], factory: []}]",
+        "each missing key must receive the factory value, and writing one key \
+         must leave the other key's entry unchanged"
+    );
 }
 
 #[test]
@@ -251,7 +262,7 @@ fn edge_a_malformed_counter_is_refused() {
     );
     both_refuse(
         "say collections.most_common({counts: [[1, \"many\"]], missing: 0})",
-        "count must be a non-negative number",
+        "count must be a non-negative integer",
     );
 }
 
@@ -285,6 +296,22 @@ fn edge_a_malformed_deque_is_refused() {
     );
     both_refuse(
         "say collections.pop_left(collections.namedtuple([\"kind\", \"front\", \"back\"], [\"deque\", 1, []]))",
+        "deque is a record",
+    );
+    both_refuse(
+        "set q to collections.namedtuple([\"kind\", \"front\", \"back\"], [\"deque\", [1], []])\n\
+         say collections.push_left(q, 2)",
+        "deque is a record",
+    );
+    both_refuse(
+        "set q to collections.namedtuple([\"kind\", \"front\", \"back\"], [\"deque\", [], [1]])\n\
+         say collections.push_right(q, 2)",
+        "deque is a record",
+    );
+    both_refuse(
+        "set q to collections.namedtuple([\"kind\", \"front\", \"back\"], \
+         [\"deque\", [], [{size: 1, value: 1}, {size: 1, value: 2}, 3]])\n\
+         say collections.push_right(q, 4)",
         "deque is a record",
     );
 }
@@ -338,7 +365,7 @@ fn value_depth(root: &Value) -> usize {
 #[test]
 fn edge_a_large_deque_keeps_its_traversal_depth_bounded() {
     let n = 4000;
-    let source = format!(
+    let pushed = format!(
         "set q to collections.deque([])\n\
          set i to 0\n\
          repeat {n} times\n\
@@ -347,11 +374,299 @@ fn edge_a_large_deque_keeps_its_traversal_depth_bounded() {
          end\n\
          q"
     );
-    let value = both(&source);
-    let depth = value_depth(&value);
+    let built_from_list = format!(
+        "set xs to []\n\
+         set i to 0\n\
+         repeat {n} times\n\
+             set xs to push(xs, i)\n\
+             set i to i + 1\n\
+         end\n\
+         collections.deque(xs)"
+    );
+    for (how, source) in [("pushed", pushed), ("built from a list", built_from_list)] {
+        let value = both(&source);
+        let depth = value_depth(&value);
+        assert!(
+            depth <= 64,
+            "a deque of {n} items {how} nests {depth} levels deep; a traversal \
+             over it must not recurse once per item"
+        );
+    }
+}
+
+/// A list of the numbers `0..n` as the language prints it.
+fn list_text(items: impl Iterator<Item = usize>) -> String {
+    let parts = items.map(|item| item.to_string()).collect::<Vec<_>>();
+    format!("[{}]", parts.join(", "))
+}
+
+/// Calls a builtin through the same dispatcher both engines use.
+#[track_caller]
+fn builtin_value(name: &str, args: &[Value]) -> Value {
+    redblue::stdlib::builtin(Span::new(1, 1), name, args)
+        .unwrap_or_else(|error| panic!("{name} should run: {error:?}"))
+        .unwrap_or_else(|| panic!("{name} should be a builtin"))
+}
+
+/// One field of a record value.
+#[track_caller]
+fn record_field<'a>(value: &'a Value, name: &str) -> &'a Value {
+    match value {
+        Value::Record(fields) => fields
+            .get(name)
+            .unwrap_or_else(|| panic!("record has no field '{name}': {value:?}")),
+        other => panic!("expected a record, got {other:?}"),
+    }
+}
+
+/// The identity of every tree node at both ends of a deque.
+#[track_caller]
+fn deque_node_ids(deque: &Value) -> Vec<usize> {
+    let mut ids = stack_node_ids(record_field(deque, "front"));
+    ids.extend(stack_node_ids(record_field(deque, "back")));
+    ids
+}
+
+/// The identity of every tree node in a deque stack.
+#[track_caller]
+fn stack_node_ids(stack: &Value) -> Vec<usize> {
+    let Value::List(trees) = stack else {
+        panic!("a stack is a list of trees, got {stack:?}");
+    };
+    let mut ids = Vec::new();
+    let mut pending = trees.iter().collect::<Vec<_>>();
+    while let Some(node) = pending.pop() {
+        let Value::Record(fields) = node else {
+            panic!("a stack tree node is a record, got {node:?}");
+        };
+        ids.push(Arc::as_ptr(fields) as usize);
+        if let Some(left) = fields.get("left") {
+            pending.push(left);
+        }
+        if let Some(right) = fields.get("right") {
+            pending.push(right);
+        }
+    }
+    ids
+}
+
+#[test]
+fn edge_a_single_entry_counter_counts_it_once() {
+    let value = both(
+        "set c to collections.counter([42])\n\
+         [collections.count(c, 42), collections.count(c, 43), collections.most_common(c)]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[1, 0, [[42, 1]]]",
+        "a one-item counter must count that item once and answer the documented          missing value for every other key"
+    );
+}
+
+#[test]
+fn edge_a_counter_refuses_a_negative_forged_count() {
+    for operation in ["count", "most_common"] {
+        for count in ["-1", "1.5", "\"lots\""] {
+            let source = if operation == "count" {
+                format!("say collections.count({{counts: [[1, {count}]], missing: 0}}, 1)")
+            } else {
+                format!("say collections.most_common({{counts: [[1, {count}]], missing: 0}})")
+            };
+            let refused = redblue::run_source_value(&source);
+            assert!(
+                refused.is_err(),
+                "a forged {count} count must be refused by collections.{operation} \
+                 rather than returned as a count"
+            );
+            both_refuse(&source, "non-negative integer");
+        }
+    }
+}
+
+#[test]
+fn edge_a_deque_built_from_a_list_pops_both_ends_for_every_length() {
+    for n in [
+        0usize, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127,
+    ] {
+        let source = format!(
+            "set xs to []\n\
+             set i to 0\n\
+             repeat {n} times\n\
+                 set xs to push(xs, i)\n\
+                 set i to i + 1\n\
+             end\n\
+             set q to collections.deque(xs)\n\
+             set left to []\n\
+             repeat {n} times\n\
+                 set p to collections.pop_left(q)\n\
+                 set left to push(left, p.value)\n\
+                 set q to p.deque\n\
+             end\n\
+             set q to collections.deque(xs)\n\
+             set right to []\n\
+             repeat {n} times\n\
+                 set p to collections.pop_right(q)\n\
+                 set right to push(right, p.value)\n\
+                 set q to p.deque\n\
+             end\n\
+             [left, right]"
+        );
+        let value = both(&source);
+        let expected = format!("[{}, {}]", list_text(0..n), list_text((0..n).rev()));
+        assert_eq!(
+            value.to_string(),
+            expected,
+            "a deque built from a {n}-item list must pop the list in order from              the left and in reverse from the right"
+        );
+    }
+}
+
+#[test]
+fn edge_a_deque_beats_a_list_work_queue_at_the_front() {
+    let n = 8000usize;
+    let expected = ((n as u64 * (n as u64 - 1)) / 2).to_string();
+    let literal = format!(
+        "[{}]",
+        (0..n)
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let deque_source = format!(
+        "set q to collections.deque([])\n\
+         set i to 0\n\
+         repeat {n} times\n\
+             set q to collections.push_right(q, i)\n\
+             set i to i + 1\n\
+         end\n\
+         set total to 0\n\
+         repeat {n} times\n\
+             set p to collections.pop_left(q)\n\
+             set total to total + p.value\n\
+             set q to p.deque\n\
+         end\n\
+         total"
+    );
+    let list_source = format!(
+        "set xs to {literal}\n\
+         set total to 0\n\
+         repeat {n} times\n\
+             set first to shift(xs)\n\
+             set total to total + first\n\
+             set xs to skip(xs, 1)\n\
+         end\n\
+         total"
+    );
+
+    // `shift` only reads the first item; removing it is `skip`. Keeping the two
+    // spellings separate checks the constant-time half on its own.
+    let shift_source = format!(
+        "set xs to {literal}\n\
+         set total to 0\n\
+         repeat {n} times\n\
+             set total to total + shift(xs)\n\
+         end\n\
+         total"
+    );
+
+    // The cost claim is pinned without a clock. Removing from the front of a
+    // deque leaves every remaining tree node shared with the deque it came
+    // from; removing from the front of a list is `skip`, which has to build a
+    // new list over the remaining items. Count the shared nodes instead of the
+    // milliseconds, so a loaded runner cannot flip the result.
+    assert_eq!(both(&deque_source).to_string(), expected);
+    assert_eq!(both(&list_source).to_string(), expected);
+    assert_eq!(both(&shift_source).to_string(), "0");
+
+    let operations = 256usize;
+    let mut deque = builtin_value("collections_deque", &[Value::list(Vec::new())]);
+    for item in (0..operations).rev() {
+        deque = builtin_value(
+            "collections_push_left",
+            &[deque, Value::Number(item as f64)],
+        );
+    }
+    let before = stack_node_ids(record_field(&deque, "front"));
+    assert_eq!(
+        before.len(),
+        operations,
+        "a deque of {operations} items must hold one tree node per item"
+    );
+    let popped = builtin_value("collections_pop_left", &[deque]);
+    assert_eq!(record_field(&popped, "value"), &Value::Number(0.0));
+    let remaining = record_field(&popped, "deque");
+    let after = stack_node_ids(record_field(remaining, "front"));
+    assert_eq!(
+        after.len(),
+        operations - 1,
+        "a front pop must leave every other item in the deque"
+    );
+    let before = before.into_iter().collect::<HashSet<_>>();
     assert!(
-        depth <= 64,
-        "a deque of {n} items nests {depth} levels deep; a traversal over it \
-         must not recurse once per item"
+        after.iter().all(|node| before.contains(node)),
+        "popping the front of a deque must share the remaining tree nodes; \
+         a list work queue's skip(xs, 1) has to copy them instead"
+    );
+
+    let list = Value::list(
+        (0..operations)
+            .map(|item| Value::Number(item as f64))
+            .collect(),
+    );
+    let skipped = builtin_value("skip", &[list.clone(), Value::Number(1.0)]);
+    let Value::List(original) = &list else {
+        unreachable!("Value::list builds a list")
+    };
+    let Value::List(new_storage) = &skipped else {
+        panic!("skip must answer a list, got {skipped:?}");
+    };
+    assert!(
+        !Arc::ptr_eq(original, new_storage),
+        "skip(xs, 1) must build a new list over the remaining items, which is \
+         the copy the deque's shared tree nodes avoid"
+    );
+}
+#[test]
+fn edge_alternating_pops_at_both_ends_share_the_deque_trees() {
+    let n = 2048usize;
+    let mut deque = builtin_value("collections_deque", &[Value::list(Vec::new())]);
+    for item in 0..n {
+        deque = builtin_value(
+            "collections_push_right",
+            &[deque, Value::Number(item as f64)],
+        );
+    }
+    let mut previous = deque_node_ids(&deque).into_iter().collect::<HashSet<_>>();
+    let mut rebuilt = 0usize;
+    for step in 0..n {
+        let from_left = step % 2 == 0;
+        let expected = if from_left {
+            step / 2
+        } else {
+            n - 1 - step / 2
+        };
+        let name = if from_left {
+            "collections_pop_left"
+        } else {
+            "collections_pop_right"
+        };
+        let popped = builtin_value(name, &[deque]);
+        assert_eq!(
+            record_field(&popped, "value"),
+            &Value::Number(expected as f64),
+            "alternating pops must keep the deque's order"
+        );
+        deque = record_field(&popped, "deque").clone();
+        let current = deque_node_ids(&deque).into_iter().collect::<HashSet<_>>();
+        rebuilt += current.difference(&previous).count();
+        previous = current;
+    }
+    assert!(
+        deque_node_ids(&deque).is_empty(),
+        "popping every item must leave both ends empty"
+    );
+    assert!(
+        rebuilt <= n * 4,
+        "alternating pops rebuilt {rebuilt} tree nodes for {n} items; each pop          must share the trees at the end it did not touch instead of reversing          the whole remaining deque"
     );
 }
