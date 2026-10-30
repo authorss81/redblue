@@ -1393,6 +1393,62 @@ compiler writing a bytecode file cannot avoid. A value that is not a byte, or a
 byte list that is not valid UTF-8, is a refusal naming the byte rather than a
 wrapped value or a replacement character three files later.
 
+### collections
+
+```redblue
+set counts to collections.counter(["a", "b", "a"])
+set a_count to collections.count(counts, "a")        // 2
+set common to collections.most_common(counts)         // [["a", 2], ["b", 1]]
+set d to collections.defaultdict(0)
+set read to collections.get(d, "missing")             // {value: 0, dict: ...}
+set d to collections.put(d, "missing", 5)
+set q to collections.deque([1, 2, 3])
+set q to collections.push_left(q, 0)
+set q to collections.push_right(q, 3)
+set left to collections.pop_left(q)
+set right to collections.pop_right(q)
+set point to collections.namedtuple(["x", "y"], [3, 4])
+set x to collections.field(point, "x")                // 3
+```
+
+A counter is the record `{counts: [[key, count], ...], missing: 0}`.
+`collections.counter` groups equal values in one pass, so a list of mixed
+numbers, texts, records, lists, `yes`/`no` and `nothing` counts each equal value
+separately. The pairs keep the order their keys first appeared in, and
+`collections.most_common` sorts stably by descending count, so equal counts keep
+that order. `collections.count` answers the counter's own `missing` value for a
+key it has not seen — zero for a counter this module made — rather than
+`nothing`. Construction is linear, but a lookup (`collections.count` or
+`collections.get`) scans the stored pairs, so reading n distinct keys is O(n²);
+the records stay ordinary lists that a program can inspect and rewrite.
+
+A defaultdict is the record `{entries: [[key, value], ...], factory}`.
+`collections.get(dict, key)` answers `{value, dict}`; when the key is absent it
+adds it with the factory value and answers the updated dict. `collections.put`
+is the writer, named `put` rather than `set` because `set` is a keyword. Redblue
+values are copied, so the factory is a **value** and every missing key gets a
+copy of it: `collections.defaultdict([])` gives each new key its own empty list,
+and a program that wants a different value for each key writes it with
+`collections.put`.
+
+A deque is an opaque record of two persistent stacks, `front` and `back`, with
+the front stack holding its items in reverse. Each stack is a spine of complete
+binary trees rather than one record per item, so the nesting depth of a deque of
+n items is logarithmic and a program can say, compare or drop a large deque
+without recursing once per item. A pop answers `{value, deque}` so the shorter
+deque is the one to bind; an empty deque answers `nothing` as the value rather
+than refusing. This is what a list work queue does not have: `shift` reads the
+first item but does not remove it, so the only removal from the front is
+`skip(xs, 1)`, which copies the rest of the list on every call.
+
+A named tuple is an ordinary record whose fields are named at run time:
+`collections.namedtuple(names, values)` refuses a name that is not text, a
+repeated name, and a length mismatch. `collections.field(record, name)` answers
+the field, and a missing field is a `RuntimeError` naming it. That is the
+difference from reading a record's property, which answers `nothing` for a field
+that is not there: a named record says when the name is wrong instead of letting
+`nothing` travel on as a value.
+
 ### sys
 
 ```redblue
