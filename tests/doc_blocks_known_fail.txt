@@ -23,7 +23,7 @@
 #
 # COUNTS, as of the run that wrote this file
 #   SPEC.md 7 · PHILOSOPHY.md 1 · HANDOUT.md 6 · docs/GRAMMAR.md 0 · README.md 0
-#   14 of 103 blocks.
+#   14 of 108 blocks.
 
 # --- SPEC.md ---------------------------------------------------------------
 

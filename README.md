@@ -222,6 +222,34 @@ bytes.text(bytes)       // A byte list back to text
 bytes.write(path, bytes) // Write a byte list to a file
 ```
 
+### Collections
+```
+collections.counter(items)                // {counts: [[key, count], ...], missing: 0}
+collections.count(counter, key)           // the count, or the counter's missing value
+collections.most_common(counter)          // [[key, count], ...], most common first
+collections.defaultdict(factory)          // {entries: [], factory}
+collections.get(dict, key)                // {value, dict}; a missing key is added
+collections.put(dict, key, value)         // the dict with the key set
+collections.deque()                       // an empty deque
+collections.deque(items)                  // a deque of the items
+collections.push_left(deque, value)       // add at the front
+collections.push_right(deque, value)      // add at the back
+collections.pop_left(deque)               // {value, deque}, or nothing at the front
+collections.pop_right(deque)              // {value, deque}, or nothing at the back
+collections.namedtuple(names, values)     // a record with those named fields
+collections.field(record, name)           // the field; a missing field is an error
+```
+
+A counter counts equal values of any kind in one pass and keeps first-appearance
+order; `collections.count` answers zero for a key it has never seen.
+A defaultdict's factory is a value copied into each missing key, and `get`
+answers `{value, dict}` so the updated dictionary is the one to bind. The writer
+is `put` because `set` is a keyword. A deque pushes and pops at both ends and
+answers `{value, deque}` from a pop; its stack trees keep traversal depth
+logarithmic, so a large deque never becomes one nested record per item. A named
+tuple is a record, and `collections.field` refuses a missing name rather than
+answering `nothing` the way a record property does.
+
 ### Time
 ```
 time.now()             // Get current timestamp
