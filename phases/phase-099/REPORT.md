@@ -13,14 +13,14 @@ changed.
 This resume kept the preserved implementation and finished the evidence the
 definition of done still lacked: a structural cost test for `list.shift` against
 a deque work queue, a single-entry Counter test, a linear deque constructor, and
-balanced deque rebalancing that keeps alternating pops at opposite ends linear.
+balanced deque rebalancing that keeps alternating pops from rebuilding the untouched side.
 
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +627 −1 | `collection_pairs`, the Counter/defaultdict/deque helpers, persistent stack trees for deque ends, named-record validation, the thirteen `collections.*` arms, a linear `stack_from_values` deque constructor, and `deque_rebalance`, which splits a non-empty side across both ends instead of reversing the whole remainder |
+| `src/runtime.rs` | +698 −1 | `collection_pairs`, the Counter/defaultdict/deque helpers, persistent stack trees for deque ends, named-record validation, the thirteen `collections.*` arms, a linear `stack_from_values` deque constructor, and `deque_rebalance`, which splits a non-empty side across both ends instead of reversing the whole remainder; deque ends are validated recursively down every branch; the resume replaced a manual `div_ceil` spelling with the standard method so clippy stays warning-free |
 | `src/stdlib.rs` | +116 −1 | registers the `collections` module, its 13 members, builtin names, signatures and the module table |
-| `tests/collections_test.rs` | +585 −0 | 22 tests, all running the program on both engines and comparing values as data as well as text; includes the shared-node deque/list comparison and the linear-construction boundary sweep |
-| `SPEC.md` | +54 −0 | documents the missing-key behaviour of Counter and defaultdict, the `put` spelling, deque ends, named fields and field errors |
+| `tests/collections_test.rs` | +753 −0 | 28 tests, all running the program on both engines and comparing values as data as well as text; includes the shared-node deque/list comparison, the linear-construction boundary sweep, a counter's own missing value, signed-zero key equality, list and record defaultdict keys, and forged deque trees whose size disagrees with their children or whose children are malformed |
+| `SPEC.md` | +56 −0 | documents the missing-key behaviour of Counter and defaultdict, their lookup cost, the `put` spelling, deque ends, named fields and field errors |
 | `README.md` | +28 −0 | the user-facing collections section |
 | `SURVEY.md` | +50 −49 | builtin count 92 → 105, modules 12 → 13, members 63 → 76, and re-anchored citations |
 | `tests/stdlib_module_docs_test.rs` | +69 −0 | one answerable row per new builtin |
@@ -34,7 +34,8 @@ Counter stores first-appearance order as `{counts: [[key, count], ...], missing:
 0}`. `collections.count` answers the documented `0` for a key it never saw.
 `collections.most_common` sorts by descending count and keeps first-appearance
 order for equal counts. Grouping reuses the existing `group_value_hash`, so
-counting is linear rather than a nested scan.
+grouping is linear rather than a nested scan; lookups scan the stored pairs, as
+`SPEC.md` now states.
 
 `defaultdict` is `{entries: [[key, value], ...], factory: value}`.
 `collections.get` appends the factory value on the first read and returns
@@ -71,7 +72,9 @@ so the constructor is linear instead of paying a spine copy per item. When one
 end empties, `deque_rebalance` reads the other side's pop order once and splits
 it so both ends retain roughly half the items. Alternating pops at opposite ends
 then share the trees at the end they did not touch; moving the whole remainder
-would rebuild it on every other pop and make n alternating pops quadratic. The
+would rebuild it on every other pop and add a second quadratic term. Validation
+walks every node of both ends on each operation so a forged tree is refused
+immediately, which is a separate linear cost per operation. The
 boundary sweep pops both ends of deques built from every length in
 `{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127}` and
 checks the literal order against `0..n` and its reverse.
@@ -115,6 +118,11 @@ engines and checks the answers as data.
 | `edge_a_deque_built_from_a_list_pops_both_ends_for_every_length` | empty, singleton, boundary and power-of-two-minus-one construction lengths |
 | `edge_a_deque_beats_a_list_work_queue_at_the_front` | resource_limit and deterministic storage sharing: 8,000 deque operations against `shift` + `skip`, plus a node-identity assertion that a front pop shares the remainder while `skip` copies it |
 | `edge_alternating_pops_at_both_ends_share_the_deque_trees` | resource_limit and deterministic storage sharing: 2,048 alternating `pop_left`/`pop_right` calls, each checked for the correct value, with a bound proving the tree nodes rebuilt across all pops stay linear rather than reversing the whole remainder every other pop |
+| `edge_a_counter_answers_its_own_missing_value_for_an_unseen_key` | duplicate_missing_keys: a forged counter's `missing` value `42` is answered literally for an unseen key, and `most_common` does not invent an entry |
+| `edge_counter_treats_zero_and_negative_zero_as_the_same_key` | numeric_boundary: `0`, `-0.0`, `0.0` and `0` share one entry with the literal count `4` and one `most_common` row |
+| `edge_a_defaultdict_uses_list_and_record_keys_without_collapsing_them` | nesting_recursion and mixed key types: list and record keys create separate entries and an equal list key is found on a later read |
+| `edge_a_forged_deque_tree_with_a_wrong_size_is_refused` | failure: a deque tree whose `size` disagrees with its children is refused with the documented catchable deque error |
+| `edge_a_forged_deque_tree_with_a_self_consistent_root_but_malformed_children_is_refused` | failure: a tree whose root agrees with its children's claimed sizes but whose children are leaves claiming size 3 is refused by the first `pop_left`, not only by a later operation |
 
 Mandatory matrix:
 
@@ -135,18 +143,23 @@ Mandatory matrix:
   and by `counter_number`'s finite, non-negative and whole-number checks.
   Counts are non-negative integers, so a fractional, negative, non-numeric,
   `NaN` or infinite forged count is refused rather than returned; no arithmetic
-  is exposed through the public constructors.
+  is exposed through the public constructors. `edge_counter_treats_zero_and_negative_zero_as_the_same_key`
+  pins that `0`, `-0.0` and `0.0` are one key, not three.
 - unicode — covered by `counter_counts_unicode_yes_no_nothing_and_records` and
   `edge_a_namedtuple_field_name_may_be_any_text`.
-- nesting_recursion — covered by Counter over list and record keys, and by
+- nesting_recursion — covered by Counter over list and record keys,
+  `edge_a_defaultdict_uses_list_and_record_keys_without_collapsing_them`, and by
   `edge_a_large_deque_keeps_its_traversal_depth_bounded`, which measures the
   deque value's nesting depth instead of assuming it; no recursive user callback
   is invoked.
 - duplicate_missing_keys — covered by Counter equality for repeated values,
-  `most_common` ties, missing Counter reads, `defaultdict.get` creation, and
-  duplicate named fields being refused.
-- malformed_input — covered by the four malformed-input refusal tests and the
-  forged-count refusal.
+  `most_common` ties, missing Counter reads,
+  `edge_a_counter_answers_its_own_missing_value_for_an_unseen_key`,
+  `defaultdict.get` creation, and duplicate named fields being refused.
+- malformed_input — covered by the four malformed-input refusal tests, the
+  forged-count refusal, and
+  `edge_a_forged_deque_tree_with_a_wrong_size_is_refused` and
+  `edge_a_forged_deque_tree_with_a_self_consistent_root_but_malformed_children_is_refused`.
 - resource_limit — covered by the 4,000-item depth test, which measures both a
   pushed deque and one built by `collections.deque(list)`, and by the
   8,000-operation shared-node test; the deque stores one tree node per item at
@@ -160,7 +173,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2358 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 2364 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-099` | pass |
 
 ## Invariants touched
@@ -181,9 +194,8 @@ Mandatory matrix:
   relationship, not a wall-clock time.
 - A deque's `kind` marker makes an ordinary record fail the module's own shape
   check, but a caller who writes the marker by hand can still construct the
-  record shape. Every operation validates both ends and the root of every tree
-  on each spine before returning a deque, so a forged record with a malformed
-  root is refused rather than trusted. A malformed node nested below a
-  plausible-looking root is still accepted until that node reaches the top of a
-  spine; validating every node on every operation would make each operation
-  linear in the deque, so that remains a follow-up.
+  record shape. Every operation validates every node of both ends recursively
+  before returning a deque, so a forged record with a malformed node anywhere is
+  refused by the first operation rather than trusted. That validation makes an
+  operation linear in the deque's size; the structural sharing still keeps a
+  pop from rebuilding the untouched side, which the resource tests pin.

@@ -16,8 +16,9 @@
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::format::{Item, StrftimeItems};
@@ -1922,16 +1923,31 @@ fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
     if !matches!(front, Value::List(_)) || !matches!(back, Value::List(_)) {
         return Err(deque_error(span));
     }
+    let mut total = 0usize;
     for stack in [front, back] {
         let Value::List(trees) = stack else {
             return Err(deque_error(span));
         };
         for tree in trees.iter() {
-            stack_tree_parts(span, tree)?;
+            let size = stack_tree_budget(span, tree)?;
+            total = total.checked_add(size).ok_or_else(|| deque_error(span))?;
+            if total > MAX_DEQUE_ITEMS {
+                return Err(deque_error(span));
+            }
+            validate_stack_tree(span, tree)?;
         }
     }
     Ok((front.clone(), back.clone()))
 }
+
+/// The most logical nodes one deque operation may validate or enumerate.
+///
+/// A tree node's `size` is the number of logical nodes its root stands for, and
+/// a forged tree can reuse one physical child under both branches so that a few
+/// records claim an enormous logical tree. Rejecting an over-budget root before
+/// walking it keeps a malformed deque from making one operation visit a tree the
+/// deque cannot hold.
+const MAX_DEQUE_ITEMS: usize = 1_000_000;
 
 /// The size of one node in a deque's persistent stack.
 fn stack_tree_size(span: Span, tree: &Value) -> Result<usize> {
@@ -1971,7 +1987,7 @@ struct StackTreeParts {
 }
 
 /// One stack node's value and children, refusing a malformed node.
-fn stack_tree_parts(span: Span, tree: &Value) -> Result<StackTreeParts> {
+fn stack_tree_node_parts(span: Span, tree: &Value) -> Result<StackTreeParts> {
     let Value::Record(fields) = tree else {
         return Err(deque_error(span));
     };
@@ -2008,6 +2024,61 @@ fn stack_tree_parts(span: Span, tree: &Value) -> Result<StackTreeParts> {
     }
 }
 
+/// Refuses a tree whose logical size is beyond what one deque may hold.
+fn stack_tree_budget(span: Span, tree: &Value) -> Result<usize> {
+    let size = stack_tree_size(span, tree)?;
+    if size > MAX_DEQUE_ITEMS {
+        return Err(deque_error(span));
+    }
+    Ok(size)
+}
+
+/// Refuses a tree with any malformed node, not only a malformed root.
+///
+/// The root's logical size is checked before the walk, and each physical node is
+/// visited once, so a forged DAG that shares one child under both branches is
+/// either bounded by the budget or refused before the walk starts instead of
+/// being walked once per logical occurrence.
+fn validate_stack_tree(span: Span, tree: &Value) -> Result<()> {
+    stack_tree_budget(span, tree)?;
+    let mut seen = HashSet::new();
+    let mut pending = vec![tree];
+    while let Some(tree) = pending.pop() {
+        let Value::Record(fields) = tree else {
+            return Err(deque_error(span));
+        };
+        if !seen.insert(Arc::as_ptr(fields) as usize) {
+            continue;
+        }
+        if fields.get("value").is_none() {
+            return Err(deque_error(span));
+        }
+        let size = stack_tree_size(span, tree)?;
+        match (fields.get("left"), fields.get("right")) {
+            (None, None) => {
+                if size != 1 {
+                    return Err(deque_error(span));
+                }
+            }
+            (Some(left), Some(right)) => {
+                let left_size = stack_tree_size(span, left)?;
+                let right_size = stack_tree_size(span, right)?;
+                let expected = left_size
+                    .checked_add(right_size)
+                    .and_then(|size| size.checked_add(1))
+                    .ok_or_else(|| deque_error(span))?;
+                if left_size != right_size || size != expected {
+                    return Err(deque_error(span));
+                }
+                pending.push(left);
+                pending.push(right);
+            }
+            _ => return Err(deque_error(span)),
+        }
+    }
+    Ok(())
+}
+
 /// The largest perfect tree size (`2^k - 1`) that fits in `items`.
 fn largest_perfect_size(items: usize) -> usize {
     let mut size = 1;
@@ -2038,7 +2109,7 @@ fn stack_tree_from_values(values: &[Value]) -> Value {
 /// The forest uses the largest perfect tree that fits at each step, so
 /// `collections.deque(list)` is linear in the list's length rather than paying
 /// a spine copy for every item. Each tree still validates through the same
-/// `stack_tree_parts` a pushed stack does.
+/// `validate_stack_tree` a pushed stack does.
 fn stack_from_values(values: &[Value]) -> Value {
     let mut trees = Vec::new();
     let mut rest = values;
@@ -2052,13 +2123,14 @@ fn stack_from_values(values: &[Value]) -> Value {
 }
 
 /// Pushes `value` onto a stack. Two equal-sized top trees merge into one, so the
-/// spine holds O(log n) trees and every node has O(log n) depth.
+/// spine holds O(log n) trees and every node has O(log n) depth. Validation of
+/// the whole deque still reads every physical node before the structural change.
 fn stack_cons(span: Span, stack: &Value, value: Value) -> Result<Value> {
     let Value::List(trees) = stack else {
         return Err(deque_error(span));
     };
     for tree in trees.iter() {
-        stack_tree_parts(span, tree)?;
+        stack_tree_node_parts(span, tree)?;
     }
     let mut trees = trees.as_ref().clone();
     if trees.len() >= 2 {
@@ -2087,7 +2159,7 @@ fn stack_uncons(span: Span, stack: &Value) -> Result<Option<(Value, Value)>> {
     let Some(first) = trees.first() else {
         return Ok(None);
     };
-    let parts = stack_tree_parts(span, first)?;
+    let parts = stack_tree_node_parts(span, first)?;
     let rest = trees.iter().skip(1).cloned().collect::<Vec<_>>();
     match parts.children {
         None => Ok(Some((parts.value, Value::list(rest)))),
@@ -2108,9 +2180,20 @@ fn stack_pop_order(span: Span, stack: &Value) -> Result<Vec<Value>> {
     };
     let mut values = Vec::new();
     for tree in trees.iter() {
+        let size = stack_tree_budget(span, tree)?;
+        let total = values
+            .len()
+            .checked_add(size)
+            .ok_or_else(|| deque_error(span))?;
+        if total > MAX_DEQUE_ITEMS {
+            return Err(deque_error(span));
+        }
         let mut pending = vec![tree.clone()];
         while let Some(node) = pending.pop() {
-            let parts = stack_tree_parts(span, &node)?;
+            if values.len() == MAX_DEQUE_ITEMS {
+                return Err(deque_error(span));
+            }
+            let parts = stack_tree_node_parts(span, &node)?;
             values.push(parts.value);
             if let Some((left, right)) = parts.children {
                 pending.push(right);
@@ -2134,7 +2217,7 @@ fn deque_rebalance(span: Span, stack: &Value, wants_left: bool) -> Result<(Value
         values.reverse();
     }
     let front_count = if wants_left {
-        (values.len() + 1) / 2
+        values.len().div_ceil(2)
     } else {
         values.len() / 2
     };
@@ -2499,8 +2582,9 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         },
         // A deque is a record of two persistent stacks, `front` and `back`. The
         // front stack holds its items in reverse. Each stack is a spine of
-        // complete binary trees, so a push or pop touches O(log n) nodes instead
-        // of building an n-deep chain of `{value, next}` records. Reversing one
+        // complete binary trees, so the structural change for a push or pop
+        // touches O(log n) nodes instead of rebuilding an n-deep chain of
+        // `{value, next}` records; validation reads every node first. Reversing one
         // side into the other when it empties reads that side's pop order once
         // and builds the other side in one pass, so it is linear in the side's
         // length and amortised over the pops that emptied it.

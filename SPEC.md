@@ -1418,7 +1418,9 @@ separately. The pairs keep the order their keys first appeared in, and
 `collections.most_common` sorts stably by descending count, so equal counts keep
 that order. `collections.count` answers the counter's own `missing` value for a
 key it has not seen — zero for a counter this module made — rather than
-`nothing`.
+`nothing`. Construction is linear, but a lookup (`collections.count` or
+`collections.get`) scans the stored pairs, so reading n distinct keys is O(n²);
+the records stay ordinary lists that a program can inspect and rewrite.
 
 A defaultdict is the record `{entries: [[key, value], ...], factory}`.
 `collections.get(dict, key)` answers `{value, dict}`; when the key is absent it

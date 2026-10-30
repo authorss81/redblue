@@ -670,3 +670,132 @@ fn edge_alternating_pops_at_both_ends_share_the_deque_trees() {
         "alternating pops rebuilt {rebuilt} tree nodes for {n} items; each pop          must share the trees at the end it did not touch instead of reversing          the whole remaining deque"
     );
 }
+
+#[test]
+fn edge_a_counter_answers_its_own_missing_value_for_an_unseen_key() {
+    let value = both(
+        "set c to {counts: [[\"seen\", 3]], missing: 42}\n\
+         [collections.count(c, \"seen\"), collections.count(c, \"unseen\"), \
+          collections.most_common(c)]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[3, 42, [[seen, 3]]]",
+        "collections.count must answer the counter's own missing value, not a \
+         hard-coded zero, and most_common must not invent an unseen entry"
+    );
+}
+
+#[test]
+fn edge_counter_treats_zero_and_negative_zero_as_the_same_key() {
+    let value = both(
+        "set c to collections.counter([0, -0.0, 0.0, 0])\n\
+         [collections.count(c, 0), collections.count(c, -0.0), collections.most_common(c)]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[4, 4, [[0, 4]]]",
+        "zero and negative zero compare equal, so they must share one counter \
+         entry and answer the same count rather than splitting the key"
+    );
+}
+
+#[test]
+fn edge_a_defaultdict_uses_list_and_record_keys_without_collapsing_them() {
+    let value = both(
+        "set d to collections.defaultdict(0)\n\
+         set list_key to collections.get(d, [1, 2])\n\
+         set record_key to collections.get(list_key.dict, {x: yes})\n\
+         set again to collections.get(record_key.dict, [1, 2])\n\
+         [list_key.value, record_key.value, again.value, again.dict]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[0, 0, 0, {entries: [[[1, 2], 0], [{x: yes}, 0]], factory: 0}]",
+        "a defaultdict must keep list and record keys as distinct entries and \
+         find an equal key on a later read"
+    );
+}
+
+#[test]
+fn edge_a_forged_deque_tree_with_a_wrong_size_is_refused() {
+    let source = "set leaf to collections.namedtuple([\"size\", \"value\"], [1, 2])\n\
+                  set root to collections.namedtuple(\
+                  [\"size\", \"value\", \"left\", \"right\"], [4, 1, leaf, leaf])\n\
+                  set q to collections.namedtuple(\
+                  [\"kind\", \"front\", \"back\"], [\"deque\", [root], []])\n\
+                  say collections.pop_left(q)";
+    let refused = redblue::run_source_value(source);
+    assert!(
+        refused.is_err(),
+        "a tree whose size disagrees with its children must be refused rather \
+         than popped"
+    );
+    both_refuse(source, "deque is a record");
+}
+
+#[test]
+fn edge_a_forged_deque_tree_with_a_self_consistent_root_but_malformed_children_is_refused() {
+    let source = "set child to collections.namedtuple([\"size\", \"value\"], [3, 2])\n\
+                  set root to collections.namedtuple(\
+                  [\"size\", \"value\", \"left\", \"right\"], [7, 1, child, child])\n\
+                  set q to collections.namedtuple(\
+                  [\"kind\", \"front\", \"back\"], [\"deque\", [root], []])\n\
+                  say collections.pop_left(q)";
+    let refused = redblue::run_source_value(source);
+    assert!(
+        refused.is_err(),
+        "a tree whose root agrees with its children's claimed sizes but whose \
+         children are themselves malformed must be refused by the first pop, \
+         not answered and refused only by a later operation"
+    );
+    both_refuse(source, "deque is a record");
+}
+
+#[test]
+fn edge_a_valid_deque_tree_may_share_one_child_under_both_branches() {
+    let value = both(
+        "set leaf to collections.namedtuple([\"size\", \"value\"], [1, 1])\n\
+         set node to leaf\n\
+         set size to 1\n\
+         repeat 7 times\n\
+             set size to size * 2 + 1\n\
+             set node to collections.namedtuple(\
+             [\"size\", \"value\", \"left\", \"right\"], [size, 0, node, node])\n\
+         end\n\
+         set q to collections.namedtuple(\
+         [\"kind\", \"front\", \"back\"], [\"deque\", [node], []])\n\
+         set total to 0\n\
+         set leaves to 0\n\
+         repeat size times\n\
+             set p to collections.pop_left(q)\n\
+             set total to total + 1\n\
+             set leaves to leaves + p.value\n\
+             set q to p.deque\n\
+         end\n\
+         [total, leaves]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[255, 128]",
+        "a tree that reuses one child under both branches is a valid DAG: \
+         popping all 255 logical values must answer both copies of the shared \
+         subtree rather than hanging or dropping one"
+    );
+}
+
+#[test]
+fn edge_a_forged_deque_tree_beyond_the_node_budget_is_refused_before_it_is_walked() {
+    let source = "set leaf to collections.namedtuple([\"size\", \"value\"], [1, 0])\n\
+                  set node to leaf\n\
+                  set size to 1\n\
+                  repeat 53 times\n\
+                      set size to size * 2 + 1\n\
+                      set node to collections.namedtuple(\
+                      [\"size\", \"value\", \"left\", \"right\"], [size, 0, node, node])\n\
+                  end\n\
+                  set q to collections.namedtuple(\
+                  [\"kind\", \"front\", \"back\"], [\"deque\", [node], []])\n\
+                  say collections.pop_left(q)";
+    both_refuse(source, "deque is a record");
+}
