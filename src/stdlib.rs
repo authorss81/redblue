@@ -17,7 +17,18 @@ use std::collections::HashMap;
 /// `formats` would make a misspelling resolve to a namespace and fail later and
 /// less clearly than it does now.
 pub const MODULES: &[&str] = &[
-    "bytes", "console", "csv", "files", "json", "list", "math", "network", "regex", "sys", "text",
+    "bytes",
+    "collections",
+    "console",
+    "csv",
+    "files",
+    "json",
+    "list",
+    "math",
+    "network",
+    "regex",
+    "sys",
+    "text",
     "time",
 ];
 
@@ -62,6 +73,24 @@ pub const ALIAS_MODULES: &[&str] = &["math", "text"];
 /// `<module>.<member>` is how a program reaches them.
 pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
     ("bytes", &["from_text", "text", "write"]),
+    (
+        "collections",
+        &[
+            "counter",
+            "count",
+            "most_common",
+            "defaultdict",
+            "get",
+            "put",
+            "deque",
+            "push_left",
+            "push_right",
+            "pop_left",
+            "pop_right",
+            "namedtuple",
+            "field",
+        ],
+    ),
     ("console", &["log", "error", "clear"]),
     ("csv", &["parse"]),
     (
@@ -387,6 +416,27 @@ pub fn builtins() -> HashMap<String, Value> {
         "groupby",
         "take",
         "skip",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
+    // Collections module: a counter, a defaultdict, a deque and named records.
+    // Every value is an existing Value variant — a record of pairs, a pair of
+    // linked-list records, a record of named fields — so no new kind of value
+    // enters the language.
+    for name in [
+        "collections_counter",
+        "collections_count",
+        "collections_most_common",
+        "collections_defaultdict",
+        "collections_get",
+        "collections_put",
+        "collections_deque",
+        "collections_push_left",
+        "collections_push_right",
+        "collections_pop_left",
+        "collections_pop_right",
+        "collections_namedtuple",
+        "collections_field",
     ] {
         globals.insert(name.to_string(), Value::Builtin(name.to_string()));
     }
@@ -1233,6 +1283,19 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "take",
     "skip",
     "list_map",
+    "collections_counter",
+    "collections_count",
+    "collections_most_common",
+    "collections_defaultdict",
+    "collections_get",
+    "collections_put",
+    "collections_deque",
+    "collections_push_left",
+    "collections_push_right",
+    "collections_pop_left",
+    "collections_pop_right",
+    "collections_namedtuple",
+    "collections_field",
     "is_number",
     "is_text",
     "is_list",
@@ -1404,6 +1467,58 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     (
         "skip",
         "skip(list, number) -> the list without its first n items (a whole number)",
+    ),
+    (
+        "collections_counter",
+        "collections.counter(list) -> {counts: [[key, count], ...], missing: 0}",
+    ),
+    (
+        "collections_count",
+        "collections.count(counter, key) -> the count, or the counter's missing value",
+    ),
+    (
+        "collections_most_common",
+        "collections.most_common(counter) -> [[key, count], ...], most common first",
+    ),
+    (
+        "collections_defaultdict",
+        "collections.defaultdict(factory) -> {entries: [], factory}",
+    ),
+    (
+        "collections_get",
+        "collections.get(dict, key) -> {value, dict}; a missing key is added with the factory value",
+    ),
+    (
+        "collections_put",
+        "collections.put(dict, key, value) -> the dict with the key set",
+    ),
+    (
+        "collections_deque",
+        "collections.deque() -> an empty deque\ncollections.deque(list) -> a deque of the list's items",
+    ),
+    (
+        "collections_push_left",
+        "collections.push_left(deque, value) -> the deque with the value at its front",
+    ),
+    (
+        "collections_push_right",
+        "collections.push_right(deque, value) -> the deque with the value at its back",
+    ),
+    (
+        "collections_pop_left",
+        "collections.pop_left(deque) -> {value, deque}; nothing at the front of an empty deque",
+    ),
+    (
+        "collections_pop_right",
+        "collections.pop_right(deque) -> {value, deque}; nothing at the back of an empty deque",
+    ),
+    (
+        "collections_namedtuple",
+        "collections.namedtuple(list of names, list of values) -> a record with those fields",
+    ),
+    (
+        "collections_field",
+        "collections.field(named record, text) -> the field's value; a missing field is refused by name",
     ),
     (
         "list_map",

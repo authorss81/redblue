@@ -729,6 +729,75 @@ say length(bytes.from_text("héllo"))"#
         ),
         ("take", "say take([1, 2, 3], 2)".into(), "[1, 2]\n".into()),
         ("skip", "say skip([1, 2, 3], 2)".into(), "[3]\n".into()),
+        (
+            "collections_counter",
+            r#"say collections.counter(["a", "a", "b"])"#.into(),
+            "{counts: [[a, 2], [b, 1]], missing: 0}\n".into(),
+        ),
+        (
+            "collections_count",
+            "set c to collections.counter([1, 1])\nsay collections.count(c, 1)".into(),
+            "2\n".into(),
+        ),
+        (
+            "collections_most_common",
+            r#"set c to collections.counter(["a", "b", "a"])
+say collections.most_common(c)"#
+                .into(),
+            "[[a, 2], [b, 1]]\n".into(),
+        ),
+        (
+            "collections_defaultdict",
+            "say collections.defaultdict(0)".into(),
+            "{entries: [], factory: 0}\n".into(),
+        ),
+        (
+            "collections_get",
+            r#"say collections.get(collections.defaultdict(0), "x")"#.into(),
+            "{value: 0, dict: {entries: [[x, 0]], factory: 0}}\n".into(),
+        ),
+        (
+            "collections_put",
+            r#"say collections.put(collections.defaultdict(0), "x", 1)"#.into(),
+            "{entries: [[x, 1]], factory: 0}\n".into(),
+        ),
+        (
+            "collections_deque",
+            "say collections.pop_left(collections.deque([1])).value".into(),
+            "1\n".into(),
+        ),
+        (
+            "collections_push_left",
+            "say collections.pop_left(collections.push_left(collections.deque([]), 1)).value"
+                .into(),
+            "1\n".into(),
+        ),
+        (
+            "collections_push_right",
+            "say collections.pop_right(collections.push_right(collections.deque([]), 1)).value"
+                .into(),
+            "1\n".into(),
+        ),
+        (
+            "collections_pop_left",
+            "say collections.pop_left(collections.deque([1])).value".into(),
+            "1\n".into(),
+        ),
+        (
+            "collections_pop_right",
+            "say collections.pop_right(collections.deque([1])).value".into(),
+            "1\n".into(),
+        ),
+        (
+            "collections_namedtuple",
+            r#"say collections.namedtuple(["x"], [1])"#.into(),
+            "{x: 1}\n".into(),
+        ),
+        (
+            "collections_field",
+            r#"say collections.field(collections.namedtuple(["x"], [1]), "x")"#.into(),
+            "1\n".into(),
+        ),
         ("is_number", "say is_number(1)".into(), "yes\n".into()),
         ("is_text", r#"say is_text("a")"#.into(), "yes\n".into()),
         ("is_list", "say is_list([1])".into(), "yes\n".into()),
