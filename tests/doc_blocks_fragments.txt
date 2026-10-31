@@ -64,7 +64,7 @@ SPEC.md:1018	excerpt - `process` is bound nowhere in the block, and `files.open`
 SPEC.md:1108	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
 SPEC.md:1286	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
 SPEC.md:1314	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
-SPEC.md:1358	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
+SPEC.md:1388	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
 
 # --- docs/GRAMMAR.md --------------------------------------------------------
 

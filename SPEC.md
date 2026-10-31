@@ -1309,7 +1309,7 @@ the draw a fraction: `random(0, 100.5)` answers `0` to `100`, and a range holdin
 no whole number at all, such as `random(0.2, 0.8)`, is refused. `random_choice`
 refuses an empty list, since it has no member to choose.
 
-### files
+### files and path
 
 ```redblue
 set content to files.read("data.rb")
@@ -1323,6 +1323,36 @@ if files.exists("config.rb")
     // ...
 end
 ```
+
+```redblue
+set folder to path.parent("data/records.rb")    // "data"
+set name to path.filename("data/records.rb")    // "records.rb"
+set stem to path.stem("data/records.rb")        // "records"
+set kind to path.extension("data/records.rb")   // "rb"
+set full to path.join("data", "records.rb")     // data<separator>records.rb
+set absolute to path.is_absolute(full)          // no
+set here to path.resolve("data")                // an absolute path
+set entries to path.list(".")                   // sorted entry names
+```
+
+`path.join` takes its separator from the platform, so the same program builds
+`data/records.rb` on POSIX and `data\records.rb` on Windows. It takes one or more
+parts, and an absolute part discards everything joined before it: joining
+`"data"` and `"/records.rb"` is `"/records.rb"`, not `"data//records.rb"`. A path
+value is accepted wherever these functions take a path, and `files.read`,
+`files.write`, `files.append`, `files.exists`, `files.lines`, `files.delete`,
+`files.copy` and `files.rename` accept either a path value or the text form every
+existing program writes.
+
+`path.parent` answers `nothing` for a root such as `/`, and for a bare filename
+that has no directory part. A trailing separator names a directory without
+changing its last name, so `path.filename("data/records/")` is `"records"` and
+`path.stem` and `path.extension` read that same name. `path.resolve` makes a path
+absolute against the working directory and removes `.` and `..` segments
+lexically; it does not consult the filesystem, so it answers for a path that does
+not exist yet. `path.list` answers the names directly inside a directory, sorted,
+so the same directory always prints the same list; an empty directory is an empty
+list rather than an error, and a directory that does not exist is an `IoError`.
 
 `files.copy` and `files.rename` refuse rather than write half a file: a copy
 whose source is not there, or a rename onto a path that cannot be written, is an

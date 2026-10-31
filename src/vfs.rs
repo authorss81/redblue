@@ -64,10 +64,24 @@ mod native {
     pub fn write_bytes(path: &str, content: &[u8]) -> io::Result<()> {
         std::fs::write(path, content)
     }
+
+    /// The names directly inside `path`, sorted so a listing is deterministic.
+    ///
+    /// A directory that does not exist is an error, as it is for `read_dir`
+    /// itself. A directory that exists and is empty is an empty list, not an
+    /// error: "there is nothing here" is an answer.
+    pub fn read_dir(path: &str) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            names.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{append, exists, is_file, write_bytes};
+pub use native::{append, exists, is_file, read_dir, write_bytes};
 
 /// The path `relative` names inside `root`, as the one string a read takes.
 ///
@@ -105,7 +119,7 @@ pub fn rooted(root: &std::path::Path, relative: &str) -> String {
 /// and tested there, the two builds' filesystem agrees by construction and the
 /// test that says so is one `cargo test` runs.
 pub mod memory {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -232,6 +246,44 @@ pub mod memory {
         Ok(())
     }
 
+    /// The names directly inside `path`, sorted so a listing is deterministic.
+    ///
+    /// A directory is implied by the keys underneath it, so a path with no
+    /// stored key under it is not a directory this filesystem has: it is the
+    /// same `NotFound` the native `read_dir` gives for a path that is not
+    /// there. That is also the one case a flat map cannot reproduce — an empty
+    /// directory that exists on a disk has no key here, so it is reported as
+    /// missing rather than as an empty list; see [`exists`](self::exists).
+    pub fn read_dir(path: &str) -> io::Result<Vec<String>> {
+        let files = lock();
+        if files.contains_key(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("Not a directory: {path}"),
+            ));
+        }
+        let Some(prefix) = directory_prefix(path) else {
+            return Err(not_found(path));
+        };
+        let mut names = BTreeSet::new();
+        for stored in files.keys() {
+            let Some(rest) = stored.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            let name = rest.split(['/', '\\']).next().unwrap_or(rest);
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+        if names.is_empty() {
+            return Err(not_found(path));
+        }
+        Ok(names.into_iter().collect())
+    }
+
     /// Empties the map. Only a test calls this: the store is a process-wide
     /// singleton, so a test that wrote into it has to be able to start from
     /// nothing, and nothing a program can reach.
@@ -270,5 +322,6 @@ pub mod memory {
 
 #[cfg(target_arch = "wasm32")]
 pub use memory::{
-    append, copy, exists, is_file, read_to_string, remove_file, rename, write, write_bytes,
+    append, copy, exists, is_file, read_dir, read_to_string, remove_file, rename, write,
+    write_bytes,
 };

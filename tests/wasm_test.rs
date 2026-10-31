@@ -1116,6 +1116,53 @@ fn edge_the_in_memory_filesystem_answers_for_directories_too() {
     memory::clear();
 }
 
+/// A directory that exists in the map is listed from the keys beneath it, and
+/// one that does not is the same `NotFound` the native `read_dir` gives. An
+/// empty list is not the answer for a path nobody wrote: the flat map cannot
+/// tell "empty directory" from "missing directory", so it reports the one that
+/// matches the native error instead of inventing an empty directory.
+#[test]
+fn edge_the_in_memory_filesystem_lists_directories_and_refuses_missing_ones() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    let dir = "/wasm-listing";
+    let missing = "/wasm-listing/no-such-dir";
+    memory::write("/wasm-listing/b.txt", "b").expect("write should succeed");
+    memory::write("/wasm-listing/a.txt", "a").expect("write should succeed");
+    memory::write("/wasm-listing/nested/c.txt", "c").expect("write should succeed");
+
+    let expected = vec![
+        "a.txt".to_string(),
+        "b.txt".to_string(),
+        "nested".to_string(),
+    ];
+    assert_eq!(
+        memory::read_dir(dir).expect("a populated directory should list"),
+        expected,
+        "the listing must be sorted and name directories as well as files"
+    );
+    assert_eq!(
+        memory::read_dir(&format!("{dir}/"))
+            .expect("a trailing separator names the same directory"),
+        expected,
+        "one directory must not have two different listings"
+    );
+
+    let missing_error = memory::read_dir(missing).expect_err("a missing directory must fail");
+    assert_eq!(missing_error.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        missing_error
+            .to_string()
+            .contains("No such file or directory"),
+        "the message must be the one `std::fs` gives, got: {missing_error}"
+    );
+
+    memory::clear();
+}
+
 /// A file that does not decode is the same failure with the same words in both
 /// builds. The in-memory filesystem used to append the path to `std`'s message
 /// while `std::fs` does not, and the caller in `runtime.rs` prefixes the path

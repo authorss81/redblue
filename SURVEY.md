@@ -6,10 +6,10 @@ phase-095; rank 6 gained date arithmetic in phase-096 and text parsing and
 formatting in phase-097; the entries are kept so the ranking and its history
 stay readable.
 
-- **Builtins in the registry**: 105 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1249`,
-  which closes with `"input"` at `src/stdlib.rs:1354`.
-- **Modules a dotted call may name**: 13 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 76 — `stdlib::MODULE_MEMBERS` at
+- **Builtins in the registry**: 113 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1334`,
+  which closes with `"input"` at `src/stdlib.rs:1447`.
+- **Modules a dotted call may name**: 14 — `stdlib::MODULES` at `src/stdlib.rs:19`.
+- **Dotted members those modules accept**: 84 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:74`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
@@ -97,7 +97,8 @@ survey measures against, and it is short.
 | `list` | `map`, `length` | `src/stdlib.rs:121` |
 | `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp` | `src/stdlib.rs:122` |
 | `network` | `get`, `post` | `src/stdlib.rs:128` |
-| `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:129` |
+| `path` | `join`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, `resolve`, `list` | `src/stdlib.rs:130` |
+| `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:141` |
 | `sys` | `argv` | `src/stdlib.rs:133` |
 | `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length` | `src/stdlib.rs:134` |
 | `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:156` |
@@ -160,7 +161,7 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:924` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:952` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a

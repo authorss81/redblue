@@ -6,10 +6,12 @@
 //! that opens a socket asserts the *absence of a hang*, and the rest check
 //! argument handling, which never reaches the network.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use redblue::{Error, Value, NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS};
+use redblue::bytecode::compile_source;
+use redblue::bytecode::vm::BytecodeVm;
+use redblue::{run_source_value, Error, Value, NETWORK_CONNECT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS};
 
 /// One test's private directory under `target/tmp/phase014`.
 ///
@@ -986,4 +988,243 @@ fn edge_network_rejects_an_argument_that_is_not_a_url() {
         started.elapsed() < Duration::from_secs(NETWORK_TIMEOUT_SECS),
         "an unparseable URL must fail without waiting for the network"
     );
+}
+
+// The `path` module, kept beside the `files` tests it has to agree with.
+
+/// The text a value prints as, which is how a path value is read at the
+/// language boundary.
+fn text(value: Value) -> String {
+    value.to_string()
+}
+
+/// Runs `source` and answers the value it handed back.
+fn answered(source: &str) -> Value {
+    run_source_value(source).unwrap_or_else(|error| panic!("{source}: {error}"))
+}
+
+/// Runs `source` on both engines and asserts they printed the same lines.
+fn both_engines(source: &str) -> Vec<String> {
+    let (mut walker, outcome) = redblue::run_isolated(
+        &redblue::parser::parse(
+            redblue::lexer::Lexer::tokenize(source).unwrap_or_else(|e| panic!("{source}: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("{source}: {e}")),
+    );
+    outcome.unwrap_or_else(|e| panic!("the walker refused:\n{source}\n{e}"));
+
+    let chunk = compile_source(source).unwrap_or_else(|e| panic!("{source}: {e}"));
+    let mut vm = BytecodeVm::new();
+    vm.set_echo(false);
+    vm.run(&chunk)
+        .unwrap_or_else(|e| panic!("the bytecode VM refused:\n{source}\n{e}"));
+
+    let walked = walker.take_output();
+    let compiled = vm.take_output();
+    assert_eq!(walked, compiled, "the two engines disagree:\n{source}");
+    walked
+}
+
+#[test]
+fn path_join_uses_the_platform_separator() {
+    let expected = format!("a{}b", std::path::MAIN_SEPARATOR);
+    let value = answered(r#"path.join("a", "b")"#);
+    assert_eq!(text(value), expected);
+}
+
+#[test]
+fn edge_the_separator_is_the_platforms_not_a_hardcoded_slash() {
+    use redblue::path::join_with_separator;
+
+    let posix = join_with_separator(&["a", "b"], '/');
+    let windows = join_with_separator(&["a", "b"], '\\');
+    assert_eq!(posix, "a/b");
+    assert_eq!(windows, "a\\b");
+    assert_ne!(
+        posix, windows,
+        "a test that cannot tell the two separators apart cannot catch a Windows path bug"
+    );
+
+    let platform = join_with_separator(&["a", "b"], std::path::MAIN_SEPARATOR);
+    assert_eq!(
+        platform,
+        format!("a{}b", std::path::MAIN_SEPARATOR),
+        "the join did not take its separator from the platform"
+    );
+    assert_eq!(
+        text(answered(r#"path.join("a", "b")"#)),
+        platform,
+        "the language's join does not use the platform separator"
+    );
+}
+
+#[test]
+fn path_components_are_literal_for_relative_and_absolute_inputs() {
+    assert_eq!(text(answered(r#"path.parent("data/records.rb")"#)), "data");
+    assert_eq!(
+        text(answered(r#"path.parent("/data/records.rb")"#)),
+        if cfg!(windows) { "\\data" } else { "/data" }
+    );
+    assert_eq!(
+        text(answered(r#"path.filename("data/records.rb")"#)),
+        "records.rb"
+    );
+    assert_eq!(
+        text(answered(r#"path.filename("/data/records.rb")"#)),
+        "records.rb"
+    );
+    assert_eq!(text(answered(r#"path.stem("data/records.rb")"#)), "records");
+    assert_eq!(text(answered(r#"path.extension("data/records.rb")"#)), "rb");
+    assert_eq!(
+        text(answered(r#"path.is_absolute("/data")"#)),
+        if cfg!(windows) { "no" } else { "yes" }
+    );
+    assert_eq!(text(answered(r#"path.is_absolute("data")"#)), "no");
+}
+
+#[test]
+fn edge_parent_of_a_root_is_nothing_and_a_trailing_separator_is_ignored() {
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    let program = format!(
+        r#"say path.parent("{root}") is nothing
+say path.filename("data/records/")
+say path.stem("data/records/")
+say path.extension("data/records/")"#
+    );
+    let lines = both_engines(&program);
+    assert_eq!(lines, ["yes", "records", "records", "nothing"]);
+}
+
+#[test]
+fn edge_join_of_an_absolute_part_discards_what_came_before() {
+    use redblue::path::join_with_separator;
+
+    assert_eq!(join_with_separator(&["a", "/b"], '/'), "/b");
+    assert_eq!(join_with_separator(&["a", "\\b"], '\\'), "\\b");
+    assert_eq!(
+        text(answered(r#"path.join("a", "b", "c")"#)),
+        format!("a{0}b{0}c", std::path::MAIN_SEPARATOR)
+    );
+
+    let absolute = if cfg!(windows) { r"C:\b" } else { "/b" };
+    let source = format!(r#"path.join("a", "{absolute}")"#);
+    assert_eq!(
+        text(answered(&source)),
+        if cfg!(windows) { r"C:\b" } else { "/b" },
+        "an absolute part must replace the relative path before it"
+    );
+}
+
+#[test]
+fn edge_trailing_double_dot_and_spaced_paths_are_handled() {
+    use redblue::path::{filename, join_with_separator, stem};
+
+    assert_eq!(filename("data//records/"), Some("records".to_string()));
+    assert_eq!(stem("data//records/"), Some("records".to_string()));
+    assert_eq!(
+        join_with_separator(&["data/", "records/"], '/'),
+        "data/records"
+    );
+    assert_eq!(
+        filename("my data/naïve file.txt"),
+        Some("naïve file.txt".to_string())
+    );
+    assert_eq!(
+        stem("my data/naïve file.txt"),
+        Some("naïve file".to_string())
+    );
+
+    let resolved = text(answered(r#"path.resolve("a/./b/../c")"#));
+    assert!(
+        !resolved.contains("/./") && !resolved.contains("/../"),
+        "resolve must remove dot segments, got {resolved}"
+    );
+    assert_eq!(
+        Path::new(&resolved)
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("c")
+    );
+}
+
+#[test]
+fn files_accept_a_path_value_as_well_as_text() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/phase100-files");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    let file = dir.join("value.txt");
+
+    let source = format!(
+        r#"set p to path.join("{dir}", "value.txt")
+files.write(p, "through a path")
+say files.exists(p)
+say files.read(p)
+say files.lines(p)"#,
+        dir = dir.to_string_lossy().replace('\\', "/")
+    );
+    let lines = both_engines(&source);
+    assert_eq!(lines, ["yes", "through a path", "[through a path]"]);
+    assert!(file.exists(), "the path value did not reach the filesystem");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "through a path");
+}
+
+#[test]
+fn edge_listing_is_sorted_and_an_empty_directory_is_an_empty_list() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/phase100-list");
+    let empty = dir.join("empty");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&empty).expect("scratch directory");
+    std::fs::write(dir.join("z.txt"), "z").unwrap();
+    std::fs::write(dir.join("a.txt"), "a").unwrap();
+
+    let source = format!(
+        r#"say path.list("{dir}")
+say path.list("{empty}")"#,
+        dir = dir.to_string_lossy().replace('\\', "/"),
+        empty = empty.to_string_lossy().replace('\\', "/")
+    );
+    let lines = both_engines(&source);
+    assert_eq!(lines, ["[a.txt, empty, z.txt]", "[]"]);
+}
+
+#[test]
+fn edge_bad_path_arguments_are_clean_runtime_failures() {
+    for source in [
+        r#"path.join(1, "b")"#,
+        r#"path.parent(nothing)"#,
+        r#"path.is_absolute([1])"#,
+    ] {
+        let error = run_source_value(source).expect_err(source);
+        assert_eq!(
+            error.label(),
+            "RuntimeError",
+            "{source} was not a clean runtime failure: {error}"
+        );
+    }
+
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/phase100-no-such-dir");
+    let source = format!(
+        r#"path.list("{}")"#,
+        missing.to_string_lossy().replace('\\', "/")
+    );
+    let error = run_source_value(&source).expect_err("a missing directory must be refused");
+    assert_eq!(error.label(), "IoError", "{error}");
+}
+
+#[test]
+fn edge_a_path_value_serialises_as_its_text_in_json() {
+    let expected = format!("\"a{}b\"", std::path::MAIN_SEPARATOR);
+    assert_eq!(
+        both_engines(r#"say json.stringify(path.join("a", "b"))"#),
+        [expected],
+        "a path value is its text in JSON, not null"
+    );
+}
+
+#[test]
+fn edge_empty_text_has_no_components() {
+    assert_eq!(text(answered(r#"path.parent("")"#)), "nothing");
+    assert_eq!(text(answered(r#"path.filename("")"#)), "nothing");
+    assert_eq!(text(answered(r#"path.stem("")"#)), "nothing");
+    assert_eq!(text(answered(r#"path.extension("")"#)), "nothing");
 }
