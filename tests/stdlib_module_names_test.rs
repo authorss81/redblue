@@ -1307,6 +1307,11 @@ say network.post("{address}/echo", "ping")"#
             format!("{NETWORK_BODY}\n{NETWORK_BODY}\n"),
         ),
         (
+            "path",
+            r#"say path.is_absolute(path.resolve("data"))"#.to_string(),
+            "yes\n".to_string(),
+        ),
+        (
             "regex",
             r#"say regex.is_match("id=42", "^id")"#.to_string(),
             "yes\n".to_string(),
