@@ -1,5 +1,21 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "opencode": {
+      "options": {
+        "headerTimeout": 60000,
+        "chunkTimeout": 45000
+      }
+    },
+    "rbops": {
+      "options": {
+        "apiKey": "{env:OPENCODE_API_KEY}",
+        "baseURL": "https://opencode.ai/zen/v1",
+        "headerTimeout": 60000,
+        "chunkTimeout": 45000
+      }
+    }
+  },
   "agent": {
     "reviewer": {
       "description": "Read-only reviewer for a redblue pipeline phase. Reviews the phase diff and emits findings; may not edit files, run commands, fetch the web, launch subagents, or touch paths outside the checkout.",
