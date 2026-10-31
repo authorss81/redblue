@@ -47,23 +47,54 @@ routing for `bytes.write`, adds the missing integration coverage for
 `append`/`delete`/`copy`/`rename` with path values, and records the phase-100
 delivery commit in the unreviewed-work acknowledgement rule.
 
+The final resume closes the last Windows join rule and restores the config
+contract. A part that carries a drive but no root, such as `D:other`, now
+replaces the whole path before it, matching `std::path::PathBuf::push`; before
+this change it was appended as if it were an ordinary relative part. A
+top-level `provider` block merged by a config commit broke 18 pre-existing
+`agent_permissions_test` checks, so this run removes it; the project config
+declares only `$schema` and `agent`, as its own contract requires. The two new
+integration tests exercise `path.list` with a path value (sorted, empty, spaced
+and non-ASCII names) and its refusal to list a file.
+
+The review round pins two playground promises that were only implicit. The
+`path.resolve` refusal is now a helper the host build also compiles under
+`test`, so its `Unsupported` kind and platform-naming message are asserted by
+`cargo test` instead of living in a wasm-only arm nobody compiles. The
+in-memory listing splits only on `/`, because that is the playground's
+separator: a backslash stays an ordinary filename character, so a file written
+as `a\b.txt` is listed by that whole name rather than truncated to `a`.
+
+The second review round closes three path edge cases. The in-memory directory
+prefix now drops `.` segments, so `path.list("./data")` lists the file
+`files.write("data/x.txt", …)` stored, instead of asking for a literal `./data/`
+prefix no key carries. `path.join` keeps the separator on a UNC share root such
+as `\\server\share\`, because trimming it leaves a prefix with no root. And
+`path.resolve` refuses a Windows prefix without a root, such as `C:foo`, rather
+than joining it to the working directory and answering a path that is still
+relative.
+
 | File | Lines | What |
 |---|---|---|
 | `src/path.rs` | +344 −0 | path value, `text_of`, `join`, `join_with_separator`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, lexical `resolve`, `list`, the eight `path.*` builtin arms, and three unit tests |
 | `src/runtime.rs` | +52 −25 | `path_*` dispatch, path-object property access and hashing, `files.*` accepting text or path values, and `bytes.write` accepting a path value |
-| `src/vfs.rs` | +56 −3 | native and in-memory `read_dir`, with sorted names and an empty native directory answered as an empty list |
+| `src/vfs.rs` | +63 −4 | native and in-memory `read_dir`, with sorted names, an empty native directory answered as an empty list, and only `/` separating names in the playground |
 | `src/value.rs` | +17 −0 | path values display as their text, answer `path` from `type_name`, and compare equal to that text |
 | `src/stdlib.rs` | +60 −1 | registers the `path` module and its members, and corrects the `bytes.write` signature text |
 | `src/lib.rs` | +1 −0 | exports `pub mod path` |
-| `tests/stdlib_modules_test.rs` | +296 −2 | 15 path integration tests running both engines and comparing their answers |
+| `tests/stdlib_modules_test.rs` | +296 −2 | 15 path integration tests running both engines and comparing their answers; the final resume adds `edge_listing_accepts_a_path_value` and `edge_listing_a_file_path_value_is_an_io_error` |
+| `src/path.rs` | +16 −0 | the final resume makes a Windows drive-relative part replace the path before it, matching `PathBuf::push`, with `edge_a_drive_relative_part_replaces_the_path_before_it` |
+| `src/path.rs` | +17 −0 | the review round lifts the wasm `path.resolve` refusal into a helper the host suite asserts, with `edge_the_playground_refuses_resolve_without_a_working_directory` |
+| `opencode.json` | −16 | removes the top-level `provider` block a config commit merged; the agent-permission contract allows only `$schema` and `agent` |
 | `tests/stdlib_module_docs_test.rs` | +52 −0 | one answerable row per new builtin |
 | `tests/stdlib_module_names_test.rs` | +5 −0 | the `path` module row |
-| `tests/wasm_test.rs` | +47 −0 | in-memory directory listing tests |
+| `tests/wasm_test.rs` | +70 −0 | in-memory directory listing tests, including the review round's backslash-is-a-filename-character case |
+| `src/path.rs`, `src/vfs.rs`, `tests/wasm_test.rs` | +70 −8 | the second review round normalizes dot-relative directory prefixes, keeps a UNC root separator, and refuses a drive-relative resolve, with the three tests below |
 | `tests/unreviewed_work_ack_test.rs` | +2 −1 | acknowledges the phase-100 delivery subject by rule and keeps the "another phase is not acknowledged" fixture meaningful |
 | `tests/doc_blocks_runs.txt` | +9 −9 | re-anchors the SPEC blocks after the expanded files/path block |
 | `tests/doc_blocks_fragments.txt` | +1 −1 | re-anchors the later network fragment |
 | `tests/doc_blocks_known_fail.txt` | +1 −1 | re-anchors the later parser-failure block |
-| `SPEC.md` | +30 −2 | documents the `path` surface and that `bytes.write` accepts a path value |
+| `SPEC.md` | +32 −2 | documents the `path` surface, that `bytes.write` accepts a path value, and the Windows drive-relative join rule |
 | `README.md` | +15 −1 | the user-facing files and path section |
 | `SURVEY.md` | +7 −6 | builtin count 105 → 113, modules 13 → 14, members 76 → 84, the `path` row, and re-anchored citations |
 
@@ -103,6 +134,14 @@ filesystem or resolving symlinks.
 | `edge_the_in_memory_filesystem_lists_the_current_directory` | boundary: `.` and `./` list the files written by their bare names |
 | `edge_the_in_memory_filesystem_lists_an_empty_current_directory` | empty: an empty current directory exists and lists as `[]` under both `.` and `./` |
 | `edge_an_object_named_path_with_an_extra_field_is_not_a_path_value` | type_mismatch: only an object with exactly one text field is a path value |
+| `edge_listing_accepts_a_path_value` | unicode and ordering: a path value lists sorted spaced and non-ASCII names; an empty directory answers `[]` |
+| `edge_listing_a_file_path_value_is_an_io_error` | malformed_input: a path value naming a file is a catchable `IoError`, not a listing |
+| `path::tests::edge_a_drive_relative_part_replaces_the_path_before_it` | boundary (Windows): a part with a drive but no root replaces the path before it; on POSIX the colon is ordinary text |
+| `path::tests::edge_the_playground_refuses_resolve_without_a_working_directory` | malformed_input/platform: the wasm `path.resolve` refusal is `Unsupported` and names the platform and the native alternative |
+| `edge_the_in_memory_filesystem_treats_a_backslash_as_a_filename_character` | boundary (POSIX): on the playground only `/` separates components, so a backslash stays part of the filename |
+| `edge_the_in_memory_filesystem_lists_a_dot_relative_directory` | boundary: `data/x.txt` is listed by `./data`, `././data`, `data/.` and `./data/` as well as `data`, and each spelling also exists |
+| `path::tests::edge_joining_a_unc_share_root_keeps_it_absolute` | boundary (Windows): a UNC share root keeps the separator that makes it a root, and the joined result is absolute |
+| `path::tests::edge_resolve_refuses_a_drive_relative_path` | boundary (Windows): `C:foo` has a prefix but no root and is refused with `InvalidInput` instead of answered as a relative path |
 
 Mandatory matrix:
 
@@ -111,8 +150,9 @@ Mandatory matrix:
   root parent case.
 - singleton — a single component is joined and listed unchanged; the one-file
   listing case is covered by the sorted-listing test.
-- boundary — the root parent, a trailing separator, an absolute later part,
-  double separators, dot segments and a path-value join part are all pinned.
+- boundary — the root parent, a trailing separator, an absolute later part, a
+  Windows drive-relative part, double separators, dot segments and a path-value
+  join part are all pinned.
 - out_of_bounds — N/A: `path` exposes no numeric index or argument order.
 - type_mismatch — every `path.*` argument and every `files.*` path is checked;
   `edge_bad_path_arguments_are_clean_runtime_failures` and the path-value tests
@@ -135,7 +175,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2410 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 2417 passed, 0 failed, 0 ignored |
 | `../rbops/verify.sh phase-100` | pass |
 
 ## Invariants touched

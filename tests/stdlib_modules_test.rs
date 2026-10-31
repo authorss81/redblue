@@ -1209,6 +1209,46 @@ say path.list("{empty}")"#,
 }
 
 #[test]
+fn edge_listing_accepts_a_path_value() {
+    let dir = TempDir::new("path-list-value");
+    std::fs::create_dir_all(dir.file("empty")).expect("the empty directory should be creatable");
+    dir.write_file("z.txt", "z");
+    dir.write_file("a b.txt", "a");
+    dir.write_file("naïve.txt", "n");
+
+    let source = format!(
+        r#"set d to path.join({dir})
+say path.list(d)
+say path.list(path.join(d, "empty"))"#,
+        dir = redblue_text(&dir.path.to_string_lossy())
+    );
+    let lines = both_engines(&source);
+    assert_eq!(
+        lines,
+        ["[a b.txt, empty, naïve.txt, z.txt]", "[]"],
+        "path.list must accept a path value, sort names, and answer [] for an empty directory"
+    );
+}
+
+#[test]
+fn edge_listing_a_file_path_value_is_an_io_error() {
+    let dir = TempDir::new("path-list-value-file");
+    dir.write_file("plain.txt", "x");
+    let source = format!(
+        r#"set p to path.join({dir}, "plain.txt")
+path.list(p)"#,
+        dir = redblue_text(&dir.path.to_string_lossy())
+    );
+    let result = run_source_value(&source);
+    assert!(
+        result.is_err(),
+        "a path value naming a file must not list as a directory"
+    );
+    let error = result.expect_err("a file is not a directory");
+    assert_eq!(error.label(), "IoError", "{error}");
+}
+
+#[test]
 fn edge_bad_path_arguments_are_clean_runtime_failures() {
     for source in [
         r#"path.join(1, "b")"#,

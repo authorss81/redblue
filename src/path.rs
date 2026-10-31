@@ -102,6 +102,20 @@ pub fn join_with_separator(parts: &[&str], separator: char) -> String {
         };
         let absolute = is_absolute_with(&part, separator);
 
+        // A Windows prefix with no root, such as `D:other`, replaces the whole
+        // path before it, exactly as `PathBuf::push` does. It is not absolute
+        // (the drive is relative to that drive's own working directory), and it
+        // is not root-relative either (the drive itself is a new prefix), so
+        // neither of the branches below would do the right thing with it.
+        if separator == '\\' {
+            let prefix = windows_prefix_len(&part);
+            if prefix > 0 && part.as_bytes().get(prefix) != Some(&b'\\') {
+                joined.clear();
+                joined.push_str(&part);
+                continue;
+            }
+        }
+
         if let Some(root) = root_with(&part, separator) {
             if separator == '\\' && root == "\\" {
                 let prefix = windows_prefix_len(&joined);
@@ -155,6 +169,17 @@ fn root_with(part: &str, separator: char) -> Option<String> {
             && part[2..].chars().all(|c| c == '\\')
         {
             return Some(format!("{}:\\", bytes[0] as char));
+        }
+        // A UNC share is a prefix, not a root, until a separator follows it.
+        // Keeping that separator is what makes `\\server\share\` absolute; the
+        // ordinary trailing-separator trim would otherwise leave only the
+        // prefix `\\server\share`, which names no root at all.
+        let prefix = windows_prefix_len(part);
+        if prefix > 2
+            && bytes.get(prefix) == Some(&b'\\')
+            && part[prefix..].chars().all(|c| c == '\\')
+        {
+            return Some(format!("{}\\", &part[..prefix]));
         }
         if !part.is_empty() && part.chars().all(|c| c == '\\') {
             return Some("\\".to_string());
@@ -251,6 +276,16 @@ pub fn is_absolute(text: &str) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve(text: &str) -> std::io::Result<String> {
     let path = Path::new(text);
+    #[cfg(windows)]
+    if has_prefix_without_root(text) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "cannot resolve '{text}': it has a Windows prefix but no root, so it is \
+                 relative to that drive's own working directory; use a rooted path instead"
+            ),
+        ));
+    }
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -259,17 +294,42 @@ pub fn resolve(text: &str) -> std::io::Result<String> {
     Ok(normalize(&absolute).to_string_lossy().into_owned())
 }
 
+/// Whether `text` carries a Windows prefix but no root after it.
+///
+/// A drive-relative path such as `C:foo` has a drive but no separator, so it
+/// names a file relative to that drive's current directory rather than to the
+/// process's. `PathBuf::push` would truncate the working directory to `C:foo`
+/// and leave it relative; [`resolve`] refuses it instead of answering a path
+/// that is not absolute. The same applies to a UNC share with no trailing
+/// separator, which is a prefix without a root.
+#[cfg(windows)]
+fn has_prefix_without_root(text: &str) -> bool {
+    let prefix = windows_prefix_len(text);
+    prefix > 0 && text.as_bytes().get(prefix) != Some(&b'\\')
+}
+
+/// The refusal the WebAssembly playground gives for [`resolve`].
+///
+/// It is a function the host build also compiles under `test`, so `cargo test`
+/// can assert the kind and wording of the refusal a wasm program receives. A
+/// wasm-only `Err` would be compiled only for a target this checkout's test
+/// suite does not build, leaving the playground's promise unpinned.
+#[cfg(any(target_arch = "wasm32", test))]
+fn no_working_directory() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "path.resolve cannot read the working directory in the WebAssembly playground: \
+         the platform has none. Run it with the native rb binary to resolve a path.",
+    )
+}
+
 /// The playground has no working directory, so there is nothing to resolve
 /// against. `current_dir()` is not available on `wasm32-unknown-unknown`; a
 /// silent empty answer or a host-dependent virtual root would be a path the
 /// program cannot read, so the refusal names the platform instead.
 #[cfg(target_arch = "wasm32")]
 pub fn resolve(_text: &str) -> std::io::Result<String> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "path.resolve cannot read the working directory in the WebAssembly playground: \
-         the platform has none. Run it with the native rb binary to resolve a path.",
-    ))
+    Err(no_working_directory())
 }
 
 /// `path` with `.` removed and `..` folded into its parent where possible.
@@ -399,6 +459,29 @@ mod tests {
     }
 
     #[test]
+    fn edge_joining_a_unc_share_root_keeps_it_absolute() {
+        let root = r"\\server\share\";
+        assert_eq!(
+            join_with_separator(&[root], '\\'),
+            root,
+            "a UNC root must keep the separator that makes it a root"
+        );
+        assert_eq!(
+            join_with_separator(&[r"\\server\share\\"], '\\'),
+            root,
+            "a UNC root is one root however many separators spell it"
+        );
+        assert_eq!(
+            join_with_separator(&[root, "folder"], '\\'),
+            r"\\server\share\folder"
+        );
+        assert!(
+            is_absolute_with(&join_with_separator(&[root], '\\'), '\\'),
+            "the joined UNC root must still be absolute"
+        );
+    }
+
+    #[test]
     fn edge_join_keeps_the_drive_for_a_root_relative_part() {
         assert_eq!(
             join_with_separator(&["C:\\base", "\\other"], '\\'),
@@ -415,6 +498,48 @@ mod tests {
             join_with_separator(&["a", "\\b"], '\\'),
             "\\b",
             "with no prefix to keep, a root-relative part still replaces the rest"
+        );
+    }
+
+    #[test]
+    fn edge_a_drive_relative_part_replaces_the_path_before_it() {
+        assert_eq!(
+            join_with_separator(&["C:\\base", "D:other"], '\\'),
+            "D:other",
+            "a part with a prefix but no root replaces the whole path, as PathBuf::push does"
+        );
+        assert_eq!(join_with_separator(&["C:\\base", "C:"], '\\'), "C:");
+        assert_eq!(
+            join_with_separator(&["a", "C:other"], '/'),
+            "a/C:other",
+            "on POSIX a colon is an ordinary filename character, not a drive prefix"
+        );
+    }
+
+    #[test]
+    fn edge_the_playground_refuses_resolve_without_a_working_directory() {
+        let refusal = no_working_directory();
+        assert_eq!(
+            refusal.kind(),
+            std::io::ErrorKind::Unsupported,
+            "a platform with no working directory is Unsupported, not a missing file: {refusal}"
+        );
+        let message = refusal.to_string();
+        assert!(
+            message.contains("path.resolve"),
+            "the refusal must name the operation the program called: {message}"
+        );
+        assert!(
+            message.contains("WebAssembly"),
+            "the refusal must name the platform rather than a host-dependent path: {message}"
+        );
+        assert!(
+            message.contains("working directory"),
+            "the refusal must say what the platform lacks: {message}"
+        );
+        assert!(
+            message.contains("native rb binary"),
+            "the refusal must say what the reader can run instead: {message}"
         );
     }
 
@@ -437,6 +562,31 @@ mod tests {
                 .file_name()
                 .and_then(|name| name.to_str()),
             Some("c")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn edge_resolve_refuses_a_drive_relative_path() {
+        let error =
+            resolve("C:foo").expect_err("a drive-relative path has no root to resolve against");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "a drive-relative path is not a missing file: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("C:foo"),
+            "the refusal must name the path the program passed: {message}"
+        );
+        assert!(
+            message.contains("prefix but no root"),
+            "the refusal must say why it cannot be made absolute: {message}"
+        );
+        assert!(
+            message.contains("rooted path"),
+            "the refusal must say what the reader can pass instead: {message}"
         );
     }
 }

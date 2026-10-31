@@ -276,7 +276,12 @@ pub mod memory {
             if rest.is_empty() {
                 continue;
             }
-            let name = rest.split(['/', '\\']).next().unwrap_or(rest);
+            // This is the playground's filesystem, which follows POSIX: only
+            // `/` separates components there, and `path.join` deliberately
+            // leaves a backslash alone on that target. Splitting on `\\` here
+            // too would list a file written as `"a\\b.txt"` as `"a"`, which is
+            // a filename the program never wrote.
+            let name = rest.split('/').next().unwrap_or(rest);
             if !name.is_empty() {
                 names.insert(name.to_string());
             }
@@ -313,23 +318,35 @@ pub mod memory {
     ///
     /// The trailing separator is the whole of it, and it is why
     /// [`exists`](self::exists) does not confuse the directory `notes` with a
-    /// file called `notes.txt`. `.` and `./` name the working directory, whose
-    /// stored keys are the paths written without a prefix, so both answer the
-    /// empty prefix rather than a literal `"./"` no key carries. `None` for a
+    /// file called `notes.txt`. `.` segments name the working directory or the
+    /// directory they sit in, whose stored keys are the paths written without
+    /// that segment, so `./data`, `data/.` and `data` all answer the prefix
+    /// `"data/"` rather than a literal `"./data/"` no key carries. `None` for a
     /// path that cannot name a directory at all: the empty path, which
     /// `Path::new("").exists()` also answers `false` for on a disk.
     fn directory_prefix(path: &str) -> Option<String> {
         if path.is_empty() {
             return None;
         }
-        if path == "." || path == "./" {
-            return Some(String::new());
+        let mut prefix = String::new();
+        if path.starts_with('/') {
+            prefix.push('/');
         }
-        if path.ends_with('/') {
-            Some(path.to_string())
-        } else {
-            Some(format!("{path}/"))
+        let mut first = true;
+        for component in path.split('/') {
+            if component.is_empty() || component == "." {
+                continue;
+            }
+            if !first {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            first = false;
         }
+        if !prefix.is_empty() && !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        Some(prefix)
     }
 }
 

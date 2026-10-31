@@ -1169,6 +1169,29 @@ fn edge_the_in_memory_filesystem_lists_directories_and_refuses_missing_ones() {
     memory::clear();
 }
 
+/// On the playground only `/` separates components, so a backslash is an
+/// ordinary filename character. A listing that split on both separators would
+/// turn `a\b.txt` into the directory name `a`, which is not a name the program
+/// ever wrote and which `path.join` on this target deliberately does not build.
+#[test]
+fn edge_the_in_memory_filesystem_treats_a_backslash_as_a_filename_character() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    let dir = "/wasm-backslash";
+    memory::write("/wasm-backslash/a\\b.txt", "x").expect("write should succeed");
+
+    assert_eq!(
+        memory::read_dir(dir).expect("the directory should list"),
+        vec!["a\\b.txt".to_string()],
+        "only `/` separates components on the playground"
+    );
+
+    memory::clear();
+}
+
 /// `.` names the working directory, and this filesystem stores the paths a
 /// program wrote verbatim. A file written as `"a.txt"` therefore has to be
 /// visible to `path.list(".")`, the spelling SPEC.md documents, and `"./"` must
@@ -1194,6 +1217,36 @@ fn edge_the_in_memory_filesystem_lists_the_current_directory() {
         expected,
         "the current directory must not have two different listings"
     );
+
+    memory::clear();
+}
+
+/// A dot-relative spelling of a directory names the same directory. The map
+/// stores keys verbatim, so `./data` has to lose its `.` segment before it
+/// becomes a prefix; otherwise it is a literal `./data/` no key carries and
+/// `path.list("./data")` answers `NotFound` while native `read_dir("./data")`
+/// lists the file.
+#[test]
+fn edge_the_in_memory_filesystem_lists_a_dot_relative_directory() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("data/x.txt", "x").expect("write should succeed");
+
+    let expected = vec!["x.txt".to_string()];
+    for spelling in ["data", "./data", "././data", "data/.", "./data/"] {
+        assert_eq!(
+            memory::read_dir(spelling).expect("the dot-relative directory should list"),
+            expected,
+            "`{spelling}` must name the same directory as `data`"
+        );
+        assert!(
+            memory::exists(spelling),
+            "`{spelling}` must name the same directory as `data`"
+        );
+    }
 
     memory::clear();
 }

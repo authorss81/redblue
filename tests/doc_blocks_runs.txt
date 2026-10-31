@@ -62,15 +62,15 @@ SPEC.md:1195
 SPEC.md:1231
 SPEC.md:1264
 SPEC.md:1327
-SPEC.md:1368
-SPEC.md:1402
-SPEC.md:1431
-SPEC.md:1506
-SPEC.md:1518
-SPEC.md:1567
-SPEC.md:1686
-SPEC.md:1737
-SPEC.md:1763
+SPEC.md:1370
+SPEC.md:1404
+SPEC.md:1433
+SPEC.md:1508
+SPEC.md:1520
+SPEC.md:1569
+SPEC.md:1688
+SPEC.md:1739
+SPEC.md:1765
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:558

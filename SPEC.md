@@ -1338,7 +1338,9 @@ set entries to path.list(".")                   // sorted entry names
 `path.join` takes its separator from the platform, so the same program builds
 `data/records.rb` on POSIX and `data\records.rb` on Windows. It takes one or more
 parts, and an absolute part discards everything joined before it: joining
-`"data"` and `"/records.rb"` is `"/records.rb"`, not `"data//records.rb"`. A path
+`"data"` and `"/records.rb"` is `"/records.rb"`, not `"data//records.rb"`. On
+Windows a part that carries a drive but no root, such as `"D:other"`, also
+replaces everything before it, as the host's `PathBuf::push` does. A path
 value is accepted wherever these functions take a path, and `files.read`,
 `files.write`, `files.append`, `files.exists`, `files.lines`, `files.delete`,
 `files.copy`, `files.rename` and `bytes.write` accept either a path value or the
