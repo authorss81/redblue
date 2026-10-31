@@ -381,7 +381,7 @@ pub fn range_has_next(current: f64, end: f64, step: f64) -> bool {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Nothing,
     Number(f64),
@@ -401,6 +401,42 @@ pub enum Value {
     Date(NaiveDateTime),
     /// A signed span of time, as the difference between two dates.
     Duration(TimeDelta),
+}
+
+/// Value equality, with one exception to structural comparison: two deques
+/// made by `collections` compare by the items they hold, in order.
+///
+/// A deque's `front` and `back` are persistent stack trees, and the same
+/// sequence can be split across them differently depending on how it was built.
+/// Comparing those fields structurally would make a deque from
+/// `collections.deque([1, 2])` unequal to one made by two `push_right` calls,
+/// leaking the construction history through `is`, `==`, Counter keys and
+/// `collections.get`. The runtime answers the logical comparison; an object that
+/// is not a well-formed deque falls back to the structural rule below.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Nothing, Value::Nothing) => true,
+            (Value::Number(left), Value::Number(right)) => left == right,
+            (Value::Text(left), Value::Text(right)) => left == right,
+            (Value::YesNo(left), Value::YesNo(right)) => left == right,
+            (Value::List(left), Value::List(right)) => left == right,
+            (Value::Record(left), Value::Record(right)) => left == right,
+            (Value::Object(left_name, left_fields), Value::Object(right_name, right_fields)) => {
+                if left_name == "deque" && right_name == "deque" {
+                    if let Some(equal) = crate::runtime::deques_equal(self, other) {
+                        return equal;
+                    }
+                }
+                left_name == right_name && left_fields == right_fields
+            }
+            (Value::Function(left), Value::Function(right)) => left == right,
+            (Value::Builtin(left), Value::Builtin(right)) => left == right,
+            (Value::Date(left), Value::Date(right)) => left == right,
+            (Value::Duration(left), Value::Duration(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 /// Storage a list or a record's contents live in, shared rather than owned.

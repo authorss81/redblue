@@ -16,8 +16,9 @@
 //! moved rather than rewritten, so `rb run` behaves exactly as before.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::format::{Item, StrftimeItems};
@@ -26,7 +27,7 @@ use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, T
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
 use crate::parser::{BinaryOp, Expr, Program, Statement, UnaryOp};
-use crate::value::Value;
+use crate::value::{Fields, Value};
 
 /// Parses a module file into the program its top level declares.
 ///
@@ -1602,6 +1603,11 @@ fn cache_value_eq(left: &Value, right: &Value) -> bool {
                 })
         }
         (Value::Object(an, af), Value::Object(bn, bf)) => {
+            if an == "deque" && bn == "deque" {
+                if let Some(equal) = deque_cache_equal(left, right) {
+                    return equal;
+                }
+            }
             an == bn
                 && af.len() == bf.len()
                 && af.iter().all(|(name, value)| {
@@ -1698,7 +1704,9 @@ fn combine_hash(hash: u64, value: u64) -> u64 {
 /// costs one comparison rather than changing the answer. Record and object
 /// fields are combined commutatively because their `IndexMap` equality is
 /// order-independent; captured scopes are combined in order because a
-/// function's captured stack is.
+/// function's captured stack is. A deque made by `collections` is hashed by
+/// the items it holds rather than by its two stack trees, because `Value`
+/// equality compares two deques by those items.
 fn group_value_hash(value: &Value) -> u64 {
     match value {
         Value::Nothing => hash_tagged_u64(HASH_NOTHING, 0),
@@ -1721,6 +1729,11 @@ fn group_value_hash(value: &Value) -> u64 {
         }
         Value::Record(fields) => group_fields_hash(HASH_RECORD, fields),
         Value::Object(name, fields) => {
+            if name == "deque" {
+                if let Some(hash) = deque_items_hash(value) {
+                    return hash;
+                }
+            }
             let mut hash = hash_tagged_bytes(HASH_OBJECT_NAME, name.as_bytes());
             hash = combine_hash(hash, group_fields_hash(HASH_OBJECT_FIELDS, fields));
             hash
@@ -1769,6 +1782,714 @@ fn group_function_hash(function: &crate::value::FunctionValue) -> u64 {
         hash = combine_hash(hash, entries);
     }
     hash
+}
+
+/// The `[key, value]` pairs a Counter or a defaultdict stores.
+fn collection_pairs(span: Span, value: &Value, what: &str) -> Result<Vec<(Value, Value)>> {
+    collection_pairs_with_hash(span, value, what, group_value_hash)
+}
+
+/// The same check with the key hash supplied, so a test can force two distinct
+/// keys into one bucket.
+///
+/// A repeated key is refused rather than letting `count` answer one entry while
+/// `most_common` lists both, or letting `put` update the first copy and leave a
+/// stale second one. The hash index makes the check expected-linear: a pair is
+/// compared only with earlier keys that share its hash. A hash collision is
+/// resolved by equality, and a bucket that many distinct keys share costs one
+/// comparison per earlier key in that bucket, so the worst case is still
+/// quadratic rather than linear.
+fn collection_pairs_with_hash<F>(
+    span: Span,
+    value: &Value,
+    what: &str,
+    key_hash: F,
+) -> Result<Vec<(Value, Value)>>
+where
+    F: Fn(&Value) -> u64,
+{
+    let Value::List(pairs) = value else {
+        return Err(Error::Runtime(
+            format!("{what} requires a list of [key, value] pairs"),
+            span,
+        ));
+    };
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+    let mut seen: HashMap<u64, Vec<usize>> = HashMap::new();
+    for pair in pairs.iter() {
+        let Value::List(pair) = pair else {
+            return Err(Error::Runtime(
+                format!("{what} requires [key, value] pairs"),
+                span,
+            ));
+        };
+        let [key, value] = pair.as_slice() else {
+            return Err(Error::Runtime(
+                format!("{what} requires [key, value] pairs"),
+                span,
+            ));
+        };
+        let candidates = seen.entry(key_hash(key)).or_default();
+        if candidates.iter().any(|&index| out[index].0 == *key) {
+            return Err(Error::Runtime(
+                format!("{what} has duplicate key {key}"),
+                span,
+            ));
+        }
+        candidates.push(out.len());
+        out.push((key.clone(), value.clone()));
+    }
+    Ok(out)
+}
+
+fn counter_value(pairs: Vec<(Value, Value)>) -> Value {
+    let counts = pairs
+        .into_iter()
+        .map(|(key, count)| Value::list(vec![key, count]))
+        .collect();
+    let mut fields = Fields::new();
+    fields.insert("counts".to_string(), Value::list(counts));
+    fields.insert("missing".to_string(), Value::Number(0.0));
+    Value::record(fields)
+}
+
+fn counter_parts(span: Span, counter: &Value) -> Result<(Vec<(Value, Value)>, Value)> {
+    let Value::Record(fields) = counter else {
+        return Err(Error::Runtime(
+            "a counter is a record made by collections.counter".to_string(),
+            span,
+        ));
+    };
+    let Some(counts) = fields.get("counts") else {
+        return Err(Error::Runtime(
+            "a counter is a record made by collections.counter".to_string(),
+            span,
+        ));
+    };
+    let pairs = collection_pairs(span, counts, "a counter")?;
+    for (_, count) in &pairs {
+        counter_number(span, count)?;
+    }
+    let Some(missing) = fields.get("missing") else {
+        return Err(Error::Runtime(
+            "a counter is a record made by collections.counter".to_string(),
+            span,
+        ));
+    };
+    Ok((pairs, missing.clone()))
+}
+
+fn counter_number(span: Span, value: &Value) -> Result<f64> {
+    match value {
+        Value::Number(number) if number.is_finite() && *number >= 0.0 && number.fract() == 0.0 => {
+            Ok(*number)
+        }
+        _ => Err(Error::Runtime(
+            "a counter's count must be a non-negative integer".to_string(),
+            span,
+        )),
+    }
+}
+
+fn defaultdict_value(pairs: Vec<(Value, Value)>, factory: Value) -> Value {
+    let entries = pairs
+        .into_iter()
+        .map(|(key, value)| Value::list(vec![key, value]))
+        .collect();
+    let mut fields = Fields::new();
+    fields.insert("entries".to_string(), Value::list(entries));
+    fields.insert("factory".to_string(), factory);
+    Value::record(fields)
+}
+
+fn defaultdict_parts(span: Span, dictionary: &Value) -> Result<(Vec<(Value, Value)>, Value)> {
+    let Value::Record(fields) = dictionary else {
+        return Err(Error::Runtime(
+            "a defaultdict is a record made by collections.defaultdict".to_string(),
+            span,
+        ));
+    };
+    let Some(entries) = fields.get("entries") else {
+        return Err(Error::Runtime(
+            "a defaultdict is a record made by collections.defaultdict".to_string(),
+            span,
+        ));
+    };
+    let pairs = collection_pairs(span, entries, "a defaultdict")?;
+    let Some(factory) = fields.get("factory") else {
+        return Err(Error::Runtime(
+            "a defaultdict is a record made by collections.defaultdict".to_string(),
+            span,
+        ));
+    };
+    Ok((pairs, factory.clone()))
+}
+
+fn defaultdict_answer(value: Value, dictionary: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("value".to_string(), value);
+    fields.insert("dict".to_string(), dictionary);
+    Value::record(fields)
+}
+
+fn deque_error(span: Span) -> Error {
+    Error::Runtime("a value made by collections.deque".to_string(), span)
+}
+
+/// Refuses a deque that would hold more than [`MAX_DEQUE_ITEMS`].
+///
+/// The message names both the limit and the length that crossed it, so a
+/// constructor or push refusal says what to remove rather than only saying the
+/// value is not a deque.
+fn deque_budget_error(span: Span, length: usize) -> Error {
+    Error::Runtime(
+        format!("a deque holds at most {MAX_DEQUE_ITEMS} items, but this one would hold {length}"),
+        span,
+    )
+}
+
+/// The private field that tells a trusted deque from a look-alike object.
+///
+/// An `object deque` declaration produces a `Record`, not an `Object`, but the
+/// marker makes the trust boundary independent of that detail: a trusted deque
+/// carries a field whose value is itself an `Object` with a name source cannot
+/// bind. A source-declared object cannot produce either the outer `Object` or
+/// this inner marker value, so it can never take the trusted path even if a
+/// later change makes declarations construct `Object` values.
+const DEQUE_MARKER_FIELD: &str = "__collections_deque";
+const DEQUE_MARKER_NAME: &str = "__collections_deque_marker";
+
+fn deque_value(front: Value, back: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("kind".to_string(), Value::Text("deque".to_string()));
+    fields.insert("front".to_string(), front);
+    fields.insert("back".to_string(), back);
+    fields.insert(
+        DEQUE_MARKER_FIELD.to_string(),
+        Value::object(DEQUE_MARKER_NAME.to_string(), Fields::new()),
+    );
+    // An `Object` rather than a `Record` because source cannot build one: a
+    // deque made here is trusted, while a hand-written record with the same
+    // field names is not. Both are accepted by `deque_parts`, but only the
+    // trusted object skips the full tree walk on every operation.
+    Value::object("deque".to_string(), fields)
+}
+
+/// The two stacks of a deque, and whether they came from this module.
+///
+/// A value made by `collections.deque` is an `Object`, which no Redblue source
+/// can construct, so its trees are known good and an operation may trust them.
+/// A hand-written record is still accepted for compatibility and for the
+/// forged-tree tests, but it is validated all the way down before use: its
+/// `size` fields may disagree with its children, and walking every node is what
+/// refuses it rather than trusting a `kind` a program can write.
+fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
+    let (front, back, trusted) = match deque {
+        Value::Object(name, fields) if name == "deque" => {
+            let Some(Value::Text(kind)) = fields.get("kind") else {
+                return Err(deque_error(span));
+            };
+            if kind != "deque" {
+                return Err(deque_error(span));
+            }
+            let Some(Value::Object(marker, _)) = fields.get(DEQUE_MARKER_FIELD) else {
+                return Err(deque_error(span));
+            };
+            if marker != DEQUE_MARKER_NAME {
+                return Err(deque_error(span));
+            }
+            let Some(front) = fields.get("front") else {
+                return Err(deque_error(span));
+            };
+            let Some(back) = fields.get("back") else {
+                return Err(deque_error(span));
+            };
+            (front, back, true)
+        }
+        Value::Record(fields) => {
+            let Some(Value::Text(kind)) = fields.get("kind") else {
+                return Err(deque_error(span));
+            };
+            if kind != "deque" {
+                return Err(deque_error(span));
+            }
+            let Some(front) = fields.get("front") else {
+                return Err(deque_error(span));
+            };
+            let Some(back) = fields.get("back") else {
+                return Err(deque_error(span));
+            };
+            (front, back, false)
+        }
+        _ => return Err(deque_error(span)),
+    };
+    if !matches!(front, Value::List(_)) || !matches!(back, Value::List(_)) {
+        return Err(deque_error(span));
+    }
+    let mut total = 0usize;
+    for stack in [front, back] {
+        let Value::List(trees) = stack else {
+            return Err(deque_error(span));
+        };
+        for tree in trees.iter() {
+            let size = stack_tree_budget(span, tree)?;
+            total = total.checked_add(size).ok_or_else(|| deque_error(span))?;
+            if total > MAX_DEQUE_ITEMS {
+                return Err(deque_budget_error(span, total));
+            }
+            if !trusted {
+                validate_stack_tree(span, tree)?;
+            }
+        }
+    }
+    Ok((front.clone(), back.clone()))
+}
+
+/// One node visit while walking a stack in pop order or reverse pop order.
+enum StackTask {
+    Visit(Value),
+    Emit(Value),
+}
+
+/// A lazy walk over one stack.
+///
+/// The walk keeps only the tree nodes it still has to visit, so iterating a
+/// million-item deque costs O(log n) memory instead of allocating one vector of
+/// every item. `reverse` walks the reverse of the stack's pop order, which is
+/// the order a deque's `back` contributes to the deque as a whole.
+struct StackItems {
+    tasks: Vec<StackTask>,
+    reverse: bool,
+}
+
+impl StackItems {
+    fn new(span: Span, stack: Value, reverse: bool) -> Result<Self> {
+        let Value::List(trees) = stack else {
+            return Err(deque_error(span));
+        };
+        let mut tasks = Vec::with_capacity(trees.len());
+        if reverse {
+            for tree in trees.iter() {
+                tasks.push(StackTask::Visit(tree.clone()));
+            }
+        } else {
+            for tree in trees.iter().rev() {
+                tasks.push(StackTask::Visit(tree.clone()));
+            }
+        }
+        Ok(Self { tasks, reverse })
+    }
+
+    fn next(&mut self, span: Span) -> Result<Option<Value>> {
+        while let Some(task) = self.tasks.pop() {
+            match task {
+                StackTask::Emit(value) => return Ok(Some(value)),
+                StackTask::Visit(tree) => {
+                    let parts = stack_tree_node_parts(span, &tree)?;
+                    match parts.children {
+                        None => return Ok(Some(parts.value)),
+                        Some((left, right)) => {
+                            if self.reverse {
+                                self.tasks.push(StackTask::Emit(parts.value));
+                                self.tasks.push(StackTask::Visit(left));
+                                self.tasks.push(StackTask::Visit(right));
+                            } else {
+                                self.tasks.push(StackTask::Visit(right));
+                                self.tasks.push(StackTask::Visit(left));
+                                return Ok(Some(parts.value));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// The items a deque holds, from left to right, one at a time.
+///
+/// `front` pops from the left and `back` pops from the right, so the logical
+/// order is the front's pop order followed by the reverse of the back's. Walking
+/// lazily keeps equality and hashing from materialising either deque, so a
+/// million-item comparison allocates O(log n) tree cursors rather than two
+/// million-item vectors. A malformed value refuses the walk, which lets the
+/// caller fall back to structural comparison.
+struct DequeItems {
+    front: StackItems,
+    back: StackItems,
+    front_done: bool,
+}
+
+impl DequeItems {
+    fn new(span: Span, value: &Value) -> Result<Self> {
+        let (front, back) = deque_parts(span, value)?;
+        Ok(Self {
+            front: StackItems::new(span, front, false)?,
+            back: StackItems::new(span, back, true)?,
+            front_done: false,
+        })
+    }
+
+    fn next(&mut self, span: Span) -> Result<Option<Value>> {
+        if !self.front_done {
+            match self.front.next(span)? {
+                Some(value) => return Ok(Some(value)),
+                None => self.front_done = true,
+            }
+        }
+        self.back.next(span)
+    }
+}
+
+/// Whether two well-formed deques hold the same items in the same order.
+///
+/// `None` means at least one side is not a well-formed deque, which lets the
+/// caller keep the ordinary structural comparison for a value that only looks
+/// like a deque. The walk compares in lockstep, so it stops at the first
+/// difference instead of reading both deques to the end.
+pub(crate) fn deques_equal(left: &Value, right: &Value) -> Option<bool> {
+    let span = Span::new(1, 1);
+    let mut left = DequeItems::new(span, left).ok()?;
+    let mut right = DequeItems::new(span, right).ok()?;
+    loop {
+        match (left.next(span).ok()?, right.next(span).ok()?) {
+            (None, None) => return Some(true),
+            (Some(left), Some(right)) if left == right => {}
+            _ => return Some(false),
+        }
+    }
+}
+
+/// The key hash of a deque, folded one item at a time.
+///
+/// The tag order differs from the eager version, but equal deques still walk the
+/// same items in the same order and therefore hash the same.
+fn deque_items_hash(value: &Value) -> Option<u64> {
+    let span = Span::new(1, 1);
+    let mut items = DequeItems::new(span, value).ok()?;
+    let mut hash = hash_tagged_bytes(HASH_OBJECT_NAME, b"deque");
+    let mut count = 0u64;
+    while let Some(item) = items.next(span).ok()? {
+        hash = combine_hash(hash, group_value_hash(&item));
+        count += 1;
+    }
+    Some(combine_hash(hash, hash_tagged_u64(HASH_LIST, count)))
+}
+
+/// Whether two deques are equal as `lru_cache` keys, comparing their items with
+/// the cache's own function-identity rule.
+fn deque_cache_equal(left: &Value, right: &Value) -> Option<bool> {
+    let span = Span::new(1, 1);
+    let mut left = DequeItems::new(span, left).ok()?;
+    let mut right = DequeItems::new(span, right).ok()?;
+    loop {
+        match (left.next(span).ok()?, right.next(span).ok()?) {
+            (None, None) => return Some(true),
+            (Some(left), Some(right)) if cache_value_eq(&left, &right) => {}
+            _ => return Some(false),
+        }
+    }
+}
+
+/// The most logical nodes one deque operation may validate or enumerate.
+///
+/// A tree node's `size` is the number of logical nodes its root stands for, and
+/// a forged tree can reuse one physical child under both branches so that a few
+/// records claim an enormous logical tree. Rejecting an over-budget root before
+/// walking it keeps a malformed deque from making one operation visit a tree the
+/// deque cannot hold.
+const MAX_DEQUE_ITEMS: usize = 1_000_000;
+
+/// The size of one node in a deque's persistent stack.
+fn stack_tree_size(span: Span, tree: &Value) -> Result<usize> {
+    let Value::Record(fields) = tree else {
+        return Err(deque_error(span));
+    };
+    let Some(Value::Number(size)) = fields.get("size") else {
+        return Err(deque_error(span));
+    };
+    if !size.is_finite() || *size < 1.0 || size.fract() != 0.0 || *size > usize::MAX as f64 {
+        return Err(deque_error(span));
+    }
+    Ok(*size as usize)
+}
+
+/// A leaf stack node holding `value`.
+fn stack_tree(value: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("size".to_string(), Value::Number(1.0));
+    fields.insert("value".to_string(), value);
+    Value::record(fields)
+}
+
+/// An internal stack node holding `value` and two equal-sized child trees.
+fn stack_node(value: Value, left: Value, right: Value, size: usize) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("size".to_string(), Value::Number(size as f64));
+    fields.insert("value".to_string(), value);
+    fields.insert("left".to_string(), left);
+    fields.insert("right".to_string(), right);
+    Value::record(fields)
+}
+
+struct StackTreeParts {
+    value: Value,
+    children: Option<(Value, Value)>,
+}
+
+/// One stack node's value and children, refusing a malformed node.
+fn stack_tree_node_parts(span: Span, tree: &Value) -> Result<StackTreeParts> {
+    let Value::Record(fields) = tree else {
+        return Err(deque_error(span));
+    };
+    let Some(value) = fields.get("value") else {
+        return Err(deque_error(span));
+    };
+    let size = stack_tree_size(span, tree)?;
+    match (fields.get("left"), fields.get("right")) {
+        (None, None) => {
+            if size != 1 {
+                return Err(deque_error(span));
+            }
+            Ok(StackTreeParts {
+                value: value.clone(),
+                children: None,
+            })
+        }
+        (Some(left), Some(right)) => {
+            let left_size = stack_tree_size(span, left)?;
+            let right_size = stack_tree_size(span, right)?;
+            let expected = left_size
+                .checked_add(right_size)
+                .and_then(|size| size.checked_add(1))
+                .ok_or_else(|| deque_error(span))?;
+            if left_size != right_size || size != expected {
+                return Err(deque_error(span));
+            }
+            Ok(StackTreeParts {
+                value: value.clone(),
+                children: Some((left.clone(), right.clone())),
+            })
+        }
+        _ => Err(deque_error(span)),
+    }
+}
+
+/// Refuses a tree whose logical size is beyond what one deque may hold.
+fn stack_tree_budget(span: Span, tree: &Value) -> Result<usize> {
+    let size = stack_tree_size(span, tree)?;
+    if size > MAX_DEQUE_ITEMS {
+        return Err(deque_budget_error(span, size));
+    }
+    Ok(size)
+}
+
+/// Refuses a tree with any malformed node, not only a malformed root.
+///
+/// The root's logical size is checked before the walk, and each physical node is
+/// visited once, so a forged DAG that shares one child under both branches is
+/// either bounded by the budget or refused before the walk starts instead of
+/// being walked once per logical occurrence.
+fn validate_stack_tree(span: Span, tree: &Value) -> Result<()> {
+    stack_tree_budget(span, tree)?;
+    let mut seen = HashSet::new();
+    let mut pending = vec![tree];
+    while let Some(tree) = pending.pop() {
+        let Value::Record(fields) = tree else {
+            return Err(deque_error(span));
+        };
+        if !seen.insert(Arc::as_ptr(fields) as usize) {
+            continue;
+        }
+        if fields.get("value").is_none() {
+            return Err(deque_error(span));
+        }
+        let size = stack_tree_size(span, tree)?;
+        match (fields.get("left"), fields.get("right")) {
+            (None, None) => {
+                if size != 1 {
+                    return Err(deque_error(span));
+                }
+            }
+            (Some(left), Some(right)) => {
+                let left_size = stack_tree_size(span, left)?;
+                let right_size = stack_tree_size(span, right)?;
+                let expected = left_size
+                    .checked_add(right_size)
+                    .and_then(|size| size.checked_add(1))
+                    .ok_or_else(|| deque_error(span))?;
+                if left_size != right_size || size != expected {
+                    return Err(deque_error(span));
+                }
+                pending.push(left);
+                pending.push(right);
+            }
+            _ => return Err(deque_error(span)),
+        }
+    }
+    Ok(())
+}
+
+/// The largest perfect tree size (`2^k - 1`) that fits in `items`.
+fn largest_perfect_size(items: usize) -> usize {
+    let mut size = 1;
+    while size * 2 < items {
+        size = size * 2 + 1;
+    }
+    size
+}
+
+/// A perfect tree whose pop order is `values`.
+///
+/// `values` has `2^k - 1` items, so the root is the first to pop and the two
+/// equal halves are the left and right subtrees. Building it directly costs one
+/// visit per item; pushing the same items one at a time costs a spine copy per
+/// push.
+fn stack_tree_from_values(values: &[Value]) -> Value {
+    if values.len() == 1 {
+        return stack_tree(values[0].clone());
+    }
+    let half = values.len() / 2;
+    let left = stack_tree_from_values(&values[1..=half]);
+    let right = stack_tree_from_values(&values[half + 1..]);
+    stack_node(values[0].clone(), left, right, values.len())
+}
+
+/// A stack whose pop order is `values`, built in one pass.
+///
+/// The forest uses the largest perfect tree that fits at each step, so
+/// `collections.deque(list)` is linear in the list's length rather than paying
+/// a spine copy for every item. The trees are built directly from values this
+/// module already holds, so they are trusted for the same reason the `Object`
+/// holding them is: Redblue source cannot construct that object, and
+/// `deque_parts` therefore does not walk the constructor's trees.
+fn stack_from_values(values: &[Value]) -> Value {
+    let mut trees = Vec::new();
+    let mut rest = values;
+    while !rest.is_empty() {
+        let size = largest_perfect_size(rest.len());
+        let (head, tail) = rest.split_at(size);
+        trees.push(stack_tree_from_values(head));
+        rest = tail;
+    }
+    Value::list(trees)
+}
+
+/// Pushes `value` onto a stack. Two equal-sized top trees merge into one, so the
+/// spine holds O(log n) trees and every node has O(log n) depth. Only the top
+/// tree of each spine entry is checked here: a module deque's deeper nodes were
+/// checked when it was built, and `deque_parts` already walked a hand-written
+/// record all the way down before this runs.
+fn stack_cons(span: Span, stack: &Value, value: Value) -> Result<Value> {
+    let Value::List(trees) = stack else {
+        return Err(deque_error(span));
+    };
+    for tree in trees.iter() {
+        stack_tree_node_parts(span, tree)?;
+    }
+    let mut trees = trees.as_ref().clone();
+    if trees.len() >= 2 {
+        let first_size = stack_tree_size(span, &trees[0])?;
+        let second_size = stack_tree_size(span, &trees[1])?;
+        if first_size == second_size {
+            let left = trees.remove(0);
+            let right = trees.remove(0);
+            let size = first_size
+                .checked_add(second_size)
+                .and_then(|size| size.checked_add(1))
+                .ok_or_else(|| deque_error(span))?;
+            trees.insert(0, stack_node(value, left, right, size));
+            return Ok(Value::list(trees));
+        }
+    }
+    trees.insert(0, stack_tree(value));
+    Ok(Value::list(trees))
+}
+
+/// Pops the top of a stack, answering `None` when it is empty.
+fn stack_uncons(span: Span, stack: &Value) -> Result<Option<(Value, Value)>> {
+    let Value::List(trees) = stack else {
+        return Err(deque_error(span));
+    };
+    let Some(first) = trees.first() else {
+        return Ok(None);
+    };
+    let parts = stack_tree_node_parts(span, first)?;
+    let rest = trees.iter().skip(1).cloned().collect::<Vec<_>>();
+    match parts.children {
+        None => Ok(Some((parts.value, Value::list(rest)))),
+        Some((left, right)) => {
+            let mut next = Vec::with_capacity(rest.len() + 2);
+            next.push(left);
+            next.push(right);
+            next.extend(rest);
+            Ok(Some((parts.value, Value::list(next))))
+        }
+    }
+}
+
+/// Every value a stack holds, in the order it would pop them.
+fn stack_pop_order(span: Span, stack: &Value) -> Result<Vec<Value>> {
+    let Value::List(trees) = stack else {
+        return Err(deque_error(span));
+    };
+    let mut values = Vec::new();
+    for tree in trees.iter() {
+        let size = stack_tree_budget(span, tree)?;
+        let total = values
+            .len()
+            .checked_add(size)
+            .ok_or_else(|| deque_error(span))?;
+        if total > MAX_DEQUE_ITEMS {
+            return Err(deque_budget_error(span, total));
+        }
+        let mut pending = vec![tree.clone()];
+        while let Some(node) = pending.pop() {
+            if values.len() == MAX_DEQUE_ITEMS {
+                return Err(deque_budget_error(span, MAX_DEQUE_ITEMS + 1));
+            }
+            let parts = stack_tree_node_parts(span, &node)?;
+            values.push(parts.value);
+            if let Some((left, right)) = parts.children {
+                pending.push(right);
+                pending.push(left);
+            }
+        }
+    }
+    Ok(values)
+}
+
+/// Splits the one non-empty stack across both ends when the other end empties.
+///
+/// Moving every item across would make alternating pops at opposite ends
+/// reverse the whole remaining deque on every other pop, which is quadratic.
+/// Keeping roughly half at each end means those pops share the trees they do
+/// not touch, and each remaining item is rebuilt only a constant number of
+/// times as the two ends shrink together.
+fn deque_rebalance(span: Span, stack: &Value, wants_left: bool) -> Result<(Value, Value)> {
+    let mut values = stack_pop_order(span, stack)?;
+    if wants_left {
+        values.reverse();
+    }
+    let front_count = if wants_left {
+        values.len().div_ceil(2)
+    } else {
+        values.len() / 2
+    };
+    let (front_values, back_values) = values.split_at(front_count);
+    let front = stack_from_values(front_values);
+    let mut back_values = back_values.to_vec();
+    back_values.reverse();
+    let back = stack_from_values(&back_values);
+    Ok((front, back))
+}
+
+fn deque_pop(value: Value, deque: Value) -> Value {
+    let mut fields = Fields::new();
+    fields.insert("value".to_string(), value);
+    fields.insert("deque".to_string(), deque);
+    Value::record(fields)
 }
 
 /// Every function that is not a user-defined one, in the one place both VMs
@@ -1983,6 +2704,287 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             }
             _ => Err(Error::Runtime(
                 "skip requires a list and a number".to_string(),
+                span,
+            )),
+        },
+        // -- collections -------------------------------------------------------
+        //
+        // A Counter is a record `{counts: [[key, count], ...], missing: 0}`.
+        // The pairs are in first-appearance order, so `most_common` can sort
+        // them stably by count and a tie keeps the order its key first appeared
+        // in. The missing value is written into the record rather than assumed,
+        // so `collections.count` answers the record's own documented default.
+        "collections_counter" => match args {
+            [Value::List(items)] => {
+                let mut counts: Vec<(Value, f64)> = Vec::new();
+                let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
+                for item in items.iter() {
+                    let hash = group_value_hash(item);
+                    let existing = index.get(&hash).and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|&candidate| counts[candidate].0 == *item)
+                    });
+                    match existing {
+                        Some(candidate) => counts[candidate].1 += 1.0,
+                        None => {
+                            let candidate = counts.len();
+                            index.entry(hash).or_default().push(candidate);
+                            counts.push((item.clone(), 1.0));
+                        }
+                    }
+                }
+                let pairs = counts
+                    .into_iter()
+                    .map(|(key, count)| (key, Value::Number(count)))
+                    .collect();
+                Ok(Some(counter_value(pairs)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.counter requires one list".to_string(),
+                span,
+            )),
+        },
+        "collections_count" => match args {
+            [counter, key] => {
+                let (pairs, missing) = counter_parts(span, counter)?;
+                let found = pairs
+                    .into_iter()
+                    .find(|(candidate, _)| candidate == key)
+                    .map(|(_, count)| count);
+                Ok(Some(found.unwrap_or(missing)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.count requires a counter and a key".to_string(),
+                span,
+            )),
+        },
+        "collections_most_common" => match args {
+            [counter] => {
+                let (pairs, _) = counter_parts(span, counter)?;
+                let mut ordered: Vec<(Value, f64)> = pairs
+                    .into_iter()
+                    .map(|(key, count)| counter_number(span, &count).map(|count| (key, count)))
+                    .collect::<Result<_>>()?;
+                // A stable sort, so equal counts keep the order their keys first
+                // appeared in the counter rather than an order that depends on
+                // the sort implementation.
+                ordered.sort_by(|left, right| {
+                    right
+                        .1
+                        .partial_cmp(&left.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let answer = ordered
+                    .into_iter()
+                    .map(|(key, count)| Value::list(vec![key, Value::Number(count)]))
+                    .collect();
+                Ok(Some(Value::list(answer)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.most_common requires one counter".to_string(),
+                span,
+            )),
+        },
+        // A defaultdict is a record `{entries: [[key, value], ...], factory}`.
+        // Redblue values are copied, so the factory is a *value*: every entry
+        // the first read creates is a copy of it. That is written down in
+        // SPEC.md rather than left to be discovered.
+        "collections_defaultdict" => match args {
+            [factory] => {
+                let mut fields = Fields::new();
+                fields.insert("entries".to_string(), Value::list(Vec::new()));
+                fields.insert("factory".to_string(), factory.clone());
+                Ok(Some(Value::record(fields)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.defaultdict requires one factory value".to_string(),
+                span,
+            )),
+        },
+        "collections_get" => match args {
+            [dictionary, key] => {
+                let (pairs, factory) = defaultdict_parts(span, dictionary)?;
+                if let Some((_, value)) = pairs.iter().find(|(candidate, _)| candidate == key) {
+                    return Ok(Some(defaultdict_answer(value.clone(), dictionary.clone())));
+                }
+                let value = factory.clone();
+                let mut updated = pairs;
+                updated.push((key.clone(), value.clone()));
+                Ok(Some(defaultdict_answer(
+                    value,
+                    defaultdict_value(updated, factory),
+                )))
+            }
+            _ => Err(Error::Runtime(
+                "collections.get requires a defaultdict and a key".to_string(),
+                span,
+            )),
+        },
+        "collections_put" => match args {
+            [dictionary, key, value] => {
+                let (mut pairs, factory) = defaultdict_parts(span, dictionary)?;
+                match pairs.iter_mut().find(|(candidate, _)| candidate == key) {
+                    Some((_, entry)) => *entry = value.clone(),
+                    None => pairs.push((key.clone(), value.clone())),
+                }
+                Ok(Some(defaultdict_value(pairs, factory)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.put requires a defaultdict, a key and a value".to_string(),
+                span,
+            )),
+        },
+        // A deque is an opaque object holding two persistent stacks, `front`
+        // and `back`. The front stack holds its items in reverse. Each stack is
+        // a spine of complete binary trees, so the structural change for a push
+        // or pop touches O(log n) nodes instead of rebuilding an n-deep chain of
+        // `{value, next}` records. Because source cannot build the object, its
+        // trees are trusted after construction; a hand-written record with the
+        // same fields is validated all the way down before use instead.
+        // Reversing one side into the other when it empties reads that side's
+        // pop order once and builds the other side in one pass, so it is linear
+        // in the side's length and amortised over the pops that emptied it.
+        "collections_deque" => match args {
+            [] => Ok(Some(deque_value(
+                Value::list(Vec::new()),
+                Value::list(Vec::new()),
+            ))),
+            [Value::List(items)] => {
+                if items.len() > MAX_DEQUE_ITEMS {
+                    return Err(deque_budget_error(span, items.len()));
+                }
+                // The stack pops the last item of the list first, so its pop
+                // order is the list reversed.
+                let pop_order = items.iter().rev().cloned().collect::<Vec<_>>();
+                let back = stack_from_values(&pop_order);
+                Ok(Some(deque_value(Value::list(Vec::new()), back)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.deque requires zero or one list".to_string(),
+                span,
+            )),
+        },
+        "collections_push_left" => match args {
+            [deque, value] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let front = stack_cons(span, &front, value.clone())?;
+                let updated = deque_value(front, back);
+                deque_parts(span, &updated)?;
+                Ok(Some(updated))
+            }
+            _ => Err(Error::Runtime(
+                "collections.push_left requires a deque and a value".to_string(),
+                span,
+            )),
+        },
+        "collections_push_right" => match args {
+            [deque, value] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let back = stack_cons(span, &back, value.clone())?;
+                let updated = deque_value(front, back);
+                deque_parts(span, &updated)?;
+                Ok(Some(updated))
+            }
+            _ => Err(Error::Runtime(
+                "collections.push_right requires a deque and a value".to_string(),
+                span,
+            )),
+        },
+        "collections_pop_left" => match args {
+            [deque] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let (value, front, back) = match stack_uncons(span, &front)? {
+                    Some((value, rest)) => (value, rest, back),
+                    None => {
+                        let (front, back) = deque_rebalance(span, &back, true)?;
+                        match stack_uncons(span, &front)? {
+                            Some((value, rest)) => (value, rest, back),
+                            None => (
+                                Value::Nothing,
+                                Value::list(Vec::new()),
+                                Value::list(Vec::new()),
+                            ),
+                        }
+                    }
+                };
+                Ok(Some(deque_pop(value, deque_value(front, back))))
+            }
+            _ => Err(Error::Runtime(
+                "collections.pop_left requires one deque".to_string(),
+                span,
+            )),
+        },
+        "collections_pop_right" => match args {
+            [deque] => {
+                let (front, back) = deque_parts(span, deque)?;
+                let (value, front, back) = match stack_uncons(span, &back)? {
+                    Some((value, rest)) => (value, front, rest),
+                    None => {
+                        let (front, back) = deque_rebalance(span, &front, false)?;
+                        match stack_uncons(span, &back)? {
+                            Some((value, rest)) => (value, front, rest),
+                            None => (
+                                Value::Nothing,
+                                Value::list(Vec::new()),
+                                Value::list(Vec::new()),
+                            ),
+                        }
+                    }
+                };
+                Ok(Some(deque_pop(value, deque_value(front, back))))
+            }
+            _ => Err(Error::Runtime(
+                "collections.pop_right requires one deque".to_string(),
+                span,
+            )),
+        },
+        "collections_namedtuple" => match args {
+            [Value::List(names), Value::List(values)] => {
+                if names.len() != values.len() {
+                    return Err(Error::Runtime(
+                        format!(
+                            "collections.namedtuple needs one value per name: {} names and {} values",
+                            names.len(),
+                            values.len()
+                        ),
+                        span,
+                    ));
+                }
+                let mut fields = Fields::new();
+                for (index, name) in names.iter().enumerate() {
+                    let Value::Text(name) = name else {
+                        return Err(Error::Runtime(
+                            "collections.namedtuple field names must be text".to_string(),
+                            span,
+                        ));
+                    };
+                    if fields.contains_key(name) {
+                        return Err(Error::Runtime(
+                            format!("collections.namedtuple has duplicate field '{name}'"),
+                            span,
+                        ));
+                    }
+                    fields.insert(name.clone(), values[index].clone());
+                }
+                Ok(Some(Value::record(fields)))
+            }
+            _ => Err(Error::Runtime(
+                "collections.namedtuple requires a list of names and a list of values".to_string(),
+                span,
+            )),
+        },
+        "collections_field" => match args {
+            [Value::Record(fields), Value::Text(name)] => match fields.get(name) {
+                Some(value) => Ok(Some(value.clone())),
+                None => Err(Error::Runtime(
+                    format!("Named record has no field '{name}'"),
+                    span,
+                )),
+            },
+            _ => Err(Error::Runtime(
+                "collections.field requires a named record and a text field name".to_string(),
                 span,
             )),
         },
@@ -2382,7 +3384,8 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                     ))
                 }
             };
-            Ok(Some(Value::Text(json_stringify(&value))))
+            let text = json_stringify(&value).map_err(|message| Error::Runtime(message, span))?;
+            Ok(Some(Value::Text(text)))
         }
         "csv_parse" => {
             let text = match args.first() {
@@ -3126,19 +4129,20 @@ fn split_json_elements(content: &str) -> Vec<&str> {
     split_json_pairs(content)
 }
 
-/// Writes `value` as JSON, on one line.
+/// Writes `value` as JSON, on one line, or refuses an opaque deque.
 ///
 /// `pub(crate)` because the REPL's `.json` command prints the same document:
 /// one writer means the REPL and `json.stringify` cannot disagree about what
-/// a value looks like in JSON.
-pub(crate) fn json_stringify(value: &Value) -> String {
+/// a value looks like in JSON. A deque has no JSON form, and writing `null`
+/// for one would say it is `nothing`, so it is refused instead.
+pub(crate) fn json_stringify(value: &Value) -> std::result::Result<String, String> {
     match value {
-        Value::Nothing => "null".to_string(),
+        Value::Nothing => Ok("null".to_string()),
         Value::YesNo(b) => {
             if *b {
-                "true".to_string()
+                Ok("true".to_string())
             } else {
-                "false".to_string()
+                Ok("false".to_string())
             }
         }
         Value::Number(n) => {
@@ -3146,30 +4150,42 @@ pub(crate) fn json_stringify(value: &Value) -> String {
             // written as `null`, which is what every JSON writer emits for one.
             // No Redblue program can reach this branch: see SPEC.md.
             if !n.is_finite() {
-                "null".to_string()
+                Ok("null".to_string())
             } else if n.fract() == 0.0 && n.abs() < 1e15 {
-                format!("{}", *n as i64)
+                Ok(format!("{}", *n as i64))
             } else {
-                format!("{}", n)
+                Ok(format!("{}", n))
             }
         }
-        Value::Text(s) => json_escape_text(s),
+        Value::Text(s) => Ok(json_escape_text(s)),
         Value::List(items) => {
-            let elements: Vec<String> = items.iter().map(json_stringify).collect();
-            format!("[{}]", elements.join(", "))
+            let elements = items
+                .iter()
+                .map(json_stringify)
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(format!("[{}]", elements.join(", ")))
         }
         Value::Record(fields) => {
-            let pairs: Vec<String> = fields
-                .iter()
-                .map(|(k, v)| format!("{}: {}", json_escape_text(k), json_stringify(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
+            let mut pairs = Vec::with_capacity(fields.len());
+            for (key, field) in fields.iter() {
+                pairs.push(format!(
+                    "{}: {}",
+                    json_escape_text(key),
+                    json_stringify(field)?
+                ));
+            }
+            Ok(format!("{{{}}}", pairs.join(", ")))
         }
-        Value::Function(_) => "null".to_string(),
-        Value::Builtin(_) => "null".to_string(),
-        Value::Object(_, _) => "null".to_string(),
-        Value::Date(date) => json_escape_text(&crate::value::date_text(*date)),
-        Value::Duration(duration) => format!("{}", duration.as_seconds_f64()),
+        Value::Function(_) => Ok("null".to_string()),
+        Value::Builtin(_) => Ok("null".to_string()),
+        Value::Object(name, _) if name == "deque" => Err(
+            "JSON has no literal for a deque, and null would say 'nothing' about a \
+             value that is not nothing"
+                .to_string(),
+        ),
+        Value::Object(_, _) => Ok("null".to_string()),
+        Value::Date(date) => Ok(json_escape_text(&crate::value::date_text(*date))),
+        Value::Duration(duration) => Ok(format!("{}", duration.as_seconds_f64())),
     }
 }
 
@@ -3189,7 +4205,7 @@ mod tests {
             (f64::NEG_INFINITY, "negative infinity"),
         ] {
             assert_eq!(
-                json_stringify(&Value::Number(value)),
+                json_stringify(&Value::Number(value)).unwrap(),
                 "null",
                 "{} must be written as null, not as a JSON number",
                 what
@@ -3197,11 +4213,41 @@ mod tests {
         }
         // The widest finite numbers are numbers, and must not be nulled.
         for finite in [f64::MAX, f64::MIN, f64::MIN_POSITIVE, 0.0, -0.0, 1.5] {
-            let written = json_stringify(&Value::Number(finite));
+            let written = json_stringify(&Value::Number(finite)).unwrap();
             assert_ne!(written, "null", "{} should still be written", finite);
         }
-        assert_eq!(json_stringify(&Value::Number(42.0)), "42");
-        assert_eq!(json_stringify(&Value::Number(1.5)), "1.5");
+        assert_eq!(json_stringify(&Value::Number(42.0)).unwrap(), "42");
+        assert_eq!(json_stringify(&Value::Number(1.5)).unwrap(), "1.5");
+    }
+
+    /// The duplicate-key check stores candidates in a hash bucket. A bucket
+    /// with more than one entry must compare each candidate by equality rather
+    /// than refusing every later key that happens to share the hash. The hash
+    /// is supplied here so the collision is forced instead of waiting for a
+    /// real 64-bit collision.
+    #[test]
+    fn edge_a_hash_collision_does_not_refuse_two_distinct_keys() {
+        let constant_hash = |_: &Value| 0;
+        let distinct = Value::list(vec![
+            Value::list(vec![Value::Text("a".to_string()), Value::Number(1.0)]),
+            Value::list(vec![Value::Text("b".to_string()), Value::Number(2.0)]),
+        ]);
+        let pairs =
+            collection_pairs_with_hash(Span::new(1, 1), &distinct, "a counter", constant_hash)
+                .expect("two distinct keys must survive sharing one hash bucket");
+        assert_eq!(pairs.len(), 2, "both distinct keys must be kept");
+
+        let duplicate = Value::list(vec![
+            Value::list(vec![Value::Text("a".to_string()), Value::Number(1.0)]),
+            Value::list(vec![Value::Text("a".to_string()), Value::Number(2.0)]),
+        ]);
+        let error =
+            collection_pairs_with_hash(Span::new(1, 1), &duplicate, "a counter", constant_hash)
+                .expect_err("equal keys must still be refused inside one hash bucket");
+        assert!(
+            error.to_string().contains("duplicate key a"),
+            "the refusal must name the repeated key, got {error}"
+        );
     }
 
     /// A cache key cannot use the language's `is` for a function: that compares
