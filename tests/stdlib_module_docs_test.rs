@@ -624,6 +624,12 @@ fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
     // not need a branch for it.
     let path = |name: &str| scratch.join(name).to_string_lossy().replace('\\', "/");
 
+    let listing = scratch.join("path_rows_listing");
+    let _ = std::fs::remove_dir_all(&listing);
+    std::fs::create_dir_all(&listing).expect("listing directory");
+    std::fs::write(listing.join("b.txt"), "b").expect("listing file");
+    std::fs::write(listing.join("a.txt"), "a").expect("listing file");
+
     let rows: Vec<(&str, String, String)> = vec![
         ("abs", "say abs(-3)".into(), "3\n".into()),
         ("floor", "say floor(1.7)".into(), "1\n".into()),
@@ -890,6 +896,52 @@ say files.exists("{}")"#,
                 path("rows_renamed.txt")
             ),
             "yes\n".into(),
+        ),
+        (
+            "path_join",
+            r#"say path.join("a", "b")"#.into(),
+            format!("a{}b\n", std::path::MAIN_SEPARATOR),
+        ),
+        (
+            "path_parent",
+            r#"say path.parent("data/records.rb")"#.into(),
+            "data\n".into(),
+        ),
+        (
+            "path_filename",
+            r#"say path.filename("data/records.rb")"#.into(),
+            "records.rb\n".into(),
+        ),
+        (
+            "path_stem",
+            r#"say path.stem("data/records.rb")"#.into(),
+            "records\n".into(),
+        ),
+        (
+            "path_extension",
+            r#"say path.extension("data/records.rb")"#.into(),
+            "rb\n".into(),
+        ),
+        (
+            "path_is_absolute",
+            format!(
+                r#"say path.is_absolute("{}")"#,
+                path("rows_exists_probe.rb")
+            ),
+            "yes\n".into(),
+        ),
+        (
+            "path_resolve",
+            r#"say path.is_absolute(path.resolve("data"))"#.into(),
+            "yes\n".into(),
+        ),
+        (
+            "path_list",
+            format!(
+                r#"say path.list("{}")"#,
+                listing.to_string_lossy().replace('\\', "/")
+            ),
+            "[a.txt, b.txt]\n".into(),
         ),
         // `time.now()` is a clock: the row asks what kind of answer it is, not
         // what the clock said.

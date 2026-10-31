@@ -422,6 +422,16 @@ impl PartialEq for Value {
             (Value::YesNo(left), Value::YesNo(right)) => left == right,
             (Value::List(left), Value::List(right)) => left == right,
             (Value::Record(left), Value::Record(right)) => left == right,
+            (Value::Object(name, fields), Value::Text(text))
+                if name == crate::path::OBJECT_NAME =>
+            {
+                matches!(fields.get(crate::path::TEXT_FIELD), Some(Value::Text(path)) if path == text)
+            }
+            (Value::Text(text), Value::Object(name, fields))
+                if name == crate::path::OBJECT_NAME =>
+            {
+                matches!(fields.get(crate::path::TEXT_FIELD), Some(Value::Text(path)) if path == text)
+            }
             (Value::Object(left_name, left_fields), Value::Object(right_name, right_fields)) => {
                 if left_name == "deque" && right_name == "deque" {
                     if let Some(equal) = crate::runtime::deques_equal(self, other) {
@@ -533,6 +543,12 @@ impl fmt::Display for Value {
             }
             Value::Function(function) => write!(f, "<function {}>", function.name),
             Value::Builtin(name) => write!(f, "<builtin {}>", name),
+            Value::Object(name, fields) if name == crate::path::OBJECT_NAME => {
+                match fields.get(crate::path::TEXT_FIELD) {
+                    Some(Value::Text(text)) => write!(f, "{}", text),
+                    _ => write!(f, "<object>"),
+                }
+            }
             Value::Object(_, _) => write!(f, "<object>"),
             Value::Date(date) => write!(f, "{}", date_text(*date)),
             Value::Duration(duration) => write!(f, "{}", display_duration(*duration)),
@@ -603,6 +619,7 @@ impl Value {
             Value::YesNo(_) => "yes/no",
             Value::List(_) => "list",
             Value::Record(_) => "record",
+            Value::Object(name, _) if name == crate::path::OBJECT_NAME => "path",
             Value::Object(_, _) => "object",
             Value::Function(_) => "function",
             Value::Builtin(_) => "builtin",

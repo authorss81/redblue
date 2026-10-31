@@ -203,7 +203,7 @@ Before adding a module or builtin, read [`LIBRARIES.md`](LIBRARIES.md): it is th
 standing decision on whether a capability is written in Redblue, bound to a Rust
 crate, or not built at all.
 
-### Files
+### Files and Path
 ```
 files.read(path)      // Read file as text
 files.write(path, content)
@@ -213,7 +213,21 @@ files.lines(path)    // Read as list of lines
 files.delete(path)
 files.copy(from, to)     // Copy a file
 files.rename(from, to)   // Rename it, or move it
+
+path.join("data", "records.rb")   // join with the platform's separator
+path.parent("data/records.rb")    // "data", or nothing for a root
+path.filename("data/records.rb")  // "records.rb"; a trailing separator is ignored
+path.stem("data/records.rb")      // "records"
+path.extension("data/records.rb") // "rb"
+path.is_absolute("data")          // no
+path.resolve("data")              // an absolute path with . and .. removed
+path.list("data")                 // sorted entry names; [] for an empty directory
 ```
+
+The files functions accept either a text path or a path value, so
+`files.read(path.join("data", "records.rb"))` and
+`files.read("data/records.rb")` are the same call. `path.join` uses the
+platform's separator and lets an absolute part replace what came before it.
 
 ### Bytes
 ```

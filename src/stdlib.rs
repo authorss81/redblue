@@ -26,6 +26,7 @@ pub const MODULES: &[&str] = &[
     "list",
     "math",
     "network",
+    "path",
     "regex",
     "sys",
     "text",
@@ -126,6 +127,19 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
         ],
     ),
     ("network", &["get", "post"]),
+    (
+        "path",
+        &[
+            "join",
+            "parent",
+            "filename",
+            "stem",
+            "extension",
+            "is_absolute",
+            "resolve",
+            "list",
+        ],
+    ),
     (
         "regex",
         &["match", "is_match", "capture", "replace", "split"],
@@ -501,6 +515,20 @@ pub fn builtins() -> HashMap<String, Value> {
         "files_rename".to_string(),
         Value::Builtin("files_rename".to_string()),
     );
+
+    // Path module: the host's path rules rather than string concatenation.
+    for name in [
+        "path_join",
+        "path_parent",
+        "path_filename",
+        "path_stem",
+        "path_extension",
+        "path_is_absolute",
+        "path_resolve",
+        "path_list",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
 
     // Time module
     globals.insert(
@@ -1312,6 +1340,14 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "files_delete",
     "files_copy",
     "files_rename",
+    "path_join",
+    "path_parent",
+    "path_filename",
+    "path_stem",
+    "path_extension",
+    "path_is_absolute",
+    "path_resolve",
+    "path_list",
     "time_now",
     "time_sleep",
     "time_format",
@@ -1564,6 +1600,29 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "files_rename",
         "files_rename(text, text) -> nothing; moves a file",
     ),
+    (
+        "path_join",
+        "path_join(text, ...) -> a path joined with the platform's separator",
+    ),
+    (
+        "path_parent",
+        "path_parent(text) -> the directory holding it, or nothing for a root",
+    ),
+    ("path_filename", "path_filename(text) -> the last name, or nothing"),
+    ("path_stem", "path_stem(text) -> the name without its extension"),
+    ("path_extension", "path_extension(text) -> the extension without its dot"),
+    (
+        "path_is_absolute",
+        "path_is_absolute(text) -> yes/no, whether the host calls it absolute",
+    ),
+    (
+        "path_resolve",
+        "path_resolve(text) -> an absolute path with . and .. removed",
+    ),
+    (
+        "path_list",
+        "path_list(text) -> the names in a directory, sorted",
+    ),
     ("time_now", "time_now() -> a record of the current time"),
     (
         "time_sleep",
@@ -1801,6 +1860,7 @@ pub const EFFECTFUL_BUILTINS: &[&str] = &[
     "files_delete",
     "files_copy",
     "files_rename",
+    "path_list",
     "network_get",
     "network_post",
     "time_now",
