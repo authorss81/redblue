@@ -18,7 +18,9 @@
 //! program passes, or the value this module answers — because the corpus and the
 //! language's examples are written against the string form.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Component, PathBuf};
 
 use crate::error::{Error, Result, Span};
 use crate::value::{Fields, Value};
@@ -36,6 +38,23 @@ pub fn value(text: impl Into<String>) -> Value {
     Value::object(OBJECT_NAME.to_string(), fields)
 }
 
+/// The text of the object `name` with `fields`, if that object is a path value.
+///
+/// A path value has exactly one field, `text`. An object that shares the name
+/// but carries another field is an ordinary object, not a path: treating it as
+/// a path would make it equal to its text while remaining unequal to a real
+/// path value, which breaks the transitivity `collections.counter` and
+/// `defaultdict` depend on.
+pub fn object_text<'a>(name: &str, fields: &'a Fields) -> Option<&'a str> {
+    if name != OBJECT_NAME || fields.len() != 1 {
+        return None;
+    }
+    match fields.get(TEXT_FIELD) {
+        Some(Value::Text(text)) => Some(text),
+        _ => None,
+    }
+}
+
 /// The text of a path value, or of a plain text path.
 ///
 /// This is the one conversion every `files.*` call and every `path.*` argument
@@ -43,17 +62,14 @@ pub fn value(text: impl Into<String>) -> Value {
 pub fn text_of(value: &Value) -> Option<&str> {
     match value {
         Value::Text(text) => Some(text),
-        Value::Object(name, fields) if name == OBJECT_NAME => match fields.get(TEXT_FIELD) {
-            Some(Value::Text(text)) => Some(text),
-            _ => None,
-        },
+        Value::Object(name, fields) => object_text(name, fields),
         _ => None,
     }
 }
 
 /// Whether `value` is a path value rather than a text.
 pub fn is_path(value: &Value) -> bool {
-    matches!(value, Value::Object(name, _) if name == OBJECT_NAME)
+    matches!(value, Value::Object(name, fields) if object_text(name, fields).is_some())
 }
 
 /// Joins `parts` with the platform's separator.
@@ -87,7 +103,12 @@ pub fn join_with_separator(parts: &[&str], separator: char) -> String {
         let absolute = is_absolute_with(&part, separator);
 
         if let Some(root) = root_with(&part, separator) {
-            joined.clear();
+            if separator == '\\' && root == "\\" {
+                let prefix = windows_prefix_len(&joined);
+                joined.truncate(prefix);
+            } else {
+                joined.clear();
+            }
             joined.push_str(&root);
             continue;
         }
@@ -97,7 +118,12 @@ pub fn join_with_separator(parts: &[&str], separator: char) -> String {
         }
 
         if absolute {
-            joined.clear();
+            if separator == '\\' && part.starts_with('\\') && windows_prefix_len(&part) == 0 {
+                let prefix = windows_prefix_len(&joined);
+                joined.truncate(prefix);
+            } else {
+                joined.clear();
+            }
         } else if !joined.is_empty() && !joined.ends_with(separator) {
             joined.push(separator);
         }
@@ -139,6 +165,29 @@ fn root_with(part: &str, separator: char) -> Option<String> {
     } else {
         None
     }
+}
+
+/// The length of the Windows prefix in `path`, or zero when it has none.
+///
+/// A prefix is a drive such as `C:` or a UNC share such as `\\server\share`.
+/// It is what `PathBuf::push` keeps when the part being joined is rooted but
+/// carries no prefix of its own: joining `C:\base` and `\other` is
+/// `C:\other`, not `\other`, because the drive belongs to the path before the
+/// root-relative part rather than to that part.
+fn windows_prefix_len(path: &str) -> usize {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return 2;
+    }
+    if let Some(rest) = path.strip_prefix("\\\\") {
+        let mut parts = rest.splitn(3, '\\');
+        let server = parts.next().unwrap_or("");
+        let share = parts.next().unwrap_or("");
+        if !server.is_empty() && !share.is_empty() {
+            return 2 + server.len() + 1 + share.len();
+        }
+    }
+    0
 }
 
 /// Whether `part` is absolute under `separator`.
@@ -199,6 +248,7 @@ pub fn is_absolute(text: &str) -> bool {
 /// This is lexical: it does not consult the filesystem, so it answers for a path
 /// that does not exist yet and does not resolve symlinks. That is the useful
 /// answer for building a path before creating it, and it is what SPEC.md states.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve(text: &str) -> std::io::Result<String> {
     let path = Path::new(text);
     let absolute = if path.is_absolute() {
@@ -209,7 +259,21 @@ pub fn resolve(text: &str) -> std::io::Result<String> {
     Ok(normalize(&absolute).to_string_lossy().into_owned())
 }
 
+/// The playground has no working directory, so there is nothing to resolve
+/// against. `current_dir()` is not available on `wasm32-unknown-unknown`; a
+/// silent empty answer or a host-dependent virtual root would be a path the
+/// program cannot read, so the refusal names the platform instead.
+#[cfg(target_arch = "wasm32")]
+pub fn resolve(_text: &str) -> std::io::Result<String> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "path.resolve cannot read the working directory in the WebAssembly playground: \
+         the platform has none. Run it with the native rb binary to resolve a path.",
+    ))
+}
+
 /// `path` with `.` removed and `..` folded into its parent where possible.
+#[cfg(not(target_arch = "wasm32"))]
 fn normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -335,10 +399,44 @@ mod tests {
     }
 
     #[test]
+    fn edge_join_keeps_the_drive_for_a_root_relative_part() {
+        assert_eq!(
+            join_with_separator(&["C:\\base", "\\other"], '\\'),
+            "C:\\other",
+            "a root-relative part keeps the drive of the path before it"
+        );
+        assert_eq!(join_with_separator(&["C:\\base", "\\"], '\\'), "C:\\");
+        assert_eq!(
+            join_with_separator(&["\\\\server\\share\\base", "\\other"], '\\'),
+            "\\\\server\\share\\other",
+            "a UNC share is a prefix too"
+        );
+        assert_eq!(
+            join_with_separator(&["a", "\\b"], '\\'),
+            "\\b",
+            "with no prefix to keep, a root-relative part still replaces the rest"
+        );
+    }
+
+    #[test]
     fn edge_resolve_removes_dot_segments() {
         let resolved = resolve("a/./b/../c").expect("the working directory is readable");
-        assert!(!resolved.contains("/./"));
-        assert!(!resolved.contains("/../"));
-        assert!(resolved.ends_with("c"));
+        let separator = std::path::MAIN_SEPARATOR;
+        let dot = format!("{separator}.{separator}");
+        let dotdot = format!("{separator}..{separator}");
+        assert!(
+            !resolved.contains(&dot),
+            "resolve must remove `.` segments on this platform, got {resolved}"
+        );
+        assert!(
+            !resolved.contains(&dotdot),
+            "resolve must remove `..` segments on this platform, got {resolved}"
+        );
+        assert_eq!(
+            Path::new(&resolved)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("c")
+        );
     }
 }

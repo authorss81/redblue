@@ -70,16 +70,18 @@ const broken = rb.run('say "unterminated\n');
 assert.equal(broken.ok, false, "a malformed program must not report success");
 assert.match(broken.error, /Unterminated string/);
 
-// The refusals. On `wasm32-unknown-unknown` these three have no platform to work
+// The refusals. On `wasm32-unknown-unknown` these four have no platform to work
 // with — a thread for the network client, a second thread to sleep on, a
-// terminal to read from — and each one used to abort or hang the whole module
-// instance instead of failing. A trap here would be a TypeError, so reaching
-// this line at all is half the assertion. These cannot be asserted from
-// `cargo test`, which runs natively and where all three genuinely work.
+// terminal to read from, and a working directory to resolve against — and each
+// one used to abort, hang or mis-answer the whole module instance instead of
+// failing. A trap here would be a TypeError, so reaching this line at all is
+// half the assertion. These cannot be asserted from `cargo test`, which runs
+// natively and where all four genuinely work.
 for (const [what, source] of [
   ["network", 'say network.get("https://example.test")'],
   ["time.sleep", 'time.sleep(0.01)\nsay "unreachable"'],
   ["input", 'say input("what is your name? ")'],
+  ["path.resolve", 'say path.resolve("data")'],
 ]) {
   const result = rb.run(source);
   assert.equal(result.ok, false, `${what} must be refused, not silently allowed`);
@@ -169,6 +171,14 @@ rb.run('files.write("rb-modules/note.txt", "x")');
 assert.equal(rb.run('say files.exists("rb-modules")').output, "yes\n");
 assert.equal(rb.run('say files.exists("rb-modules/note.txt")').output, "yes\n");
 assert.equal(rb.run('say files.exists("rb-mod")').output, "no\n");
+
+// `path.list(".")` names the working directory, whose keys are the paths a
+// program wrote without a prefix. A file written by its bare name has to be in
+// that listing, not hidden behind a literal `"./"` the map never stored.
+rb.run('files.write("rb-current/a.txt", "x")');
+const current = rb.run('say path.list(".")');
+assert.equal(current.ok, true, `path.list(".") must list the current directory: ${current.error}`);
+assert.match(current.output, /rb-current/, "a bare relative path must be in the current directory");
 
 // `time.now()` is the opposite case: the platform has no clock, and it used to
 // panic there — aborting the module — but `Redblue.run` hands it the host's, so

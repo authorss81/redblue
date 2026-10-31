@@ -1341,8 +1341,8 @@ parts, and an absolute part discards everything joined before it: joining
 `"data"` and `"/records.rb"` is `"/records.rb"`, not `"data//records.rb"`. A path
 value is accepted wherever these functions take a path, and `files.read`,
 `files.write`, `files.append`, `files.exists`, `files.lines`, `files.delete`,
-`files.copy` and `files.rename` accept either a path value or the text form every
-existing program writes.
+`files.copy`, `files.rename` and `bytes.write` accept either a path value or the
+text form every existing program writes.
 
 `path.parent` answers `nothing` for a root such as `/`, and for a bare filename
 that has no directory part. A trailing separator names a directory without
@@ -1350,9 +1350,12 @@ changing its last name, so `path.filename("data/records/")` is `"records"` and
 `path.stem` and `path.extension` read that same name. `path.resolve` makes a path
 absolute against the working directory and removes `.` and `..` segments
 lexically; it does not consult the filesystem, so it answers for a path that does
-not exist yet. `path.list` answers the names directly inside a directory, sorted,
-so the same directory always prints the same list; an empty directory is an empty
-list rather than an error, and a directory that does not exist is an `IoError`.
+not exist yet. The WebAssembly playground has no working directory to resolve
+against, so there `path.resolve` is refused with an `IoError` that names the
+platform; the native `rb` binary performs the resolution described here.
+`path.list` answers the names directly inside a directory, sorted, so the same
+directory always prints the same list; an empty directory is an empty list rather
+than an error, and a directory that does not exist is an `IoError`.
 
 `files.copy` and `files.rename` refuse rather than write half a file: a copy
 whose source is not there, or a rename onto a path that cannot be written, is an

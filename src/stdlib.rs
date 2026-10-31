@@ -1757,7 +1757,7 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ),
     (
         "bytes_write",
-        "bytes_write(bytes, text) -> the bytes with the text appended",
+        "bytes_write(path, bytes) -> write the byte values to a file",
     ),
     ("bytes_text", "bytes_text(bytes) -> the bytes as text"),
     (

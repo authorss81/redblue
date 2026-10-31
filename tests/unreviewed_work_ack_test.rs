@@ -259,6 +259,7 @@ const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
     "resume phase-097:",
     "resume phase-098:",
     "resume phase-099:",
+    "resume phase-100:",
 ];
 
 /// The reason recorded for the delivery commits this rule acknowledges.
@@ -1954,7 +1955,7 @@ fn edge_the_delivery_rule_covers_each_phase_in_flight_and_no_other() {
         }
     }
 
-    let other_phase = format!("{SHA_A}\tresume phase-100: adopt preserved work\n");
+    let other_phase = format!("{SHA_A}\tresume phase-083: adopt preserved work\n");
     let result = scan(&other_phase, &[]).expect("a well-formed fixture log");
     assert!(
         result.delivery.is_empty(),

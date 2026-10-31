@@ -83,7 +83,7 @@ pub fn module_bindings(
 pub fn property(span: Span, object: Value, name: &str) -> Result<Value> {
     match object {
         Value::Record(fields) => Ok(fields.get(name).cloned().unwrap_or(Value::Nothing)),
-        Value::Object(kind, fields) if kind == crate::path::OBJECT_NAME => {
+        Value::Object(kind, fields) if crate::path::object_text(&kind, &fields).is_some() => {
             Ok(fields.get(name).cloned().unwrap_or(Value::Nothing))
         }
         Value::Date(date) => Ok(date_property(date, name)),
@@ -1732,10 +1732,8 @@ fn group_value_hash(value: &Value) -> u64 {
         }
         Value::Record(fields) => group_fields_hash(HASH_RECORD, fields),
         Value::Object(name, fields) => {
-            if name == crate::path::OBJECT_NAME {
-                if let Some(Value::Text(text)) = fields.get(crate::path::TEXT_FIELD) {
-                    return hash_tagged_bytes(HASH_TEXT, text.as_bytes());
-                }
+            if let Some(text) = crate::path::object_text(name, fields) {
+                return hash_tagged_bytes(HASH_TEXT, text.as_bytes());
             }
             if name == "deque" {
                 if let Some(hash) = deque_items_hash(value) {
@@ -3657,8 +3655,8 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             )))
         }
         "bytes_write" => {
-            let (path, bytes) = match (args.first(), args.get(1)) {
-                (Some(Value::Text(path)), Some(Value::List(bytes))) => (path, bytes),
+            let (path, bytes) = match (args.first().and_then(crate::path::text_of), args.get(1)) {
+                (Some(path), Some(Value::List(bytes))) => (path, bytes),
                 _ => {
                     return Err(Error::Runtime(
                         "bytes.write requires a path and a list of byte values".to_string(),
@@ -4253,13 +4251,10 @@ pub(crate) fn json_stringify(value: &Value) -> std::result::Result<String, Strin
              value that is not nothing"
                 .to_string(),
         ),
-        Value::Object(name, fields) if name == crate::path::OBJECT_NAME => {
-            match fields.get(crate::path::TEXT_FIELD) {
-                Some(Value::Text(text)) => Ok(json_escape_text(text)),
-                _ => Ok("null".to_string()),
-            }
-        }
-        Value::Object(_, _) => Ok("null".to_string()),
+        Value::Object(name, fields) => match crate::path::object_text(name, fields) {
+            Some(text) => Ok(json_escape_text(text)),
+            None => Ok("null".to_string()),
+        },
         Value::Date(date) => Ok(json_escape_text(&crate::value::date_text(*date))),
         Value::Duration(duration) => Ok(format!("{}", duration.as_seconds_f64())),
     }

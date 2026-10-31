@@ -1118,9 +1118,11 @@ fn edge_the_in_memory_filesystem_answers_for_directories_too() {
 
 /// A directory that exists in the map is listed from the keys beneath it, and
 /// one that does not is the same `NotFound` the native `read_dir` gives. An
-/// empty list is not the answer for a path nobody wrote: the flat map cannot
-/// tell "empty directory" from "missing directory", so it reports the one that
-/// matches the native error instead of inventing an empty directory.
+/// empty list is not the answer for a named path nobody wrote: the flat map
+/// cannot tell "empty directory" from "missing directory", so it reports the
+/// one that matches the native error instead of inventing an empty directory.
+/// The working directory is the exception, because it always exists; see
+/// [`edge_the_in_memory_filesystem_lists_an_empty_current_directory`].
 #[test]
 fn edge_the_in_memory_filesystem_lists_directories_and_refuses_missing_ones() {
     use redblue::vfs::memory;
@@ -1158,6 +1160,72 @@ fn edge_the_in_memory_filesystem_lists_directories_and_refuses_missing_ones() {
             .to_string()
             .contains("No such file or directory"),
         "the message must be the one `std::fs` gives, got: {missing_error}"
+    );
+    assert!(
+        !missing_error.to_string().contains(missing),
+        "the caller prefixes the path, so the error must not repeat it: {missing_error}"
+    );
+
+    memory::clear();
+}
+
+/// `.` names the working directory, and this filesystem stores the paths a
+/// program wrote verbatim. A file written as `"a.txt"` therefore has to be
+/// visible to `path.list(".")`, the spelling SPEC.md documents, and `"./"` must
+/// name the same directory rather than a literal prefix no key carries.
+#[test]
+fn edge_the_in_memory_filesystem_lists_the_current_directory() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("a.txt", "a").expect("write should succeed");
+    memory::write("data/x.txt", "x").expect("write should succeed");
+
+    let expected = vec!["a.txt".to_string(), "data".to_string()];
+    assert_eq!(
+        memory::read_dir(".").expect("the current directory should list"),
+        expected,
+        "a file written by its bare name must be in the current directory"
+    );
+    assert_eq!(
+        memory::read_dir("./").expect("`./` names the same directory"),
+        expected,
+        "the current directory must not have two different listings"
+    );
+
+    memory::clear();
+}
+
+/// `.` and `./` name the working directory, and a working directory that holds
+/// nothing is still a directory: the native `read_dir` answers an empty list,
+/// not `NotFound`, so the in-memory filesystem has to answer the same for the
+/// one directory it always knows exists.
+#[test]
+fn edge_the_in_memory_filesystem_lists_an_empty_current_directory() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    assert!(
+        memory::exists("."),
+        "the current directory exists even when nothing is in it"
+    );
+    assert!(
+        memory::exists("./"),
+        "`./` names that same existing directory"
+    );
+    assert_eq!(
+        memory::read_dir(".").expect("an empty current directory still exists"),
+        Vec::<String>::new(),
+        "an empty directory is an empty list, not an error"
+    );
+    assert_eq!(
+        memory::read_dir("./").expect("`./` names the same empty directory"),
+        Vec::<String>::new(),
+        "the current directory must not have two different answers"
     );
 
     memory::clear();
