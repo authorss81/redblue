@@ -1431,6 +1431,12 @@ copy of it: `collections.defaultdict([])` gives each new key its own empty list,
 and a program that wants a different value for each key writes it with
 `collections.put`.
 
+Both records refuse a hand-written `counts` or `entries` list that repeats a
+key. Otherwise `collections.count` would answer one copy while
+`collections.most_common` listed both, and `collections.put` would update only
+the first copy and leave a stale second one. A repeated key is a catchable
+`RuntimeError` naming the key.
+
 A deque is an opaque value holding two persistent stacks, `front` and `back`,
 with the front stack holding its items in reverse. A deque made by
 `collections.deque` is an object source cannot construct, so its trees are
@@ -1443,6 +1449,9 @@ recursing once per item. A deque holds at most 1,000,000 items: the constructor
 and every push refuse a larger one, so a deque that exists is one every
 operation can use. A pop answers `{value, deque}` so the shorter deque is the
 one to bind; an empty deque answers `nothing` as the value rather than refusing.
+Two deques made by this module compare equal when they hold equal items in the
+same order, however their ends are split, and that is also the key rule for
+Counter and defaultdict.
 This is what a list work queue does not have: `shift` reads the first item but
 does not remove it, so the only removal from the front is `skip(xs, 1)`, which
 copies the rest of the list on every call. A deque has no JSON form, so

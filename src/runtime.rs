@@ -1603,6 +1603,11 @@ fn cache_value_eq(left: &Value, right: &Value) -> bool {
                 })
         }
         (Value::Object(an, af), Value::Object(bn, bf)) => {
+            if an == "deque" && bn == "deque" {
+                if let Some(equal) = deque_cache_equal(left, right) {
+                    return equal;
+                }
+            }
             an == bn
                 && af.len() == bf.len()
                 && af.iter().all(|(name, value)| {
@@ -1699,7 +1704,9 @@ fn combine_hash(hash: u64, value: u64) -> u64 {
 /// costs one comparison rather than changing the answer. Record and object
 /// fields are combined commutatively because their `IndexMap` equality is
 /// order-independent; captured scopes are combined in order because a
-/// function's captured stack is.
+/// function's captured stack is. A deque made by `collections` is hashed by
+/// the items it holds rather than by its two stack trees, because `Value`
+/// equality compares two deques by those items.
 fn group_value_hash(value: &Value) -> u64 {
     match value {
         Value::Nothing => hash_tagged_u64(HASH_NOTHING, 0),
@@ -1722,6 +1729,11 @@ fn group_value_hash(value: &Value) -> u64 {
         }
         Value::Record(fields) => group_fields_hash(HASH_RECORD, fields),
         Value::Object(name, fields) => {
+            if name == "deque" {
+                if let Some(hash) = deque_items_hash(value) {
+                    return hash;
+                }
+            }
             let mut hash = hash_tagged_bytes(HASH_OBJECT_NAME, name.as_bytes());
             hash = combine_hash(hash, group_fields_hash(HASH_OBJECT_FIELDS, fields));
             hash
@@ -1774,13 +1786,36 @@ fn group_function_hash(function: &crate::value::FunctionValue) -> u64 {
 
 /// The `[key, value]` pairs a Counter or a defaultdict stores.
 fn collection_pairs(span: Span, value: &Value, what: &str) -> Result<Vec<(Value, Value)>> {
+    collection_pairs_with_hash(span, value, what, group_value_hash)
+}
+
+/// The same check with the key hash supplied, so a test can force two distinct
+/// keys into one bucket.
+///
+/// A repeated key is refused rather than letting `count` answer one entry while
+/// `most_common` lists both, or letting `put` update the first copy and leave a
+/// stale second one. The hash index makes the check expected-linear: a pair is
+/// compared only with earlier keys that share its hash. A hash collision is
+/// resolved by equality, and a bucket that many distinct keys share costs one
+/// comparison per earlier key in that bucket, so the worst case is still
+/// quadratic rather than linear.
+fn collection_pairs_with_hash<F>(
+    span: Span,
+    value: &Value,
+    what: &str,
+    key_hash: F,
+) -> Result<Vec<(Value, Value)>>
+where
+    F: Fn(&Value) -> u64,
+{
     let Value::List(pairs) = value else {
         return Err(Error::Runtime(
             format!("{what} requires a list of [key, value] pairs"),
             span,
         ));
     };
-    let mut out = Vec::with_capacity(pairs.len());
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+    let mut seen: HashMap<u64, Vec<usize>> = HashMap::new();
     for pair in pairs.iter() {
         let Value::List(pair) = pair else {
             return Err(Error::Runtime(
@@ -1794,6 +1829,14 @@ fn collection_pairs(span: Span, value: &Value, what: &str) -> Result<Vec<(Value,
                 span,
             ));
         };
+        let candidates = seen.entry(key_hash(key)).or_default();
+        if candidates.iter().any(|&index| out[index].0 == *key) {
+            return Err(Error::Runtime(
+                format!("{what} has duplicate key {key}"),
+                span,
+            ));
+        }
+        candidates.push(out.len());
         out.push((key.clone(), value.clone()));
     }
     Ok(out)
@@ -1905,11 +1948,26 @@ fn deque_budget_error(span: Span, length: usize) -> Error {
     )
 }
 
+/// The private field that tells a trusted deque from a look-alike object.
+///
+/// An `object deque` declaration produces a `Record`, not an `Object`, but the
+/// marker makes the trust boundary independent of that detail: a trusted deque
+/// carries a field whose value is itself an `Object` with a name source cannot
+/// bind. A source-declared object cannot produce either the outer `Object` or
+/// this inner marker value, so it can never take the trusted path even if a
+/// later change makes declarations construct `Object` values.
+const DEQUE_MARKER_FIELD: &str = "__collections_deque";
+const DEQUE_MARKER_NAME: &str = "__collections_deque_marker";
+
 fn deque_value(front: Value, back: Value) -> Value {
     let mut fields = Fields::new();
     fields.insert("kind".to_string(), Value::Text("deque".to_string()));
     fields.insert("front".to_string(), front);
     fields.insert("back".to_string(), back);
+    fields.insert(
+        DEQUE_MARKER_FIELD.to_string(),
+        Value::object(DEQUE_MARKER_NAME.to_string(), Fields::new()),
+    );
     // An `Object` rather than a `Record` because source cannot build one: a
     // deque made here is trusted, while a hand-written record with the same
     // field names is not. Both are accepted by `deque_parts`, but only the
@@ -1932,6 +1990,12 @@ fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
                 return Err(deque_error(span));
             };
             if kind != "deque" {
+                return Err(deque_error(span));
+            }
+            let Some(Value::Object(marker, _)) = fields.get(DEQUE_MARKER_FIELD) else {
+                return Err(deque_error(span));
+            };
+            if marker != DEQUE_MARKER_NAME {
                 return Err(deque_error(span));
             }
             let Some(front) = fields.get("front") else {
@@ -1979,6 +2043,153 @@ fn deque_parts(span: Span, deque: &Value) -> Result<(Value, Value)> {
         }
     }
     Ok((front.clone(), back.clone()))
+}
+
+/// One node visit while walking a stack in pop order or reverse pop order.
+enum StackTask {
+    Visit(Value),
+    Emit(Value),
+}
+
+/// A lazy walk over one stack.
+///
+/// The walk keeps only the tree nodes it still has to visit, so iterating a
+/// million-item deque costs O(log n) memory instead of allocating one vector of
+/// every item. `reverse` walks the reverse of the stack's pop order, which is
+/// the order a deque's `back` contributes to the deque as a whole.
+struct StackItems {
+    tasks: Vec<StackTask>,
+    reverse: bool,
+}
+
+impl StackItems {
+    fn new(span: Span, stack: Value, reverse: bool) -> Result<Self> {
+        let Value::List(trees) = stack else {
+            return Err(deque_error(span));
+        };
+        let mut tasks = Vec::with_capacity(trees.len());
+        if reverse {
+            for tree in trees.iter() {
+                tasks.push(StackTask::Visit(tree.clone()));
+            }
+        } else {
+            for tree in trees.iter().rev() {
+                tasks.push(StackTask::Visit(tree.clone()));
+            }
+        }
+        Ok(Self { tasks, reverse })
+    }
+
+    fn next(&mut self, span: Span) -> Result<Option<Value>> {
+        while let Some(task) = self.tasks.pop() {
+            match task {
+                StackTask::Emit(value) => return Ok(Some(value)),
+                StackTask::Visit(tree) => {
+                    let parts = stack_tree_node_parts(span, &tree)?;
+                    match parts.children {
+                        None => return Ok(Some(parts.value)),
+                        Some((left, right)) => {
+                            if self.reverse {
+                                self.tasks.push(StackTask::Emit(parts.value));
+                                self.tasks.push(StackTask::Visit(left));
+                                self.tasks.push(StackTask::Visit(right));
+                            } else {
+                                self.tasks.push(StackTask::Visit(right));
+                                self.tasks.push(StackTask::Visit(left));
+                                return Ok(Some(parts.value));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// The items a deque holds, from left to right, one at a time.
+///
+/// `front` pops from the left and `back` pops from the right, so the logical
+/// order is the front's pop order followed by the reverse of the back's. Walking
+/// lazily keeps equality and hashing from materialising either deque, so a
+/// million-item comparison allocates O(log n) tree cursors rather than two
+/// million-item vectors. A malformed value refuses the walk, which lets the
+/// caller fall back to structural comparison.
+struct DequeItems {
+    front: StackItems,
+    back: StackItems,
+    front_done: bool,
+}
+
+impl DequeItems {
+    fn new(span: Span, value: &Value) -> Result<Self> {
+        let (front, back) = deque_parts(span, value)?;
+        Ok(Self {
+            front: StackItems::new(span, front, false)?,
+            back: StackItems::new(span, back, true)?,
+            front_done: false,
+        })
+    }
+
+    fn next(&mut self, span: Span) -> Result<Option<Value>> {
+        if !self.front_done {
+            match self.front.next(span)? {
+                Some(value) => return Ok(Some(value)),
+                None => self.front_done = true,
+            }
+        }
+        self.back.next(span)
+    }
+}
+
+/// Whether two well-formed deques hold the same items in the same order.
+///
+/// `None` means at least one side is not a well-formed deque, which lets the
+/// caller keep the ordinary structural comparison for a value that only looks
+/// like a deque. The walk compares in lockstep, so it stops at the first
+/// difference instead of reading both deques to the end.
+pub(crate) fn deques_equal(left: &Value, right: &Value) -> Option<bool> {
+    let span = Span::new(1, 1);
+    let mut left = DequeItems::new(span, left).ok()?;
+    let mut right = DequeItems::new(span, right).ok()?;
+    loop {
+        match (left.next(span).ok()?, right.next(span).ok()?) {
+            (None, None) => return Some(true),
+            (Some(left), Some(right)) if left == right => {}
+            _ => return Some(false),
+        }
+    }
+}
+
+/// The key hash of a deque, folded one item at a time.
+///
+/// The tag order differs from the eager version, but equal deques still walk the
+/// same items in the same order and therefore hash the same.
+fn deque_items_hash(value: &Value) -> Option<u64> {
+    let span = Span::new(1, 1);
+    let mut items = DequeItems::new(span, value).ok()?;
+    let mut hash = hash_tagged_bytes(HASH_OBJECT_NAME, b"deque");
+    let mut count = 0u64;
+    while let Some(item) = items.next(span).ok()? {
+        hash = combine_hash(hash, group_value_hash(&item));
+        count += 1;
+    }
+    Some(combine_hash(hash, hash_tagged_u64(HASH_LIST, count)))
+}
+
+/// Whether two deques are equal as `lru_cache` keys, comparing their items with
+/// the cache's own function-identity rule.
+fn deque_cache_equal(left: &Value, right: &Value) -> Option<bool> {
+    let span = Span::new(1, 1);
+    let mut left = DequeItems::new(span, left).ok()?;
+    let mut right = DequeItems::new(span, right).ok()?;
+    loop {
+        match (left.next(span).ok()?, right.next(span).ok()?) {
+            (None, None) => return Some(true),
+            (Some(left), Some(right)) if cache_value_eq(&left, &right) => {}
+            _ => return Some(false),
+        }
+    }
 }
 
 /// The most logical nodes one deque operation may validate or enumerate.
@@ -2149,8 +2360,10 @@ fn stack_tree_from_values(values: &[Value]) -> Value {
 ///
 /// The forest uses the largest perfect tree that fits at each step, so
 /// `collections.deque(list)` is linear in the list's length rather than paying
-/// a spine copy for every item. Each tree still validates through the same
-/// `validate_stack_tree` a pushed stack does.
+/// a spine copy for every item. The trees are built directly from values this
+/// module already holds, so they are trusted for the same reason the `Object`
+/// holding them is: Redblue source cannot construct that object, and
+/// `deque_parts` therefore does not walk the constructor's trees.
 fn stack_from_values(values: &[Value]) -> Value {
     let mut trees = Vec::new();
     let mut rest = values;
@@ -4005,6 +4218,36 @@ mod tests {
         }
         assert_eq!(json_stringify(&Value::Number(42.0)).unwrap(), "42");
         assert_eq!(json_stringify(&Value::Number(1.5)).unwrap(), "1.5");
+    }
+
+    /// The duplicate-key check stores candidates in a hash bucket. A bucket
+    /// with more than one entry must compare each candidate by equality rather
+    /// than refusing every later key that happens to share the hash. The hash
+    /// is supplied here so the collision is forced instead of waiting for a
+    /// real 64-bit collision.
+    #[test]
+    fn edge_a_hash_collision_does_not_refuse_two_distinct_keys() {
+        let constant_hash = |_: &Value| 0;
+        let distinct = Value::list(vec![
+            Value::list(vec![Value::Text("a".to_string()), Value::Number(1.0)]),
+            Value::list(vec![Value::Text("b".to_string()), Value::Number(2.0)]),
+        ]);
+        let pairs =
+            collection_pairs_with_hash(Span::new(1, 1), &distinct, "a counter", constant_hash)
+                .expect("two distinct keys must survive sharing one hash bucket");
+        assert_eq!(pairs.len(), 2, "both distinct keys must be kept");
+
+        let duplicate = Value::list(vec![
+            Value::list(vec![Value::Text("a".to_string()), Value::Number(1.0)]),
+            Value::list(vec![Value::Text("a".to_string()), Value::Number(2.0)]),
+        ]);
+        let error =
+            collection_pairs_with_hash(Span::new(1, 1), &duplicate, "a counter", constant_hash)
+                .expect_err("equal keys must still be refused inside one hash bucket");
+        assert!(
+            error.to_string().contains("duplicate key a"),
+            "the refusal must name the repeated key, got {error}"
+        );
     }
 
     /// A cache key cannot use the language's `is` for a function: that compares

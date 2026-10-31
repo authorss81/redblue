@@ -64,12 +64,12 @@ SPEC.md:1264
 SPEC.md:1335
 SPEC.md:1369
 SPEC.md:1398
-SPEC.md:1462
-SPEC.md:1474
-SPEC.md:1523
-SPEC.md:1642
-SPEC.md:1693
-SPEC.md:1719
+SPEC.md:1471
+SPEC.md:1483
+SPEC.md:1532
+SPEC.md:1651
+SPEC.md:1702
+SPEC.md:1728
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:558

@@ -217,6 +217,77 @@ fn edge_a_deque_reverses_its_storage_once_when_one_side_empties() {
 }
 
 #[test]
+fn edge_deques_compare_by_contents_not_by_construction() {
+    let value = both(
+        "set built to collections.deque([1, 2, 3, 4])\n\
+         set pushed to collections.deque([])\n\
+         set pushed to collections.push_right(pushed, 1)\n\
+         set pushed to collections.push_right(pushed, 2)\n\
+         set pushed to collections.push_right(pushed, 3)\n\
+         set pushed to collections.push_right(pushed, 4)\n\
+         [built is pushed, built is collections.deque([1, 2, 3, 4]), \
+          built is collections.deque([4, 3, 2, 1])]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[yes, yes, no]",
+        "a deque built from a list and one built by pushing the same items must \
+         compare equal, while a different order must not"
+    );
+}
+
+#[test]
+fn edge_deques_compare_equal_across_left_mixed_and_rebalanced_construction() {
+    let value = both(
+        "set built to collections.deque([1, 2, 3, 4])\n\
+         set left to collections.deque([])\n\
+         set left to collections.push_left(left, 4)\n\
+         set left to collections.push_left(left, 3)\n\
+         set left to collections.push_left(left, 2)\n\
+         set left to collections.push_left(left, 1)\n\
+         set mixed to collections.deque([2, 3])\n\
+         set mixed to collections.push_left(mixed, 1)\n\
+         set mixed to collections.push_right(mixed, 4)\n\
+         set resplit to collections.deque([0, 1, 2, 3, 4, 5])\n\
+         set resplit to collections.pop_left(resplit).deque\n\
+         set resplit to collections.pop_right(resplit).deque\n\
+         [built is left, built is mixed, built is resplit]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[yes, yes, yes]",
+        "a deque built with push_left, one built from both ends, and one whose \
+         split changed through a rebalancing pop must all compare equal to the \
+         same items built from a list"
+    );
+}
+
+#[test]
+fn edge_deques_are_consistent_keys_for_counter_and_defaultdict() {
+    let value = both(
+        "set built to collections.deque([1, 2, 3, 4])\n\
+         set pushed to collections.deque([])\n\
+         set pushed to collections.push_right(pushed, 1)\n\
+         set pushed to collections.push_right(pushed, 2)\n\
+         set pushed to collections.push_right(pushed, 3)\n\
+         set pushed to collections.push_right(pushed, 4)\n\
+         set counts to collections.counter([built, pushed])\n\
+         set d to collections.defaultdict(0)\n\
+         set first to collections.get(d, built)\n\
+         set second to collections.get(first.dict, pushed)\n\
+         set updated to collections.put(second.dict, pushed, 9)\n\
+         [collections.count(counts, built), collections.count(counts, pushed), \
+          length(collections.most_common(counts)), collections.get(updated, built).value]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[2, 2, 1, 9]",
+        "two equal deques must share one Counter entry and one defaultdict \
+         entry no matter which construction built each one"
+    );
+}
+
+#[test]
 fn namedtuple_makes_a_record_with_the_names_it_was_given() {
     let value = both(
         "set point to collections.namedtuple([\"x\", \"y\"], [3, 4])\n\
@@ -276,6 +347,44 @@ fn edge_a_malformed_defaultdict_is_refused() {
     both_refuse(
         "say collections.put(collections.defaultdict(0), \"a\")",
         "requires a defaultdict, a key and a value",
+    );
+}
+
+#[test]
+fn edge_a_counter_with_duplicate_keys_is_refused() {
+    both_refuse(
+        "set c to {counts: [[1, 1], [1, 2]], missing: 0}\n\
+         say [collections.count(c, 1), collections.most_common(c)]",
+        "duplicate key 1",
+    );
+}
+
+#[test]
+fn edge_a_defaultdict_with_duplicate_keys_is_refused() {
+    both_refuse(
+        "set d to {entries: [[\"a\", 1], [\"a\", 2]], factory: 0}\n\
+         say collections.get(d, \"a\")",
+        "duplicate key a",
+    );
+}
+
+#[test]
+fn edge_duplicate_keys_compare_by_value_across_types() {
+    let value = both(
+        "set c to collections.counter([1, \"1\", 1])\n\
+         [collections.count(c, 1), collections.count(c, \"1\"), \
+          collections.most_common(c)]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[2, 1, [[1, 2], [1, 1]]]",
+        "the number 1 and the text \"1\" are different keys, so only the \
+         repeated number collapses"
+    );
+    both_refuse(
+        "set d to {entries: [[[1], 1], [[1], 2]], factory: 0}\n\
+         say collections.get(d, [1])",
+        "duplicate key",
     );
 }
 
@@ -942,6 +1051,20 @@ fn edge_an_object_named_deque_still_needs_the_kind_marker() {
             "an object named deque {how} must not be trusted: {error}"
         );
     }
+}
+
+#[test]
+fn edge_a_source_declared_object_named_deque_cannot_pose_as_a_trusted_deque() {
+    // `back` is a reserved word, so an `object deque` declaration cannot even
+    // spell one of the three fields. The declaration binds a record, not the
+    // private `Object` a module deque is, and taking the untrusted record path
+    // refuses it rather than trusting the name.
+    let source = "object deque\n\
+                  has kind default \"deque\"\n\
+                  has front default []\n\
+                  end\n\
+                  say collections.pop_left(deque)";
+    both_refuse(source, "value made by collections.deque");
 }
 
 #[test]
