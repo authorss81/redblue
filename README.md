@@ -236,6 +236,7 @@ collections.push_left(deque, value)       // add at the front
 collections.push_right(deque, value)      // add at the back
 collections.pop_left(deque)               // {value, deque}, or nothing at the front
 collections.pop_right(deque)              // {value, deque}, or nothing at the back
+length(deque)                             // the number of items the deque holds
 collections.namedtuple(names, values)     // a record with those named fields
 collections.field(record, name)           // the field; a missing field is an error
 ```

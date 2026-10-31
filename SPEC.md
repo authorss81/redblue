@@ -1451,7 +1451,9 @@ operation can use. A pop answers `{value, deque}` so the shorter deque is the
 one to bind; an empty deque answers `nothing` as the value rather than refusing.
 Two deques made by this module compare equal when they hold equal items in the
 same order, however their ends are split, and that is also the key rule for
-Counter and defaultdict.
+Counter and defaultdict. `length(deque)` answers how many items the deque holds;
+it reads the stored sizes rather than walking the items, and a hand-written
+record that claims to be a deque is validated before its sizes are trusted.
 This is what a list work queue does not have: `shift` reads the first item but
 does not remove it, so the only removal from the front is `skip(xs, 1)`, which
 copies the rest of the list on every call. A deque has no JSON form, so

@@ -1189,6 +1189,73 @@ fn edge_a_forged_deque_record_at_the_cap_refuses_another_push() {
 }
 
 #[test]
+fn deque_length_counts_items_at_both_ends() {
+    let value = both(
+        "set q to collections.deque([])\n\
+         set empty to length(q)\n\
+         set q to collections.push_right(q, 1)\n\
+         set q to collections.push_left(q, 0)\n\
+         set two to length(q)\n\
+         set popped to collections.pop_left(q)\n\
+         [empty, two, length(popped.deque)]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[0, 2, 1]",
+        "length must answer the number of items a deque holds across both ends, \
+         including an empty deque and one after a pop"
+    );
+}
+
+#[test]
+fn edge_a_single_item_deque_has_length_one() {
+    let value = both(
+        "set q to collections.deque([7])\n\
+         [length(q), length(collections.push_left(q, 6)), length(collections.deque([]))]",
+    );
+    assert_eq!(
+        value.to_string(),
+        "[1, 2, 0]",
+        "a one-item deque must measure one, a push must grow it, and an empty \
+         deque must measure zero"
+    );
+}
+
+#[test]
+fn edge_a_forged_deque_length_counts_logical_items() {
+    let value = both(
+        "set leaf to collections.namedtuple([\"size\", \"value\"], [1, 0])\n\
+         set pair to collections.namedtuple(\
+         [\"size\", \"value\", \"left\", \"right\"], [3, 0, leaf, leaf])\n\
+         set root to collections.namedtuple(\
+         [\"size\", \"value\", \"left\", \"right\"], [7, 0, pair, pair])\n\
+         set q to collections.namedtuple(\
+         [\"kind\", \"front\", \"back\"], [\"deque\", [root], []])\n\
+         length(q)",
+    );
+    assert_eq!(
+        value.to_string(),
+        "7",
+        "length of a hand-written deque record must count the logical items its \
+         shared tree describes, not the physical nodes it stores"
+    );
+}
+
+#[test]
+fn edge_a_malformed_deque_length_is_refused() {
+    both_refuse("say length({a: 1})", "length requires a list or text");
+    both_refuse(
+        "set leaf to collections.namedtuple([\"size\", \"value\"], [1, 0])\n\
+         set root to collections.namedtuple(\
+         [\"size\", \"value\", \"left\", \"right\"], [4, 0, leaf, leaf])\n\
+         set q to collections.namedtuple(\
+         [\"kind\", \"front\", \"back\"], [\"deque\", [root], []])\n\
+         say length(q)",
+        "value made by collections.deque",
+    );
+}
+
+#[test]
 fn edge_json_stringify_refuses_a_deque_rather_than_writing_null() {
     both_refuse(
         "set q to collections.deque([1, 2])\nsay json.stringify(q)",

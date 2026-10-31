@@ -62,17 +62,28 @@ deque was built. The comment on `stack_from_values` now says its trees are
 trusted because source cannot construct the `Object`, rather than claiming a
 validation the constructor does not perform.
 
+This final resume closed the last obvious hole in the deque surface: a deque had
+no size. Every other collection in the language can be measured — a list and a
+text with `length`, a record by its fields — but `length(q)` on a deque failed,
+so a program holding one could only count items by popping it. `length` now
+answers a deque's logical item count from the sizes stored on the spine, without
+walking the items. A value that claims to be a deque is validated by the same
+`deque_parts` every other operation uses, so a malformed or over-budget
+hand-written record is refused with the usual deque error rather than measured.
+The ordinary "length requires a list or text" error for every other value is
+unchanged, which keeps the differential corpus's recorded error text intact.
+
 | File | Lines | What |
 |---|---|---|
-| `src/runtime.rs` | +72 −28 (resume and review) | `collection_pairs`, the Counter/defaultdict/deque helpers, persistent stack trees for deque ends, named-record validation, the thirteen `collections.*` arms, a linear `stack_from_values` deque constructor, and `deque_rebalance`, which splits a non-empty side across both ends instead of reversing the whole remainder. The resume makes `deque_value` build an opaque `Object` and splits `deque_parts` into a trusted object path (cheap shape and budget checks) and an untrusted record path (full `validate_stack_tree` walk), so module deques no longer re-walk every node per operation while hand-written records are still refused node by node. The review enforces the item budget in the constructor and after each push, splits malformed-value errors from a dedicated budget error that names the limit and supplied length, requires the `kind: "deque"` marker on the trusted object path as well as the record path, corrects the `stack_cons` trust-boundary comment, and makes `json_stringify` refuse a deque rather than write `null`; the final resume adds the expected-linear duplicate-key check in `collection_pairs`, and this review adds logical deque equality and hashing, the collision test, and the corrected `stack_from_values` trust comment; this round adds a private marker value only a module-made `Object` can carry, so a source-declared `object deque` cannot enter the trusted path, and replaces the eager equality/hash vectors with lazy tree cursors that compare in lockstep and fold one item at a time |
+| `src/runtime.rs` | +121 −28 (resume, review and final resume) | `collection_pairs`, the Counter/defaultdict/deque helpers, persistent stack trees for deque ends, named-record validation, the thirteen `collections.*` arms, a linear `stack_from_values` deque constructor, and `deque_rebalance`, which splits a non-empty side across both ends instead of reversing the whole remainder. The resume makes `deque_value` build an opaque `Object` and splits `deque_parts` into a trusted object path (cheap shape and budget checks) and an untrusted record path (full `validate_stack_tree` walk), so module deques no longer re-walk every node per operation while hand-written records are still refused node by node. The review enforces the item budget in the constructor and after each push, splits malformed-value errors from a dedicated budget error that names the limit and supplied length, requires the `kind: "deque"` marker on the trusted object path as well as the record path, corrects the `stack_cons` trust-boundary comment, and makes `json_stringify` refuse a deque rather than write `null`; the final resume adds the expected-linear duplicate-key check in `collection_pairs`, and this review adds logical deque equality and hashing, the collision test, and the corrected `stack_from_values` trust comment; this round adds a private marker value only a module-made `Object` can carry, so a source-declared `object deque` cannot enter the trusted path, and replaces the eager equality/hash vectors with lazy tree cursors that compare in lockstep and fold one item at a time; this final resume adds `looks_like_deque` and `deque_length`, so `length(deque)` answers from the spine sizes after the same validation every other operation performs |
 | `src/stdlib.rs` | +116 −1 | registers the `collections` module, its 13 members, builtin names, signatures and the module table |
-| `tests/collections_test.rs` | +374 −19 (resume, review, final resume and round 2) | 45 tests, all running the program on both engines and comparing values as data as well as text; the resume adds the opaque-object contract, a malformed-grandchild refusal on the untrusted record path, and a 1,500-item both-ends order test that exercises the trusted path; the review adds the constructor-budget refusal, push-at-cap refusals for both a module deque and a forged record at the cap, the object-path `kind` marker check, and the `json.stringify` refusal; the final resume adds duplicate-key refusals for a forged Counter and defaultdict plus a mixed-type key comparison; this review adds construction-independent deque equality and its use as a Counter/defaultdict key, a source-declared `object deque` refusal, and equality across `push_left`, mixed-end and rebalanced construction |
-| `SPEC.md` | +21 −6 (resume, review and final resume) | documents the missing-key behaviour of Counter and defaultdict, their lookup cost, the `put` spelling, deque ends, named fields and field errors; the resume changes the deque description from an opaque record to an opaque value and states the trusted-object rule; the review names the `kind: "deque"` marker, the item budget and the JSON refusal; the final resume documents that a repeated key in a forged Counter or defaultdict is refused; this review documents that two deques compare equal by their items and use that rule as keys |
-| `README.md` | +28 −0 | the user-facing collections section |
+| `tests/collections_test.rs` | +441 −19 (resume, review, final resume and round 2) | 49 tests, all running the program on both engines and comparing values as data as well as text; the resume adds the opaque-object contract, a malformed-grandchild refusal on the untrusted record path, and a 1,500-item both-ends order test that exercises the trusted path; the review adds the constructor-budget refusal, push-at-cap refusals for both a module deque and a forged record at the cap, the object-path `kind` marker check, and the `json.stringify` refusal; the final resume adds duplicate-key refusals for a forged Counter and defaultdict plus a mixed-type key comparison; this review adds construction-independent deque equality and its use as a Counter/defaultdict key, a source-declared `object deque` refusal, equality across `push_left`, mixed-end and rebalanced construction; this final resume adds empty, single-item, forged-record and malformed-record length tests |
+| `SPEC.md` | +25 −7 (resume, review and final resume) | documents the missing-key behaviour of Counter and defaultdict, their lookup cost, the `put` spelling, deque ends, named fields and field errors; the resume changes the deque description from an opaque record to an opaque value and states the trusted-object rule; the review names the `kind: "deque"` marker, the item budget and the JSON refusal; the final resume documents that a repeated key in a forged Counter or defaultdict is refused; this review documents that two deques compare equal by their items and use that rule as keys; this final resume documents `length(deque)` |
+| `README.md` | +29 −0 | the user-facing collections section, including `length(deque)` |
 | `SURVEY.md` | +50 −49 | builtin count 92 → 105, modules 12 → 13, members 63 → 76, and re-anchored citations |
 | `tests/stdlib_module_docs_test.rs` | +69 −0 | one answerable row per new builtin |
 | `tests/stdlib_module_names_test.rs` | +5 −0 | the `collections` module row |
-| `tests/doc_blocks_runs.txt` | +14 −13 (final resume) | classifies the new SPEC block and re-anchors the blocks after it; the final resume moves the six blocks after the duplicate-key paragraph |
+| `tests/doc_blocks_runs.txt` | +14 −13 (final resume) | classifies the new SPEC block and re-anchors the blocks after it; the final resume moves the six blocks after the duplicate-key paragraph; this final resume re-anchors the six blocks after the new `length(deque)` sentence |
 | `tests/doc_blocks_fragments.txt` | +1 −1 | recounted to 39 of 110 blocks |
 | `tests/doc_blocks_known_fail.txt` | +2 −2 | recounted to 12 of 110 blocks |
 | `tests/unreviewed_work_ack_test.rs` | +2 −1 | acknowledges the `resume phase-099:` delivery subject |
@@ -204,16 +215,21 @@ sharing assertion, so the evidence does not depend on that wall-clock number.
 | `edge_a_deque_at_the_cap_refuses_another_push` | resource_limit: a module deque holding exactly `MAX_DEQUE_ITEMS` refuses both `push_left` and `push_right`, naming the limit and the length the push would produce |
 | `edge_a_forged_deque_record_at_the_cap_refuses_another_push` | resource_limit: a forged record at the cap, built from structurally valid shared trees, is refused by both pushes after validation rather than only by the constructor |
 | `edge_json_stringify_refuses_a_deque_rather_than_writing_null` | representation boundary: a deque, alone or nested in a record, is refused by `json.stringify` rather than silently written as `null` |
+| `deque_length_counts_items_at_both_ends` | empty and boundary: `length` answers 0, then 2 after a push at each end, then 1 after a pop |
+| `edge_a_single_item_deque_has_length_one` | singleton and empty: a one-item deque measures 1, a push grows it to 2, an empty deque measures 0 |
+| `edge_a_forged_deque_length_counts_logical_items` | nesting_recursion: a hand-written shared tree reporting 7 logical items measures 7, not its smaller physical node count |
+| `edge_a_malformed_deque_length_is_refused` | malformed_input and type_mismatch: a plain record is still refused as "list or text", and a forged tree with a wrong size is refused as a malformed deque |
 
 Mandatory matrix:
 
 - empty — covered by `edge_an_empty_counter_answers_empty_and_zero`, the empty
-  deque pop and `edge_an_empty_namedtuple_is_an_empty_record`.
+  deque pop, `edge_an_empty_namedtuple_is_an_empty_record` and
+  `edge_a_single_item_deque_has_length_one`.
 - singleton — covered by `edge_a_single_entry_counter_counts_it_once`, the
-  one-element deque and named-record cases.
+  one-element deque, named-record cases and `edge_a_single_item_deque_has_length_one`.
 - boundary — covered by popping the last item at each deque end,
-  `most_common`'s equal-count ordering, and the `2^k - 1` lengths in the
-  construction sweep.
+  `most_common`'s equal-count ordering, the `2^k - 1` lengths in the
+  construction sweep, and `deque_length_counts_items_at_both_ends`.
 - out_of_bounds — N/A: these values expose no numeric index or argument order;
   an empty pop answers `nothing` instead of indexing, and a missing named field
   is refused by name.
@@ -261,7 +277,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2382 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 2386 passed, 0 failed, 0 ignored |
 | `./rbops/verify.sh phase-099` | pass |
 
 ## Invariants touched

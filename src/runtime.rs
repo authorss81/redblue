@@ -2492,6 +2492,45 @@ fn deque_pop(value: Value, deque: Value) -> Value {
     Value::record(fields)
 }
 
+/// Whether `value` claims to be a deque, whether made by the module or written
+/// out by hand.
+///
+/// This is only a shape test: a value that claims to be a deque is handed to
+/// [`deque_length`], which runs the same validation every other operation does,
+/// so a malformed claim is refused by name rather than treated as an ordinary
+/// value.
+fn looks_like_deque(value: &Value) -> bool {
+    match value {
+        Value::Object(name, _) => name == "deque",
+        Value::Record(fields) => {
+            matches!(fields.get("kind"), Some(Value::Text(kind)) if kind == "deque")
+        }
+        _ => false,
+    }
+}
+
+/// The number of logical items both ends of a deque hold.
+///
+/// The sizes on the spine roots already describe each tree's logical contents,
+/// so a trusted deque is measured without walking its items. A hand-written
+/// record still goes through [`deque_parts`], which validates every node before
+/// its sizes are trusted; an over-budget or malformed value is refused with the
+/// same error its other operations produce.
+fn deque_length(span: Span, value: &Value) -> Result<usize> {
+    let (front, back) = deque_parts(span, value)?;
+    let mut total = 0usize;
+    for stack in [&front, &back] {
+        let Value::List(trees) = stack else {
+            return Err(deque_error(span));
+        };
+        for tree in trees.iter() {
+            let size = stack_tree_budget(span, tree)?;
+            total = total.checked_add(size).ok_or_else(|| deque_error(span))?;
+        }
+    }
+    Ok(total)
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -2539,6 +2578,16 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 // reached, and it is deleted. `tests/text_length_characters_test.rs`
                 // pins that there is one.
                 Ok(Some(Value::Number(s.chars().count() as f64)))
+            } else if let Some(value) = args.first() {
+                if looks_like_deque(value) {
+                    let length = deque_length(span, value)?;
+                    Ok(Some(Value::Number(length as f64)))
+                } else {
+                    Err(Error::Runtime(
+                        "length requires a list or text".to_string(),
+                        span,
+                    ))
+                }
             } else {
                 Err(Error::Runtime(
                     "length requires a list or text".to_string(),
