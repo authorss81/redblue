@@ -224,10 +224,13 @@ path.resolve("data")              // an absolute path with . and .. removed
 path.list("data")                 // sorted entry names; [] for an empty directory
 ```
 
-The files functions accept either a text path or a path value, so
+The files functions and `bytes.write` accept either a text path or a path value, so
 `files.read(path.join("data", "records.rb"))` and
 `files.read("data/records.rb")` are the same call. `path.join` uses the
-platform's separator and lets an absolute part replace what came before it.
+platform's separator and lets an absolute part replace what came before it. The
+WebAssembly playground has no working directory, so `path.resolve` is refused
+there with an `IoError` naming the platform; run the native `rb` binary to
+resolve a path.
 
 ### Bytes
 ```
