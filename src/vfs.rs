@@ -64,10 +64,24 @@ mod native {
     pub fn write_bytes(path: &str, content: &[u8]) -> io::Result<()> {
         std::fs::write(path, content)
     }
+
+    /// The names directly inside `path`, sorted so a listing is deterministic.
+    ///
+    /// A directory that does not exist is an error, as it is for `read_dir`
+    /// itself. A directory that exists and is empty is an empty list, not an
+    /// error: "there is nothing here" is an answer.
+    pub fn read_dir(path: &str) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            names.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{append, exists, is_file, write_bytes};
+pub use native::{append, exists, is_file, read_dir, write_bytes};
 
 /// The path `relative` names inside `root`, as the one string a read takes.
 ///
@@ -105,7 +119,7 @@ pub fn rooted(root: &std::path::Path, relative: &str) -> String {
 /// and tested there, the two builds' filesystem agrees by construction and the
 /// test that says so is one `cargo test` runs.
 pub mod memory {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -130,7 +144,7 @@ pub mod memory {
     }
 
     pub fn read_to_string(path: &str) -> io::Result<String> {
-        let bytes = lock().get(path).cloned().ok_or_else(|| not_found(path))?;
+        let bytes = lock().get(path).cloned().ok_or_else(not_found)?;
         String::from_utf8(bytes).map_err(|_| {
             // Exactly the sentence `std::fs` gives, with nothing added. The
             // caller in `runtime.rs` prefixes the path itself, so a path in
@@ -182,10 +196,11 @@ pub mod memory {
     /// disagree about the same filesystem.
     ///
     /// A directory is implied by its contents: it exists when something is
-    /// stored underneath it. That is the one case this cannot answer for — an
-    /// *empty* directory on disk exists and this one does not, because nothing
-    /// in the language creates one and nothing in the map could remember it.
-    /// See [`directory_prefix`].
+    /// stored underneath it. That is the one case this cannot answer for — a
+    /// named *empty* directory on disk exists and this one does not, because
+    /// nothing in the language creates one and nothing in the map could
+    /// remember it. The working directory is the exception: `.` and `./`
+    /// always name a directory that exists. See [`directory_prefix`].
     pub fn exists(path: &str) -> bool {
         let files = lock();
         if files.contains_key(path) {
@@ -195,6 +210,9 @@ pub mod memory {
             Some(prefix) => prefix,
             None => return false,
         };
+        if prefix.is_empty() {
+            return true;
+        }
         files.keys().any(|stored| stored.starts_with(&prefix))
     }
 
@@ -211,15 +229,12 @@ pub mod memory {
     }
 
     pub fn remove_file(path: &str) -> io::Result<()> {
-        lock()
-            .remove(path)
-            .map(|_| ())
-            .ok_or_else(|| not_found(path))
+        lock().remove(path).map(|_| ()).ok_or_else(not_found)
     }
 
     pub fn copy(from: &str, to: &str) -> io::Result<u64> {
         let mut files = lock();
-        let content = files.get(from).ok_or_else(|| not_found(from))?.clone();
+        let content = files.get(from).ok_or_else(not_found)?.clone();
         let length = content.len() as u64;
         files.insert(to.to_string(), content);
         Ok(length)
@@ -227,9 +242,54 @@ pub mod memory {
 
     pub fn rename(from: &str, to: &str) -> io::Result<()> {
         let mut files = lock();
-        let content = files.remove(from).ok_or_else(|| not_found(from))?;
+        let content = files.remove(from).ok_or_else(not_found)?;
         files.insert(to.to_string(), content);
         Ok(())
+    }
+
+    /// The names directly inside `path`, sorted so a listing is deterministic.
+    ///
+    /// A directory is implied by the keys underneath it, so a path with no
+    /// stored key under it is not a directory this filesystem has: it is the
+    /// same `NotFound` the native `read_dir` gives for a path that is not
+    /// there. That is also the one case a flat map cannot reproduce — a named
+    /// empty directory that exists on a disk has no key here, so it is reported
+    /// as missing rather than as an empty list; see [`exists`](self::exists).
+    /// The working directory is the exception: `.` and `./` always exist, so an
+    /// empty one is the empty list a native `read_dir(".")` gives, not an error.
+    pub fn read_dir(path: &str) -> io::Result<Vec<String>> {
+        let files = lock();
+        if files.contains_key(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "Not a directory (os error 20)",
+            ));
+        }
+        let Some(prefix) = directory_prefix(path) else {
+            return Err(not_found());
+        };
+        let mut names = BTreeSet::new();
+        for stored in files.keys() {
+            let Some(rest) = stored.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            // This is the playground's filesystem, which follows POSIX: only
+            // `/` separates components there, and `path.join` deliberately
+            // leaves a backslash alone on that target. Splitting on `\\` here
+            // too would list a file written as `"a\\b.txt"` as `"a"`, which is
+            // a filename the program never wrote.
+            let name = rest.split('/').next().unwrap_or(rest);
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+        if names.is_empty() && !prefix.is_empty() {
+            return Err(not_found());
+        }
+        Ok(names.into_iter().collect())
     }
 
     /// Empties the map. Only a test calls this: the store is a process-wide
@@ -241,10 +301,15 @@ pub mod memory {
 
     /// The wording `std::fs` uses for a path that is not there, so a Redblue
     /// program that reads the message reads the same sentence in both builds.
-    fn not_found(path: &str) -> io::Error {
+    ///
+    /// The path is not part of the sentence: `std::fs` on a Linux host does not
+    /// put it there, and the caller in `runtime.rs` prefixes it itself, so a
+    /// path in here as well would print it twice in the playground and once
+    /// natively — the same mistake reading two different messages.
+    fn not_found() -> io::Error {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("No such file or directory (os error 2): {path}"),
+            "No such file or directory (os error 2)",
         )
     }
 
@@ -253,22 +318,40 @@ pub mod memory {
     ///
     /// The trailing separator is the whole of it, and it is why
     /// [`exists`](self::exists) does not confuse the directory `notes` with a
-    /// file called `notes.txt`. `None` for a path that cannot name a directory
-    /// at all: the empty path, which `Path::new("").exists()` also answers
-    /// `false` for on a disk.
+    /// file called `notes.txt`. `.` segments name the working directory or the
+    /// directory they sit in, whose stored keys are the paths written without
+    /// that segment, so `./data`, `data/.` and `data` all answer the prefix
+    /// `"data/"` rather than a literal `"./data/"` no key carries. `None` for a
+    /// path that cannot name a directory at all: the empty path, which
+    /// `Path::new("").exists()` also answers `false` for on a disk.
     fn directory_prefix(path: &str) -> Option<String> {
         if path.is_empty() {
             return None;
         }
-        if path.ends_with('/') {
-            Some(path.to_string())
-        } else {
-            Some(format!("{path}/"))
+        let mut prefix = String::new();
+        if path.starts_with('/') {
+            prefix.push('/');
         }
+        let mut first = true;
+        for component in path.split('/') {
+            if component.is_empty() || component == "." {
+                continue;
+            }
+            if !first {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            first = false;
+        }
+        if !prefix.is_empty() && !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        Some(prefix)
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 pub use memory::{
-    append, copy, exists, is_file, read_to_string, remove_file, rename, write, write_bytes,
+    append, copy, exists, is_file, read_dir, read_to_string, remove_file, rename, write,
+    write_bytes,
 };

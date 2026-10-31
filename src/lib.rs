@@ -11,6 +11,7 @@ pub mod linter;
 pub mod lsp;
 pub mod manifest;
 pub mod parser;
+pub mod path;
 pub mod repl;
 mod runtime;
 pub mod stdlib;
