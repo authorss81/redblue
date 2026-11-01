@@ -680,6 +680,36 @@ fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
             "a+b\n".into(),
         ),
         (
+            "text_wrap",
+            r#"say text.wrap("the quick brown fox", 9)"#.into(),
+            "[the quick, brown fox]\n".into(),
+        ),
+        (
+            "text_diff",
+            r#"say contains(text.diff("a\nb\n", "a\nB\n"), "+B")"#.into(),
+            "yes\n".into(),
+        ),
+        (
+            "text_dedent",
+            r#"say text.dedent("    a\n    b")"#.into(),
+            "a\nb\n".into(),
+        ),
+        (
+            "text_template",
+            r#"say text.template("Hi <<name>>!", {name: "Ada"})"#.into(),
+            "Hi Ada!\n".into(),
+        ),
+        (
+            "text_pad",
+            r#"say text.pad("x", 3, "-")"#.into(),
+            "x--\n".into(),
+        ),
+        (
+            "text_align",
+            r#"say text.align("x", 5, "right")"#.into(),
+            "    x\n".into(),
+        ),
+        (
             "length",
             r#"say length("abcd")
 say length(bytes.from_text("héllo"))"#
