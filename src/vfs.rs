@@ -203,18 +203,21 @@ pub mod memory {
     /// stored underneath it. That is the one case this cannot answer for — a
     /// named *empty* directory on disk exists and this one does not, because
     /// nothing in the language creates one and nothing in the map could
-    /// remember it. The working directory is the exception: `.` and `./`
-    /// always name a directory that exists. See [`normalize`].
+    /// remember it. The working directory and the root are the exceptions: `.`,
+    /// `./` and `/` always name a directory that exists. See [`normalize`].
     pub fn exists(path: &str) -> bool {
-        let Some(key) = normalize(path) else {
+        let files = lock();
+        let Ok(Some(key)) = normalize(path, &files) else {
             return false;
         };
-        let files = lock();
-        if key.is_empty() {
+        let names_directory = names_directory(path);
+        if key.is_empty() || key == "/" {
             return true;
         }
         if files.contains_key(&key) {
-            return true;
+            // A trailing separator names a directory, and a file is not one.
+            // Native `Path::exists("note/")` is false when `note` is a file.
+            return !names_directory;
         }
         let prefix = directory_prefix(&key);
         files.keys().any(|stored| stored.starts_with(&prefix))
@@ -229,8 +232,12 @@ pub mod memory {
     /// distinction — `modules/Foo/` is where the *versions* of `Foo` are
     /// published, and opening it is not what an import means.
     pub fn is_file(path: &str) -> bool {
-        match normalize(path) {
-            Some(key) if !key.is_empty() => lock().contains_key(&key),
+        if names_directory(path) {
+            return false;
+        }
+        let files = lock();
+        match normalize(path, &files) {
+            Ok(Some(key)) if !key.is_empty() => files.contains_key(&key),
             _ => false,
         }
     }
@@ -267,11 +274,12 @@ pub mod memory {
     /// there. That is also the one case a flat map cannot reproduce — a named
     /// empty directory that exists on a disk has no key here, so it is reported
     /// as missing rather than as an empty list; see [`exists`](self::exists).
-    /// The working directory is the exception: `.` and `./` always exist, so an
-    /// empty one is the empty list a native `read_dir(".")` gives, not an error.
+    /// The working directory and the root are the exceptions: `.`, `./` and `/`
+    /// always exist, so an empty one is the empty list a native `read_dir(".")`
+    /// or `read_dir("/")` gives, not an error.
     pub fn read_dir(path: &str) -> io::Result<Vec<String>> {
-        let key = normalize(path).ok_or_else(not_found)?;
         let files = lock();
+        let key = normalize(path, &files)?.ok_or_else(not_found)?;
         if !key.is_empty() && files.contains_key(&key) {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
@@ -297,7 +305,7 @@ pub mod memory {
                 names.insert(name.to_string());
             }
         }
-        if names.is_empty() && !prefix.is_empty() {
+        if names.is_empty() && !prefix.is_empty() && key != "/" {
             return Err(not_found());
         }
         Ok(names.into_iter().collect())
@@ -334,9 +342,17 @@ pub mod memory {
     /// same answer as the empty path, rather than a literal key no native
     /// `read_dir(".")` would ever list. `None` for the empty path too, which
     /// names no file or directory at all.
-    fn normalize(path: &str) -> Option<String> {
+    ///
+    /// Folding is not enough on its own. A native lookup walks every component
+    /// in turn, so whatever a `..` climbs out of has to be a directory that
+    /// exists. Folding lexically would hide both failures: `missing/..` would
+    /// name the current directory instead of `NotFound`, and `file.txt/..`
+    /// would name the file's parent instead of `NotADirectory`. Every component
+    /// popped by a `..` — not only the one before a *final* `..` — is checked
+    /// against the store before it is folded away.
+    fn normalize(path: &str, files: &Store) -> io::Result<Option<String>> {
         if path.is_empty() {
-            return None;
+            return Ok(None);
         }
         let absolute = path.starts_with('/');
         let mut components: Vec<&str> = Vec::new();
@@ -345,6 +361,8 @@ pub mod memory {
                 "" | "." => {}
                 ".." => {
                     if matches!(components.last(), Some(last) if *last != "..") {
+                        let traversed = join_components(&components, absolute);
+                        ensure_directory(&traversed, files)?;
                         components.pop();
                     } else if !absolute {
                         components.push(component);
@@ -354,14 +372,52 @@ pub mod memory {
             }
         }
         if matches!(components.first(), Some(&"..")) {
-            return None;
+            return Ok(None);
         }
+        Ok(Some(join_components(&components, absolute)))
+    }
+
+    /// The normalized key for `components`, keeping a leading `/` when the
+    /// original path was absolute.
+    fn join_components(components: &[&str], absolute: bool) -> String {
         let mut normalized = String::new();
         if absolute {
             normalized.push('/');
         }
         normalized.push_str(&components.join("/"));
-        Some(normalized)
+        normalized
+    }
+
+    /// Refuse a `..` that climbs out of something that is not a directory.
+    ///
+    /// `key` is the normalized path of the component being popped. When it is a
+    /// stored file the answer is `NotADirectory`, and when nothing is stored
+    /// under it there is no directory to climb out of, so the answer is
+    /// `NotFound`. The working directory and root always exist and need no
+    /// entry of their own; see [`normalize`](self::normalize).
+    fn ensure_directory(key: &str, files: &Store) -> io::Result<()> {
+        if key.is_empty() || key == "/" {
+            return Ok(());
+        }
+        if files.contains_key(key) {
+            return Err(not_a_directory());
+        }
+        let prefix = directory_prefix(key);
+        if !files.keys().any(|stored| stored.starts_with(&prefix)) {
+            return Err(not_found());
+        }
+        Ok(())
+    }
+
+    /// Whether the path as written asks for a directory rather than a file.
+    ///
+    /// A trailing separator is the obvious spelling, but a final `.` or `..`
+    /// names a directory too: `note/.` is the directory `note`, so a file
+    /// called `note` must not be opened through it. [`normalize`] folds those
+    /// components away before the lookup, so the question has to be asked of
+    /// the text the caller wrote.
+    fn names_directory(path: &str) -> bool {
+        path.ends_with('/') || matches!(path.rsplit('/').next(), Some("." | ".."))
     }
 
     /// The key a file operation writes or reads, refusing a directory spelling.
@@ -372,12 +428,25 @@ pub mod memory {
     /// underneath it — `data/.` or `data/sub/..` when `data/x` is stored — is
     /// that same `IsADirectory`, not a new file that hides the directory.
     fn file_key(path: &str) -> io::Result<String> {
-        let key = normalize(path).ok_or_else(not_found)?;
+        let files = lock();
+        let key = normalize(path, &files)?.ok_or_else(not_found)?;
+        let names_directory = names_directory(path);
         if key.is_empty() || key == "/" {
             return Err(is_a_directory());
         }
         let prefix = directory_prefix(&key);
-        if lock().keys().any(|stored| stored.starts_with(&prefix)) {
+        let is_file = files.contains_key(&key);
+        let has_children = files.keys().any(|stored| stored.starts_with(&prefix));
+        if names_directory {
+            if is_file {
+                return Err(not_a_directory());
+            }
+            if has_children {
+                return Err(is_a_directory());
+            }
+            return Err(not_found());
+        }
+        if has_children {
             return Err(is_a_directory());
         }
         Ok(key)
@@ -387,6 +456,15 @@ pub mod memory {
     /// program that reads the message reads the same sentence in both builds.
     fn is_a_directory() -> io::Error {
         io::Error::new(io::ErrorKind::IsADirectory, "Is a directory (os error 21)")
+    }
+
+    /// The wording `std::fs` uses when a file appears where a directory was
+    /// expected, so `files.write("note/")` says the same thing in both builds.
+    fn not_a_directory() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "Not a directory (os error 20)",
+        )
     }
 
     /// The prefix a stored path has to carry for `key` to name a directory

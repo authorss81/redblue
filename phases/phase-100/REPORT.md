@@ -95,6 +95,38 @@ refuses it rather than joining it to the working directory. And a leading `..`
 on a relative path now normalizes to nothing instead of a literal `..` key, so
 it cannot be written or shown in `path.list(".")`.
 
+This resume closes the trailing-separator parity gap in the in-memory
+filesystem. `normalize` folds a trailing `/` away before a file lookup, so
+`files.write("note/")` used to create the file `note` in the playground while
+native `std::fs` refused the same spelling. A trailing separator now names a
+directory for every file operation: a file is `NotADirectory`, an implied
+directory is `IsADirectory`, and a name that does not exist is `NotFound`.
+`exists` and `is_file` follow the same rule, so a file asked for as
+`"note/"` is neither existing nor a file, exactly as `Path::exists` and
+`Path::is_file` answer on the native build.
+
+This review round closes the dot-spelled directory gap the trailing-separator
+rule left open. A final `.` or `..` asks for a directory just as a trailing `/`
+does, but `normalize` folded it away, so `files.write("note/.")` overwrote the
+file `note` and `files.delete("note/.")` removed it while native `std::fs`
+refused both with `NotADirectory`. `exists`, `is_file` and every writer now ask
+the path as written whether it names a directory, and a final `..` also checks
+that the component it traverses is a directory rather than a file. The root is
+the second directory that always exists: an empty store now lists `/` as the
+empty list, the same answer a native `read_dir("/")` gives, instead of
+`NotFound`.
+
+This review round closes the parent-segment traversal gap the dot-spelled rule
+left open. Folding `.` and `..` before a lookup hid a `..` that climbed out of
+something that is not a directory: `path.list("missing/..")` answered the
+current directory instead of `NotFound`, and `path.list("file.txt/..")`
+answered the file's parent instead of `NotADirectory`. Every component popped
+by a `..`, not only the one before a final `..`, is now checked against the
+store before it is folded, so a stored file is `NotADirectory` and a name with
+no contents is `NotFound`. `exists`, `is_file`, `read_dir` and every file
+operation follow the same answer, and a native test pins the `std::fs` rule the
+in-memory filesystem is matching.
+
 | File | Lines | What |
 |---|---|---|
 | `src/path.rs` | +344 −0 | path value, `text_of`, `join`, `join_with_separator`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, lexical `resolve`, `list`, the eight `path.*` builtin arms, and three unit tests |
@@ -114,6 +146,12 @@ it cannot be written or shown in `path.list(".")`.
 | `src/vfs.rs` | +89 −48 | the resumed continuation folds `.` and `..` before every in-memory file lookup and listing, refuses directory spellings as files, and keeps the flat map's keys canonical |
 | `src/path.rs` | +65 −2 | the resumed continuation accepts a forward-slash Windows drive root in `resolve` and pins both root spellings with unit tests |
 | `tests/wasm_test.rs` | +146 −0 | four in-memory tests for dotted file spellings, parent segments in listings, refusal of a file as a directory, and spaced/non-ASCII names |
+| `src/vfs.rs` | +30 −3 | this resume makes a trailing separator name a directory for every in-memory file operation and for `exists`/`is_file`, with `NotADirectory`, `IsADirectory` and `NotFound` matching `std::fs` |
+| `src/vfs.rs` | +34 −12 | this review round treats a final `.`/`..` as a directory spelling in `exists`, `is_file` and `file_key`, validates the component a final `..` traverses, and lets an empty root list as `[]` |
+| `tests/wasm_test.rs` | +79 −0 | this review round pins `note/.` for read, write, delete, copy and rename, the dot-spelled `exists`/`is_file` answers, and `path.list("/")` on an empty store |
+| `tests/wasm_test.rs` | +153 −0 | this resume's three tests pin the trailing-separator refusal for reads and writes, for `exists`/`is_file`, and for every other file writer |
+| `src/vfs.rs` | +65 −35 | this review round validates every component a `..` traverses in `exists`, `is_file`, `file_key` and `read_dir`, returning `NotADirectory` for a stored file and `NotFound` for a missing directory |
+| `tests/wasm_test.rs` | +143 −0 | this review round pins a `..` through a missing directory and through a stored file for listing, existence and every file operation, beside a native `std::fs` test |
 | `tests/unreviewed_work_ack_test.rs` | +2 −1 | acknowledges the phase-100 delivery subject by rule and keeps the "another phase is not acknowledged" fixture meaningful |
 | `tests/doc_blocks_runs.txt` | +9 −9 | re-anchors the SPEC blocks after the expanded files/path block |
 | `tests/doc_blocks_fragments.txt` | +1 −1 | re-anchors the later network fragment |
@@ -175,6 +213,13 @@ filesystem or resolving symlinks.
 | `path::tests::edge_a_unc_share_without_a_root_is_a_prefix_without_a_root` | boundary (Windows): a UNC share with no trailing separator is refused; a rooted UNC spelling is not |
 | `path::tests::edge_resolve_accepts_a_forward_slash_drive_root` | boundary (Windows, cfg-gated): `C:/Windows/..` resolves to the drive root rather than being refused |
 | `edge_the_in_memory_filesystem_refuses_a_relative_path_above_the_root` | malformed_input/boundary: a leading `..` names nothing, is not writable, and is not an entry in `path.list(".")` |
+| `edge_a_trailing_separator_names_a_directory_for_files` | boundary/malformed_input: a file asked for as a directory is `NotADirectory`, an implied directory is `IsADirectory`, and a missing name is `NotFound` |
+| `edge_a_trailing_separator_does_not_name_a_file` | boundary: `exists` and `is_file` answer `no` for a file asked for with a trailing separator, and `yes`/`no` for the implied directory |
+| `edge_a_trailing_separator_is_refused_by_every_file_writer` | malformed_input: append, `bytes.write`, delete, copy and rename all refuse a file asked for as a directory, and the file survives |
+| `edge_a_final_dot_segment_names_a_directory_for_files` | malformed_input/boundary: read, write, delete, copy and rename all refuse `note/.` on an existing file with `NotADirectory`, and the file survives |
+| `edge_the_in_memory_filesystem_lists_an_empty_root` | empty/boundary: `/` always exists, and an empty store lists it as `[]` rather than `NotFound` |
+| `edge_the_in_memory_filesystem_refuses_a_parent_segment_that_traverses_a_non_directory` | malformed_input: a `..` through a missing directory is `NotFound`, through a stored file is `NotADirectory`, for listing, existence and every file operation |
+| `edge_a_native_parent_segment_cannot_climb_out_of_a_file_or_a_missing_directory` | malformed_input: native `std::fs` refuses the same two traversals, so the in-memory rule is the host's rule |
 
 Mandatory matrix:
 
@@ -200,8 +245,9 @@ Mandatory matrix:
   invoked.
 - duplicate_missing_keys — N/A: paths are not collections and do not have keys.
 - malformed_input — missing directory, a file passed as a directory, a dotted
-  spelling of a file asked to list, no join parts, non-text arguments and empty
-  components are covered by the refusal and empty-path tests.
+  spelling of a file asked to list, no join parts, non-text arguments, empty
+  components and a trailing separator on a file are covered by the refusal and
+  empty-path tests.
 - resource_limit — N/A: no new numeric limit is introduced; a listing is
   bounded by the host directory.
 
@@ -211,7 +257,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2425 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 2432 passed, 0 failed, 0 ignored |
 | `../rbops/verify.sh phase-100` | pass |
 
 ## Invariants touched
@@ -244,8 +290,9 @@ Mandatory matrix:
   lexical behaviour above, and SPEC.md and README.md now say the same.
 - A path value is a record-shaped object, so `json.stringify` uses its text
   spelling rather than a path-specific JSON form.
-- The in-memory filesystem folds `.` and `..` lexically because a flat map has
-  no directories to traverse. A leading `..` on a relative path therefore names
+- The in-memory filesystem folds `.` and `..` lexically after checking that
+  every component a `..` traverses is a directory, because a flat map has no
+  directories to walk. A leading `..` on a relative path therefore names
   nothing rather than the host's parent directory, so reading, listing or
   writing through it is `NotFound`; the native build resolves it against the
   real working directory.

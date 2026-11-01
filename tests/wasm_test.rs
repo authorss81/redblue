@@ -1372,6 +1372,122 @@ fn edge_the_in_memory_filesystem_refuses_a_file_named_through_dot_segments_as_a_
     memory::clear();
 }
 
+/// Native resolution walks every component before a `..`, so a `..` that climbs
+/// out of a missing directory is `NotFound` and one that climbs out of a stored
+/// file is `NotADirectory`. Folding the path lexically would turn `missing/..`
+/// into the current directory and `file.txt/..` into the file's parent.
+#[test]
+fn edge_the_in_memory_filesystem_refuses_a_parent_segment_that_traverses_a_non_directory() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("data/sub/keep.txt", "k").expect("write should succeed");
+    memory::write("data/top.txt", "t").expect("write should succeed");
+    memory::write("data/source.txt", "s").expect("write should succeed");
+
+    let missing = memory::read_dir("data/missing/..")
+        .expect_err("a missing directory cannot be climbed out of");
+    assert_eq!(
+        missing.kind(),
+        std::io::ErrorKind::NotFound,
+        "`data/missing/..` must be missing rather than the current directory"
+    );
+
+    let file =
+        memory::read_dir("data/top.txt/..").expect_err("a file is not a directory to climb out of");
+    assert_eq!(
+        file.kind(),
+        std::io::ErrorKind::NotADirectory,
+        "`data/top.txt/..` must be refused as a file rather than list its parent"
+    );
+
+    for spelling in ["data/top.txt/../x.txt", "data/top.txt/../sub/../x.txt"] {
+        assert!(
+            !memory::exists(spelling),
+            "native Path::exists is false for `{spelling}`"
+        );
+        assert!(
+            !memory::is_file(spelling),
+            "native Path::is_file is false for `{spelling}`"
+        );
+        let read = memory::read_to_string(spelling).expect_err("a file cannot be climbed out of");
+        assert_eq!(
+            read.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "`{spelling}` must be refused as a file"
+        );
+        let write = memory::write(spelling, "x").expect_err("a file cannot be climbed out of");
+        assert_eq!(
+            write.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "`{spelling}` must not write through a file"
+        );
+        let remove = memory::remove_file(spelling).expect_err("a file cannot be climbed out of");
+        assert_eq!(
+            remove.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "`{spelling}` must not delete through a file"
+        );
+        let copy =
+            memory::copy("data/source.txt", spelling).expect_err("a file cannot be climbed out of");
+        assert_eq!(
+            copy.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "`{spelling}` must not copy through a file"
+        );
+        let rename = memory::rename("data/source.txt", spelling)
+            .expect_err("a file cannot be climbed out of");
+        assert_eq!(
+            rename.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "`{spelling}` must not rename through a file"
+        );
+    }
+
+    let missing_write = memory::write("data/missing/../x.txt", "x")
+        .expect_err("a missing directory cannot be climbed out of");
+    assert_eq!(
+        missing_write.kind(),
+        std::io::ErrorKind::NotFound,
+        "a missing directory must not be created by folding `..`"
+    );
+    assert!(
+        !memory::exists("data/x.txt"),
+        "the refused write must not land on the folded key"
+    );
+
+    memory::clear();
+}
+
+/// The rules above are the host's rules, not an invention of the flat map. This
+/// pins the native `std::fs` answer the in-memory filesystem is matching.
+#[test]
+fn edge_a_native_parent_segment_cannot_climb_out_of_a_file_or_a_missing_directory() {
+    let dir = temp_dir("wasm_dotdot_traversal");
+    std::fs::write(dir.join("top.txt"), "t").expect("the native file should be writable");
+
+    let through_file = dir.join("top.txt").join("..").join("x.txt");
+    let file_error = std::fs::read_to_string(&through_file).expect_err("a file is not a directory");
+    assert_eq!(
+        file_error.kind(),
+        std::io::ErrorKind::NotADirectory,
+        "native `std::fs` must refuse a `..` that climbs out of a file"
+    );
+
+    let through_missing = dir.join("missing").join("..").join("x.txt");
+    let missing_error = std::fs::read_to_string(&through_missing)
+        .expect_err("a missing directory cannot be climbed out of");
+    assert_eq!(
+        missing_error.kind(),
+        std::io::ErrorKind::NotFound,
+        "native `std::fs` must refuse a `..` that climbs out of a missing directory"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A relative path that climbs above the root names nothing in a flat map. It
 /// must not be stored as a literal `..` key, which a listing of `.` would
 /// report as an entry native `read_dir(".")` never gives.
@@ -1436,6 +1552,236 @@ fn edge_the_in_memory_filesystem_folds_segments_around_spaced_and_non_ascii_name
     memory::clear();
 }
 
+/// A trailing separator names a directory. The flat map used to fold it away
+/// before a file lookup, so `files.write("note/")` created the file `note` in
+/// the playground while native `std::fs` refused the same spelling. A file
+/// path with a trailing separator is `NotADirectory`, a missing one is
+/// `NotFound`, and a directory is `IsADirectory`.
+#[test]
+fn edge_a_trailing_separator_names_a_directory_for_files() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("/wasm-trailing/note", "x").expect("write should succeed");
+    memory::write("/wasm-trailing/dir/inside.txt", "y").expect("write should succeed");
+
+    let on_a_file = memory::read_to_string("/wasm-trailing/note/");
+    assert!(
+        on_a_file.is_err(),
+        "a file cannot be read through a trailing separator"
+    );
+    assert_eq!(
+        on_a_file.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let on_a_directory = memory::write("/wasm-trailing/dir/", "z");
+    assert!(
+        on_a_directory.is_err(),
+        "a directory cannot be written as a file"
+    );
+    assert_eq!(
+        on_a_directory
+            .expect_err("a directory is not a file")
+            .kind(),
+        std::io::ErrorKind::IsADirectory
+    );
+
+    let missing = memory::write("/wasm-trailing/never/", "z");
+    assert!(
+        missing.is_err(),
+        "a missing directory is not a file to create"
+    );
+    assert_eq!(
+        missing.expect_err("a missing path must fail").kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    memory::clear();
+}
+
+/// A trailing separator asks about a directory, so it must not answer for the
+/// file of the same name. Native `Path::exists("note/")` and `Path::is_file`
+/// are false when `note` is a file; the flat map used to strip the separator
+/// and answer `true` to both.
+#[test]
+fn edge_a_trailing_separator_does_not_name_a_file() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("/wasm-trailing/file.txt", "x").expect("write should succeed");
+
+    assert!(
+        memory::is_file("/wasm-trailing/file.txt"),
+        "the plain spelling names the file"
+    );
+    assert!(
+        !memory::is_file("/wasm-trailing/file.txt/"),
+        "a trailing separator names a directory, not the file"
+    );
+    assert!(
+        !memory::is_file("/wasm-trailing/file.txt/."),
+        "a final `.` names a directory, not the file"
+    );
+    assert!(
+        !memory::is_file("/wasm-trailing/file.txt/.."),
+        "a final `..` names a directory, not the file"
+    );
+    assert!(
+        !memory::exists("/wasm-trailing/file.txt/"),
+        "native Path::exists is false for a file asked for as a directory"
+    );
+    assert!(
+        !memory::exists("/wasm-trailing/file.txt/."),
+        "native Path::exists is false for a file asked for as `file/.`"
+    );
+    assert!(
+        !memory::exists("/wasm-trailing/file.txt/.."),
+        "native Path::exists is false for a file asked for as `file/..`"
+    );
+    assert!(
+        memory::exists("/wasm-trailing/"),
+        "the implied directory itself still exists"
+    );
+    assert!(
+        !memory::is_file("/wasm-trailing/"),
+        "a directory is not a file"
+    );
+    assert!(
+        !memory::exists("/wasm-trailing/missing/"),
+        "a missing directory does not exist"
+    );
+
+    memory::clear();
+}
+
+/// Every writer goes through the same `file_key`, so a trailing separator has
+/// to be refused by all of them rather than only by `write`. Native `std::fs`
+/// answers `NotADirectory` when the name before the separator is a file.
+#[test]
+fn edge_a_trailing_separator_is_refused_by_every_file_writer() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("/wasm-trailing/a.txt", "a").expect("write should succeed");
+    memory::write("/wasm-trailing/dir/b.txt", "b").expect("write should succeed");
+
+    let append = memory::append("/wasm-trailing/a.txt/", "x");
+    assert!(
+        append.is_err(),
+        "append must refuse a file asked for as a directory"
+    );
+    assert_eq!(
+        append.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let bytes = memory::write_bytes("/wasm-trailing/a.txt/", b"x");
+    assert!(bytes.is_err(), "bytes.write must refuse the same spelling");
+    assert_eq!(
+        bytes.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let remove = memory::remove_file("/wasm-trailing/a.txt/");
+    assert!(remove.is_err(), "delete must refuse the same spelling");
+    assert_eq!(
+        remove.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let copy = memory::copy("/wasm-trailing/a.txt/", "/wasm-trailing/copy.txt");
+    assert!(
+        copy.is_err(),
+        "copy must refuse a file asked for as a directory"
+    );
+    assert_eq!(
+        copy.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let rename = memory::rename("/wasm-trailing/a.txt/", "/wasm-trailing/renamed.txt");
+    assert!(rename.is_err(), "rename must refuse the same spelling");
+    assert_eq!(
+        rename.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    assert!(
+        memory::is_file("/wasm-trailing/a.txt"),
+        "a refused write must not remove or rename the file it named"
+    );
+
+    memory::clear();
+}
+
+/// A final `.` segment names a directory, so it must not reach the file of the
+/// same name. The flat map folds the segment away before a lookup, so
+/// `files.write("note/.")` used to overwrite `note` and `files.delete("note/.")`
+/// used to remove it while native `std::fs` refused both with `NotADirectory`.
+/// Every operation that shares `file_key` has to answer the same way.
+#[test]
+fn edge_a_final_dot_segment_names_a_directory_for_files() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("/wasm-final-dot/note", "x").expect("write should succeed");
+
+    let read = memory::read_to_string("/wasm-final-dot/note/.");
+    assert!(read.is_err(), "a file cannot be read through `note/.`");
+    assert_eq!(
+        read.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let write = memory::write("/wasm-final-dot/note/.", "y");
+    assert!(
+        write.is_err(),
+        "a file cannot be overwritten through `note/.`"
+    );
+    assert_eq!(
+        write.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let remove = memory::remove_file("/wasm-final-dot/note/.");
+    assert!(remove.is_err(), "a file cannot be deleted through `note/.`");
+    assert_eq!(
+        remove.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let copy = memory::copy("/wasm-final-dot/note/.", "/wasm-final-dot/copy.txt");
+    assert!(copy.is_err(), "a file cannot be copied through `note/.`");
+    assert_eq!(
+        copy.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    let rename = memory::rename("/wasm-final-dot/note/.", "/wasm-final-dot/renamed.txt");
+    assert!(rename.is_err(), "a file cannot be renamed through `note/.`");
+    assert_eq!(
+        rename.expect_err("a file is not a directory").kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+
+    assert_eq!(
+        memory::read_to_string("/wasm-final-dot/note").expect("the file must survive"),
+        "x",
+        "a refused operation must not replace or remove the file it named"
+    );
+
+    memory::clear();
+}
+
 /// `.` and `./` name the working directory, and a working directory that holds
 /// nothing is still a directory: the native `read_dir` answers an empty list,
 /// not `NotFound`, so the in-memory filesystem has to answer the same for the
@@ -1464,6 +1810,27 @@ fn edge_the_in_memory_filesystem_lists_an_empty_current_directory() {
         memory::read_dir("./").expect("`./` names the same empty directory"),
         Vec::<String>::new(),
         "the current directory must not have two different answers"
+    );
+
+    memory::clear();
+}
+
+/// The root always exists, just like the working directory. An empty store has
+/// no key under `/`, but a native `read_dir("/")` still succeeds with whatever
+/// the host root holds, so the playground must answer an empty list rather than
+/// `NotFound` for the one directory a filesystem always has.
+#[test]
+fn edge_the_in_memory_filesystem_lists_an_empty_root() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    assert!(memory::exists("/"), "the root always exists");
+    assert_eq!(
+        memory::read_dir("/").expect("an empty root still exists"),
+        Vec::<String>::new(),
+        "an empty root is an empty list, not an error"
     );
 
     memory::clear();
