@@ -83,6 +83,9 @@ pub fn module_bindings(
 pub fn property(span: Span, object: Value, name: &str) -> Result<Value> {
     match object {
         Value::Record(fields) => Ok(fields.get(name).cloned().unwrap_or(Value::Nothing)),
+        Value::Object(kind, fields) if crate::path::object_text(&kind, &fields).is_some() => {
+            Ok(fields.get(name).cloned().unwrap_or(Value::Nothing))
+        }
         Value::Date(date) => Ok(date_property(date, name)),
         Value::Duration(duration) => Ok(duration_property(duration, name)),
         _ => Err(Error::Runtime(
@@ -1729,6 +1732,9 @@ fn group_value_hash(value: &Value) -> u64 {
         }
         Value::Record(fields) => group_fields_hash(HASH_RECORD, fields),
         Value::Object(name, fields) => {
+            if let Some(text) = crate::path::object_text(name, fields) {
+                return hash_tagged_bytes(HASH_TEXT, text.as_bytes());
+            }
             if name == "deque" {
                 if let Some(hash) = deque_items_hash(value) {
                     return hash;
@@ -3071,13 +3077,20 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             seed_random(seed.trunc() as i64 as u64);
             Ok(Some(Value::Nothing))
         }
-        // Files module
+        // Path module. The functions live in `crate::path` so a path is the
+        // host's idea of one rather than a second grammar written here.
+        "path_join" | "path_parent" | "path_filename" | "path_stem" | "path_extension"
+        | "path_is_absolute" | "path_resolve" | "path_list" => {
+            crate::path::builtin(span, name, args).map(Some)
+        }
+        // Files module. Every one of these takes the text form the corpus uses
+        // and the path value `path.*` answers, through the same conversion.
         "files_read" => {
-            let path = match args.first() {
-                Some(Value::Text(p)) => p,
+            let path = match args.first().and_then(crate::path::text_of) {
+                Some(p) => p,
                 _ => {
                     return Err(Error::Runtime(
-                        "files.read requires a text path".to_string(),
+                        "files.read requires a text path or a path value".to_string(),
                         span,
                     ))
                 }
@@ -3088,11 +3101,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 .map_err(|e| Error::Io(format!("Failed to read '{}': {}", path, e)))
         }
         "files_write" => {
-            let (path, content) = match (args.first(), args.get(1)) {
-                (Some(Value::Text(p)), Some(Value::Text(c))) => (p, c),
+            let (path, content) = match (args.first().and_then(crate::path::text_of), args.get(1)) {
+                (Some(p), Some(Value::Text(c))) => (p, c),
                 _ => {
                     return Err(Error::Runtime(
-                        "files.write requires two text arguments".to_string(),
+                        "files.write requires two text arguments (a path and text)".to_string(),
                         span,
                     ))
                 }
@@ -3102,11 +3115,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::Nothing))
         }
         "files_append" => {
-            let (path, content) = match (args.first(), args.get(1)) {
-                (Some(Value::Text(p)), Some(Value::Text(c))) => (p, c),
+            let (path, content) = match (args.first().and_then(crate::path::text_of), args.get(1)) {
+                (Some(p), Some(Value::Text(c))) => (p, c),
                 _ => {
                     return Err(Error::Runtime(
-                        "files.append requires two text arguments".to_string(),
+                        "files.append requires two text arguments (a path and text)".to_string(),
                         span,
                     ))
                 }
@@ -3116,11 +3129,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::Nothing))
         }
         "files_exists" => {
-            let path = match args.first() {
-                Some(Value::Text(p)) => p,
+            let path = match args.first().and_then(crate::path::text_of) {
+                Some(p) => p,
                 _ => {
                     return Err(Error::Runtime(
-                        "files.exists requires a text path".to_string(),
+                        "files.exists requires a text path or a path value".to_string(),
                         span,
                     ))
                 }
@@ -3128,11 +3141,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::YesNo(crate::vfs::exists(path))))
         }
         "files_lines" => {
-            let path = match args.first() {
-                Some(Value::Text(p)) => p,
+            let path = match args.first().and_then(crate::path::text_of) {
+                Some(p) => p,
                 _ => {
                     return Err(Error::Runtime(
-                        "files.lines requires a text path".to_string(),
+                        "files.lines requires a text path or a path value".to_string(),
                         span,
                     ))
                 }
@@ -3146,11 +3159,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::list(lines)))
         }
         "files_delete" => {
-            let path = match args.first() {
-                Some(Value::Text(p)) => p,
+            let path = match args.first().and_then(crate::path::text_of) {
+                Some(p) => p,
                 _ => {
                     return Err(Error::Runtime(
-                        "files.delete requires a text path".to_string(),
+                        "files.delete requires a text path or a path value".to_string(),
                         span,
                     ))
                 }
@@ -3160,11 +3173,14 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             Ok(Some(Value::Nothing))
         }
         "files_copy" => {
-            let (from, to) = match (args.first(), args.get(1)) {
-                (Some(Value::Text(f)), Some(Value::Text(t))) => (f, t),
+            let (from, to) = match (
+                args.first().and_then(crate::path::text_of),
+                args.get(1).and_then(crate::path::text_of),
+            ) {
+                (Some(f), Some(t)) => (f, t),
                 _ => {
                     return Err(Error::Runtime(
-                        "files.copy requires two text arguments".to_string(),
+                        "files.copy requires two text arguments (two paths)".to_string(),
                         span,
                     ))
                 }
@@ -3174,11 +3190,14 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 .map_err(|e| Error::Io(format!("Failed to copy '{}' to '{}': {}", from, to, e)))
         }
         "files_rename" => {
-            let (from, to) = match (args.first(), args.get(1)) {
-                (Some(Value::Text(f)), Some(Value::Text(t))) => (f, t),
+            let (from, to) = match (
+                args.first().and_then(crate::path::text_of),
+                args.get(1).and_then(crate::path::text_of),
+            ) {
+                (Some(f), Some(t)) => (f, t),
                 _ => {
                     return Err(Error::Runtime(
-                        "files.rename requires two text arguments".to_string(),
+                        "files.rename requires two text arguments (two paths)".to_string(),
                         span,
                     ))
                 }
@@ -3636,8 +3655,8 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             )))
         }
         "bytes_write" => {
-            let (path, bytes) = match (args.first(), args.get(1)) {
-                (Some(Value::Text(path)), Some(Value::List(bytes))) => (path, bytes),
+            let (path, bytes) = match (args.first().and_then(crate::path::text_of), args.get(1)) {
+                (Some(path), Some(Value::List(bytes))) => (path, bytes),
                 _ => {
                     return Err(Error::Runtime(
                         "bytes.write requires a path and a list of byte values".to_string(),
@@ -4232,7 +4251,10 @@ pub(crate) fn json_stringify(value: &Value) -> std::result::Result<String, Strin
              value that is not nothing"
                 .to_string(),
         ),
-        Value::Object(_, _) => Ok("null".to_string()),
+        Value::Object(name, fields) => match crate::path::object_text(name, fields) {
+            Some(text) => Ok(json_escape_text(text)),
+            None => Ok("null".to_string()),
+        },
         Value::Date(date) => Ok(json_escape_text(&crate::value::date_text(*date))),
         Value::Duration(duration) => Ok(format!("{}", duration.as_seconds_f64())),
     }
