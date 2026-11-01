@@ -221,14 +221,18 @@ path.stem("data/records.rb")      // "records"
 path.extension("data/records.rb") // "rb"
 path.is_absolute("data")          // no
 path.resolve("data")              // an absolute path with . and .. removed
+path.normalize("data/./records.rb") // clean it, but keep it relative
 path.list("data")                 // sorted entry names; [] for an empty directory
 ```
 
 The files functions and `bytes.write` accept either a text path or a path value, so
 `files.read(path.join("data", "records.rb"))` and
 `files.read("data/records.rb")` are the same call. `path.join` uses the
-platform's separator and lets an absolute part replace what came before it. The
-WebAssembly playground has no working directory, so `path.resolve` is refused
+platform's separator and lets an absolute part replace what came before it.
+`path.normalize` removes `.` and `..` and repeated separators while keeping a
+relative path relative, which is what a program wants when it has built a path
+and only needs to clean it. The WebAssembly playground has no working directory,
+so `path.resolve` is refused
 there with an `IoError` naming the platform; run the native `rb` binary to
 resolve a path.
 

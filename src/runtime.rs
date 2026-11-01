@@ -3080,7 +3080,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         // Path module. The functions live in `crate::path` so a path is the
         // host's idea of one rather than a second grammar written here.
         "path_join" | "path_parent" | "path_filename" | "path_stem" | "path_extension"
-        | "path_is_absolute" | "path_resolve" | "path_list" => {
+        | "path_is_absolute" | "path_resolve" | "path_normalize" | "path_list" => {
             crate::path::builtin(span, name, args).map(Some)
         }
         // Files module. Every one of these takes the text form the corpus uses

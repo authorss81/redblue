@@ -1318,6 +1318,67 @@ fn edge_empty_text_has_no_components() {
 }
 
 #[test]
+fn path_normalize_keeps_a_relative_path_relative() {
+    assert_eq!(text(answered(r#"path.normalize("a/./b/../c")"#)), "a/c");
+    assert_eq!(text(answered(r#"path.normalize("./")"#)), ".");
+    assert_eq!(text(answered(r#"path.normalize("")"#)), "");
+    let separator = std::path::MAIN_SEPARATOR;
+    let cleaned = text(answered(&format!(
+        r#"path.normalize("a{separator}..{separator}b")"#
+    )));
+    assert_eq!(cleaned, "b");
+    assert!(
+        !Path::new(&cleaned).is_absolute(),
+        "normalize must not anchor a relative path to the working directory, got {cleaned}"
+    );
+}
+
+#[test]
+fn edge_normalize_collapses_a_trailing_and_double_separator() {
+    let separator = std::path::MAIN_SEPARATOR;
+    let input = format!("my data{separator}{separator}naïve{separator}");
+    let source = format!(r#"say path.normalize({})"#, redblue_text(&input));
+    assert_eq!(
+        both_engines(&source),
+        [format!("my data{separator}naïve")],
+        "repeated and trailing separators must fold away without touching spaces or non-ASCII names"
+    );
+}
+
+#[test]
+fn edge_normalize_a_parent_segment_above_a_root_stays_at_the_root() {
+    let root = if cfg!(windows) { r"C:\" } else { "/" };
+    let source = format!(r#"say path.normalize({})"#, redblue_text(root));
+    assert_eq!(
+        both_engines(&source),
+        [root],
+        "`..` cannot climb above a root, so the root is its own answer"
+    );
+}
+
+#[test]
+fn edge_normalize_accepts_a_path_value() {
+    let separator = std::path::MAIN_SEPARATOR;
+    assert_eq!(
+        both_engines(r#"say path.normalize(path.join("data", ".", "records"))"#),
+        [format!("data{separator}records")],
+        "normalize must accept the path value path.join answers"
+    );
+}
+
+#[test]
+fn edge_normalize_with_no_argument_is_a_clean_runtime_failure() {
+    let error = run_source_value("path.normalize()").expect_err("normalize needs one path");
+    assert_eq!(error.label(), "RuntimeError", "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("path.normalize requires one text path"),
+        "the refusal must name the operation and what it is missing, got: {error}"
+    );
+}
+
+#[test]
 fn edge_bytes_write_accepts_a_path_value() {
     let dir = TempDir::new("path-bytes");
     let file = dir.file("path-value.bin");

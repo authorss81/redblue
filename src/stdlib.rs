@@ -137,6 +137,7 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "extension",
             "is_absolute",
             "resolve",
+            "normalize",
             "list",
         ],
     ),
@@ -525,6 +526,7 @@ pub fn builtins() -> HashMap<String, Value> {
         "path_extension",
         "path_is_absolute",
         "path_resolve",
+        "path_normalize",
         "path_list",
     ] {
         globals.insert(name.to_string(), Value::Builtin(name.to_string()));
@@ -1347,6 +1349,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "path_extension",
     "path_is_absolute",
     "path_resolve",
+    "path_normalize",
     "path_list",
     "time_now",
     "time_sleep",
@@ -1618,6 +1621,10 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     (
         "path_resolve",
         "path_resolve(text) -> an absolute path with . and .. removed",
+    ),
+    (
+        "path_normalize",
+        "path_normalize(text) -> the path cleaned of . and .. without making it absolute",
     ),
     (
         "path_list",

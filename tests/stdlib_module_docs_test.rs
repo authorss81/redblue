@@ -936,6 +936,11 @@ say files.exists("{}")"#,
             "yes\n".into(),
         ),
         (
+            "path_normalize",
+            r#"say path.normalize("data/./records/")"#.into(),
+            format!("data{}records\n", std::path::MAIN_SEPARATOR),
+        ),
+        (
             "path_list",
             format!(
                 r#"say path.list("{}")"#,

@@ -127,8 +127,27 @@ no contents is `NotFound`. `exists`, `is_file`, `read_dir` and every file
 operation follow the same answer, and a native test pins the `std::fs` rule the
 in-memory filesystem is matching.
 
+The resumed continuation adds `path.normalize`, the one cleaning operation the
+path surface still lacked: `path.resolve` always makes a path absolute, so there
+was no way to remove repeated separators, `.` and `..` from a relative path
+without also anchoring it to the working directory. `path.normalize` folds those
+lexically and keeps a relative path relative, takes its separator from the
+platform, leaves an empty text empty, answers `.` for a spelling that normalizes
+away entirely, and cannot climb above a root. It is registered as
+`path.normalize` in `MODULE_MEMBERS`, `BUILTIN_NAMES` and the signature table,
+and both engines reach it through `runtime::builtin`.
+
 | File | Lines | What |
 |---|---|---|
+| `src/path.rs` | +79 −6 | `path.normalize`, a public lexical normalizer shared with `resolve`, the builtin arm, and two unit tests |
+| `src/runtime.rs` | +1 −1 | dispatches `path_normalize` with the other path builtins |
+| `src/stdlib.rs` | +7 −0 | registers `path.normalize` in the builtin table, the member table and the signature table |
+| `tests/stdlib_modules_test.rs` | +61 −0 | five integration tests, both engines, for relative normalization, separators, a root, a path value and a clean refusal |
+| `tests/stdlib_module_docs_test.rs` | +5 −0 | the answerable row for `path_normalize` |
+| `SPEC.md` | +7 −0 | documents `path.normalize` and its relative rule |
+| `README.md` | +6 −2 | the user-facing `path.normalize` line and prose |
+| `SURVEY.md` | +23 −23 | builtin count 113 → 114, members 84 → 85, the `path` row, and re-anchored citations |
+| `tests/doc_blocks_runs.txt`, `tests/doc_blocks_fragments.txt`, `tests/doc_blocks_known_fail.txt` | +11 −11 | re-anchors the SPEC blocks after the added `path.normalize` line and prose |
 | `src/path.rs` | +344 −0 | path value, `text_of`, `join`, `join_with_separator`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, lexical `resolve`, `list`, the eight `path.*` builtin arms, and three unit tests |
 | `src/runtime.rs` | +52 −25 | `path_*` dispatch, path-object property access and hashing, `files.*` accepting text or path values, and `bytes.write` accepting a path value |
 | `src/vfs.rs` | +63 −4 | native and in-memory `read_dir`, with sorted names, an empty native directory answered as an empty list, and only `/` separating names in the playground |
@@ -220,6 +239,13 @@ filesystem or resolving symlinks.
 | `edge_the_in_memory_filesystem_lists_an_empty_root` | empty/boundary: `/` always exists, and an empty store lists it as `[]` rather than `NotFound` |
 | `edge_the_in_memory_filesystem_refuses_a_parent_segment_that_traverses_a_non_directory` | malformed_input: a `..` through a missing directory is `NotFound`, through a stored file is `NotADirectory`, for listing, existence and every file operation |
 | `edge_a_native_parent_segment_cannot_climb_out_of_a_file_or_a_missing_directory` | malformed_input: native `std::fs` refuses the same two traversals, so the in-memory rule is the host's rule |
+| `path_normalize_keeps_a_relative_path_relative` | boundary: `path.normalize` folds `.` and `..` without anchoring a relative path to the working directory; empty text stays empty and `./` is `.` |
+| `edge_normalize_collapses_a_trailing_and_double_separator` | malformed_input/unicode: repeated and trailing separators fold away, while spaces and a non-ASCII name survive, on both engines |
+| `edge_normalize_a_parent_segment_above_a_root_stays_at_the_root` | boundary: `..` cannot climb above a root, so the root is its own answer |
+| `edge_normalize_accepts_a_path_value` | type_mismatch: `path.normalize` accepts the path value `path.join` answers |
+| `edge_normalize_with_no_argument_is_a_clean_runtime_failure` | malformed_input: a call with no path is a catchable `RuntimeError` that names the operation |
+| `path::tests::edge_normalize_collapses_separators_and_dot_segments` | unit: repeated separators, trailing separators, `.`, `..`, an empty text and a root all normalize as stated |
+| `path::tests::edge_normalize_keeps_a_relative_path_relative` | unit: a leading `..` stays at the front and the answer is not absolute |
 
 Mandatory matrix:
 
@@ -229,9 +255,10 @@ Mandatory matrix:
 - singleton — a single component is joined and listed unchanged; the one-file
   listing case is covered by the sorted-listing test.
 - boundary — the root parent, a trailing separator, an absolute later part, a
-  Windows drive-relative part, double separators, dot and parent segments, and
-  a path-value join part are all pinned. The in-memory filesystem folds those
-  segments before every lookup and listing, so a stored file has one name.
+  Windows drive-relative part, double separators, dot and parent segments, a
+  path-value join part and `path.normalize`'s root rule are all pinned. The
+  in-memory filesystem folds those segments before every lookup and listing, so
+  a stored file has one name.
 - out_of_bounds — N/A: `path` exposes no numeric index or argument order.
 - type_mismatch — every `path.*` argument and every `files.*` path is checked;
   `edge_bad_path_arguments_are_clean_runtime_failures` and the path-value tests
@@ -246,8 +273,8 @@ Mandatory matrix:
 - duplicate_missing_keys — N/A: paths are not collections and do not have keys.
 - malformed_input — missing directory, a file passed as a directory, a dotted
   spelling of a file asked to list, no join parts, non-text arguments, empty
-  components and a trailing separator on a file are covered by the refusal and
-  empty-path tests.
+  components, a trailing separator on a file and `path.normalize` with no
+  argument are covered by the refusal and empty-path tests.
 - resource_limit — N/A: no new numeric limit is introduced; a listing is
   bounded by the host directory.
 
@@ -257,7 +284,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2432 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 2439 passed, 0 failed, 0 ignored |
 | `../rbops/verify.sh phase-100` | pass |
 
 ## Invariants touched

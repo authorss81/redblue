@@ -18,9 +18,7 @@
 //! program passes, or the value this module answers — because the corpus and the
 //! language's examples are written against the string form.
 
-use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Error, Result, Span};
 use crate::value::{Fields, Value};
@@ -293,7 +291,7 @@ pub fn resolve(text: &str) -> std::io::Result<String> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    Ok(normalize(&absolute).to_string_lossy().into_owned())
+    Ok(normalize_path(&absolute).to_string_lossy().into_owned())
 }
 
 /// Whether `text` carries a Windows prefix but no root after it.
@@ -341,8 +339,7 @@ pub fn resolve(_text: &str) -> std::io::Result<String> {
 }
 
 /// `path` with `.` removed and `..` folded into its parent where possible.
-#[cfg(not(target_arch = "wasm32"))]
-fn normalize(path: &Path) -> PathBuf {
+fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -358,6 +355,32 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+/// Cleans a path without making it absolute.
+///
+/// Repeated separators collapse, `.` segments disappear, `..` folds into the
+/// component before it where one exists, and a trailing separator is dropped
+/// unless it names a root. A relative path stays relative: unlike [`resolve`],
+/// this does not consult the working directory, so it is the operation to use
+/// when a program wants to clean a path it already built rather than ask where
+/// that path lives.
+///
+/// The separator comes from the platform. On Windows both `/` and `\` separate
+/// components and the answer is spelled with `\`; on POSIX a `\` is an ordinary
+/// filename character and the answer is spelled with `/`. An empty text stays
+/// empty, and a spelling that normalizes away entirely answers `.`.
+pub fn normalize(text: &str) -> String {
+    let normalized = normalize_path(Path::new(text));
+    if normalized.as_os_str().is_empty() {
+        if text.is_empty() {
+            String::new()
+        } else {
+            ".".to_string()
+        }
+    } else {
+        normalized.to_string_lossy().into_owned()
+    }
 }
 
 /// The entries directly inside `text`, sorted by name.
@@ -418,6 +441,10 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Value> {
             resolve(&text)
                 .map(value)
                 .map_err(|error| Error::Io(format!("Failed to resolve '{text}': {error}")))
+        }
+        "path_normalize" => {
+            let text = one_path(span, "path.normalize", args)?;
+            Ok(value(normalize(&text)))
         }
         "path_list" => {
             let text = one_path(span, "path.list", args)?;
@@ -608,6 +635,52 @@ mod tests {
         assert!(
             message.contains("native rb binary"),
             "the refusal must say what the reader can run instead: {message}"
+        );
+    }
+
+    #[test]
+    fn edge_normalize_collapses_separators_and_dot_segments() {
+        let separator = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            normalize(&format!(
+                "a{separator}{separator}b{separator}.{separator}c{separator}"
+            )),
+            format!("a{separator}b{separator}c"),
+            "repeated and trailing separators and `.` must fold away"
+        );
+        assert_eq!(
+            normalize(&format!("a{separator}b{separator}..{separator}c")),
+            format!("a{separator}c"),
+            "`..` must fold into the component before it"
+        );
+        assert_eq!(normalize("./"), ".");
+        assert_eq!(normalize(""), "", "an empty path has nothing to clean");
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        assert_eq!(
+            normalize(root),
+            root,
+            "a root keeps the separator that roots it"
+        );
+        assert_eq!(
+            normalize(&format!("{root}..")),
+            root,
+            "`..` cannot climb above a root"
+        );
+    }
+
+    #[test]
+    fn edge_normalize_keeps_a_relative_path_relative() {
+        let separator = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            normalize(&format!("..{separator}a{separator}..{separator}b")),
+            format!("..{separator}b"),
+            "a leading `..` stays at the front of a relative path"
+        );
+        let cleaned = normalize(&format!("a{separator}..{separator}b"));
+        assert_eq!(cleaned, "b");
+        assert!(
+            !Path::new(&cleaned).is_absolute(),
+            "normalize must not make a relative path absolute, got {cleaned}"
         );
     }
 

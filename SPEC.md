@@ -1332,6 +1332,7 @@ set kind to path.extension("data/records.rb")   // "rb"
 set full to path.join("data", "records.rb")     // data<separator>records.rb
 set absolute to path.is_absolute(full)          // no
 set here to path.resolve("data")                // an absolute path
+set cleaned to path.normalize("data/./records") // data<separator>records
 set entries to path.list(".")                   // sorted entry names
 ```
 
@@ -1355,6 +1356,12 @@ lexically; it does not consult the filesystem, so it answers for a path that doe
 not exist yet. The WebAssembly playground has no working directory to resolve
 against, so there `path.resolve` is refused with an `IoError` that names the
 platform; the native `rb` binary performs the resolution described here.
+`path.normalize` performs the same `.` and `..` folding and separator collapsing
+as `path.resolve`, but it does not consult the working directory, so a relative
+path stays relative: `path.normalize("data/./records")` is `data<separator>records`
+and `path.normalize("./")` is `.`. A leading `..` that cannot fold into a
+component stays at the front of a relative path, and `..` cannot climb above a
+root. The separator comes from the platform, as it does for `path.join`.
 `path.list` answers the names directly inside a directory, sorted, so the same
 directory always prints the same list; an empty directory is an empty list rather
 than an error, and a directory that does not exist is an `IoError`.
