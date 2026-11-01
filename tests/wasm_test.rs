@@ -1111,7 +1111,7 @@ fn edge_the_in_memory_filesystem_answers_for_directories_too() {
     // Reading a directory is still the refusal it is on a disk: there is no
     // such *file*, whatever the path is shaped like.
     let refused = memory::read_to_string(dir).expect_err("a directory is not a file");
-    assert_eq!(refused.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(refused.kind(), std::io::ErrorKind::IsADirectory);
 
     memory::clear();
 }
@@ -1247,6 +1247,191 @@ fn edge_the_in_memory_filesystem_lists_a_dot_relative_directory() {
             "`{spelling}` must name the same directory as `data`"
         );
     }
+
+    memory::clear();
+}
+
+/// A stored file has one name, however the program spells it. The flat map used
+/// to key files by their literal text, so `data/./x.txt` and `data/sub/../x.txt`
+/// named nothing even though `data/x.txt` was stored and native `std::fs` opens
+/// both spellings. `.` and `..` are folded before the lookup so a file has the
+/// same existence, contents and listing whichever spelling a program used.
+#[test]
+fn edge_the_in_memory_filesystem_folds_dot_and_parent_segments_for_files() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("data/x.txt", "x").expect("write should succeed");
+    memory::write("data/sub/keep.txt", "k").expect("write should succeed");
+
+    for spelling in ["data/x.txt", "data/./x.txt", "data/sub/../x.txt"] {
+        assert!(
+            memory::exists(spelling),
+            "`{spelling}` must name the stored file"
+        );
+        assert!(
+            memory::is_file(spelling),
+            "`{spelling}` must name a file rather than a directory"
+        );
+        assert_eq!(
+            memory::read_to_string(spelling).expect("the stored file should be readable"),
+            "x",
+            "`{spelling}` must read the file `data/x.txt` stored"
+        );
+    }
+
+    memory::write("data/./y.txt", "y").expect("a dotted write should succeed");
+    assert_eq!(
+        memory::read_to_string("data/y.txt").expect("the write should land on the canonical key"),
+        "y",
+        "a dotted write must store the file its plain spelling names"
+    );
+    memory::remove_file("data/./y.txt").expect("the dotted remove should find the file");
+    assert!(
+        !memory::exists("data/y.txt"),
+        "a dotted remove must delete the file its plain spelling names"
+    );
+
+    memory::clear();
+}
+
+/// A directory is named by its normalized key too, so a listing reached through
+/// a trailing separator, a doubled separator or a `..` is the same listing as
+/// the plain spelling. The flat map has no tree to walk, so folding the
+/// segments is the whole of the traversal a native `read_dir` would do.
+#[test]
+fn edge_the_in_memory_filesystem_folds_parent_segments_in_a_directory_listing() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("data/sub/x.txt", "x").expect("write should succeed");
+    memory::write("data/top.txt", "t").expect("write should succeed");
+
+    let expected = vec!["sub".to_string(), "top.txt".to_string()];
+    for spelling in [
+        "data/sub/..",
+        "data/./sub/../",
+        "data//sub//..",
+        "data/sub/../.",
+    ] {
+        assert_eq!(
+            memory::read_dir(spelling).expect("the normalized directory should list"),
+            expected,
+            "`{spelling}` must name the same directory as `data`"
+        );
+        assert!(
+            memory::exists(spelling),
+            "`{spelling}` must name the same directory as `data`"
+        );
+    }
+
+    memory::clear();
+}
+
+/// A dotted spelling of a file is still a file, so asking to list it is
+/// `NotADirectory`, exactly as the native `read_dir` answers. An empty path and
+/// a missing directory are `NotFound`, and a directory spelling is not a key a
+/// write may create.
+#[test]
+fn edge_the_in_memory_filesystem_refuses_a_file_named_through_dot_segments_as_a_directory() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("data/top.txt", "t").expect("write should succeed");
+    memory::write("data/sub/keep.txt", "k").expect("write should succeed");
+
+    for spelling in ["data/./top.txt", "data/sub/../top.txt"] {
+        let error = memory::read_dir(spelling).expect_err("a file is not a directory");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "`{spelling}` must be refused as a file: {error}"
+        );
+    }
+
+    let empty = memory::read_dir("").expect_err("the empty path names nothing");
+    assert_eq!(empty.kind(), std::io::ErrorKind::NotFound);
+    let missing = memory::read_dir("data/../missing").expect_err("a missing directory must fail");
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    for spelling in ["data/..", "data/.", "data/sub/.."] {
+        let directory =
+            memory::write(spelling, "x").expect_err("a directory spelling is not a file");
+        assert_eq!(
+            directory.kind(),
+            std::io::ErrorKind::IsADirectory,
+            "`{spelling}` names the implied directory `data`, not a file"
+        );
+    }
+
+    memory::clear();
+}
+
+/// A relative path that climbs above the root names nothing in a flat map. It
+/// must not be stored as a literal `..` key, which a listing of `.` would
+/// report as an entry native `read_dir(".")` never gives.
+#[test]
+fn edge_the_in_memory_filesystem_refuses_a_relative_path_above_the_root() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("data/x.txt", "x").expect("write should succeed");
+
+    for spelling in ["..", "../x", "../data/x.txt", "a/../../x"] {
+        assert!(!memory::exists(spelling), "`{spelling}` names nothing");
+        let error = memory::read_dir(spelling).expect_err("a path above the root has no listing");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "`{spelling}` must be missing rather than listed"
+        );
+    }
+    let refused = memory::write("../x", "x").expect_err("a path above the root is not a file");
+    assert_eq!(refused.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        memory::read_dir(".").expect("the current directory should list"),
+        vec!["data".to_string()],
+        "a leading `..` must not appear as an entry"
+    );
+
+    memory::clear();
+}
+
+/// Folding segments must not disturb a name: spaces and non-ASCII characters
+/// are ordinary filename text, and a dotted spelling of such a file has to
+/// reach the same bytes the plain spelling wrote.
+#[test]
+fn edge_the_in_memory_filesystem_folds_segments_around_spaced_and_non_ascii_names() {
+    use redblue::vfs::memory;
+
+    let _serialised = memory_filesystem();
+    memory::clear();
+
+    memory::write("my data/naïve.txt", "n").expect("write should succeed");
+
+    for spelling in [
+        "my data/naïve.txt",
+        "my data/./naïve.txt",
+        "my data/../my data/naïve.txt",
+    ] {
+        assert_eq!(
+            memory::read_to_string(spelling).expect("the stored file should be readable"),
+            "n",
+            "`{spelling}` must read the file `my data/naïve.txt` stored"
+        );
+    }
+    assert_eq!(
+        memory::read_dir("my data/../my data").expect("the normalized directory should list"),
+        vec!["naïve.txt".to_string()],
+        "a spaced and non-ASCII name must survive segment folding"
+    );
 
     memory::clear();
 }

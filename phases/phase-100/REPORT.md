@@ -74,6 +74,27 @@ as `\\server\share\`, because trimming it leaves a prefix with no root. And
 than joining it to the working directory and answering a path that is still
 relative.
 
+The resumed continuation closes two remaining path-parity gaps. The in-memory
+filesystem used to key files by their literal text, so `data/./x.txt` and
+`data/sub/../x.txt` named nothing even though `data/x.txt` was stored and a
+native `std::fs` call opens every spelling. It now folds `.` and `..` before
+every lookup, write, append, copy, rename, remove and listing, and refuses a
+directory spelling as a file with `IsADirectory`. A leading `..` on a relative
+path has no parent to fold into in a flat map, so it names nothing: it is not a
+literal key a listing can report, and a write through it is refused. Separately,
+`path.resolve` on Windows now accepts a rooted path whose separator is `/`
+(`C:/folder`), instead of mistaking it for a drive-relative path and refusing
+it; the root may be spelled with either separator, as Windows itself allows.
+
+The third review round closes three path edge cases. `file_key` now refuses a
+spelling such as `data/.` or `data/sub/..` when it normalizes onto a directory
+implied by the files stored beneath it, so it is `IsADirectory` instead of a
+file that hides the directory. A forward-slash UNC spelling such as
+`//server/share` is recognized as a prefix without a root, so Windows `resolve`
+refuses it rather than joining it to the working directory. And a leading `..`
+on a relative path now normalizes to nothing instead of a literal `..` key, so
+it cannot be written or shown in `path.list(".")`.
+
 | File | Lines | What |
 |---|---|---|
 | `src/path.rs` | +344 −0 | path value, `text_of`, `join`, `join_with_separator`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, lexical `resolve`, `list`, the eight `path.*` builtin arms, and three unit tests |
@@ -90,6 +111,9 @@ relative.
 | `tests/stdlib_module_names_test.rs` | +5 −0 | the `path` module row |
 | `tests/wasm_test.rs` | +70 −0 | in-memory directory listing tests, including the review round's backslash-is-a-filename-character case |
 | `src/path.rs`, `src/vfs.rs`, `tests/wasm_test.rs` | +70 −8 | the second review round normalizes dot-relative directory prefixes, keeps a UNC root separator, and refuses a drive-relative resolve, with the three tests below |
+| `src/vfs.rs` | +89 −48 | the resumed continuation folds `.` and `..` before every in-memory file lookup and listing, refuses directory spellings as files, and keeps the flat map's keys canonical |
+| `src/path.rs` | +65 −2 | the resumed continuation accepts a forward-slash Windows drive root in `resolve` and pins both root spellings with unit tests |
+| `tests/wasm_test.rs` | +146 −0 | four in-memory tests for dotted file spellings, parent segments in listings, refusal of a file as a directory, and spaced/non-ASCII names |
 | `tests/unreviewed_work_ack_test.rs` | +2 −1 | acknowledges the phase-100 delivery subject by rule and keeps the "another phase is not acknowledged" fixture meaningful |
 | `tests/doc_blocks_runs.txt` | +9 −9 | re-anchors the SPEC blocks after the expanded files/path block |
 | `tests/doc_blocks_fragments.txt` | +1 −1 | re-anchors the later network fragment |
@@ -142,6 +166,15 @@ filesystem or resolving symlinks.
 | `edge_the_in_memory_filesystem_lists_a_dot_relative_directory` | boundary: `data/x.txt` is listed by `./data`, `././data`, `data/.` and `./data/` as well as `data`, and each spelling also exists |
 | `path::tests::edge_joining_a_unc_share_root_keeps_it_absolute` | boundary (Windows): a UNC share root keeps the separator that makes it a root, and the joined result is absolute |
 | `path::tests::edge_resolve_refuses_a_drive_relative_path` | boundary (Windows): `C:foo` has a prefix but no root and is refused with `InvalidInput` instead of answered as a relative path |
+| `edge_the_in_memory_filesystem_folds_dot_and_parent_segments_for_files` | malformed_input/boundary: `data/./x.txt` and `data/sub/../x.txt` read, exist and delete the file `data/x.txt` stored |
+| `edge_the_in_memory_filesystem_folds_parent_segments_in_a_directory_listing` | boundary: a trailing separator, a doubled separator, `.` and `..` all list the same directory |
+| `edge_the_in_memory_filesystem_refuses_a_file_named_through_dot_segments_as_a_directory` | malformed_input: a dotted file spelling is `NotADirectory`, an empty or missing path is `NotFound`, and `data/.`, `data/sub/..` and `data/..` are refused as implied directories with `IsADirectory` |
+| `edge_the_in_memory_filesystem_folds_segments_around_spaced_and_non_ascii_names` | unicode: spaces and non-ASCII names survive segment folding in reads and listings |
+| `path::tests::edge_a_forward_slash_drive_root_is_not_a_prefix_without_a_root` | boundary (Windows): `C:/folder` and `C:\folder` are both rooted, so neither is refused |
+| `path::tests::edge_a_drive_without_a_root_is_a_prefix_without_a_root` | boundary (Windows): `C:`, `C:folder` and `D:other` are refused, while an ordinary relative path is not |
+| `path::tests::edge_a_unc_share_without_a_root_is_a_prefix_without_a_root` | boundary (Windows): a UNC share with no trailing separator is refused; a rooted UNC spelling is not |
+| `path::tests::edge_resolve_accepts_a_forward_slash_drive_root` | boundary (Windows, cfg-gated): `C:/Windows/..` resolves to the drive root rather than being refused |
+| `edge_the_in_memory_filesystem_refuses_a_relative_path_above_the_root` | malformed_input/boundary: a leading `..` names nothing, is not writable, and is not an entry in `path.list(".")` |
 
 Mandatory matrix:
 
@@ -151,21 +184,24 @@ Mandatory matrix:
 - singleton — a single component is joined and listed unchanged; the one-file
   listing case is covered by the sorted-listing test.
 - boundary — the root parent, a trailing separator, an absolute later part, a
-  Windows drive-relative part, double separators, dot segments and a path-value
-  join part are all pinned.
+  Windows drive-relative part, double separators, dot and parent segments, and
+  a path-value join part are all pinned. The in-memory filesystem folds those
+  segments before every lookup and listing, so a stored file has one name.
 - out_of_bounds — N/A: `path` exposes no numeric index or argument order.
 - type_mismatch — every `path.*` argument and every `files.*` path is checked;
   `edge_bad_path_arguments_are_clean_runtime_failures` and the path-value tests
   pin both the accepted and the refused forms.
 - numeric_boundary — N/A: no numeric path operation is exposed.
 - unicode — the spaced and non-ASCII filename and stem cases in
-  `edge_trailing_double_dot_and_spaced_paths_are_handled`.
+  `edge_trailing_double_dot_and_spaced_paths_are_handled`, and the in-memory
+  read/listing case in
+  `edge_the_in_memory_filesystem_folds_segments_around_spaced_and_non_ascii_names`.
 - nesting_recursion — N/A: a path is flat text; no recursive user callback is
   invoked.
 - duplicate_missing_keys — N/A: paths are not collections and do not have keys.
-- malformed_input — missing directory, a file passed as a directory, no join
-  parts, non-text arguments and empty components are covered by the refusal and
-  empty-path tests.
+- malformed_input — missing directory, a file passed as a directory, a dotted
+  spelling of a file asked to list, no join parts, non-text arguments and empty
+  components are covered by the refusal and empty-path tests.
 - resource_limit — N/A: no new numeric limit is introduced; a listing is
   bounded by the host directory.
 
@@ -175,7 +211,7 @@ Mandatory matrix:
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2417 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | 2425 passed, 0 failed, 0 ignored |
 | `../rbops/verify.sh phase-100` | pass |
 
 ## Invariants touched
@@ -208,3 +244,8 @@ Mandatory matrix:
   lexical behaviour above, and SPEC.md and README.md now say the same.
 - A path value is a record-shaped object, so `json.stringify` uses its text
   spelling rather than a path-specific JSON form.
+- The in-memory filesystem folds `.` and `..` lexically because a flat map has
+  no directories to traverse. A leading `..` on a relative path therefore names
+  nothing rather than the host's parent directory, so reading, listing or
+  writing through it is `NotFound`; the native build resolves it against the
+  real working directory.

@@ -204,8 +204,10 @@ fn windows_prefix_len(path: &str) -> usize {
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return 2;
     }
-    if let Some(rest) = path.strip_prefix("\\\\") {
-        let mut parts = rest.splitn(3, '\\');
+    let is_separator = |byte: u8| byte == b'\\' || byte == b'/';
+    if bytes.len() >= 2 && is_separator(bytes[0]) && is_separator(bytes[1]) {
+        let rest = &path[2..];
+        let mut parts = rest.splitn(3, ['\\', '/']);
         let server = parts.next().unwrap_or("");
         let share = parts.next().unwrap_or("");
         if !server.is_empty() && !share.is_empty() {
@@ -302,10 +304,16 @@ pub fn resolve(text: &str) -> std::io::Result<String> {
 /// and leave it relative; [`resolve`] refuses it instead of answering a path
 /// that is not absolute. The same applies to a UNC share with no trailing
 /// separator, which is a prefix without a root.
-#[cfg(windows)]
+///
+/// A root may be spelled with either separator: Windows accepts `C:/folder`
+/// as readily as `C:\folder`, and refusing the forward-slash spelling would
+/// turn a rooted path into an error. The helper is compiled under `test` on
+/// every platform so the host suite can pin both spellings; the `resolve`
+/// caller is still Windows-only because that is where the rule applies.
+#[cfg(any(windows, test))]
 fn has_prefix_without_root(text: &str) -> bool {
     let prefix = windows_prefix_len(text);
-    prefix > 0 && text.as_bytes().get(prefix) != Some(&b'\\')
+    prefix > 0 && !matches!(text.as_bytes().get(prefix), Some(b'\\') | Some(b'/'))
 }
 
 /// The refusal the WebAssembly playground gives for [`resolve`].
@@ -513,6 +521,66 @@ mod tests {
             join_with_separator(&["a", "C:other"], '/'),
             "a/C:other",
             "on POSIX a colon is an ordinary filename character, not a drive prefix"
+        );
+    }
+
+    #[test]
+    fn edge_a_forward_slash_drive_root_is_not_a_prefix_without_a_root() {
+        for text in ["C:/folder", "C:\\folder", "C:/", "C:\\"] {
+            assert!(
+                !has_prefix_without_root(text),
+                "`{text}` is rooted, so resolve must not refuse it"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_a_drive_without_a_root_is_a_prefix_without_a_root() {
+        for text in ["C:", "C:folder", "D:other"] {
+            assert!(
+                has_prefix_without_root(text),
+                "`{text}` has a drive but no root, so resolve must refuse it"
+            );
+        }
+        assert!(
+            !has_prefix_without_root("folder"),
+            "an ordinary relative path has no prefix to refuse"
+        );
+    }
+
+    #[test]
+    fn edge_a_unc_share_without_a_root_is_a_prefix_without_a_root() {
+        for text in [r"\\server\share", "//server/share"] {
+            assert!(
+                has_prefix_without_root(text),
+                "`{text}` is a UNC share with no trailing separator, so it names no root"
+            );
+        }
+        for text in [
+            "\\\\server\\share\\",
+            r"\\server\share\folder",
+            "//server/share/",
+            "//server/share/folder",
+        ] {
+            assert!(
+                !has_prefix_without_root(text),
+                "`{text}` is rooted, so resolve must not refuse it"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn edge_resolve_accepts_a_forward_slash_drive_root() {
+        let resolved = resolve("C:/Windows/..").expect("a rooted forward-slash path is absolute");
+        assert!(
+            Path::new(&resolved).is_absolute(),
+            "resolve must keep a forward-slash drive root absolute, got {resolved}"
+        );
+        assert_eq!(
+            Path::new(&resolved),
+            Path::new("C:\\"),
+            "resolving the parent of a drive folder must answer the drive root"
         );
     }
 

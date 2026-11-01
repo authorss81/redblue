@@ -20,8 +20,8 @@
 //! rather than an empty file. What differs is where the bytes go, and that a
 //! browser tab cannot see the disk. What an in-memory filesystem does not offer
 //! — permissions, symlinks, and *empty* directories — it does not offer
-//! silently either: `files.read` of a directory-shaped path is a `NotFound`,
-//! exactly as it would be against a disk with no such file, and the one
+//! silently either: `files.read` of a directory-shaped path is an
+//! `IsADirectory`, exactly as it would be against a disk, and the one
 //! directory case it cannot reproduce is written down at
 //! [`memory::exists`].
 //!
@@ -144,7 +144,8 @@ pub mod memory {
     }
 
     pub fn read_to_string(path: &str) -> io::Result<String> {
-        let bytes = lock().get(path).cloned().ok_or_else(not_found)?;
+        let key = file_key(path)?;
+        let bytes = lock().get(&key).cloned().ok_or_else(not_found)?;
         String::from_utf8(bytes).map_err(|_| {
             // Exactly the sentence `std::fs` gives, with nothing added. The
             // caller in `runtime.rs` prefixes the path itself, so a path in
@@ -158,7 +159,8 @@ pub mod memory {
     }
 
     pub fn write(path: &str, content: &str) -> io::Result<()> {
-        lock().insert(path.to_string(), content.as_bytes().to_vec());
+        let key = file_key(path)?;
+        lock().insert(key, content.as_bytes().to_vec());
         Ok(())
     }
 
@@ -166,7 +168,8 @@ pub mod memory {
     /// path has to reach the same filesystem, or `bytes.write` would land
     /// somewhere `files.read` cannot see.
     pub fn write_bytes(path: &str, content: &[u8]) -> io::Result<()> {
-        lock().insert(path.to_string(), content.to_vec());
+        let key = file_key(path)?;
+        lock().insert(key, content.to_vec());
         Ok(())
     }
 
@@ -174,14 +177,15 @@ pub mod memory {
     /// `create(true).append(true)` creates, so the native build has to match it
     /// here, and it does.
     pub fn append(path: &str, content: &str) -> io::Result<()> {
+        let key = file_key(path)?;
         let mut files = lock();
-        match files.get_mut(path) {
+        match files.get_mut(&key) {
             Some(entry) => {
                 entry.extend_from_slice(content.as_bytes());
                 Ok(())
             }
             None => {
-                files.insert(path.to_string(), content.as_bytes().to_vec());
+                files.insert(key, content.as_bytes().to_vec());
                 Ok(())
             }
         }
@@ -200,19 +204,19 @@ pub mod memory {
     /// named *empty* directory on disk exists and this one does not, because
     /// nothing in the language creates one and nothing in the map could
     /// remember it. The working directory is the exception: `.` and `./`
-    /// always name a directory that exists. See [`directory_prefix`].
+    /// always name a directory that exists. See [`normalize`].
     pub fn exists(path: &str) -> bool {
-        let files = lock();
-        if files.contains_key(path) {
-            return true;
-        }
-        let prefix = match directory_prefix(path) {
-            Some(prefix) => prefix,
-            None => return false,
+        let Some(key) = normalize(path) else {
+            return false;
         };
-        if prefix.is_empty() {
+        let files = lock();
+        if key.is_empty() {
             return true;
         }
+        if files.contains_key(&key) {
+            return true;
+        }
+        let prefix = directory_prefix(&key);
         files.keys().any(|stored| stored.starts_with(&prefix))
     }
 
@@ -225,25 +229,33 @@ pub mod memory {
     /// distinction — `modules/Foo/` is where the *versions* of `Foo` are
     /// published, and opening it is not what an import means.
     pub fn is_file(path: &str) -> bool {
-        lock().contains_key(path)
+        match normalize(path) {
+            Some(key) if !key.is_empty() => lock().contains_key(&key),
+            _ => false,
+        }
     }
 
     pub fn remove_file(path: &str) -> io::Result<()> {
-        lock().remove(path).map(|_| ()).ok_or_else(not_found)
+        let key = file_key(path)?;
+        lock().remove(&key).map(|_| ()).ok_or_else(not_found)
     }
 
     pub fn copy(from: &str, to: &str) -> io::Result<u64> {
+        let from = file_key(from)?;
+        let to = file_key(to)?;
         let mut files = lock();
-        let content = files.get(from).ok_or_else(not_found)?.clone();
+        let content = files.get(&from).ok_or_else(not_found)?.clone();
         let length = content.len() as u64;
-        files.insert(to.to_string(), content);
+        files.insert(to, content);
         Ok(length)
     }
 
     pub fn rename(from: &str, to: &str) -> io::Result<()> {
+        let from = file_key(from)?;
+        let to = file_key(to)?;
         let mut files = lock();
-        let content = files.remove(from).ok_or_else(not_found)?;
-        files.insert(to.to_string(), content);
+        let content = files.remove(&from).ok_or_else(not_found)?;
+        files.insert(to, content);
         Ok(())
     }
 
@@ -258,16 +270,15 @@ pub mod memory {
     /// The working directory is the exception: `.` and `./` always exist, so an
     /// empty one is the empty list a native `read_dir(".")` gives, not an error.
     pub fn read_dir(path: &str) -> io::Result<Vec<String>> {
+        let key = normalize(path).ok_or_else(not_found)?;
         let files = lock();
-        if files.contains_key(path) {
+        if !key.is_empty() && files.contains_key(&key) {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
                 "Not a directory (os error 20)",
             ));
         }
-        let Some(prefix) = directory_prefix(path) else {
-            return Err(not_found());
-        };
+        let prefix = directory_prefix(&key);
         let mut names = BTreeSet::new();
         for stored in files.keys() {
             let Some(rest) = stored.strip_prefix(&prefix) else {
@@ -313,40 +324,85 @@ pub mod memory {
         )
     }
 
-    /// The prefix a stored path has to carry for `path` to name a directory
+    /// The key a stored path has for `path`, with `.` and `..` folded away.
+    ///
+    /// The map is flat and creates parent directories implicitly, so it folds
+    /// `.` and `..` lexically: `data/./x` and `data/sub/../x` are the same key
+    /// as `data/x`, which is the file a native `std::fs` call reaches when the
+    /// intermediate directory exists. A leading `..` on a relative path has no
+    /// parent to fold into here, so the path names nothing at all: `None`, the
+    /// same answer as the empty path, rather than a literal key no native
+    /// `read_dir(".")` would ever list. `None` for the empty path too, which
+    /// names no file or directory at all.
+    fn normalize(path: &str) -> Option<String> {
+        if path.is_empty() {
+            return None;
+        }
+        let absolute = path.starts_with('/');
+        let mut components: Vec<&str> = Vec::new();
+        for component in path.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if matches!(components.last(), Some(last) if *last != "..") {
+                        components.pop();
+                    } else if !absolute {
+                        components.push(component);
+                    }
+                }
+                _ => components.push(component),
+            }
+        }
+        if matches!(components.first(), Some(&"..")) {
+            return None;
+        }
+        let mut normalized = String::new();
+        if absolute {
+            normalized.push('/');
+        }
+        normalized.push_str(&components.join("/"));
+        Some(normalized)
+    }
+
+    /// The key a file operation writes or reads, refusing a directory spelling.
+    ///
+    /// An empty path is `NotFound` as it is for `std::fs`, while `.`, `..` and
+    /// `/` name directories and are `IsADirectory` rather than a key holding
+    /// bytes. A path that normalizes onto a directory implied by the files
+    /// underneath it — `data/.` or `data/sub/..` when `data/x` is stored — is
+    /// that same `IsADirectory`, not a new file that hides the directory.
+    fn file_key(path: &str) -> io::Result<String> {
+        let key = normalize(path).ok_or_else(not_found)?;
+        if key.is_empty() || key == "/" {
+            return Err(is_a_directory());
+        }
+        let prefix = directory_prefix(&key);
+        if lock().keys().any(|stored| stored.starts_with(&prefix)) {
+            return Err(is_a_directory());
+        }
+        Ok(key)
+    }
+
+    /// The wording `std::fs` uses for a path that is a directory, so a Redblue
+    /// program that reads the message reads the same sentence in both builds.
+    fn is_a_directory() -> io::Error {
+        io::Error::new(io::ErrorKind::IsADirectory, "Is a directory (os error 21)")
+    }
+
+    /// The prefix a stored path has to carry for `key` to name a directory
     /// holding it — `"notes/"` for `"notes"`, `"notes/"` for `"notes/"`.
     ///
     /// The trailing separator is the whole of it, and it is why
     /// [`exists`](self::exists) does not confuse the directory `notes` with a
-    /// file called `notes.txt`. `.` segments name the working directory or the
-    /// directory they sit in, whose stored keys are the paths written without
-    /// that segment, so `./data`, `data/.` and `data` all answer the prefix
-    /// `"data/"` rather than a literal `"./data/"` no key carries. `None` for a
-    /// path that cannot name a directory at all: the empty path, which
-    /// `Path::new("").exists()` also answers `false` for on a disk.
-    fn directory_prefix(path: &str) -> Option<String> {
-        if path.is_empty() {
-            return None;
+    /// file called `notes.txt`. The key is already normalized, so `./data`,
+    /// `data/.` and `data` all answer the prefix `"data/"` rather than a
+    /// literal `"./data/"` no key carries.
+    fn directory_prefix(key: &str) -> String {
+        if key.is_empty() || key.ends_with('/') {
+            key.to_string()
+        } else {
+            format!("{key}/")
         }
-        let mut prefix = String::new();
-        if path.starts_with('/') {
-            prefix.push('/');
-        }
-        let mut first = true;
-        for component in path.split('/') {
-            if component.is_empty() || component == "." {
-                continue;
-            }
-            if !first {
-                prefix.push('/');
-            }
-            prefix.push_str(component);
-            first = false;
-        }
-        if !prefix.is_empty() && !prefix.ends_with('/') {
-            prefix.push('/');
-        }
-        Some(prefix)
     }
 }
 
