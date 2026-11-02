@@ -680,6 +680,36 @@ fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
             "a+b\n".into(),
         ),
         (
+            "text_wrap",
+            r#"say text.wrap("the quick brown fox", 9)"#.into(),
+            "[the quick, brown fox]\n".into(),
+        ),
+        (
+            "text_diff",
+            r#"say contains(text.diff("a\nb\n", "a\nB\n"), "+B")"#.into(),
+            "yes\n".into(),
+        ),
+        (
+            "text_dedent",
+            r#"say text.dedent("    a\n    b")"#.into(),
+            "a\nb\n".into(),
+        ),
+        (
+            "text_template",
+            r#"say text.template("Hi <<name>>!", {name: "Ada"})"#.into(),
+            "Hi Ada!\n".into(),
+        ),
+        (
+            "text_pad",
+            r#"say text.pad("x", 3, "-")"#.into(),
+            "x--\n".into(),
+        ),
+        (
+            "text_align",
+            r#"say text.align("x", 5, "right")"#.into(),
+            "    x\n".into(),
+        ),
+        (
             "length",
             r#"say length("abcd")
 say length(bytes.from_text("héllo"))"#
@@ -1233,10 +1263,12 @@ fn edge_no_registered_builtin_is_unreachable_from_a_program() {
 
     for (name, _, _) in &rows {
         assert!(
-            registered.contains(&name.as_str()),
+            registered.contains(&name.as_str()) || redblue::stdlib::is_module_only_builtin(name),
             "answerable_builtins() has a row for `{name}` and stdlib::builtins does \
              not register it, so the table is testing a name that is gone. Drop the \
-             row, or register the builtin."
+             row, or register the builtin. The module-only text utilities are the \
+             one exception: their dotted spelling answers, but they are deliberately \
+             kept out of the flat registry."
         );
     }
 

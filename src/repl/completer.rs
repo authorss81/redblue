@@ -1009,8 +1009,9 @@ mod tests {
 
             for member in members.iter() {
                 let bound = registry.contains_key(&qualified(member))
-                    || crate::stdlib::module_member_name(&qualified(member))
-                        .is_some_and(|flat| registry.contains_key(flat));
+                    || crate::stdlib::module_member_name(&qualified(member)).is_some_and(|flat| {
+                        registry.contains_key(flat) || crate::stdlib::is_module_only_builtin(flat)
+                    });
                 assert_eq!(
                     offered
                         .iter()

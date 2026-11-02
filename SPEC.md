@@ -1239,6 +1239,12 @@ set starts to text.starts_with("abc", "ab")  // yes
 set ends to text.ends_with("abc", "bc")  // yes
 set swapped to text.replace("a-b", "-", "+")  // "a+b"
 set size to text.length("héllo")  // 5
+set wrapped to text.wrap("the quick brown fox", 9)  // ["the quick", "brown fox"]
+set changes to text.diff("a\nb\n", "a\nB\n")  // a standard unified diff
+set body to text.dedent("    one\n    two\n")  // "one\ntwo\n"
+set greeting to text.template("Hello <<name>>!", {name: "Ada"})  // "Hello Ada!"
+set padded to text.pad("x", 3, "-")  // "x--"
+set aligned to text.align("x", 5, "right")  // "    x"
 ```
 
 `length` counts **characters**, where a character is one Unicode scalar value:
@@ -1258,6 +1264,46 @@ in all three spellings, and `tests/test_text.rb` pins the refusal as a caught
 error. Both dotted spellings are module members, so both are written
 above and in README.md — a name that answers without a document saying so is
 surface nobody agreed to.
+
+`wrap` answers a list of lines no longer than the width. A word is moved to the
+next line whole; only a word that is itself longer than the width is broken, into
+width-sized pieces, so every line the function answers is within the width.
+Existing newlines start a new line, CRLF is read as a line ending, and an empty
+text wraps to an empty list. Horizontal whitespace separates words and is
+normalised: a run of spaces, a tab or any other Unicode whitespace becomes the
+single space between two words rather than being preserved. The width is a whole
+number of characters, at least 1 and at most 1,000,000; anything else is a
+catchable `RuntimeError` naming `wrap`.
+
+`diff` answers a **standard unified diff** between its two texts, with
+`--- original` and `+++ changed` headers and three lines of context around each
+change. Identical texts answer the empty text. A text whose last line has no
+newline is written with the standard `\ No newline at end of file` marker, so
+the output can be applied by any unified-diff reader. Texts whose line counts
+multiply past 4,000,000 are refused with a catchable `RuntimeError` naming `diff`.
+
+`dedent` removes the longest leading whitespace that every non-blank line
+shares. A blank line does not vote, and a non-blank line with no leading
+whitespace makes the shared prefix empty, which leaves every line exactly as it
+was. Line endings are preserved, so CRLF input stays CRLF.
+
+`template` replaces `<<name>>` placeholders with fields of its record. The
+delimiters are literal text rather than braces because `{…}` already means
+interpolation inside a Redblue string. `<<<<` writes a literal `<<`, so a
+template can contain its own opening delimiter; `>>` outside a placeholder needs
+no escape. An unknown placeholder is a catchable `RuntimeError` that names the
+missing field. Values are written with their usual text form, so a text is
+inserted without quotes and a number as its number.
+
+`pad` right-pads a text to a width with a fill of one or more characters, and
+`align` pads to a width on the named side: `"left"`, `"right"` or `"center"`.
+Both count **characters**, not bytes, so padding `"é"` to 3 adds two characters
+and padding `"日本"` to 5 adds three, regardless of their UTF-8 length. A width
+past 1,000,000 is refused, and text already at or past the width is answered
+unchanged. An empty fill and an unknown side are catchable errors naming the function.
+
+These six are spelled as module members only — `text.wrap`, `text.diff` and the rest — so a
+bare `wrap(x, n)` remains an ordinary name a program may declare. The earlier text functions keep their flat spellings.
 
 ### math
 

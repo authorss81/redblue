@@ -2546,7 +2546,7 @@ impl Vm {
             Expr::Call { name, args } => {
                 let arg_values: Result<Vec<Value>> =
                     args.iter().map(|a| self.evaluate(a)).collect();
-                self.call(name, &arg_values?)
+                self.call(name, &arg_values?, false)
             }
             Expr::MethodCall {
                 receiver,
@@ -2662,7 +2662,21 @@ impl Vm {
         runtime::unary_op(self.span(), op, value)
     }
 
-    fn call(&mut self, name: &str, args: &[Value]) -> Result<Value> {
+    fn call(&mut self, name: &str, args: &[Value], from_module: bool) -> Result<Value> {
+        if !from_module && stdlib::is_module_only_builtin(name) {
+            // The internal module-only name is not part of the flat surface, but
+            // a program may still declare a function or binding of that exact
+            // spelling — these are ordinary identifiers. The declaration wins,
+            // as it did before the utilities were stored under this name; only a
+            // call with nothing declared behind it is refused.
+            if let Some(Value::Function(function)) = self.get_var(name) {
+                return self.call_user_function(name, &function, args);
+            }
+            return Err(Error::Runtime(
+                format!("Unknown function '{}'", name),
+                self.span(),
+            ));
+        }
         // The one place a builtin is reached, so it is the one place a refusal
         // has to be. See `Vm::refuse_effectful_builtins`: a question must not
         // change the world, and this fires before the effect rather than after
@@ -2881,7 +2895,7 @@ impl Vm {
                         self.span(),
                     ));
                 }
-                return self.call(&qualified, &args);
+                return self.call(&qualified, &args, true);
             }
         };
 

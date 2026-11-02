@@ -233,6 +233,39 @@ fn edge_every_citation_resolves_to_a_line_that_exists() {
         );
     }
 
+    let stdlib_text =
+        std::fs::read_to_string(root.join("src/stdlib.rs")).expect("src/stdlib.rs is readable");
+
+    let member_line = doc
+        .lines()
+        .find(|line| line.contains("module_has_member"))
+        .expect("SURVEY.md cites module_has_member as the dotted-call gate");
+    let member_citation = citations(member_line)
+        .into_iter()
+        .find(|(path, _)| path == "src/stdlib.rs")
+        .unwrap_or_else(|| {
+            panic!(
+                "the module_has_member line cites nothing in src/stdlib.rs. The predicate \
+                 lives in that file, and the survey has to point at it."
+            )
+        });
+    let member_cited_line = stdlib_text
+        .lines()
+        .nth(member_citation.1 - 1)
+        .expect("the cited line exists, checked above");
+    assert!(
+        member_cited_line.contains("fn module_has_member"),
+        "the module_has_member entry cites src/stdlib.rs:{}, and that line reads \
+         `{member_cited_line}` — it is not the predicate the entry is making. The \
+         function starts at line {}.",
+        member_citation.1,
+        stdlib_text
+            .lines()
+            .position(|l| l.contains("fn module_has_member"))
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    );
+
     let regex_entry = top_ten(&doc)
         .into_iter()
         .find(|entry| entry.body.to_lowercase().contains("regex"))
@@ -246,8 +279,6 @@ fn edge_every_citation_resolves_to_a_line_that_exists() {
                  file, and the survey has to point at it."
             )
         });
-    let stdlib_text =
-        std::fs::read_to_string(root.join("src/stdlib.rs")).expect("src/stdlib.rs is readable");
     let cited_line = stdlib_text
         .lines()
         .nth(regex_citation.1 - 1)

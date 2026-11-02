@@ -330,7 +330,14 @@ text.contains("text", sub)
 text.starts_with("text", prefix), text.ends_with("text", suffix)
 text.replace("text", from, to)
 text.length("text")      // characters, not bytes: text.length("héllo") is 5
-// every one of them is also spelled flat: uppercase("text"), split("text", by), ...
+text.wrap("text", width) // a list of lines no longer than width; whitespace runs become one space
+text.diff(old, new)      // a standard unified diff; empty when the texts are equal
+text.dedent("text")      // remove the common leading whitespace
+text.template("Hi <<name>>!", {name: "Ada"})  // "Hi Ada!"; <<<< writes a literal <<
+text.pad("x", 3, "-")    // "x--"
+text.align("x", 5, "right")  // "    x"; left, right or center
+// uppercase, lowercase, trim, split, join, contains, starts_with, ends_with,
+// replace and length are also spelled flat.
 ```
 
 ### Console
