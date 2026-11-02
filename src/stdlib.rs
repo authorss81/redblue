@@ -317,8 +317,7 @@ pub fn map_function(args: &[Value]) -> Result<&FunctionValue, String> {
 /// are needed, and the engines ask the second one first.
 pub fn member_resolves(module: &str, member: &str) -> bool {
     let qualified = format!("{module}_{member}");
-    BUILTIN_NAMES.contains(&qualified.as_str())
-        || module_member_name(&qualified).is_some_and(|name| BUILTIN_NAMES.contains(&name))
+    BUILTIN_NAMES.contains(&qualified.as_str()) || module_member_name(&qualified).is_some()
 }
 
 /// The `module.member` pairs in [`MODULE_MEMBERS`] that reach no builtin.
@@ -417,16 +416,6 @@ pub fn builtins() -> HashMap<String, Value> {
         Value::Builtin("ends_with".to_string()),
     );
     globals.insert("replace".to_string(), Value::Builtin("replace".to_string()));
-    for name in [
-        "text_wrap",
-        "text_diff",
-        "text_dedent",
-        "text_template",
-        "text_pad",
-        "text_align",
-    ] {
-        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
-    }
 
     // List functions
     globals.insert("length".to_string(), Value::Builtin("length".to_string()));
@@ -1090,6 +1079,9 @@ fn text_utility_width(
 /// has no line it can fit on, so it alone is broken into width-sized pieces;
 /// every word that can fit somewhere is never split. Existing newlines start a
 /// new output line and CRLF is read as a line ending rather than as content.
+/// Horizontal whitespace is the separator between words: a run of spaces, a tab
+/// or any other Unicode whitespace becomes the single space between two words,
+/// so wrapping normalises it rather than preserving it.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
@@ -1106,11 +1098,13 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         }
 
         let mut current = String::new();
+        let mut current_width = 0usize;
         for word in line.split_whitespace() {
             let word_width = word.chars().count();
             if word_width > width {
                 if !current.is_empty() {
                     lines.push(std::mem::take(&mut current));
+                    current_width = 0;
                 }
                 let characters: Vec<char> = word.chars().collect();
                 for piece in characters.chunks(width) {
@@ -1119,15 +1113,17 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 continue;
             }
 
-            let current_width = current.chars().count();
             if current.is_empty() {
                 current.push_str(word);
+                current_width = word_width;
             } else if current_width + 1 + word_width <= width {
                 current.push(' ');
                 current.push_str(word);
+                current_width += 1 + word_width;
             } else {
                 lines.push(std::mem::take(&mut current));
                 current.push_str(word);
+                current_width = word_width;
             }
         }
         if !current.is_empty() {
@@ -1453,9 +1449,10 @@ fn padded_text(
     right: usize,
     fill: &str,
 ) -> crate::error::Result<String> {
+    let widest_fill = fill.chars().map(char::len_utf8).max().unwrap_or(0);
     let bytes = left
         .checked_add(right)
-        .and_then(|count| count.checked_mul(fill.len()))
+        .and_then(|count| count.checked_mul(widest_fill))
         .and_then(|padding| padding.checked_add(text.len()))
         .ok_or_else(|| {
             text_utility_error(span, name, "the padded text is too large to allocate")
@@ -1773,6 +1770,25 @@ pub fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name)
 }
 
+/// Whether `name` is an internal builtin whose only spelling is as a member of a
+/// module.
+///
+/// The six phase-101 text utilities are stored under `text_<member>` because
+/// that is the name a dotted call resolves to, but they are not part of the flat
+/// builtin surface: `text.wrap` answers and a bare `text_wrap` does not. They are
+/// deliberately absent from [`BUILTIN_NAMES`] and [`builtins`], so `is_builtin`
+/// does not advertise them and the analyzer, REPL completer, highlighter and
+/// introspection never offer a name a program cannot call. A program that wants a
+/// flat text helper keeps writing `wrap`, which remains an ordinary name it may
+/// declare. Both engines refuse the bare spelling unless the program has declared
+/// that name itself, so this cannot depend on which one ran the program.
+pub fn is_module_only_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "text_wrap" | "text_diff" | "text_dedent" | "text_template" | "text_pad" | "text_align"
+    )
+}
+
 /// Resolves `module.member` to the builtin name behind it.
 ///
 /// The internal encoding of a module function is `module_member` — that is what
@@ -1802,6 +1818,14 @@ pub fn is_builtin(name: &str) -> bool {
 /// carries on with the name it was given and — for a receiver that is a module —
 /// refuses the call by its dotted name.
 pub fn module_member_name(qualified: &str) -> Option<&str> {
+    // The six module-only text utilities are not in `BUILTIN_NAMES`, so their
+    // dotted spelling has no registry entry to find. The member table says the
+    // pair exists, and the dispatcher answers the internal `text_<member>` name
+    // itself; returning the name unchanged is what makes `text.wrap` reach it.
+    if is_module_only_builtin(qualified) {
+        let (module, member) = qualified.split_once('_')?;
+        return module_has_member(module, member).then_some(qualified);
+    }
     if BUILTIN_NAMES.contains(&qualified) {
         return None;
     }
@@ -1873,12 +1897,6 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "starts_with",
     "ends_with",
     "replace",
-    "text_wrap",
-    "text_diff",
-    "text_dedent",
-    "text_template",
-    "text_pad",
-    "text_align",
     "length",
     "push",
     "append",
@@ -2398,12 +2416,14 @@ pub fn builtin_signature(name: &str) -> Option<&'static str> {
 /// Should always be empty, and is checked rather than trusted: a shape written
 /// for a builtin that no longer exists, and a builtin added without one, are the
 /// same defect seen from the two ends — a `:sighelp` that answers about a name
-/// the language does not have, or stays silent about one it does.
+/// the language does not have, or stays silent about one it does. Module-only
+/// names are not in [`BUILTIN_NAMES`] but do have shapes, because the dotted
+/// spelling reaches them, so they are allowed here.
 pub fn signatures_covering_nothing() -> Vec<&'static str> {
     BUILTIN_SIGNATURES
         .iter()
         .map(|(name, _)| *name)
-        .filter(|name| !BUILTIN_NAMES.contains(name))
+        .filter(|name| !BUILTIN_NAMES.contains(name) && !is_module_only_builtin(name))
         .collect()
 }
 

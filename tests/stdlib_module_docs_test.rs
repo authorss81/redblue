@@ -1263,10 +1263,12 @@ fn edge_no_registered_builtin_is_unreachable_from_a_program() {
 
     for (name, _, _) in &rows {
         assert!(
-            registered.contains(&name.as_str()),
+            registered.contains(&name.as_str()) || redblue::stdlib::is_module_only_builtin(name),
             "answerable_builtins() has a row for `{name}` and stdlib::builtins does \
              not register it, so the table is testing a name that is gone. Drop the \
-             row, or register the builtin."
+             row, or register the builtin. The module-only text utilities are the \
+             one exception: their dotted spelling answers, but they are deliberately \
+             kept out of the flat registry."
         );
     }
 

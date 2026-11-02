@@ -1269,8 +1269,11 @@ surface nobody agreed to.
 next line whole; only a word that is itself longer than the width is broken, into
 width-sized pieces, so every line the function answers is within the width.
 Existing newlines start a new line, CRLF is read as a line ending, and an empty
-text wraps to an empty list. The width is a whole number of characters, at least
-1 and at most 1,000,000; anything else is a catchable `RuntimeError` naming `wrap`.
+text wraps to an empty list. Horizontal whitespace separates words and is
+normalised: a run of spaces, a tab or any other Unicode whitespace becomes the
+single space between two words rather than being preserved. The width is a whole
+number of characters, at least 1 and at most 1,000,000; anything else is a
+catchable `RuntimeError` naming `wrap`.
 
 `diff` answers a **standard unified diff** between its two texts, with
 `--- original` and `+++ changed` headers and three lines of context around each

@@ -2872,11 +2872,33 @@ impl BytecodeVm {
     fn call(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let name = self.constant_text(instruction.arg)?;
         let args = self.pop_n(instruction.aux)?;
-        self.call_named(&name, &args, frame)
+        self.call_named(&name, &args, frame, false)
     }
 
     /// Calls `name`, which is either a builtin or a declared function.
-    fn call_named(&mut self, name: &str, args: &[Value], frame: usize) -> Result<()> {
+    fn call_named(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        frame: usize,
+        from_module: bool,
+    ) -> Result<()> {
+        if !from_module && crate::stdlib::is_module_only_builtin(name) {
+            // The internal module-only name is not part of the flat surface, but
+            // a program may still declare a function or binding of that exact
+            // spelling — these are ordinary identifiers. The declaration wins,
+            // as it did before the utilities were stored under this name; only a
+            // call with nothing declared behind it is refused.
+            if let Some(Value::Function(function)) = self.get_var(name) {
+                self.call_function(name, &function, args, None)?;
+                self.advance(frame);
+                return Ok(());
+            }
+            return Err(Error::Runtime(
+                format!("Unknown function '{name}'"),
+                self.span(),
+            ));
+        }
         // `append` writes through a binding, so it is answered here where the
         // frame is and not by the free `runtime::builtin`, which has none. The
         // write is the one a `STORE` would do, so a name that is a constant is
@@ -3126,7 +3148,7 @@ impl BytecodeVm {
                     self.span(),
                 ));
             }
-            return self.call_named(&qualified, &args, frame);
+            return self.call_named(&qualified, &args, frame, true);
         };
         let Some(Value::Function(function)) = object.methods.get(method).cloned() else {
             return Err(Error::Runtime(

@@ -330,7 +330,7 @@ text.contains("text", sub)
 text.starts_with("text", prefix), text.ends_with("text", suffix)
 text.replace("text", from, to)
 text.length("text")      // characters, not bytes: text.length("héllo") is 5
-text.wrap("text", width) // a list of lines no longer than width
+text.wrap("text", width) // a list of lines no longer than width; whitespace runs become one space
 text.diff(old, new)      // a standard unified diff; empty when the texts are equal
 text.dedent("text")      // remove the common leading whitespace
 text.template("Hi <<name>>!", {name: "Ada"})  // "Hi Ada!"; <<<< writes a literal <<

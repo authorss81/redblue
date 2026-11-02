@@ -558,3 +558,160 @@ fn edge_text_utilities_refuse_invalid_widths_and_sides_on_both_engines() {
         );
     }
 }
+
+#[test]
+fn edge_text_utilities_refuse_mismatched_argument_types_on_both_engines() {
+    both_refuse(r#"text.diff("a", 1)"#, "diff");
+    both_refuse("text.dedent(1)", "dedent");
+    both_refuse(r#"text.template("<<name>>", 1)"#, "template");
+    both_refuse(r#"text.pad("x", "five", "-")"#, "pad");
+    both_refuse(r#"text.pad("x", 3, 1)"#, "pad");
+    both_refuse(r#"text.align("x", "five", "left")"#, "align");
+    both_refuse(r#"text.align("x", 3, 1)"#, "align");
+}
+
+#[test]
+fn edge_wrap_breaks_a_long_word_after_a_partial_line_and_counts_characters() {
+    assert_eq!(
+        both(&format!(
+            "text.wrap({}, 5)",
+            rb_text("hi abcdefgh \u{4e16}\u{754c}")
+        )),
+        list_of(&["hi", "abcde", "fgh", "\u{4e16}\u{754c}"]),
+        "a word longer than the width starts a fresh line and is split by character"
+    );
+    assert_eq!(
+        both(&format!(
+            "text.wrap({}, 2)",
+            rb_text("\u{4e16}\u{754c}\u{4e16}\u{754c}\u{4e16}")
+        )),
+        list_of(&["\u{4e16}\u{754c}", "\u{4e16}\u{754c}", "\u{4e16}"]),
+        "a long CJK word is split by characters, not by UTF-8 bytes"
+    );
+}
+
+#[test]
+fn edge_pad_and_align_handle_multicharacter_fill_and_exact_widths() {
+    assert_eq!(
+        both(&format!("text.pad({}, 6, {})", rb_text("x"), rb_text("ab"))),
+        Value::Text("xababa".to_string()),
+        "a multi-character fill is repeated and cut to the exact character width"
+    );
+    assert_eq!(
+        both(&format!("text.pad({}, 5, {})", rb_text(""), rb_text("ab"))),
+        Value::Text("ababa".to_string()),
+        "padding empty text fills the whole width"
+    );
+    assert_eq!(
+        both(&format!(
+            "text.pad({}, 4, {})",
+            rb_text("x"),
+            rb_text("\u{e9}\u{65e5}")
+        )),
+        Value::Text("x\u{e9}\u{65e5}\u{e9}".to_string()),
+        "a non-ASCII multi-character fill still counts characters"
+    );
+    assert_eq!(
+        both(&format!(
+            "text.align({}, 6, {})",
+            rb_text("x"),
+            rb_text("center")
+        )),
+        Value::Text("  x   ".to_string()),
+        "center alignment puts the extra column on the right"
+    );
+}
+
+#[test]
+fn edge_pad_with_a_large_multicharacter_fill_reserves_only_the_output() {
+    let fill = "ab".repeat(50_000);
+    let width = 1_000_000;
+    let expected: String = fill.chars().cycle().take(width).collect();
+    assert_eq!(
+        both(&format!(
+            "text.pad({}, {}, {})",
+            rb_text(""),
+            width,
+            rb_text(&fill)
+        )),
+        Value::Text(expected),
+        "a long fill is cycled per output character, so the reservation is the width, not \
+         the fill's byte length times the width"
+    );
+}
+
+#[test]
+fn edge_the_six_text_utilities_are_reached_only_through_the_text_module() {
+    for (source, name) in [
+        (r#"text_wrap("x", 3)"#, "text_wrap"),
+        (r#"text_diff("a", "b")"#, "text_diff"),
+        (r#"text_dedent(" x")"#, "text_dedent"),
+        (r#"text_template("x", {})"#, "text_template"),
+        (r#"text_pad("x", 3, "-")"#, "text_pad"),
+        (r#"text_align("x", 3, "left")"#, "text_align"),
+    ] {
+        both_refuse(source, name);
+    }
+
+    assert_eq!(
+        both("to wrap(prefix)\n    give back prefix + \"!\"\nend\nwrap(\"ok\")"),
+        Value::Text("ok!".to_string()),
+        "the bare `wrap` spelling remains an ordinary name a program may declare"
+    );
+}
+
+#[test]
+fn edge_template_repeats_a_placeholder_and_leaves_a_literal_close_alone() {
+    assert_eq!(
+        both(&format!(
+            "text.template({}, {{a: {}}})",
+            rb_text("<<a>> + <<a>>"),
+            rb_text("x")
+        )),
+        Value::Text("x + x".to_string()),
+        "the same placeholder may appear more than once"
+    );
+    assert_eq!(
+        both(&format!("text.template({}, {{}})", rb_text(""))),
+        Value::Text(String::new()),
+        "an empty template and an empty record answer empty text"
+    );
+    assert_eq!(
+        both(&format!("text.template({}, {{}})", rb_text("a >> b"))),
+        Value::Text("a >> b".to_string()),
+        "a closing delimiter outside a placeholder is literal text"
+    );
+}
+
+#[test]
+fn edge_wrap_collapses_runs_of_spaces_and_keeps_blank_lines() {
+    assert_eq!(
+        both(&format!("text.wrap({}, 3)", rb_text("a b  c d"))),
+        list_of(&["a b", "c d"]),
+        "runs of spaces between words do not count against the width"
+    );
+    assert_eq!(
+        both(&format!("text.wrap({}, 5)", rb_text("a  b\n\nc"))),
+        list_of(&["a b", "", "c"]),
+        "a blank line in the middle of the text stays a blank line"
+    );
+}
+
+#[test]
+fn edge_text_diff_refuses_a_non_text_argument_on_both_engines() {
+    let source = r#"text.diff("a", 1)"#;
+
+    let walked = redblue::run_source_value(source);
+    assert!(
+        walked.is_err(),
+        "the tree-walker must refuse a diff of text and a number: {source}"
+    );
+
+    let chunk = compile_source(source).expect("the call shape should compile");
+    let mut vm = BytecodeVm::new();
+    let compiled = vm.run(&chunk);
+    assert!(
+        compiled.is_err(),
+        "the bytecode VM must refuse a diff of text and a number: {source}"
+    );
+}
