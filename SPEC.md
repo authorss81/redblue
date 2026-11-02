@@ -1559,6 +1559,8 @@ that is not there: a named record says when the name is wrong instead of letting
 ### sys
 
 ```redblue
+set options to [{name: "count", type: "number"}]
+set parsed to sys.parse(options)
 for each argument in sys.argv()
     say argument
 end
@@ -1566,7 +1568,17 @@ end
 
 `sys.argv()` is the list of arguments after the program path, and it is empty
 for a program run from the REPL or from a test, because only `rb run` collects
-them.
+them. `sys.parse(declaration)` reads those arguments against a list of flag
+records and answers a record with one field per flag, plus `arguments`, `help`
+and `usage`; `sys.parse(declaration, arguments)` reads an explicit list instead.
+A flag has a `name`, a `type` (`text`, `number`, `yes/no` or `path`), and
+optionally `takes_value`, `default`, `required` and `help`. A declaration
+error, an unknown flag, a missing required flag and a value of the wrong type
+are catchable `RuntimeError`s naming the flag, and `--help`/`-h` answers the
+generated usage without requiring the rest. The `Cli` module in `modules/`
+wraps this: its `run` function prints the usage and skips the body
+when help is asked for, and calls `body(parsed)` otherwise; its `run_with`
+function takes the argument list explicitly.
 
 ### time
 

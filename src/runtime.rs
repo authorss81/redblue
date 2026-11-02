@@ -3743,6 +3743,46 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 .map(|argument| Value::Text(argument.clone()))
                 .collect(),
         ))),
+        "sys_parse" => {
+            let Some(declaration) = args.first() else {
+                return Err(Error::Runtime(
+                    "sys.parse requires a list of flag declarations".to_string(),
+                    span,
+                ));
+            };
+            let arguments = match args.get(1) {
+                None => program_args(),
+                Some(Value::List(items)) => {
+                    let mut arguments = Vec::with_capacity(items.len());
+                    for (index, item) in items.iter().enumerate() {
+                        match item {
+                            Value::Text(text) => arguments.push(text.clone()),
+                            other => {
+                                return Err(Error::Runtime(
+                                    format!(
+                                    "sys.parse expects a list of text arguments, but item {} is {}",
+                                    index + 1,
+                                    other.type_name()
+                                ),
+                                    span,
+                                ))
+                            }
+                        }
+                    }
+                    arguments
+                }
+                Some(other) => {
+                    return Err(Error::Runtime(
+                        format!(
+                            "sys.parse expects its arguments as a list of text, but was given {}",
+                            other.type_name()
+                        ),
+                        span,
+                    ))
+                }
+            };
+            Ok(Some(crate::cli::parse(declaration, &arguments, span)?))
+        }
         _ => Ok(None),
     }
 }

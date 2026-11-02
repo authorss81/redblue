@@ -145,7 +145,7 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
         "regex",
         &["match", "is_match", "capture", "replace", "split"],
     ),
-    ("sys", &["argv"]),
+    ("sys", &["argv", "parse"]),
     (
         "text",
         &[
@@ -1800,19 +1800,27 @@ pub fn is_builtin(name: &str) -> bool {
 /// Whether `name` is an internal builtin whose only spelling is as a member of a
 /// module.
 ///
-/// The six phase-101 text utilities are stored under `text_<member>` because
-/// that is the name a dotted call resolves to, but they are not part of the flat
-/// builtin surface: `text.wrap` answers and a bare `text_wrap` does not. They are
-/// deliberately absent from [`BUILTIN_NAMES`] and [`builtins`], so `is_builtin`
-/// does not advertise them and the analyzer, REPL completer, highlighter and
-/// introspection never offer a name a program cannot call. A program that wants a
-/// flat text helper keeps writing `wrap`, which remains an ordinary name it may
-/// declare. Both engines refuse the bare spelling unless the program has declared
-/// that name itself, so this cannot depend on which one ran the program.
+/// The phase-101 text utilities and `sys.parse` are stored under
+/// `<module>_<member>` because that is the name a dotted call resolves to, but
+/// they are not part of the flat builtin surface: `text.wrap` and `sys.parse`
+/// answer and a bare `text_wrap` or `sys_parse` does not. They are deliberately
+/// absent from [`BUILTIN_NAMES`] and [`builtins`], so `is_builtin` does not
+/// advertise them and the analyzer, REPL completer, highlighter and
+/// introspection never offer a name a program cannot call. A program that wants
+/// a flat text helper keeps writing `wrap`, which remains an ordinary name it
+/// may declare. Both engines refuse the bare spelling unless the program has
+/// declared that name itself, so this cannot depend on which one ran the
+/// program.
 pub fn is_module_only_builtin(name: &str) -> bool {
     matches!(
         name,
-        "text_wrap" | "text_diff" | "text_dedent" | "text_template" | "text_pad" | "text_align"
+        "text_wrap"
+            | "text_diff"
+            | "text_dedent"
+            | "text_template"
+            | "text_pad"
+            | "text_align"
+            | "sys_parse"
     )
 }
 
@@ -1845,10 +1853,11 @@ pub fn is_module_only_builtin(name: &str) -> bool {
 /// carries on with the name it was given and — for a receiver that is a module —
 /// refuses the call by its dotted name.
 pub fn module_member_name(qualified: &str) -> Option<&str> {
-    // The six module-only text utilities are not in `BUILTIN_NAMES`, so their
-    // dotted spelling has no registry entry to find. The member table says the
-    // pair exists, and the dispatcher answers the internal `text_<member>` name
-    // itself; returning the name unchanged is what makes `text.wrap` reach it.
+    // The module-only builtins are not in `BUILTIN_NAMES`, so their dotted
+    // spelling has no registry entry to find. The member table says the pair
+    // exists, and the dispatcher answers the internal `<module>_<member>` name
+    // itself; returning the name unchanged is what makes `text.wrap` and
+    // `sys.parse` reach it.
     if is_module_only_builtin(qualified) {
         let (module, member) = qualified.split_once('_')?;
         return module_has_member(module, member).then_some(qualified);

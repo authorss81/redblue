@@ -7,12 +7,13 @@ and diffing in phase-101; rank 6 gained date arithmetic in phase-096 and text
 parsing and formatting in phase-097. The entries are kept so the ranking and
 its history stay readable.
 
-- **Builtins in the registry**: 114 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1906`,
-  which closes with `"input"` at `src/stdlib.rs:2020`. The six module-only
+- **Builtins in the registry**: 114 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1915`,
+  which closes with `"input"` at `src/stdlib.rs:2029`. The six module-only
   `text.wrap`, `text.diff`, `text.dedent`, `text.template`, `text.pad` and
-  `text.align` utilities are deliberately not in this table.
+  `text.align` utilities are deliberately not in this table, and neither is
+  `sys.parse`, whose only spelling is `sys.parse`.
 - **Modules a dotted call may name**: 14 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 91 — `stdlib::MODULE_MEMBERS` at
+- **Dotted members those modules accept**: 92 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:75`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
@@ -102,7 +103,7 @@ survey measures against, and it is short.
 | `network` | `get`, `post` | `src/stdlib.rs:129` |
 | `path` | `join`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, `resolve`, `normalize`, `list` | `src/stdlib.rs:131` |
 | `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:145` |
-| `sys` | `argv` | `src/stdlib.rs:148` |
+| `sys` | `argv`, `parse` | `src/stdlib.rs:148` |
 | `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`, `wrap`, `diff`, `dedent`, `template`, `pad`, `align` | `src/stdlib.rs:150` |
 | `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:178` |
 
@@ -198,7 +199,7 @@ Before phase-095 the same program was refused as
   inside `if let Value::List(items)`, so a record is not a list and the loop body
   never runs. `src/runtime.rs:1525` — `length` refuses a record outright with
   *"length requires a list or text"*. And the registry holds no `keys` and no
-  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:2020` without one.
+  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:2029` without one.
 - **Why it matters more than it looks**: a record is Redblue's only map type. A
   program cannot count a record, iterate it, merge one into another, or turn one
   back into text. Grouping is the operation almost every data program performs
@@ -221,7 +222,7 @@ Prints nothing and exits 0. The same record answers `r.a` and refuses `length(r)
 - **Blocked programs**: 4 — 4, 8, 19, 26
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:122` — `map` and `length` are the whole `list`
-  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:1906`) holds no `sort`, `sort_by`,
+  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:1915`) holds no `sort`, `sort_by`,
   `reverse`, `min`, `max`, `sum`, `first` or `last`. The refusal for any of them
   is `src/interpreter.rs:2411`, which formats `Unknown function '{}'`.
 - **What is missing**: `sort`, `sort_by`, `reverse`, `min`, `max`, `sum`,
@@ -383,7 +384,7 @@ entries first.
 
 | Gap | Evidence | Blocks |
 |---|---|---|
-| No `sys` surface but `argv`: no environment variables, exit code, cwd, platform | `src/stdlib.rs:148` | 31, 32 |
+| No `sys` surface beyond `argv` and CLI flags: no environment variables, exit code, cwd, platform | `src/stdlib.rs:148` | 31, 32 |
 | No set algebra: `unique`, `flatten`, `reverse`, intersection | `src/stdlib.rs:122` | 3 |
 | No statistics or integer maths: no `min`/`max`, `sum`, `mean`, `gcd`, `log2`, inverse trig | `src/stdlib.rs:123` | 8 |
 | No UUID or token generation; `random_choice`/`random_shuffle` exist but no uuid-shaped call | `src/stdlib.rs:639` | 28 |

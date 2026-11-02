@@ -296,6 +296,8 @@ time.add_seconds(date, seconds)
 ### Sys
 ```
 sys.argv()             // Arguments after the program path (empty outside `rb run`)
+sys.parse(declaration) // Parse those arguments into a record of typed flags
+sys.parse(declaration, arguments)
 ```
 
 ### Network

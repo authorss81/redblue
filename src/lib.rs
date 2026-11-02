@@ -1,6 +1,7 @@
 pub mod analyzer;
 pub mod bootstrap;
 pub mod bytecode;
+mod cli;
 pub mod debugger;
 mod error;
 pub mod failure;

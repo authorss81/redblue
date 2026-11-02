@@ -66,11 +66,11 @@ SPEC.md:1423
 SPEC.md:1457
 SPEC.md:1486
 SPEC.md:1561
-SPEC.md:1573
-SPEC.md:1622
-SPEC.md:1741
-SPEC.md:1792
-SPEC.md:1818
+SPEC.md:1585
+SPEC.md:1634
+SPEC.md:1753
+SPEC.md:1804
+SPEC.md:1830
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:558
