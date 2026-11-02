@@ -63,6 +63,18 @@ fn both_refuse(source: &str, needle: &str) {
     );
 }
 
+/// Calls `text.diff` directly, so a test can hand it a text too large to write
+/// as a source literal without also asking the parser to read it.
+#[track_caller]
+fn diff_direct(old: &str, new: &str) -> Result<Value, redblue::Error> {
+    redblue::stdlib::builtin(
+        redblue::Span::new(1, 1),
+        "text_diff",
+        &[Value::Text(old.to_string()), Value::Text(new.to_string())],
+    )
+    .map(|value| value.expect("text_diff is a builtin"))
+}
+
 /// A Redblue text literal for `value`, with `\` and `"` escaped.
 fn rb_text(value: &str) -> String {
     let mut out = String::from("\"");
@@ -713,5 +725,55 @@ fn edge_text_diff_refuses_a_non_text_argument_on_both_engines() {
     assert!(
         compiled.is_err(),
         "the bytecode VM must refuse a diff of text and a number: {source}"
+    );
+}
+
+#[test]
+fn edge_text_diff_refuses_a_text_past_the_documented_line_limit() {
+    let old = "a\n".repeat(1_000_001);
+    let error = diff_direct(&old, "")
+        .expect_err("a text past the line limit must be refused")
+        .to_string();
+    assert!(
+        error.contains("diff"),
+        "the refusal must name diff: {error}"
+    );
+    assert!(
+        error.contains("1000000-line limit"),
+        "the refusal must name the line limit it crossed: {error}"
+    );
+}
+
+#[test]
+fn edge_text_diff_reports_the_line_limit_before_the_cell_limit() {
+    let text = "a\n".repeat(1_000_001);
+    let error = diff_direct(&text, &text)
+        .expect_err("two oversized texts must be refused")
+        .to_string();
+    assert!(
+        error.contains("1000000-line limit"),
+        "the line count is checked before the cell table: {error}"
+    );
+    assert!(
+        !error.contains("cell limit"),
+        "an oversized line count must not be reported as a cell-limit failure: {error}"
+    );
+}
+
+#[test]
+fn edge_text_diff_accepts_a_large_but_bounded_unbalanced_diff() {
+    let old = "a\n".repeat(10_000);
+    let source = format!("text.diff({}, {})", rb_text(&old), rb_text("a\n"));
+    let Value::Text(diff) = both(&source) else {
+        panic!("diff must answer text");
+    };
+    assert!(
+        diff.starts_with("--- original\n+++ changed\n@@ -1,10000 +1 @@\n a\n"),
+        "a large unbalanced diff still starts with a standard hunk: {diff}"
+    );
+    assert_eq!(
+        diff.lines().filter(|line| *line == "-a").count(),
+        9_999,
+        "every line removed from the large text is a change line"
     );
 }

@@ -1279,8 +1279,8 @@ catchable `RuntimeError` naming `wrap`.
 `--- original` and `+++ changed` headers and three lines of context around each
 change. Identical texts answer the empty text. A text whose last line has no
 newline is written with the standard `\ No newline at end of file` marker, so
-the output can be applied by any unified-diff reader. Texts whose line counts
-multiply past 4,000,000 are refused with a catchable `RuntimeError` naming `diff`.
+the output can be applied by any unified-diff reader. A text longer than
+1,000,000 lines is refused, as is a pair whose line counts multiply past 4,000,000, with a catchable `RuntimeError` naming `diff`.
 
 `dedent` removes the longest leading whitespace that every non-blank line
 shares. A blank line does not vote, and a non-blank line with no leading

@@ -1048,6 +1048,14 @@ const MAX_TEXT_UTILITY_WIDTH: usize = 1_000_000;
 /// that an oversized pair is a catchable error rather than an aborted process.
 const MAX_DIFF_CELLS: usize = 4_000_000;
 
+/// The largest number of lines `text.diff` will read from either text.
+///
+/// The cell bound alone does not bound the line table's row vector: one line on
+/// one side and a million on the other is a million rows, each a separate
+/// allocation. Refusing a text past this many lines keeps that overhead
+/// ordinary too, and the count is taken before the lines are materialised.
+const MAX_DIFF_LINES: usize = 1_000_000;
+
 /// Reads a width argument, refusing anything that is not a whole number between
 /// one character and [`MAX_TEXT_UTILITY_WIDTH`].
 fn text_utility_width(
@@ -1161,6 +1169,14 @@ fn diff_lines(text: &str) -> Vec<DiffLine> {
         .collect()
 }
 
+/// Counts the lines `diff_lines` would produce, without allocating them.
+fn diff_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    text.bytes().filter(|byte| *byte == b'\n').count() + usize::from(!text.ends_with('\n'))
+}
+
 /// One step of the edit script: a line both texts share, or one only `old` or
 /// only `new` has.
 #[derive(Debug, Clone, Copy)]
@@ -1177,9 +1193,18 @@ enum DiffStep {
 /// `@@ -a,b +c,d @@` hunks with three context lines, and ` `/`+`/`-` prefixed
 /// lines. A line with no final newline carries the standard marker.
 fn unified_diff(span: crate::error::Span, old: &str, new: &str) -> crate::error::Result<String> {
-    let old_lines = diff_lines(old);
-    let new_lines = diff_lines(new);
-    let (old_len, new_len) = (old_lines.len(), new_lines.len());
+    let old_len = diff_line_count(old);
+    let new_len = diff_line_count(new);
+    if old_len > MAX_DIFF_LINES || new_len > MAX_DIFF_LINES {
+        return Err(text_utility_error(
+            span,
+            "diff",
+            &format!(
+                "the texts are too large to diff: {old_len} and {new_len} lines exceed the \
+                 {MAX_DIFF_LINES}-line limit"
+            ),
+        ));
+    }
 
     let cells = old_len
         .checked_add(1)
@@ -1196,6 +1221,8 @@ fn unified_diff(span: crate::error::Span, old: &str, new: &str) -> crate::error:
         ));
     }
 
+    let old_lines = diff_lines(old);
+    let new_lines = diff_lines(new);
     let mut lengths = vec![vec![0usize; new_len + 1]; old_len + 1];
     for i in (0..old_len).rev() {
         for j in (0..new_len).rev() {

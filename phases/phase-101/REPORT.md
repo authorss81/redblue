@@ -4,12 +4,12 @@
 
 | File | Lines | What |
 |---|---|---|
-| src/stdlib.rs | +610 −0 | added `text.wrap`, `text.diff`, `text.dedent`, `text.template`, `text.pad`, `text.align`, their dispatch/signature entries and helpers (kept out of the flat registry so the bare names are not advertised); `dedent` now preserves CRLF line endings rather than rewriting them to LF; padded and aligned output is size-capped and allocated with `try_reserve_exact` using the widest fill character rather than the fill's byte length, and `diff` refuses a line table past its cap; the six utilities are reachable only through the `text` module, and a bare `text_wrap(...)`-style name is refused on both engines. On resume, `wrap` tracks its current line width incrementally instead of recounting every word, so a long word-heavy line is linear rather than quadratic |
-| tests/text_utilities_test.rs | +740 −0 | twenty-two tests, both-engine comparison, catchable failures and an independent unified-diff reader |
-| SPEC.md | +43 −0 | documented the six operations, width semantics, template delimiters and `dedent` line-ending preservation |
+| src/stdlib.rs | +657 −4 | added `text.wrap`, `text.diff`, `text.dedent`, `text.template`, `text.pad`, `text.align`, their dispatch/signature entries and helpers (kept out of the flat registry so the bare names are not advertised); `dedent` now preserves CRLF line endings rather than rewriting them to LF; padded and aligned output is size-capped and allocated with `try_reserve_exact` using the widest fill character rather than the fill's byte length, and `diff` refuses a line table past its cap; the six utilities are reachable only through the `text` module, and a bare `text_wrap(...)`-style name is refused on both engines. On resume, `wrap` tracks its current line width incrementally instead of recounting every word, so a long word-heavy line is linear rather than quadratic; `diff` now counts lines before materialising them and refuses either text past 1,000,000 lines, so the cell cap cannot be bypassed by a single enormous row vector |
+| tests/text_utilities_test.rs | +779 −0 | twenty-five tests, both-engine comparison, catchable failures and an independent unified-diff reader |
+| SPEC.md | +46 −0 | documented the six operations, width semantics, template delimiters and `dedent` line-ending preservation |
 | README.md | +8 −1 | added the six operations to the Text section |
-| SURVEY.md | +51 −47 | re-anchored `src/stdlib.rs` citations, kept the registry count at 114 with the six module-only utilities outside it, member count 85→91, and recorded the rank-5 padding change |
-| tests/stdlib_module_docs_test.rs | +30 −0 | answerable-builtin rows for the six new module-only names |
+| SURVEY.md | +74 −66 | re-anchored `src/stdlib.rs` citations, kept the registry count at 114 with the six module-only utilities outside it, member count 85→91, and recorded the rank-5 padding change |
+| tests/stdlib_module_docs_test.rs | +34 −2 | answerable-builtin rows for the six new module-only names |
 | tests/doc_blocks_runs.txt, tests/doc_blocks_fragments.txt, tests/doc_blocks_known_fail.txt | +15 −15 | re-anchored SPEC block line keys after the documentation insertions |
 | tests/unreviewed_work_ack_test.rs | +1 −0 | added `resume phase-101:` to the delivery-subject prefixes so the resume commit that carries this phase is acknowledged |
 
@@ -45,9 +45,14 @@ reachable only through the `text` module, so a user declaration such as
 | edge_wrap_collapses_runs_of_spaces_and_keeps_blank_lines | boundary / whitespace runs / blank line |
 | edge_pad_with_a_large_multicharacter_fill_reserves_only_the_output | resource limit / long fill / exact width |
 | edge_the_six_text_utilities_are_reached_only_through_the_text_module | module-only spelling / bare internal name refused / user `wrap` name |
+| edge_text_diff_refuses_a_text_past_the_documented_line_limit | resource limit / line count past 1,000,000 / failure asserted |
+| edge_text_diff_reports_the_line_limit_before_the_cell_limit | resource limit / line check before the cell table / failure asserted |
+| edge_text_diff_accepts_a_large_but_bounded_unbalanced_diff | boundary / a large one-sided diff still produces the standard hunk |
 
-All twenty-two are `#[test]` functions; sixteen are named `edge_*`. Every test that
-can succeed is checked on the tree-walker and the bytecode VM and compared as data.
+All twenty-five are `#[test]` functions; nineteen are named `edge_*`. Every success
+path is checked on the tree-walker and the bytecode VM and compared as data. The
+two oversized-line tests call the shared dispatcher directly, because a
+1,000,001-line source literal would exercise the parser rather than the diff.
 
 ## Test matrix
 
@@ -61,7 +66,7 @@ can succeed is checked on the tree-walker and the bytecode VM and compared as da
 - nesting_recursion — N/A: the utilities operate on flat text; template substitution is a single pass with no recursive evaluation.
 - duplicate_missing_keys — covered: unknown template placeholders are named in a catchable error; repeated placeholders reuse the same field and a literal `>>` is left alone.
 - malformed_input — covered: an unclosed template placeholder, an empty placeholder, an empty pad fill and an unknown alignment side are clean errors, including an unknown side when the text is already past the width; `dedent` preserves CRLF.
-- resource_limit — covered: `wrap`/`pad`/`align` cap the width at 1,000,000 characters, `pad`/`align` reserve their output with `try_reserve_exact` bounded by the widest emitted character rather than the whole fill, and `diff` refuses a line table past 4,000,000 cells. Each refusal is a catchable `RuntimeError` naming the operation; `wrap` also no longer recounts the current line for every word.
+- resource_limit — covered: `wrap`/`pad`/`align` cap the width at 1,000,000 characters, `pad`/`align` reserve their output with `try_reserve_exact` bounded by the widest emitted character rather than the whole fill, and `diff` refuses a line table past 4,000,000 cells. On resume, `diff` also counts lines before materialising them and refuses either text past 1,000,000 lines, so one enormous row vector cannot get past the cell cap. Each refusal is a catchable `RuntimeError` naming the operation; `wrap` also no longer recounts the current line for every word.
 
 ## Gates
 
@@ -69,7 +74,7 @@ can succeed is checked on the tree-walker and the bytecode VM and compared as da
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2461 passed, 0 failed |
+| cargo test --all-targets | 2464 passed, 0 failed |
 | rbops/verify.sh | pass |
 
 ## Invariants touched
@@ -81,7 +86,7 @@ can succeed is checked on the tree-walker and the bytecode VM and compared as da
 - `text.diff` is a standard unified diff with three context lines; it is
   intentionally not a merge or patch tool.
 - Its line table is the usual quadratic-in-lines LCS table, now bounded at
-  4,000,000 cells. That is fine for source-sized texts; a larger pair is refused
-  with a catchable error rather than attempting the allocation. There is still no
-  linear-space fallback, so the cap is the resource limit rather than a claim
-  that the diff is linear.
+  4,000,000 cells and at 1,000,000 lines on either side. That is fine for
+  source-sized texts; a larger pair is refused with a catchable error rather than
+  attempting the allocation. There is still no linear-space fallback, so the caps
+  are the resource limit rather than a claim that the diff is linear.
