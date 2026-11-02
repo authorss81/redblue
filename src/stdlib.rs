@@ -992,7 +992,7 @@ fn text_utility_builtin(
             let [Value::Text(old), Value::Text(new)] = args else {
                 return Err(text_utility_error(span, "diff", "needs two texts"));
             };
-            Value::Text(unified_diff(old, new))
+            Value::Text(unified_diff(span, old, new)?)
         }
         "text_dedent" => {
             let [Value::Text(text)] = args else {
@@ -1042,8 +1042,25 @@ fn text_utility_error(span: crate::error::Span, name: &str, what: &str) -> crate
     crate::error::Error::Runtime(format!("{name}: {what}"), span)
 }
 
-/// Reads a width argument, refusing anything that is not a whole number of at
-/// least one character.
+/// The largest width `text.wrap`, `text.pad` and `text.align` accept.
+///
+/// Padding and alignment allocate a character per column of the gap, so an
+/// unbounded width would let a program ask the host for an arbitrary amount of
+/// memory. A million characters is far beyond any formatting need and small
+/// enough that the allocation is ordinary; a larger width is refused by name
+/// instead of reaching an infallible allocation.
+const MAX_TEXT_UTILITY_WIDTH: usize = 1_000_000;
+
+/// The largest line table `text.diff` will build.
+///
+/// The LCS table costs one `usize` per pair of lines, so the bound is on
+/// `(old + 1) * (new + 1)` rather than on either count alone. Four million
+/// cells is about 32 MiB: enough for ordinary source files, and small enough
+/// that an oversized pair is a catchable error rather than an aborted process.
+const MAX_DIFF_CELLS: usize = 4_000_000;
+
+/// Reads a width argument, refusing anything that is not a whole number between
+/// one character and [`MAX_TEXT_UTILITY_WIDTH`].
 fn text_utility_width(
     span: crate::error::Span,
     name: &str,
@@ -1054,14 +1071,14 @@ fn text_utility_width(
             if number.is_finite()
                 && number.fract() == 0.0
                 && *number >= 1.0
-                && *number <= usize::MAX as f64 =>
+                && *number <= MAX_TEXT_UTILITY_WIDTH as f64 =>
         {
             Ok(*number as usize)
         }
         Value::Number(_) => Err(text_utility_error(
             span,
             name,
-            "the width must be a whole number of at least 1",
+            &format!("the width must be a whole number between 1 and {MAX_TEXT_UTILITY_WIDTH}"),
         )),
         _ => Err(text_utility_error(span, name, "the width must be a number")),
     }
@@ -1163,10 +1180,25 @@ enum DiffStep {
 /// The shape is the one every unified-diff reader knows: `---`/`+++` headers,
 /// `@@ -a,b +c,d @@` hunks with three context lines, and ` `/`+`/`-` prefixed
 /// lines. A line with no final newline carries the standard marker.
-fn unified_diff(old: &str, new: &str) -> String {
+fn unified_diff(span: crate::error::Span, old: &str, new: &str) -> crate::error::Result<String> {
     let old_lines = diff_lines(old);
     let new_lines = diff_lines(new);
     let (old_len, new_len) = (old_lines.len(), new_lines.len());
+
+    let cells = old_len
+        .checked_add(1)
+        .and_then(|old| new_len.checked_add(1).and_then(|new| old.checked_mul(new)))
+        .ok_or_else(|| text_utility_error(span, "diff", "the texts are too large to diff"))?;
+    if cells > MAX_DIFF_CELLS {
+        return Err(text_utility_error(
+            span,
+            "diff",
+            &format!(
+                "the texts are too large to diff: {old_len} and {new_len} lines exceed the \
+                 {MAX_DIFF_CELLS}-cell limit"
+            ),
+        ));
+    }
 
     let mut lengths = vec![vec![0usize; new_len + 1]; old_len + 1];
     for i in (0..old_len).rev() {
@@ -1204,7 +1236,7 @@ fn unified_diff(old: &str, new: &str) -> String {
     }
 
     if steps.iter().all(|step| matches!(step, DiffStep::Equal(_))) {
-        return String::new();
+        return Ok(String::new());
     }
 
     let mut old_before = Vec::with_capacity(steps.len() + 1);
@@ -1289,7 +1321,7 @@ fn unified_diff(old: &str, new: &str) -> String {
         }
     }
 
-    text
+    Ok(text)
 }
 
 /// A unified-diff range: `start` alone when it covers one line, `start,count`
@@ -1308,17 +1340,24 @@ fn diff_range(start: usize, count: usize) -> String {
 /// A blank line does not vote, so indentation around a blank line still
 /// dedents. A non-blank line with no leading whitespace makes the common prefix
 /// empty, which leaves every line exactly as it was rather than stripping some
-/// and not others.
+/// and not others. Line endings are preserved, so CRLF input stays CRLF.
 fn dedent_text(text: &str) -> String {
-    let trailing_newline = text.ends_with('\n');
-    let lines: Vec<&str> = text.lines().collect();
-
+    let pieces: Vec<(&str, &str)> = text
+        .split_inclusive('\n')
+        .map(|piece| match piece.strip_suffix('\n') {
+            Some(content) => match content.strip_suffix('\r') {
+                Some(content) => (content, "\r\n"),
+                None => (content, "\n"),
+            },
+            None => (piece, ""),
+        })
+        .collect();
     let mut prefix: Option<String> = None;
-    for line in &lines {
-        if line.trim().is_empty() {
+    for (content, _) in &pieces {
+        if content.trim().is_empty() {
             continue;
         }
-        let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+        let leading: String = content.chars().take_while(|c| c.is_whitespace()).collect();
         prefix = Some(match prefix {
             None => leading,
             Some(current) => common_prefix(&current, &leading),
@@ -1326,19 +1365,13 @@ fn dedent_text(text: &str) -> String {
     }
     let prefix = prefix.unwrap_or_default();
 
-    let mut result = lines
+    pieces
         .iter()
-        .map(|line| match line.strip_prefix(&prefix) {
-            Some(rest) => rest.to_string(),
-            None => (*line).to_string(),
+        .map(|&(content, ending)| {
+            let body = content.strip_prefix(&prefix).unwrap_or(content);
+            format!("{body}{ending}")
         })
-        .collect::<Vec<String>>()
-        .join("\n");
-
-    if trailing_newline {
-        result.push('\n');
-    }
-    result
+        .collect()
 }
 
 /// The longest prefix two strings share.
@@ -1406,6 +1439,41 @@ fn template_text(
     Ok(result)
 }
 
+/// Builds `left` copies of `fill`, then `text`, then `right` copies of `fill`.
+///
+/// The capacity is reserved with [`String::try_reserve_exact`] so a request the
+/// host cannot satisfy is a named `RuntimeError` rather than an abort, and the
+/// copies are written one character at a time so the loop is bounded by the
+/// already-capped padding counts.
+fn padded_text(
+    span: crate::error::Span,
+    name: &str,
+    text: &str,
+    left: usize,
+    right: usize,
+    fill: &str,
+) -> crate::error::Result<String> {
+    let bytes = left
+        .checked_add(right)
+        .and_then(|count| count.checked_mul(fill.len()))
+        .and_then(|padding| padding.checked_add(text.len()))
+        .ok_or_else(|| {
+            text_utility_error(span, name, "the padded text is too large to allocate")
+        })?;
+    let mut result = String::new();
+    result
+        .try_reserve_exact(bytes)
+        .map_err(|_| text_utility_error(span, name, "the padded text is too large to allocate"))?;
+    for character in fill.chars().cycle().take(left) {
+        result.push(character);
+    }
+    result.push_str(text);
+    for character in fill.chars().cycle().take(right) {
+        result.push(character);
+    }
+    Ok(result)
+}
+
 /// Right-pads `text` to `width` characters with repeated `fill`.
 fn pad_text(
     span: crate::error::Span,
@@ -1421,14 +1489,15 @@ fn pad_text(
         ));
     }
     let current = text.chars().count();
-    if current >= width {
-        return Ok(text.to_string());
-    }
-    let padding: String = fill.chars().cycle().take(width - current).collect();
-    Ok(format!("{text}{padding}"))
+    let needed = width.saturating_sub(current);
+    padded_text(span, "pad", text, 0, needed, fill)
 }
 
 /// Pads `text` to `width` characters on the named side.
+///
+/// The side is validated before the width short-circuit so a text already at or
+/// past the width still refuses an unknown side rather than answering it
+/// unchanged.
 fn align_text(
     span: crate::error::Span,
     text: &str,
@@ -1436,20 +1505,13 @@ fn align_text(
     side: &str,
 ) -> crate::error::Result<String> {
     let current = text.chars().count();
-    if current >= width {
-        return Ok(text.to_string());
-    }
-    let needed = width - current;
+    let needed = width.saturating_sub(current);
     match side {
-        "left" => Ok(format!("{text}{}", " ".repeat(needed))),
-        "right" => Ok(format!("{}{text}", " ".repeat(needed))),
+        "left" => padded_text(span, "align", text, 0, needed, " "),
+        "right" => padded_text(span, "align", text, needed, 0, " "),
         "center" => {
             let left = needed / 2;
-            Ok(format!(
-                "{}{text}{}",
-                " ".repeat(left),
-                " ".repeat(needed - left)
-            ))
+            padded_text(span, "align", text, left, needed - left, " ")
         }
         _ => Err(text_utility_error(
             span,

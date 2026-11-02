@@ -455,4 +455,106 @@ fn edge_a_bad_text_utility_argument_is_a_catchable_error_named_by_the_function()
         &format!("text.align({}, 3, {})", rb_text("x"), rb_text("sideways")),
         "align",
     );
+    both_refuse(
+        &format!("text.align({}, 2, {})", rb_text("abc"), rb_text("sideways")),
+        "align",
+    );
+}
+
+#[test]
+fn edge_text_utilities_refuse_widths_past_the_documented_limit_on_both_engines() {
+    for source in [
+        format!("text.wrap({}, 10000000000000000000)", rb_text("x")),
+        format!(
+            "text.pad({}, 10000000000000000000, {})",
+            rb_text("x"),
+            rb_text(".")
+        ),
+        format!(
+            "text.align({}, 10000000000000000000, {})",
+            rb_text("x"),
+            rb_text("left")
+        ),
+    ] {
+        let walked = redblue::run_source_value(&source);
+        assert!(
+            walked.is_err(),
+            "the tree-walker must refuse a width past the limit: {source}"
+        );
+
+        let chunk = compile_source(&source).expect("the call shape should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm.run(&chunk);
+        assert!(
+            compiled.is_err(),
+            "the bytecode VM must refuse a width past the limit: {source}"
+        );
+    }
+}
+
+#[test]
+fn edge_text_diff_refuses_a_line_table_past_the_documented_limit_on_both_engines() {
+    let old = "a\n".repeat(3000);
+    let new = "b\n".repeat(3000);
+    both_refuse(
+        &format!("text.diff({}, {})", rb_text(&old), rb_text(&new)),
+        "diff",
+    );
+}
+
+#[test]
+fn dedent_preserves_crlf_line_endings_while_removing_the_common_prefix() {
+    assert_eq!(
+        both(&format!(
+            "text.dedent({})",
+            rb_text("    alpha\r\n    beta\r\n")
+        )),
+        Value::Text("alpha\r\nbeta\r\n".to_string()),
+        "dedent removes indentation without rewriting CRLF line endings"
+    );
+}
+
+#[test]
+fn edge_dedent_handles_blank_lines_tabs_and_no_final_newline() {
+    assert_eq!(
+        both(&format!(
+            "text.dedent({})",
+            rb_text("    alpha\n\n    beta")
+        )),
+        Value::Text("alpha\n\nbeta".to_string()),
+        "a blank line does not vote and a missing final newline is preserved"
+    );
+    assert_eq!(
+        both(&format!("text.dedent({})", rb_text("\t\tone\r\n\t\ttwo"))),
+        Value::Text("one\r\ntwo".to_string()),
+        "tabs are indentation and CRLF without a final newline is preserved"
+    );
+    assert_eq!(
+        both(&format!("text.dedent({})", rb_text("  \r\n  \r\n"))),
+        Value::Text("  \r\n  \r\n".to_string()),
+        "text made only of blank lines is left unchanged"
+    );
+}
+
+#[test]
+fn edge_text_utilities_refuse_invalid_widths_and_sides_on_both_engines() {
+    for source in [
+        format!("text.wrap({}, 0)", rb_text("x")),
+        format!("text.pad({}, 0, {})", rb_text("x"), rb_text(".")),
+        format!("text.align({}, 2, {})", rb_text("x"), rb_text("middle")),
+    ] {
+        let walked = redblue::run_source_value(&source);
+        assert!(
+            walked.is_err(),
+            "the tree-walker must refuse an invalid text utility argument: {source}"
+        );
+
+        let chunk = compile_source(&source).expect("the call shape should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm.run(&chunk);
+        assert!(
+            compiled.is_err(),
+            "the bytecode VM must refuse an invalid text utility argument: {source}"
+        );
+    }
 }

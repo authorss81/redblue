@@ -1270,19 +1270,19 @@ next line whole; only a word that is itself longer than the width is broken, int
 width-sized pieces, so every line the function answers is within the width.
 Existing newlines start a new line, CRLF is read as a line ending, and an empty
 text wraps to an empty list. The width is a whole number of characters, at least
-1; anything else is a catchable `RuntimeError` naming `wrap`.
+1 and at most 1,000,000; anything else is a catchable `RuntimeError` naming `wrap`.
 
 `diff` answers a **standard unified diff** between its two texts, with
 `--- original` and `+++ changed` headers and three lines of context around each
 change. Identical texts answer the empty text. A text whose last line has no
 newline is written with the standard `\ No newline at end of file` marker, so
-the output can be applied by any unified-diff reader rather than only by
-Redblue.
+the output can be applied by any unified-diff reader. Texts whose line counts
+multiply past 4,000,000 are refused with a catchable `RuntimeError` naming `diff`.
 
 `dedent` removes the longest leading whitespace that every non-blank line
 shares. A blank line does not vote, and a non-blank line with no leading
 whitespace makes the shared prefix empty, which leaves every line exactly as it
-was.
+was. Line endings are preserved, so CRLF input stays CRLF.
 
 `template` replaces `<<name>>` placeholders with fields of its record. The
 delimiters are literal text rather than braces because `{…}` already means
@@ -1295,9 +1295,9 @@ inserted without quotes and a number as its number.
 `pad` right-pads a text to a width with a fill of one or more characters, and
 `align` pads to a width on the named side: `"left"`, `"right"` or `"center"`.
 Both count **characters**, not bytes, so padding `"é"` to 3 adds two characters
-and padding `"日本"` to 5 adds three, regardless of their UTF-8 length. Text
-already at or past the width is answered unchanged. An empty fill and an
-unknown side are catchable errors naming the function.
+and padding `"日本"` to 5 adds three, regardless of their UTF-8 length. A width
+past 1,000,000 is refused, and text already at or past the width is answered
+unchanged. An empty fill and an unknown side are catchable errors naming the function.
 
 These six are spelled as module members only — `text.wrap`, `text.diff` and the rest — so a
 bare `wrap(x, n)` remains an ordinary name a program may declare. The earlier text functions keep their flat spellings.
