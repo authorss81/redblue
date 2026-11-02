@@ -2431,6 +2431,10 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "sys_argv",
         "sys_argv() -> the arguments the program was run with",
     ),
+    (
+        "sys_parse",
+        "sys_parse(declaration) -> a record of typed flags, arguments, help and usage\nsys_parse(declaration, arguments) -> the same, reading the given argument list",
+    ),
     ("input", "input() -> the next line typed, as text"),
 ];
 

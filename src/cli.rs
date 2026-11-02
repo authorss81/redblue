@@ -105,16 +105,40 @@ pub fn parse(declaration: &Value, argv: &[String], span: Span) -> Result<Value> 
                     Some(value) => value.to_string(),
                     None => {
                         index += 1;
-                        argv.get(index).cloned().ok_or_else(|| {
-                            Error::Runtime(
-                                format!(
-                                    "Flag '--{}' needs a value of type {}",
-                                    flag.name,
-                                    flag.kind.name()
-                                ),
+                        let next = argv
+                            .get(index)
+                            .cloned()
+                            .ok_or_else(|| missing_value(flag, span))?;
+                        // Help is a request about the declaration, even when
+                        // it appears where a value was expected: `--count
+                        // --help` answers the generated usage rather than
+                        // complaining that count is missing.
+                        if next == "--help" || next == "-h" {
+                            return build_record(
+                                &flags,
+                                &given,
+                                positionals,
+                                true,
+                                &usage,
                                 span,
-                            )
-                        })?
+                                false,
+                            );
+                        }
+                        // A flag's value is the next token even when it starts
+                        // with `-`, so a negative number still parses. What is
+                        // not a value is another flag: `--count --verbose`
+                        // should say the count is missing, not that
+                        // `--verbose` is not a number.
+                        if next == "--" || names_declared_flag(&next, &flags) {
+                            return Err(missing_value(flag, span));
+                        }
+                        // An undeclared `--name` in value position is a typo,
+                        // not a value: reporting it as one keeps a text flag
+                        // from silently storing `--bogus` as its text.
+                        if let Some(name) = flag_name(&next) {
+                            return Err(Error::Runtime(format!("Unknown flag '--{name}'"), span));
+                        }
+                        next
                     }
                 };
                 let value = from_text(flag, &text, span)?;
@@ -338,7 +362,7 @@ fn parse_kind(kind: &str) -> Option<Kind> {
     match kind {
         "text" => Some(Kind::Text),
         "number" => Some(Kind::Number),
-        "yes/no" | "boolean" => Some(Kind::YesNo),
+        "yes/no" => Some(Kind::YesNo),
         "path" => Some(Kind::Path),
         _ => None,
     }
@@ -416,6 +440,29 @@ fn default_error(name: &str, kind: Kind, value: &Value, span: Span) -> Error {
         ),
         span,
     )
+}
+
+/// The failure for a value-taking flag with no value after it.
+fn missing_value(flag: &Flag, span: Span) -> Error {
+    Error::Runtime(
+        format!(
+            "Flag '--{}' needs a value of type {}",
+            flag.name,
+            flag.kind.name()
+        ),
+        span,
+    )
+}
+
+/// The name in a `--name` or `--name=value` token, if it has one.
+fn flag_name(token: &str) -> Option<&str> {
+    let rest = token.strip_prefix("--")?;
+    Some(rest.split_once('=').map(|(name, _)| name).unwrap_or(rest))
+}
+
+/// Whether `token` is `--name` or `--name=value` for a flag in the declaration.
+fn names_declared_flag(token: &str, flags: &[Flag]) -> bool {
+    flag_name(token).is_some_and(|name| flags.iter().any(|flag| flag.name == name))
 }
 
 /// Builds the record a program receives.
