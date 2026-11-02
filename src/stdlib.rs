@@ -158,6 +158,12 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "starts_with",
             "ends_with",
             "replace",
+            "wrap",
+            "diff",
+            "dedent",
+            "template",
+            "pad",
+            "align",
             // `length` is registered flat and both documents write it both ways —
             // SPEC.md § text and README.md § Text and § List — so `text.length`
             // and `list.length` are spellings a program may write. Naming them is
@@ -411,6 +417,16 @@ pub fn builtins() -> HashMap<String, Value> {
         Value::Builtin("ends_with".to_string()),
     );
     globals.insert("replace".to_string(), Value::Builtin("replace".to_string()));
+    for name in [
+        "text_wrap",
+        "text_diff",
+        "text_dedent",
+        "text_template",
+        "text_pad",
+        "text_align",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
 
     // List functions
     globals.insert("length".to_string(), Value::Builtin("length".to_string()));
@@ -919,6 +935,9 @@ pub fn builtin(
     ) {
         return regex_builtin(span, name, args).map(Some);
     }
+    if let Some(value) = text_utility_builtin(span, name, args)? {
+        return Ok(Some(value));
+    }
     match builtin_function(name, args.to_vec()) {
         // `Value::Nothing` out of `builtin_function` means the builtin ran and
         // has no answer to give — `sqrt` of a negative, `log` of zero, an
@@ -942,6 +961,563 @@ pub fn builtin(
             span,
         )),
         None => Ok(None),
+    }
+}
+
+/// The text utilities that formatting, templates and diffs need.
+///
+/// They live in one dispatcher because they all fail by name: an unknown
+/// placeholder, a width that is not a whole number and a fill of no characters
+/// are all `RuntimeError`s a program can catch with `try`, not `Unknown
+/// function` messages about a name the language has.
+fn text_utility_builtin(
+    span: crate::error::Span,
+    name: &str,
+    args: &[Value],
+) -> crate::error::Result<Option<Value>> {
+    let answer = match name {
+        "text_wrap" => {
+            let [Value::Text(text), width] = args else {
+                return Err(text_utility_error(span, "wrap", "needs text and a width"));
+            };
+            let width = text_utility_width(span, "wrap", width)?;
+            Value::list(
+                wrap_text(text, width)
+                    .into_iter()
+                    .map(Value::Text)
+                    .collect(),
+            )
+        }
+        "text_diff" => {
+            let [Value::Text(old), Value::Text(new)] = args else {
+                return Err(text_utility_error(span, "diff", "needs two texts"));
+            };
+            Value::Text(unified_diff(span, old, new)?)
+        }
+        "text_dedent" => {
+            let [Value::Text(text)] = args else {
+                return Err(text_utility_error(span, "dedent", "needs one text"));
+            };
+            Value::Text(dedent_text(text))
+        }
+        "text_template" => {
+            let [Value::Text(template), Value::Record(values)] = args else {
+                return Err(text_utility_error(
+                    span,
+                    "template",
+                    "needs a text and a record of values",
+                ));
+            };
+            Value::Text(template_text(span, template, values)?)
+        }
+        "text_pad" => {
+            let [Value::Text(text), width, Value::Text(fill)] = args else {
+                return Err(text_utility_error(
+                    span,
+                    "pad",
+                    "needs text, a width and a fill",
+                ));
+            };
+            let width = text_utility_width(span, "pad", width)?;
+            Value::Text(pad_text(span, text, width, fill)?)
+        }
+        "text_align" => {
+            let [Value::Text(text), width, Value::Text(side)] = args else {
+                return Err(text_utility_error(
+                    span,
+                    "align",
+                    "needs text, a width and a side",
+                ));
+            };
+            let width = text_utility_width(span, "align", width)?;
+            Value::Text(align_text(span, text, width, side)?)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(answer))
+}
+
+/// A named refusal from one of the text utilities.
+fn text_utility_error(span: crate::error::Span, name: &str, what: &str) -> crate::error::Error {
+    crate::error::Error::Runtime(format!("{name}: {what}"), span)
+}
+
+/// The largest width `text.wrap`, `text.pad` and `text.align` accept.
+///
+/// Padding and alignment allocate a character per column of the gap, so an
+/// unbounded width would let a program ask the host for an arbitrary amount of
+/// memory. A million characters is far beyond any formatting need and small
+/// enough that the allocation is ordinary; a larger width is refused by name
+/// instead of reaching an infallible allocation.
+const MAX_TEXT_UTILITY_WIDTH: usize = 1_000_000;
+
+/// The largest line table `text.diff` will build.
+///
+/// The LCS table costs one `usize` per pair of lines, so the bound is on
+/// `(old + 1) * (new + 1)` rather than on either count alone. Four million
+/// cells is about 32 MiB: enough for ordinary source files, and small enough
+/// that an oversized pair is a catchable error rather than an aborted process.
+const MAX_DIFF_CELLS: usize = 4_000_000;
+
+/// Reads a width argument, refusing anything that is not a whole number between
+/// one character and [`MAX_TEXT_UTILITY_WIDTH`].
+fn text_utility_width(
+    span: crate::error::Span,
+    name: &str,
+    value: &Value,
+) -> crate::error::Result<usize> {
+    match value {
+        Value::Number(number)
+            if number.is_finite()
+                && number.fract() == 0.0
+                && *number >= 1.0
+                && *number <= MAX_TEXT_UTILITY_WIDTH as f64 =>
+        {
+            Ok(*number as usize)
+        }
+        Value::Number(_) => Err(text_utility_error(
+            span,
+            name,
+            &format!("the width must be a whole number between 1 and {MAX_TEXT_UTILITY_WIDTH}"),
+        )),
+        _ => Err(text_utility_error(span, name, "the width must be a number")),
+    }
+}
+
+/// Wraps `text` into lines no longer than `width` characters.
+///
+/// Words are moved whole to the next line. A single word longer than the width
+/// has no line it can fit on, so it alone is broken into width-sized pieces;
+/// every word that can fit somewhere is never split. Existing newlines start a
+/// new output line and CRLF is read as a line ending rather than as content.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    let mut lines = Vec::new();
+
+    for raw in body.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.trim().is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        for word in line.split_whitespace() {
+            let word_width = word.chars().count();
+            if word_width > width {
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                }
+                let characters: Vec<char> = word.chars().collect();
+                for piece in characters.chunks(width) {
+                    lines.push(piece.iter().collect());
+                }
+                continue;
+            }
+
+            let current_width = current.chars().count();
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current_width + 1 + word_width <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+
+    lines
+}
+
+/// One line of a text, with whether it ended in a newline.
+///
+/// The flag is part of the line's identity: `a` and `a\n` are different lines
+/// to a diff, which is why a text with no final newline carries the standard
+/// `\ No newline at end of file` marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffLine {
+    text: String,
+    has_newline: bool,
+}
+
+/// Splits `text` into the lines a unified diff counts.
+fn diff_lines(text: &str) -> Vec<DiffLine> {
+    text.split_inclusive('\n')
+        .map(|chunk| match chunk.strip_suffix('\n') {
+            Some(line) => DiffLine {
+                text: line.to_string(),
+                has_newline: true,
+            },
+            None => DiffLine {
+                text: chunk.to_string(),
+                has_newline: false,
+            },
+        })
+        .collect()
+}
+
+/// One step of the edit script: a line both texts share, or one only `old` or
+/// only `new` has.
+#[derive(Debug, Clone, Copy)]
+enum DiffStep {
+    Equal(usize),
+    Delete(usize),
+    Insert(usize),
+}
+
+/// A standard unified diff between `old` and `new`, or the empty text when they
+/// are equal.
+///
+/// The shape is the one every unified-diff reader knows: `---`/`+++` headers,
+/// `@@ -a,b +c,d @@` hunks with three context lines, and ` `/`+`/`-` prefixed
+/// lines. A line with no final newline carries the standard marker.
+fn unified_diff(span: crate::error::Span, old: &str, new: &str) -> crate::error::Result<String> {
+    let old_lines = diff_lines(old);
+    let new_lines = diff_lines(new);
+    let (old_len, new_len) = (old_lines.len(), new_lines.len());
+
+    let cells = old_len
+        .checked_add(1)
+        .and_then(|old| new_len.checked_add(1).and_then(|new| old.checked_mul(new)))
+        .ok_or_else(|| text_utility_error(span, "diff", "the texts are too large to diff"))?;
+    if cells > MAX_DIFF_CELLS {
+        return Err(text_utility_error(
+            span,
+            "diff",
+            &format!(
+                "the texts are too large to diff: {old_len} and {new_len} lines exceed the \
+                 {MAX_DIFF_CELLS}-cell limit"
+            ),
+        ));
+    }
+
+    let mut lengths = vec![vec![0usize; new_len + 1]; old_len + 1];
+    for i in (0..old_len).rev() {
+        for j in (0..new_len).rev() {
+            lengths[i][j] = if old_lines[i] == new_lines[j] {
+                lengths[i + 1][j + 1] + 1
+            } else {
+                lengths[i + 1][j].max(lengths[i][j + 1])
+            };
+        }
+    }
+
+    let mut steps = Vec::with_capacity(old_len + new_len);
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < old_len && j < new_len {
+        if old_lines[i] == new_lines[j] {
+            steps.push(DiffStep::Equal(i));
+            i += 1;
+            j += 1;
+        } else if lengths[i + 1][j] >= lengths[i][j + 1] {
+            steps.push(DiffStep::Delete(i));
+            i += 1;
+        } else {
+            steps.push(DiffStep::Insert(j));
+            j += 1;
+        }
+    }
+    while i < old_len {
+        steps.push(DiffStep::Delete(i));
+        i += 1;
+    }
+    while j < new_len {
+        steps.push(DiffStep::Insert(j));
+        j += 1;
+    }
+
+    if steps.iter().all(|step| matches!(step, DiffStep::Equal(_))) {
+        return Ok(String::new());
+    }
+
+    let mut old_before = Vec::with_capacity(steps.len() + 1);
+    let mut new_before = Vec::with_capacity(steps.len() + 1);
+    let (mut old_seen, mut new_seen) = (0usize, 0usize);
+    for step in &steps {
+        old_before.push(old_seen);
+        new_before.push(new_seen);
+        match step {
+            DiffStep::Equal(_) => {
+                old_seen += 1;
+                new_seen += 1;
+            }
+            DiffStep::Delete(_) => old_seen += 1,
+            DiffStep::Insert(_) => new_seen += 1,
+        }
+    }
+    old_before.push(old_seen);
+    new_before.push(new_seen);
+
+    let changes: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| match step {
+            DiffStep::Equal(_) => None,
+            DiffStep::Delete(_) | DiffStep::Insert(_) => Some(index),
+        })
+        .collect();
+
+    let mut text = String::from("--- original\n+++ changed\n");
+    let mut cursor = 0usize;
+    while cursor < changes.len() {
+        let start = changes[cursor].saturating_sub(3);
+        let mut end = (changes[cursor] + 4).min(steps.len());
+        cursor += 1;
+        while cursor < changes.len() {
+            let next_start = changes[cursor].saturating_sub(3);
+            if next_start > end {
+                break;
+            }
+            end = end.max((changes[cursor] + 4).min(steps.len()));
+            cursor += 1;
+        }
+
+        let old_count = steps[start..end]
+            .iter()
+            .filter(|step| matches!(step, DiffStep::Equal(_) | DiffStep::Delete(_)))
+            .count();
+        let new_count = steps[start..end]
+            .iter()
+            .filter(|step| matches!(step, DiffStep::Equal(_) | DiffStep::Insert(_)))
+            .count();
+        let old_start = if old_count == 0 {
+            old_before[start]
+        } else {
+            old_before[start] + 1
+        };
+        let new_start = if new_count == 0 {
+            new_before[start]
+        } else {
+            new_before[start] + 1
+        };
+
+        text.push_str(&format!(
+            "@@ -{} +{} @@\n",
+            diff_range(old_start, old_count),
+            diff_range(new_start, new_count)
+        ));
+
+        for step in &steps[start..end] {
+            let (prefix, line) = match step {
+                DiffStep::Equal(old_index) => (' ', &old_lines[*old_index]),
+                DiffStep::Delete(old_index) => ('-', &old_lines[*old_index]),
+                DiffStep::Insert(new_index) => ('+', &new_lines[*new_index]),
+            };
+            text.push(prefix);
+            text.push_str(&line.text);
+            text.push('\n');
+            if !line.has_newline {
+                text.push_str("\\ No newline at end of file\n");
+            }
+        }
+    }
+
+    Ok(text)
+}
+
+/// A unified-diff range: `start` alone when it covers one line, `start,count`
+/// otherwise. A zero-length range starts at the line before it, as the format
+/// requires.
+fn diff_range(start: usize, count: usize) -> String {
+    if count == 1 {
+        start.to_string()
+    } else {
+        format!("{start},{count}")
+    }
+}
+
+/// Removes the longest leading whitespace every non-blank line shares.
+///
+/// A blank line does not vote, so indentation around a blank line still
+/// dedents. A non-blank line with no leading whitespace makes the common prefix
+/// empty, which leaves every line exactly as it was rather than stripping some
+/// and not others. Line endings are preserved, so CRLF input stays CRLF.
+fn dedent_text(text: &str) -> String {
+    let pieces: Vec<(&str, &str)> = text
+        .split_inclusive('\n')
+        .map(|piece| match piece.strip_suffix('\n') {
+            Some(content) => match content.strip_suffix('\r') {
+                Some(content) => (content, "\r\n"),
+                None => (content, "\n"),
+            },
+            None => (piece, ""),
+        })
+        .collect();
+    let mut prefix: Option<String> = None;
+    for (content, _) in &pieces {
+        if content.trim().is_empty() {
+            continue;
+        }
+        let leading: String = content.chars().take_while(|c| c.is_whitespace()).collect();
+        prefix = Some(match prefix {
+            None => leading,
+            Some(current) => common_prefix(&current, &leading),
+        });
+    }
+    let prefix = prefix.unwrap_or_default();
+
+    pieces
+        .iter()
+        .map(|&(content, ending)| {
+            let body = content.strip_prefix(&prefix).unwrap_or(content);
+            format!("{body}{ending}")
+        })
+        .collect()
+}
+
+/// The longest prefix two strings share.
+fn common_prefix(left: &str, right: &str) -> String {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a)
+        .collect()
+}
+
+/// Substitutes `<<name>>` placeholders in `template` from `values`.
+///
+/// The delimiters are literal text rather than braces because Redblue strings
+/// already use `{…}` for interpolation, so a template written as `{{name}}`
+/// would be read as an interpolated expression before this function ever saw
+/// it. `<<<<` writes the opening delimiter literally, which is the one escape
+/// a template needs: `>>` outside a placeholder is already literal text.
+fn template_text(
+    span: crate::error::Span,
+    template: &str,
+    values: &Fields,
+) -> crate::error::Result<String> {
+    let mut result = String::new();
+    let mut rest = template;
+
+    while let Some(open) = rest.find("<<") {
+        result.push_str(&rest[..open]);
+        let after_open = &rest[open..];
+
+        if let Some(stripped) = after_open.strip_prefix("<<<<") {
+            result.push_str("<<");
+            rest = stripped;
+            continue;
+        }
+
+        let after = &after_open[2..];
+        let Some(close) = after.find(">>") else {
+            return Err(text_utility_error(
+                span,
+                "template",
+                "a placeholder has no closing '>>'",
+            ));
+        };
+        let name = after[..close].trim();
+        if name.is_empty() {
+            return Err(text_utility_error(
+                span,
+                "template",
+                "a placeholder has no name",
+            ));
+        }
+        let Some(value) = values.get(name) else {
+            return Err(text_utility_error(
+                span,
+                "template",
+                &format!("unknown placeholder '{name}'"),
+            ));
+        };
+        result.push_str(&value.to_string());
+        rest = &after[close + 2..];
+    }
+
+    result.push_str(rest);
+    Ok(result)
+}
+
+/// Builds `left` copies of `fill`, then `text`, then `right` copies of `fill`.
+///
+/// The capacity is reserved with [`String::try_reserve_exact`] so a request the
+/// host cannot satisfy is a named `RuntimeError` rather than an abort, and the
+/// copies are written one character at a time so the loop is bounded by the
+/// already-capped padding counts.
+fn padded_text(
+    span: crate::error::Span,
+    name: &str,
+    text: &str,
+    left: usize,
+    right: usize,
+    fill: &str,
+) -> crate::error::Result<String> {
+    let bytes = left
+        .checked_add(right)
+        .and_then(|count| count.checked_mul(fill.len()))
+        .and_then(|padding| padding.checked_add(text.len()))
+        .ok_or_else(|| {
+            text_utility_error(span, name, "the padded text is too large to allocate")
+        })?;
+    let mut result = String::new();
+    result
+        .try_reserve_exact(bytes)
+        .map_err(|_| text_utility_error(span, name, "the padded text is too large to allocate"))?;
+    for character in fill.chars().cycle().take(left) {
+        result.push(character);
+    }
+    result.push_str(text);
+    for character in fill.chars().cycle().take(right) {
+        result.push(character);
+    }
+    Ok(result)
+}
+
+/// Right-pads `text` to `width` characters with repeated `fill`.
+fn pad_text(
+    span: crate::error::Span,
+    text: &str,
+    width: usize,
+    fill: &str,
+) -> crate::error::Result<String> {
+    if fill.is_empty() {
+        return Err(text_utility_error(
+            span,
+            "pad",
+            "the fill must be at least one character",
+        ));
+    }
+    let current = text.chars().count();
+    let needed = width.saturating_sub(current);
+    padded_text(span, "pad", text, 0, needed, fill)
+}
+
+/// Pads `text` to `width` characters on the named side.
+///
+/// The side is validated before the width short-circuit so a text already at or
+/// past the width still refuses an unknown side rather than answering it
+/// unchanged.
+fn align_text(
+    span: crate::error::Span,
+    text: &str,
+    width: usize,
+    side: &str,
+) -> crate::error::Result<String> {
+    let current = text.chars().count();
+    let needed = width.saturating_sub(current);
+    match side {
+        "left" => padded_text(span, "align", text, 0, needed, " "),
+        "right" => padded_text(span, "align", text, needed, 0, " "),
+        "center" => {
+            let left = needed / 2;
+            padded_text(span, "align", text, left, needed - left, " ")
+        }
+        _ => Err(text_utility_error(
+            span,
+            "align",
+            "the side must be left, right or center",
+        )),
     }
 }
 
@@ -1297,6 +1873,12 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "starts_with",
     "ends_with",
     "replace",
+    "text_wrap",
+    "text_diff",
+    "text_dedent",
+    "text_template",
+    "text_pad",
+    "text_align",
     "length",
     "push",
     "append",
@@ -1449,6 +2031,30 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     (
         "replace",
         "replace(text, from, to) -> text; an empty `from` has no answer",
+    ),
+    (
+        "text_wrap",
+        "wrap(text, number) -> a list of lines no longer than the width, breaking a word only when it alone is too long",
+    ),
+    (
+        "text_diff",
+        "diff(old text, new text) -> a standard unified diff, empty when the texts are equal",
+    ),
+    (
+        "text_dedent",
+        "dedent(text) -> text with the common leading whitespace of its non-blank lines removed",
+    ),
+    (
+        "text_template",
+        "template(text, record) -> text with <<name>> placeholders replaced; <<<< writes a literal <<",
+    ),
+    (
+        "text_pad",
+        "pad(text, number, text) -> text right-padded to the width with the fill",
+    ),
+    (
+        "text_align",
+        "align(text, number, text) -> text padded to the width on the named side: left, right or center",
     ),
     (
         "length",
