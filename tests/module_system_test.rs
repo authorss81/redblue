@@ -378,3 +378,632 @@ fn import_alias_accepts_the_older_to_spelling() {
         "a multi-import with an alias on the second name should resolve both"
     );
 }
+
+/// Declared command-line flags: `sys.parse` and the `Cli` module.
+///
+/// `sys.argv()` was the whole of the command-line surface, so every program
+/// that wanted a flag wrote the same loop and its own usage text. `sys.parse`
+/// takes a list of flag records, reads `sys.argv()` (or an explicit argument
+/// list), and answers a record of typed fields. The declaration is the only
+/// place a flag is named, so the parser and the usage text cannot disagree.
+mod cli_flags {
+    use std::path::Path;
+
+    use super::*;
+
+    fn cli_root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// What both engines made of a program: the value or failure, and the lines
+    /// printed. Every CLI case runs through this, so a tree-walking answer that
+    /// the bytecode VM does not share fails the test rather than passing half
+    /// the contract.
+    struct CliRun {
+        result: Result<Value, Error>,
+        output: Vec<String>,
+    }
+
+    #[track_caller]
+    fn cli_ran(source: &str) -> CliRun {
+        let tokens = redblue::lexer::Lexer::tokenize(source).expect("source should lex");
+        let ast = redblue::parser::parse(tokens).expect("source should parse");
+        redblue::analyzer::analyze_in(&ast, cli_root()).expect("source should analyze");
+
+        let (mut walker, walked) = redblue::run_isolated_in(&ast, cli_root());
+        let walked_output = walker.take_output();
+
+        let chunk = redblue::bytecode::compile_program(&ast)
+            .unwrap_or_else(|error| panic!("`{source}` should compile, failed with {error:?}"));
+        let mut vm = redblue::bytecode::vm::BytecodeVm::new_in(cli_root());
+        vm.set_echo(false);
+        let compiled = vm.run(&chunk);
+        let compiled_output = vm.take_output();
+
+        match (&walked, &compiled) {
+            (Ok(walked_value), Ok(compiled_value)) => assert_eq!(
+                walked_value, compiled_value,
+                "the two engines answered differently for `{source}`"
+            ),
+            (Err(walked_error), Err(compiled_error)) => assert_eq!(
+                format!("{}: {}", walked_error.label(), walked_error.message()),
+                format!("{}: {}", compiled_error.label(), compiled_error.message()),
+                "the two engines failed differently for `{source}`"
+            ),
+            _ => panic!(
+                "the two engines disagree about `{source}`: walked {walked:?}, compiled {compiled:?}"
+            ),
+        }
+        assert_eq!(
+            walked_output, compiled_output,
+            "the two engines printed different lines for `{source}`"
+        );
+
+        CliRun {
+            result: walked,
+            output: walked_output,
+        }
+    }
+
+    #[track_caller]
+    fn cli_eval(source: &str) -> Value {
+        cli_ran(source)
+            .result
+            .unwrap_or_else(|error| panic!("`{source}` should have run, failed with {error:?}"))
+    }
+
+    #[track_caller]
+    fn cli_eval_err(source: &str) -> Error {
+        cli_ran(source)
+            .result
+            .expect_err("`source` should have failed")
+    }
+
+    #[track_caller]
+    fn cli_assert_runtime_error(source: &str, expected: &str) {
+        match cli_eval_err(source) {
+            Error::Runtime(message, span) => {
+                assert_eq!(
+                    message, expected,
+                    "`{source}` failed with the wrong message"
+                );
+                assert!(span.is_known(), "`{source}` failed without a source span");
+            }
+            other => panic!("`{source}` should fail with a Runtime error, got {other:?}"),
+        }
+    }
+
+    /// Runs `source` and answers the lines it printed, asserting the run succeeded.
+    #[track_caller]
+    fn cli_output(source: &str) -> Vec<String> {
+        let run = cli_ran(source);
+        run.result
+            .unwrap_or_else(|error| panic!("`{source}` should have run, failed with {error:?}"));
+        run.output
+    }
+
+    #[track_caller]
+    fn cli_field<'a>(record: &'a Value, name: &str) -> &'a Value {
+        let Value::Record(fields) = record else {
+            panic!("expected a record, got {}", record.type_name());
+        };
+        fields
+            .get(name)
+            .unwrap_or_else(|| panic!("the record should have a `{name}` field"))
+    }
+
+    /// The headline claim: one declaration gives typed, defaulted fields, and
+    /// the parser handles a repeated flag (last wins) and a flag after a
+    /// positional.
+    #[test]
+    fn declared_flags_parse_into_a_typed_record() {
+        let parsed = cli_eval(
+            "set options to [{name: \"output\", type: \"text\", default: \"out.txt\"}, {name: \"count\", type: \"number\", required: yes}, {name: \"verbose\", type: \"yes/no\"}]\n\
+             set parsed to sys.parse(options, [\"first\", \"--count\", \"1\", \"--verbose\", \"--count=3\", \"--output\", \"x\"])\n\
+             give back parsed",
+        );
+
+        assert_eq!(cli_field(&parsed, "count"), &Value::Number(3.0));
+        assert_eq!(cli_field(&parsed, "verbose"), &Value::YesNo(true));
+        assert_eq!(cli_field(&parsed, "output"), &Value::Text("x".to_string()));
+        assert_eq!(cli_field(&parsed, "help"), &Value::YesNo(false));
+        assert_eq!(
+            cli_field(&parsed, "arguments"),
+            &Value::list(vec![Value::Text("first".to_string())]),
+            "a flag after a positional and the positional itself should both survive"
+        );
+        assert!(
+            cli_field(&parsed, "usage")
+                .to_string()
+                .contains("--count <number> (required)"),
+            "usage should be generated from the declaration"
+        );
+    }
+
+    /// A path flag is a path value, not merely the text a path is made of.
+    #[test]
+    fn edge_path_flags_are_path_values_and_defaults_fill_in() {
+        let parsed = cli_eval(
+            "set options to [{name: \"where\", type: \"path\", default: \"out.txt\"}, {name: \"flag\", type: \"yes/no\"}]\n\
+             set parsed to sys.parse(options)\n\
+             give back parsed",
+        );
+
+        let where_value = cli_field(&parsed, "where");
+        assert_eq!(where_value.type_name(), "path");
+        assert_eq!(
+            redblue::path::text_of(where_value),
+            Some("out.txt"),
+            "the default path should carry its text"
+        );
+        assert_eq!(
+            cli_field(&parsed, "flag"),
+            &Value::YesNo(false),
+            "an absent boolean flag is no, not nothing"
+        );
+    }
+
+    /// The empty string is a value, `--flag=value` is a spelling, and no
+    /// arguments at all still produces the record.
+    #[test]
+    fn edge_flag_value_forms_cover_equals_empty_and_no_arguments() {
+        let parsed = cli_eval(
+            "set options to [{name: \"name\", type: \"text\"}]\n\
+             give back sys.parse(options, [\"--name=\", \"--name\", \"value\"])",
+        );
+        assert_eq!(
+            cli_field(&parsed, "name"),
+            &Value::Text("value".to_string())
+        );
+
+        let empty = cli_eval(
+            "set options to [{name: \"name\", type: \"text\"}]\n\
+             give back sys.parse(options, [\"--name=\", \"after\"])",
+        );
+        assert_eq!(
+            cli_field(&empty, "name"),
+            &Value::Text(String::new()),
+            "an explicitly empty value is a value, not a missing one"
+        );
+        assert_eq!(
+            cli_field(&empty, "arguments"),
+            &Value::list(vec![Value::Text("after".to_string())])
+        );
+
+        let none = cli_eval(
+            "set options to [{name: \"name\", type: \"text\", default: \"fallback\"}]\n\
+             give back sys.parse(options, [])",
+        );
+        assert_eq!(
+            cli_field(&none, "name"),
+            &Value::Text("fallback".to_string()),
+            "no arguments should leave the default in place"
+        );
+    }
+
+    /// Help is a request about the declaration, not a run with it: a required
+    /// flag that was not given is not an error, and `--` ends flag parsing.
+    #[test]
+    fn edge_help_skips_required_flags_and_double_dash_ends_flags() {
+        let parsed = cli_eval(
+            "set options to [{name: \"count\", type: \"number\", required: yes}]\n\
+             give back sys.parse(options, [\"--help\"])",
+        );
+        assert_eq!(cli_field(&parsed, "help"), &Value::YesNo(true));
+        assert_eq!(
+            cli_field(&parsed, "count"),
+            &Value::Nothing,
+            "help answers the declaration with no required-flag failure"
+        );
+
+        let after = cli_eval(
+            "set options to [{name: \"count\", type: \"number\"}]\n\
+             give back sys.parse(options, [\"--\", \"--count\", \"3\"])",
+        );
+        assert_eq!(
+            cli_field(&after, "arguments"),
+            &Value::list(vec![
+                Value::Text("--count".to_string()),
+                Value::Text("3".to_string())
+            ]),
+            "everything after `--` is positional, even text that looks like a flag"
+        );
+    }
+
+    /// Unknown, missing and wrongly typed values are catchable failures naming
+    /// the flag, rather than a silent `nothing` that travels on as a value.
+    #[test]
+    fn failures_name_the_flag_that_was_wrong() {
+        cli_assert_runtime_error(
+            "set options to [{name: \"count\", type: \"number\", required: yes}]\n\
+             sys.parse(options, [\"--count\", \"three\"])",
+            "Flag '--count' expects a number, but 'three' is not a number",
+        );
+        cli_assert_runtime_error(
+            "set options to [{name: \"count\", type: \"number\", required: yes}]\n\
+             sys.parse(options, [])",
+            "Missing required flag '--count'",
+        );
+        cli_assert_runtime_error(
+            "set options to [{name: \"count\", type: \"number\"}]\n\
+             sys.parse(options, [\"--nope\", \"1\"])",
+            "Unknown flag '--nope'",
+        );
+        cli_assert_runtime_error(
+            "set options to [{name: \"name\"}]\n\
+             sys.parse(options, [])",
+            "Flag '--name' has no type",
+        );
+    }
+
+    /// The `Cli` module prints the generated usage and does not call the body
+    /// when help was asked for; without help the body is called.
+    #[test]
+    fn cli_module_prints_usage_and_skips_the_body_for_help() {
+        let help = "import Cli\n\
+                    set options to [{name: \"count\", type: \"number\", required: yes}]\n\
+                    Cli.run_with(options, to(parsed)\n\
+                        say \"body ran\"\n\
+                    end, [\"--help\"])";
+        let lines = cli_output(help);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("--count <number> (required)")),
+            "help should print the declaration's usage, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("--help, -h")),
+            "help should mention the help flag itself, got {lines:?}"
+        );
+
+        let run = "import Cli\n\
+                   set options to [{name: \"count\", type: \"number\", required: yes}]\n\
+                   Cli.run_with(options, to(parsed)\n\
+                       say \"body ran\"\n\
+                   end, [\"--count\", \"1\"])";
+        assert_eq!(
+            cli_output(run),
+            vec!["body ran".to_string()],
+            "without help the body is called"
+        );
+
+        let through_argv = "import Cli\n\
+                            set options to [{name: \"count\", type: \"number\", default: 2}]\n\
+                            Cli.run(options, to(parsed)\n\
+                                say parsed.count\n\
+                            end)";
+        assert_eq!(
+            cli_output(through_argv),
+            vec!["2".to_string()],
+            "the two-argument form reads sys.argv(), empty in this harness"
+        );
+    }
+
+    /// A value-taking flag followed by another flag is a missing value, not a
+    /// wrong-type value that quotes the other flag's spelling back at the user.
+    #[test]
+    fn edge_missing_value_before_another_flag_names_the_flag_and_type() {
+        let source = "set options to [{name: \"count\", type: \"number\"}, {name: \"verbose\", type: \"yes/no\"}]\n\
+                      sys.parse(options, [\"--count\", \"--verbose\"])";
+        match cli_eval_err(source) {
+            Error::Runtime(message, span) => {
+                assert_eq!(
+                    message, "Flag '--count' needs a value of type number",
+                    "the failure should name the flag and its type"
+                );
+                assert!(span.is_known(), "the failure should carry a source span");
+            }
+            other => panic!("expected a Runtime error, got {other:?}"),
+        }
+
+        let ended = "set options to [{name: \"count\", type: \"number\"}]\n\
+                     sys.parse(options, [\"--count\", \"--\"])";
+        match cli_eval_err(ended) {
+            Error::Runtime(message, span) => {
+                assert_eq!(
+                    message, "Flag '--count' needs a value of type number",
+                    "`--` is not a value for `--count`"
+                );
+                assert!(span.is_known(), "the failure should carry a source span");
+            }
+            other => panic!("expected a Runtime error, got {other:?}"),
+        }
+
+        let unknown = "set options to [{name: \"count\", type: \"number\"}]\n\
+                       sys.parse(options, [\"--count\", \"--bogus\"])";
+        match cli_eval_err(unknown) {
+            Error::Runtime(message, span) => {
+                assert_eq!(
+                    message, "Unknown flag '--bogus'",
+                    "an undeclared flag in value position should name itself, not be swallowed"
+                );
+                assert!(span.is_known(), "the failure should carry a source span");
+            }
+            other => panic!("expected a Runtime error, got {other:?}"),
+        }
+
+        let unknown_text = "set options to [{name: \"name\", type: \"text\"}]\n\
+                            sys.parse(options, [\"--name\", \"--bogus\"])";
+        match cli_eval_err(unknown_text) {
+            Error::Runtime(message, span) => {
+                assert_eq!(
+                    message, "Unknown flag '--bogus'",
+                    "a text flag must not silently store an undeclared flag as its value"
+                );
+                assert!(span.is_known(), "the failure should carry a source span");
+            }
+            other => panic!("expected a Runtime error, got {other:?}"),
+        }
+    }
+
+    /// The usage text is derived from the declaration, so adding a flag to the
+    /// declaration is enough to add it to help.
+    #[test]
+    fn edge_usage_lists_a_flag_added_to_the_declaration() {
+        let before = cli_eval(
+            "set options to [{name: \"output\", type: \"text\", help: \"where to write\"}]\n\
+             give back sys.parse(options, []).usage",
+        );
+        let after = cli_eval(
+            "set options to [{name: \"output\", type: \"text\", help: \"where to write\"}, \
+             {name: \"colour\", type: \"text\", default: \"auto\", help: \"when to colour\"}]\n\
+             give back sys.parse(options, []).usage",
+        );
+
+        let before_text = match before {
+            Value::Text(text) => text,
+            other => panic!("usage should be text, got {}", other.type_name()),
+        };
+        let after_text = match after {
+            Value::Text(text) => text,
+            other => panic!("usage should be text, got {}", other.type_name()),
+        };
+
+        assert!(
+            before_text.contains("--output <text>"),
+            "the original declaration should be in help, got {before_text:?}"
+        );
+        assert!(
+            !before_text.contains("--colour"),
+            "the flag was not declared yet, so help should not invent it"
+        );
+        assert!(
+            after_text.contains("--colour <text> (default: auto)  when to colour"),
+            "a newly declared flag should appear in help with its value type, default and help text, got {after_text:?}"
+        );
+        assert!(
+            after_text.contains("--help, -h"),
+            "help should always describe its own flag, got {after_text:?}"
+        );
+    }
+
+    /// A boolean flag may take an explicit yes/no value, and Unicode text and
+    /// path values survive unchanged.
+    #[test]
+    fn edge_boolean_values_and_unicode_survive_the_parse() {
+        let parsed = cli_eval(
+            "set options to [{name: \"enabled\", type: \"yes/no\", takes_value: yes}, \
+             {name: \"name\", type: \"text\"}, {name: \"where\", type: \"path\"}]\n\
+             give back sys.parse(options, [\"--enabled\", \"false\", \"--name\", \"héllo 🌍\", \"--where\", \"dír/文件\"])",
+        );
+
+        assert_eq!(cli_field(&parsed, "enabled"), &Value::YesNo(false));
+        assert_eq!(
+            cli_field(&parsed, "name"),
+            &Value::Text("héllo 🌍".to_string())
+        );
+        assert_eq!(
+            redblue::path::text_of(cli_field(&parsed, "where")),
+            Some("dír/文件"),
+            "a path flag should keep its Unicode text"
+        );
+
+        let yes = cli_eval(
+            "set options to [{name: \"enabled\", type: \"yes/no\", takes_value: yes}]\n\
+             give back sys.parse(options, [\"--enabled=yes\"])",
+        );
+        assert_eq!(cli_field(&yes, "enabled"), &Value::YesNo(true));
+    }
+
+    /// The parse failures are ordinary catchable failures in Redblue, not a
+    /// process abort, so a program can print its own message and carry on.
+    #[test]
+    fn edge_parse_failures_are_catchable_in_redblue() {
+        let lines = cli_output(
+            "set options to [{name: \"count\", type: \"number\", required: yes}]\n\
+             set caught to no\n\
+             try\n\
+                 sys.parse(options, [\"--count\", \"three\"])\n\
+             catch error problem\n\
+                 set caught to yes\n\
+             end\n\
+             say caught\n\
+             say \"after\"",
+        );
+        assert_eq!(
+            lines,
+            vec!["yes".to_string(), "after".to_string()],
+            "the wrong-type failure should be caught and execution should continue"
+        );
+    }
+
+    /// A declaration is a list of records with known fields, and a shape that
+    /// is not one is refused before any argument is read.
+    #[test]
+    fn declaration_shape_failures_name_the_declaration() {
+        cli_assert_runtime_error(
+            "sys.parse(\"not a list\", [])",
+            "sys.parse expects a list of flag declarations, but was given text",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([\"not a record\"], [])",
+            "flag declaration 1 must be a record, but was given text",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{type: \"text\"}], [])",
+            "flag declaration 1 has no name",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: 5, type: \"text\"}], [])",
+            "flag declaration 1 has a number name where text belongs",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\"}], [])",
+            "Flag '--count' has no type",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: 5}], [])",
+            "Flag '--count' has a number type where text belongs",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"integer\"}], [])",
+            "Flag '--count' has unknown type 'integer'; expected text, number, yes/no or path",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"enabled\", type: \"boolean\"}], [])",
+            "Flag '--enabled' has unknown type 'boolean'; expected text, number, yes/no or path",
+        );
+    }
+
+    /// The field values of a declaration have types too, and a flag may not
+    /// both require a value and supply one.
+    #[test]
+    fn malformed_declarations_are_refused() {
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\", bogus: yes}], [])",
+            "Flag '--count' has an unknown field 'bogus'",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"text\", takes_value: no}], [])",
+            "Flag '--count' is text and takes no value, but only a yes/no flag may take no value",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\", required: yes, default: 1}], [])",
+            "Flag '--count' cannot be required and have a default",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\", takes_value: \"yes\"}], [])",
+            "Flag '--count' has a text takes_value where yes/no belongs",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\", required: \"yes\"}], [])",
+            "Flag '--count' has a text required where yes/no belongs",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\", help: 5}], [])",
+            "Flag '--count' has a number help where text belongs",
+        );
+    }
+
+    /// A default must already have the flag's type, because it is handed to the
+    /// program without going through the text conversion.
+    #[test]
+    fn defaults_must_have_the_declared_type() {
+        for (declaration, expected) in [
+            (
+                "{name: \"name\", type: \"text\", default: 1}",
+                "Flag '--name' has a number default where text belongs",
+            ),
+            (
+                "{name: \"count\", type: \"number\", default: \"three\"}",
+                "Flag '--count' has a text default where number belongs",
+            ),
+            (
+                "{name: \"enabled\", type: \"yes/no\", default: 1}",
+                "Flag '--enabled' has a number default where yes/no belongs",
+            ),
+            (
+                "{name: \"where\", type: \"path\", default: 1}",
+                "Flag '--where' has a number default where path belongs",
+            ),
+        ] {
+            let source = format!("sys.parse([{declaration}], [])");
+            cli_assert_runtime_error(&source, expected);
+        }
+    }
+
+    /// A name written twice would silently overwrite the first declaration, and
+    /// a name the parser reserves would collide with the record it answers.
+    #[test]
+    fn duplicate_reserved_and_unusable_names_are_refused() {
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\"}, {name: \"count\", type: \"text\"}], [])",
+            "Flag '--count' is declared twice",
+        );
+        for reserved in ["arguments", "help", "usage"] {
+            let source = format!("sys.parse([{{name: \"{reserved}\", type: \"text\"}}], [])");
+            cli_assert_runtime_error(
+                &source,
+                &format!("'{reserved}' is a field sys.parse reserves, so it cannot name a flag"),
+            );
+        }
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"\", type: \"text\"}], [])",
+            "a flag name cannot be empty",
+        );
+        for unusable in ["-count", "two words", "a=b"] {
+            let source = format!("sys.parse([{{name: \"{unusable}\", type: \"text\"}}], [])");
+            cli_assert_runtime_error(&source, &format!("'{unusable}' is not a usable flag name"));
+        }
+    }
+
+    /// The explicit argument list is a list of text, and one item that is not
+    /// text names its position rather than being coerced.
+    #[test]
+    fn argument_list_failures_name_the_item() {
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\"}], [1])",
+            "sys.parse expects a list of text arguments, but item 1 is number",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"count\", type: \"number\"}], 5)",
+            "sys.parse expects its arguments as a list of text, but was given number",
+        );
+    }
+
+    /// Numbers that parse as a float but are not finite are refused just as
+    /// text that is not a number is; negative values are still values because
+    /// only another flag ends one.
+    #[test]
+    fn numeric_boundary_refuses_non_finite_text_and_keeps_negatives() {
+        for text in ["NaN", "inf", "-inf", "1e400"] {
+            let source = format!(
+                "sys.parse([{{name: \"count\", type: \"number\"}}], [\"--count\", \"{text}\"])"
+            );
+            cli_assert_runtime_error(
+                &source,
+                &format!("Flag '--count' expects a number, but '{text}' is not a finite number"),
+            );
+        }
+
+        let negative = cli_eval(
+            "give back sys.parse([{name: \"count\", type: \"number\"}], [\"--count\", \"-3\"]).count",
+        );
+        assert_eq!(negative, Value::Number(-3.0));
+
+        let finite = cli_eval(
+            "give back sys.parse([{name: \"count\", type: \"number\"}], [\"--count\", \"1.5\"]).count",
+        );
+        assert_eq!(finite, Value::Number(1.5));
+    }
+
+    /// Help is a request about the declaration even when it stands where a
+    /// value was expected, so it does not become a missing-value error.
+    #[test]
+    fn edge_help_in_value_position_answers_usage() {
+        for help in ["--help", "-h"] {
+            let source = format!(
+                "set options to [{{name: \"count\", type: \"number\", required: yes}}]\n\
+                 give back sys.parse(options, [\"--count\", \"{help}\"])"
+            );
+            let parsed = cli_eval(&source);
+            assert_eq!(cli_field(&parsed, "help"), &Value::YesNo(true));
+            assert_eq!(
+                cli_field(&parsed, "count"),
+                &Value::Nothing,
+                "help should skip the required flag even in value position"
+            );
+        }
+    }
+}
