@@ -425,11 +425,18 @@ mod cli_flags {
                 walked_value, compiled_value,
                 "the two engines answered differently for `{source}`"
             ),
-            (Err(walked_error), Err(compiled_error)) => assert_eq!(
-                format!("{}: {}", walked_error.label(), walked_error.message()),
-                format!("{}: {}", compiled_error.label(), compiled_error.message()),
-                "the two engines failed differently for `{source}`"
-            ),
+            (Err(walked_error), Err(compiled_error)) => {
+                assert_eq!(
+                    format!("{}: {}", walked_error.label(), walked_error.message()),
+                    format!("{}: {}", compiled_error.label(), compiled_error.message()),
+                    "the two engines failed differently for `{source}`"
+                );
+                assert_eq!(
+                    walked_error.span(),
+                    compiled_error.span(),
+                    "the two engines failed at different source spans for `{source}`"
+                );
+            }
             _ => panic!(
                 "the two engines disagree about `{source}`: walked {walked:?}, compiled {compiled:?}"
             ),
@@ -578,6 +585,22 @@ mod cli_flags {
             cli_field(&none, "name"),
             &Value::Text("fallback".to_string()),
             "no arguments should leave the default in place"
+        );
+    }
+
+    /// A `yes/no` flag without `takes_value`, so a switch, refuses an inline
+    /// value rather than silently discarding it. That includes `=false`: the
+    /// way to spell an explicit boolean is `takes_value: yes` and a separate
+    /// value, not an inline value on a switch.
+    #[test]
+    fn edge_inline_value_on_a_value_less_flag_is_refused() {
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"verbose\", type: \"yes/no\"}], [\"--verbose=yes\"])",
+            "Flag '--verbose' does not take a value",
+        );
+        cli_assert_runtime_error(
+            "sys.parse([{name: \"verbose\", type: \"yes/no\"}], [\"--verbose=false\"])",
+            "Flag '--verbose' does not take a value",
         );
     }
 
@@ -986,6 +1009,104 @@ mod cli_flags {
             "give back sys.parse([{name: \"count\", type: \"number\"}], [\"--count\", \"1.5\"]).count",
         );
         assert_eq!(finite, Value::Number(1.5));
+    }
+
+    /// A negative number is a positional value, not an unknown short flag, so
+    /// a command-line tool can be given `-5`; a real unknown short flag is
+    /// still refused and names itself.
+    #[test]
+    fn edge_negative_positionals_are_values_not_unknown_flags() {
+        let parsed = cli_eval(
+            "set options to [{name: \"count\", type: \"number\"}]\n\
+             give back sys.parse(options, [\"-5\", \"--count\", \"-2\", \"-0.5\"])",
+        );
+        assert_eq!(
+            cli_field(&parsed, "arguments"),
+            &Value::list(vec![
+                Value::Text("-5".to_string()),
+                Value::Text("-0.5".to_string())
+            ]),
+            "negative numbers are positional values, not short flags"
+        );
+        assert_eq!(cli_field(&parsed, "count"), &Value::Number(-2.0));
+
+        let failed = cli_ran("sys.parse([], [\"-x\"])");
+        assert!(
+            failed.result.is_err(),
+            "an unknown short flag must still be refused, got {:?}",
+            failed.result
+        );
+        match failed.result {
+            Err(Error::Runtime(message, span)) => {
+                assert_eq!(message, "Unknown flag '-x'");
+                assert!(span.is_known(), "the failure should carry a source span");
+            }
+            other => panic!("expected a Runtime error for `-x`, got {other:?}"),
+        }
+    }
+
+    /// A repeated flag uses its last value, and a flag after a positional is
+    /// still parsed rather than being swallowed into the positionals.
+    #[test]
+    fn repeated_flags_last_wins_after_a_positional() {
+        let parsed = cli_eval(
+            "set options to [{name: \"name\", type: \"text\", default: \"fallback\"}]\n\
+             give back sys.parse(options, [\"first\", \"--name=one\", \"second\", \"--name\", \"two\"])",
+        );
+        assert_eq!(
+            cli_field(&parsed, "name"),
+            &Value::Text("two".to_string()),
+            "a repeated flag should keep its last value"
+        );
+        assert_eq!(
+            cli_field(&parsed, "arguments"),
+            &Value::list(vec![
+                Value::Text("first".to_string()),
+                Value::Text("second".to_string())
+            ]),
+            "flags between positionals should not become positionals"
+        );
+    }
+
+    /// Help must not run a body that would fail loudly, because help is a
+    /// request about the declaration rather than a run with it.
+    #[test]
+    fn edge_help_does_not_run_a_body_that_would_fail() {
+        let lines = cli_output(
+            "import Cli\n\
+             set options to [{name: \"count\", type: \"number\", required: yes}]\n\
+             Cli.run_with(options, to(parsed)\n\
+                 sys.parse(\"the body must not run\")\n\
+             end, [\"--help\"])",
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("--count <number> (required)")),
+            "help should print the generated usage, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("--help, -h")),
+            "help should mention itself, got {lines:?}"
+        );
+    }
+
+    /// An empty declaration is legal: no flags, no arguments, and usage that
+    /// still describes help itself.
+    #[test]
+    fn edge_empty_declaration_and_no_arguments() {
+        let parsed = cli_eval("give back sys.parse([], [])");
+        assert_eq!(
+            cli_field(&parsed, "arguments"),
+            &Value::list(Vec::new()),
+            "no arguments means an empty positional list"
+        );
+        assert_eq!(cli_field(&parsed, "help"), &Value::YesNo(false));
+        let usage = cli_field(&parsed, "usage").to_string();
+        assert!(
+            usage.contains("Options:") && usage.contains("--help, -h"),
+            "usage should still describe help, got {usage:?}"
+        );
     }
 
     /// Help is a request about the declaration even when it stands where a

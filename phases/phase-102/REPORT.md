@@ -59,6 +59,9 @@ The module is written against the language's early-return rule, so help is an
 | `src/cli.rs` (review round 2) | +9 −4 | an undeclared `--name` in value position reports an unknown flag; the undocumented `boolean` alias for `yes/no` is removed |
 | `tests/module_system_test.rs` (review round 2) | +30 −18 | the missing-value branches run through the two-engine harness; unknown flags in value position are checked for both a number and a text flag; `boolean` is asserted to be an unknown type |
 | `tests/unreviewed_work_ack_test.rs` (resume) | +1 | acknowledges the phase-102 resume delivery commit by subject |
+| `src/cli.rs` (resume round 2) | +10 −4 | a negative number such as `-5` is a positional value rather than an unknown short flag; an unknown short flag such as `-x` is still refused |
+| `tests/module_system_test.rs` (resume round 2) | +83 | negative positionals and the unknown short-flag failure, repeated flags after a positional, help skipping a body that would fail, and an empty declaration |
+| `tests/module_system_test.rs` (review round 3) | +28 −5 | an inline value on a value-less `yes/no` flag is refused (`=yes` and `=false`), and the two-engine harness now compares the failure spans as well as the label and message |
 
 ## Tests added
 
@@ -67,6 +70,7 @@ The module is written against the language's early-return rule, so help is an
 | declared_flags_parse_into_a_typed_record | string, number and boolean flags; repeated flag (last wins); flag after a positional; generated usage |
 | edge_path_flags_are_path_values_and_defaults_fill_in | path value type; default applied; absent boolean is `no` |
 | edge_flag_value_forms_cover_equals_empty_and_no_arguments | `--flag=value`; empty string value; no arguments at all |
+| edge_inline_value_on_a_value_less_flag_is_refused | malformed input / boundary: `--verbose=yes` and `--verbose=false` on a default `yes/no` switch are refused with "Flag '--verbose' does not take a value" on both engines |
 | edge_help_skips_required_flags_and_double_dash_ends_flags | help skips a required flag; `--` ends flag parsing |
 | failures_name_the_flag_that_was_wrong | wrong type; missing required; unknown flag; malformed declaration; failure asserted with exact messages |
 | cli_module_prints_usage_and_skips_the_body_for_help | `Cli.run_with` prints help without running the body; body runs without help; `Cli.run` reads `sys.argv()` |
@@ -80,6 +84,10 @@ The module is written against the language's early-return rule, so help is an
 | duplicate_reserved_and_unusable_names_are_refused | duplicate/missing keys: duplicate declared name, reserved names (`arguments`, `help`, `usage`), empty and unusable names |
 | argument_list_failures_name_the_item | type mismatch: a non-list argument list and a non-text item, named by position |
 | numeric_boundary_refuses_non_finite_text_and_keeps_negatives | numeric boundary: `NaN`, `inf`, `-inf` and `1e400` text refused; finite and negative values kept |
+| edge_negative_positionals_are_values_not_unknown_flags | boundary / failure: `-5`, `-2` and `-0.5` are positional values and a negative flag value, while `-x` is still a catchable unknown-flag error naming itself |
+| repeated_flags_last_wins_after_a_positional | duplicate/missing keys: a repeated flag keeps its last value; flags between positionals are parsed, not stored as arguments |
+| edge_help_does_not_run_a_body_that_would_fail | boundary / resource: help prints usage and succeeds even though the body would raise a runtime error if it ran |
+| edge_empty_declaration_and_no_arguments | empty: an empty declaration with no arguments yields an empty positional list and usage that still describes help |
 | edge_help_in_value_position_answers_usage | out of bounds / help: `--help` and `-h` in value position answer usage and skip a required flag |
 
 Every case in this module runs through both the tree-walking interpreter and
@@ -89,10 +97,10 @@ both engines.
 
 ## Test matrix
 
-- empty — covered: empty argument list, empty string as a value, empty `arguments` field.
+- empty — covered: empty argument list, empty declaration, empty string as a value, empty `arguments` field.
 - singleton — covered: one declared flag, one positional, one value.
-- boundary — covered: no arguments, first/last argument, `--` as the terminator, `--flag=value`.
-- out_of_bounds — covered: a missing value after a flag is a catchable error rather than an index panic; a following `--`, declared flag or undeclared long flag is not swallowed as the value (the last is an unknown-flag failure), while `--help`/`-h` in that position answers help.
+- boundary — covered: no arguments, first/last argument, `--` as the terminator, a value-taking flag's `--flag=value`, an inline value on a value-less flag being refused, and a negative number as a positional rather than a short flag.
+- out_of_bounds — covered: a missing value after a flag is a catchable error rather than an index panic; a following `--`, declared flag or undeclared long flag is not swallowed as the value (the last is an unknown-flag failure), while `--help`/`-h` in that position answers help; an unknown short flag `-x` is still refused.
 - type_mismatch — covered: a number flag given text; a non-list declaration; a non-record declaration item; a non-text name, type or argument-list item; a wrong default type; a non-list argument list; and an explicit yes/no value on a boolean flag.
 - numeric_boundary — covered: `NaN`, `inf`, `-inf` and `1e400` text are refused with the finite-number message; finite numbers become `Value::Number`; negative values still parse because only another flag ends a value.
 - unicode — covered: text and path values keep their Unicode text unchanged; parsing only inspects ASCII flag prefixes.
@@ -107,12 +115,12 @@ both engines.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2481 passed, 0 failed |
+| cargo test --all-targets | 2486 passed, 0 failed |
 | rbops/verify.sh | pass |
 
-`verify.sh` exits 0. It prints an under-claim warning because the pipeline's
-copy of this report still carries the previous attempt's 2474 until delivery
-harvests this file; the number above is this file's actual run.
+`verify.sh` reads the pipeline's pre-harvest copy of this report, so its
+honesty check still sees the previous count and prints an under-claim warning;
+the table above is this file's actual run (2486).
 
 
 ## Invariants touched

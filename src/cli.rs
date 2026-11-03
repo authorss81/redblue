@@ -157,7 +157,7 @@ pub fn parse(declaration: &Value, argv: &[String], span: Span) -> Result<Value> 
             continue;
         }
 
-        if token.starts_with('-') && token != "-" {
+        if token.starts_with('-') && token != "-" && !is_negative_number(token) {
             return Err(Error::Runtime(format!("Unknown flag '{token}'"), span));
         }
 
@@ -458,6 +458,13 @@ fn missing_value(flag: &Flag, span: Span) -> Error {
 fn flag_name(token: &str) -> Option<&str> {
     let rest = token.strip_prefix("--")?;
     Some(rest.split_once('=').map(|(name, _)| name).unwrap_or(rest))
+}
+
+/// Whether a token that starts with `-` is a negative number rather than a
+/// short flag. A command-line tool may be given `-5` as a positional argument,
+/// and refusing it as an unknown flag would make negative numbers unusable.
+fn is_negative_number(token: &str) -> bool {
+    token.parse::<f64>().is_ok_and(|number| number.is_finite())
 }
 
 /// Whether `token` is `--name` or `--name=value` for a flag in the declaration.
