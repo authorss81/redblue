@@ -428,6 +428,35 @@ fn edge_a_failure_keeps_the_output_written_before_it() {
     );
 }
 
+/// A `stdout` log record is written when the call runs, so a later failure does
+/// not discard it. It shares `print`'s place at the output boundary rather than
+/// `say`'s buffered one.
+#[test]
+fn edge_a_failure_keeps_a_stdout_record_written_before_it() {
+    let _channels = host_channels();
+    let source = "logging.set_level(\"info\")\n\
+                  logging.set_timestamps(no)\n\
+                  logging.set_destination(\"stdout\")\n\
+                  logging.info(\"before\")\n\
+                  set x to 1 / 0\n";
+    unsafe {
+        let input = wasm::rb_alloc(source.len() as i32);
+        assert!(!input.is_null(), "rb_alloc returned null");
+        std::ptr::copy_nonoverlapping(source.as_ptr(), input, source.len());
+
+        let status = wasm::rb_run(input, source.len() as i32);
+        assert_eq!(status, 1, "a division by zero must fail the run");
+
+        assert_eq!(
+            read_output(),
+            "[INFO] before\n",
+            "a record written before the failure must survive it"
+        );
+
+        assert_eq!(wasm::rb_release(input.cast_const()), 0);
+    }
+}
+
 /// The pointer a host is holding must survive whatever else the module does.
 /// `rb_alloc` used to reuse one buffer, so a second allocation for a longer
 /// program moved the first one and left the host writing into freed memory —

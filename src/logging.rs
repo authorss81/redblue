@@ -130,11 +130,34 @@ fn format_timestamp() -> Option<String> {
 ///
 /// Kept separate so the no-clock and out-of-range paths are testable on the
 /// native target, where the runtime always has a clock.
+///
+/// An instant before the Unix epoch is still a real instant and keeps its
+/// timestamp: `duration_since(UNIX_EPOCH)` fails there, and treating that
+/// failure as "no clock" silently dropped the timestamp from every record a
+/// host clock set before 1970 produced. The seconds and nanoseconds are split
+/// here so a pre-epoch instant becomes a negative second count that `chrono`
+/// can format, rather than an absent field.
 fn format_timestamp_at(instant: Option<SystemTime>) -> Option<String> {
-    let since_epoch = instant?.duration_since(UNIX_EPOCH).ok()?;
-    let secs = i64::try_from(since_epoch.as_secs()).ok()?;
+    let (secs, nanos) = match instant?.duration_since(UNIX_EPOCH) {
+        Ok(since_epoch) => (
+            i64::try_from(since_epoch.as_secs()).ok()?,
+            since_epoch.subsec_nanos(),
+        ),
+        Err(before_epoch) => {
+            let before = before_epoch.duration();
+            let secs = i64::try_from(before.as_secs()).ok()?;
+            if before.subsec_nanos() == 0 {
+                (secs.checked_neg()?, 0)
+            } else {
+                (
+                    secs.checked_neg()?.checked_sub(1)?,
+                    1_000_000_000 - before.subsec_nanos(),
+                )
+            }
+        }
+    };
     Some(
-        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, since_epoch.subsec_nanos())?
+        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)?
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string(),
     )
@@ -239,6 +262,27 @@ mod tests {
             format_timestamp_at(Some(UNIX_EPOCH + Duration::from_millis(1_234))).as_deref(),
             Some("1970-01-01T00:00:01.234Z")
         );
+    }
+
+    #[test]
+    fn edge_a_pre_epoch_instant_keeps_its_timestamp() {
+        let instant = UNIX_EPOCH - Duration::from_millis(1_234);
+        assert_eq!(
+            format_timestamp_at(Some(instant)).as_deref(),
+            Some("1969-12-31T23:59:58.766Z")
+        );
+    }
+
+    #[test]
+    fn edge_a_pre_epoch_host_clock_reaches_the_timestamp_formatter() {
+        let instant = UNIX_EPOCH - Duration::from_millis(1_234);
+        crate::runtime::with_test_clock(instant, || {
+            assert_eq!(
+                format_timestamp().as_deref(),
+                Some("1969-12-31T23:59:58.766Z"),
+                "the real clock path must keep a pre-epoch instant's timestamp"
+            );
+        });
     }
 
     #[test]

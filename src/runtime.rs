@@ -496,6 +496,34 @@ fn now() -> Result<SystemTime> {
     Ok(SystemTime::now())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// An instant a unit test injects for [`current_instant`].
+    ///
+    /// The native clock cannot be moved before 1970, and `rb_set_clock` is a
+    /// playground export that is deliberately inert here. This is thread-local
+    /// so it cannot bleed into a test running in parallel, and it exists only
+    /// in the test build.
+    static TEST_CLOCK: Cell<Option<SystemTime>> = const { Cell::new(None) };
+}
+
+/// Runs `body` with [`current_instant`] answering `instant`, then restores the
+/// previous test clock however `body` ends.
+#[cfg(test)]
+pub(crate) fn with_test_clock<T>(instant: SystemTime, body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<SystemTime>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_CLOCK.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = TEST_CLOCK.with(|slot| slot.replace(Some(instant)));
+    let _restore = Restore(previous);
+    body()
+}
+
 /// The playground's clock, as a [`Duration`] from the Unix epoch. `None` until
 /// the host has supplied one.
 #[cfg(target_arch = "wasm32")]
@@ -553,6 +581,10 @@ fn now() -> Result<SystemTime> {
 /// timestamp from `chrono::Utc::now()` and abort the whole module instead of
 /// writing a record.
 pub(crate) fn current_instant() -> Result<SystemTime> {
+    #[cfg(test)]
+    if let Some(instant) = TEST_CLOCK.with(Cell::get) {
+        return Ok(instant);
+    }
     now()
 }
 

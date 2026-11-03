@@ -1477,6 +1477,7 @@ mod logging_module {
     }
 
     fn tree_walk(source: &str) -> Run {
+        redblue::logging::reset();
         let tokens = redblue::lexer::Lexer::tokenize(source).expect("source tokenizes");
         let ast = redblue::parser::parse(tokens).expect("source parses");
         redblue::analyzer::analyze(&ast).expect("source analyzes");
@@ -1489,6 +1490,7 @@ mod logging_module {
     }
 
     fn bytecode(source: &str) -> Run {
+        redblue::logging::reset();
         let chunk = compile_source(source).expect("source compiles");
         let mut vm = BytecodeVm::new();
         vm.set_echo(false);
@@ -1605,7 +1607,6 @@ mod logging_module {
 
     #[test]
     fn edge_the_stdout_destination_joins_the_programs_captured_output() {
-        redblue::logging::reset();
         let printed = redblue::wasm::run_program(
             "logging.set_level(\"info\")\n\
              logging.set_timestamps(no)\n\
@@ -1615,6 +1616,60 @@ mod logging_module {
         )
         .expect("the program runs");
         assert_eq!(printed, "[INFO] to stdout\nresult\n");
+    }
+
+    /// A second program in the same process starts from the documented
+    /// defaults, not from the configuration the first one left behind.
+    #[test]
+    fn edge_a_run_starts_from_the_default_logging_configuration() {
+        let dir = scratch("run-defaults");
+        let stale = dir.join("stale.log");
+        redblue::logging::set_level("info").expect("a known level is accepted");
+        redblue::logging::set_timestamps(false);
+        redblue::logging::set_destination(&stale.to_string_lossy())
+            .expect("a file destination is accepted");
+
+        let printed = redblue::wasm::run_program(
+            "logging.info(\"leaked\")\n\
+             say logging.level()\n",
+        )
+        .expect("the program runs");
+
+        assert_eq!(
+            printed, "off\n",
+            "the run started above the default threshold"
+        );
+        assert_eq!(
+            redblue::logging::level(),
+            "off",
+            "the run left the caller's threshold configured"
+        );
+        assert!(
+            !stale.exists(),
+            "the run wrote to the destination the previous configuration named"
+        );
+    }
+
+    /// A `stdout` record is written when the call runs, like `print` and not
+    /// like `say`, which the interpreter buffers until the program finishes.
+    /// The record therefore keeps its place among printed output and comes
+    /// before every `say` line, exactly as it does in native `rb`.
+    #[test]
+    fn edge_a_stdout_record_is_written_when_the_call_runs() {
+        let settings = "logging.set_level(\"info\")\n\
+                        logging.set_timestamps(no)\n\
+                        logging.set_destination(\"stdout\")\n";
+        let record_then_print = redblue::wasm::run_program(&format!(
+            "{settings}logging.info(\"record\")\nprint \"tail\"\n"
+        ))
+        .expect("the program runs");
+        assert_eq!(record_then_print, "[INFO] record\ntail");
+
+        let say_then_record = redblue::wasm::run_program(&format!(
+            "{settings}say \"said\"\nlogging.info(\"record\")\n"
+        ))
+        .expect("the program runs");
+        assert_eq!(say_then_record, "[INFO] record\nsaid\n");
     }
 
     #[test]
@@ -1654,7 +1709,6 @@ mod logging_module {
         let stamped = dir.join("stamped.log");
         let deterministic = dir.join("deterministic.log");
 
-        redblue::logging::reset();
         let stamped_run = tree_walk(&format!(
             "logging.set_level(\"info\")\n\
              logging.set_timestamps(yes)\n\
@@ -1674,7 +1728,6 @@ mod logging_module {
             "a record without a timestamp: {stamped_record:?}"
         );
 
-        redblue::logging::reset();
         let deterministic_run = tree_walk(&format!(
             "logging.set_level(\"info\")\n\
              logging.set_timestamps(no)\n\
@@ -2046,5 +2099,111 @@ mod logging_module {
             assert!(run.result.is_ok(), "{:?}", run.result);
             assert_eq!(run.output, vec!["caught".to_string(), "done".to_string()]);
         }
+    }
+
+    /// A refused setter must leave the previous configuration intact: the
+    /// validation happens before the thread-local is written.
+    #[test]
+    fn edge_a_refused_setting_leaves_the_previous_configuration_intact() {
+        let dir = scratch("refused-settings");
+        let tree_log = dir.join("tree.log");
+        let byte_log = dir.join("byte.log");
+
+        let source = |path: &Path| {
+            format!(
+                "logging.reset()\n\
+                 logging.set_level(\"warn\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 try\n\
+                     logging.set_level(\"chatty\")\n\
+                 catch error of Runtime\n\
+                     say \"level refused\"\n\
+                 end\n\
+                 try\n\
+                     logging.set_destination(\"\")\n\
+                 catch error of Runtime\n\
+                     say \"destination refused\"\n\
+                 end\n\
+                 logging.info(\"filtered\")\n\
+                 logging.warn(\"kept\")\n",
+                quoted(path)
+            )
+        };
+
+        let tree = tree_walk(&source(&tree_log));
+        let byte = bytecode(&source(&byte_log));
+        assert!(tree.result.is_ok(), "{:?}", tree.result);
+        assert!(byte.result.is_ok(), "{:?}", byte.result);
+        assert_eq!(
+            tree.output,
+            vec![
+                "level refused".to_string(),
+                "destination refused".to_string()
+            ]
+        );
+        assert_eq!(byte.output, tree.output);
+
+        let expected = "[WARN] kept\n";
+        assert_eq!(
+            fs::read_to_string(&tree_log).expect("tree record"),
+            expected
+        );
+        assert_eq!(
+            fs::read_to_string(&byte_log).expect("bytecode record"),
+            expected
+        );
+    }
+
+    /// `logging.reset` must restore all three defaults, not just the level: the
+    /// record after it goes to stderr with a timestamp again.
+    #[test]
+    fn edge_reset_restores_the_default_configuration() {
+        let dir = scratch("reset-defaults");
+        let file = dir.join("program.rb");
+        let log = dir.join("before-reset.log");
+        fs::write(
+            &file,
+            format!(
+                "logging.set_level(\"info\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 logging.info(\"before reset\")\n\
+                 logging.reset()\n\
+                 say logging.level()\n\
+                 logging.set_level(\"info\")\n\
+                 logging.info(\"after reset\")\n\
+                 say \"result\"\n",
+                quoted(&log)
+            ),
+        )
+        .expect("program file");
+
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("rb runs");
+
+        assert!(
+            output.status.success(),
+            "the program failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "off\nresult\n");
+        let timestamp = regex::Regex::new(
+            r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[INFO\] after reset\n$",
+        )
+        .expect("timestamp pattern");
+        assert!(
+            timestamp.is_match(&String::from_utf8_lossy(&output.stderr)),
+            "reset did not restore stderr and timestamps: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&log).expect("the pre-reset record"),
+            "[INFO] before reset\n",
+            "reset sent a record to the old file destination"
+        );
     }
 }

@@ -1,5 +1,14 @@
 # Phase 103 — A logging module with levels, destinations and deterministic records
 
+Resume note: the phase implementation was already merged at `HEAD`, so the
+gate's diff check saw no implementation change. This run fixes a timestamp
+defect on top of the preserved work and adds the state tests the old table was
+missing; no preserved code was removed. The original finding no longer
+reproduces because `logging` already exists. Review round 2 keeps `stdout`
+records immediate, as `print` is, so a record logged before a later output (or a
+later failure) is neither reordered nor discarded; the run reset now also
+happens on the interpreter thread that executes the program.
+
 ## What changed
 | File | Lines | What |
 |---|---|---|
@@ -18,6 +27,12 @@
 | `tests/doc_blocks_fragments.txt` | +4 −4 | SPEC fragment anchors moved with the new section |
 | `tests/doc_blocks_known_fail.txt` | +1 −1 | SPEC known-failure anchor moved with the new section |
 | `tests/unreviewed_work_ack_test.rs` | +1 | `resume phase-103:` added to the delivery-subject rule |
+| `src/logging.rs` (resume) | +51 −4 | a pre-epoch clock instant keeps its timestamp; a captured `stdout` record stays immediate, like `print`, rather than being deferred into the final `say` flush |
+| `src/lib.rs` (resume) | +6 | both program entry points reset the logging configuration before a run |
+| `src/interpreter.rs` (resume) | +7 | the spawned interpreter thread, and the inline wasm fallback, reset the logging configuration on the thread that actually runs the program |
+| `src/runtime.rs` (resume) | +32 | a test-only clock injection so the pre-epoch path is exercised through `current_instant`, not only the private formatter |
+| `tests/stdlib_modules_test.rs` (resume) | +158 −3 | reset restores all three defaults; a refused setter leaves the previous configuration intact; a run starts from the defaults; a `stdout` record is immediate like `print` |
+| `tests/wasm_test.rs` (resume) | +29 | a `stdout` record written before a runtime failure survives it, like `print` |
 
 ## Behaviour
 `logging.debug`, `logging.info`, `logging.warn` and `logging.error` take one
@@ -41,7 +56,9 @@ ending with one newline. The timestamp is read from the same clock as
 `rb_set_clock`, rather than from a second clock the logging module owns. A host
 with no clock writes the record without a timestamp rather than failing the
 run, the same fallback SPEC documents; `time.now()` still answers that there is
-no clock. An empty or multi-line message is written unchanged.
+no clock. An instant before the Unix epoch is a real instant, not a missing
+clock: it keeps its timestamp (as 1969-12-31T…Z) rather than losing the field.
+An empty or multi-line message is written unchanged.
 File destinations append one record per write through the same `vfs` path as
 `files.append`, so a record can be read by either engine. A file that cannot be
 written raises a catchable `IoError` naming `logging`; it does not abort the
@@ -55,9 +72,20 @@ treats `EBADF` on a standard stream as success; a `stdout` record stays inside a
 host capture only when the calling thread belongs to the run that opened it, so
 one run's logging cannot be collected by another run's capture.
 
-The configuration is thread-local and both engines dispatch through the same
-`runtime::builtin` arms. There is no second formatter or threshold check in the
-bytecode VM, so the same program produces the same records under both engines.
+Every program run starts from those defaults. The configuration is thread-local,
+so the reset happens both at the entry point (which is the thread the inline
+wasm run shares) and on the interpreter thread a native run spawns. Without it
+the second program in one page, or a later program in one process, would inherit
+the first one's threshold, destination and timestamp mode. The reset is part of
+the run, not something a program or a test has to remember.
+
+A captured `stdout` record is written when the call runs, exactly as `print` is
+and unlike `say`, which the interpreter buffers until the program finishes. It
+therefore keeps its place among printed output, comes before every `say` line,
+and survives a later failure the same way a `print` does. The configuration is
+thread-local and both engines dispatch through the same `runtime::builtin` arms.
+There is no second formatter or threshold check in the bytecode VM, so the same
+program produces the same records under both engines.
 
 ## Tests added
 | Test | Edge class covered |
@@ -78,16 +106,23 @@ bytecode VM, so the same program produces the same records under both engines.
 | `edge_a_readerless_pipe_is_a_catchable_error` | a pipe with no reader, `EPIPE`, caught and recorded |
 | `edge_a_directory_destination_is_a_catchable_error` | a directory as a file destination, both engines |
 | `edge_an_unrelated_thread_is_not_part_of_an_open_capture` | capture membership is scoped to the run that opened it, not the process |
+| `edge_a_pre_epoch_instant_keeps_its_timestamp` | numeric boundary: an instant before the Unix epoch keeps a timestamp rather than being treated as "no clock" |
+| `edge_a_pre_epoch_host_clock_reaches_the_timestamp_formatter` | numeric boundary: the same instant reaches the formatter through `runtime::current_instant`, not only through the private helper |
+| `edge_a_run_starts_from_the_default_logging_configuration` | state: a run resets the threshold, destination and timestamp mode before the program starts |
+| `edge_a_stdout_record_is_written_when_the_call_runs` | ordering: a record is written at its call, like `print` — before a later `say` and after an earlier `print` |
+| `edge_a_failure_keeps_a_stdout_record_written_before_it` | failure: a `stdout` record logged before a runtime error is still in the captured output |
+| `edge_a_refused_setting_leaves_the_previous_configuration_intact` | malformed input / state: a refused level and destination leave the previous threshold and file destination unchanged, on both engines |
+| `edge_reset_restores_the_default_configuration` | boundary / state: reset restores `off`, `stderr` and timestamps on, proven through the CLI |
 
 ## Mandatory edge-case matrix
 | Row | Status |
 |---|---|
 | empty | covered — an empty message writes an empty body; an empty destination is refused |
 | singleton | covered — one record at the threshold is written once, and one below it writes nothing |
-| boundary | covered — every adjacent threshold pair, the highest level and `off` |
+| boundary | covered — every adjacent threshold pair, the highest level and `off`; a reset returns to the boundary defaults |
 | out_of_bounds | covered — an unknown level and a destination whose directory does not exist, or is a directory, are refused |
 | type_mismatch | covered — a number where a level or destination is wanted, a non-boolean timestamp switch, and extra arguments to `level`/`reset` |
-| numeric_boundary | covered — a number is not accepted as a level or destination; logging performs no numeric formatting |
+| numeric_boundary | covered — a number is not accepted as a level or destination; logging performs no numeric formatting; a pre-epoch clock instant keeps a negative-second timestamp instead of dropping it |
 | unicode | N/A — messages are opaque text passed through unchanged; this facility adds no Unicode-specific boundary |
 | nesting_recursion | covered — a function called inside another writes its records in call order |
 | duplicate_missing_keys | N/A — logging has no user-supplied keys or collections |
@@ -99,8 +134,9 @@ bytecode VM, so the same program produces the same records under both engines.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 79 test binaries, 2502 passed, 0 failed, 0 ignored |
+| `cargo test --all-targets` | pass — 2512 passed, 0 failed, 0 ignored |
 | `../rbops/verify.sh "phase-103"` | pass |
+
 
 ## Invariants touched
 - `stdlib::MODULES` gains `logging`; `MODULE_MEMBERS` gains its nine documented

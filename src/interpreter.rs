@@ -198,6 +198,10 @@ pub fn run_isolated_with_depth_in(
     let joined = match builder.spawn({
         let root = root.clone();
         move || {
+            // The configuration is thread-local, so the reset has to happen on
+            // the thread that runs the program. The caller's reset only reaches
+            // the inline wasm path; this is the one this run actually uses.
+            crate::logging::reset();
             crate::wasm::join_capture(capture_member);
             let mut vm = Vm::new_in(&root);
             let result = vm.run(&threaded);
@@ -245,6 +249,9 @@ fn run_without_a_sized_thread(
     #[cfg(target_arch = "wasm32")]
     {
         let _ = limit;
+        // The inline run is the program's thread, so it resets the configuration
+        // here just as the spawned path does.
+        crate::logging::reset();
         let mut vm = Vm::new_in(&root);
         let result = vm.run(program);
         (vm, result)
