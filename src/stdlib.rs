@@ -24,6 +24,7 @@ pub const MODULES: &[&str] = &[
     "files",
     "json",
     "list",
+    "logging",
     "math",
     "network",
     "path",
@@ -93,6 +94,20 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
         ],
     ),
     ("console", &["log", "error", "clear"]),
+    (
+        "logging",
+        &[
+            "debug",
+            "info",
+            "warn",
+            "error",
+            "set_level",
+            "level",
+            "set_timestamps",
+            "set_destination",
+            "reset",
+        ],
+    ),
     ("csv", &["parse"]),
     (
         "files",
@@ -624,6 +639,21 @@ pub fn builtins() -> HashMap<String, Value> {
         "console_clear".to_string(),
         Value::Builtin("console_clear".to_string()),
     );
+
+    // Logging module
+    for name in [
+        "logging_debug",
+        "logging_info",
+        "logging_warn",
+        "logging_error",
+        "logging_set_level",
+        "logging_level",
+        "logging_set_timestamps",
+        "logging_set_destination",
+        "logging_reset",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
 
     // Random module
     globals.insert("random".to_string(), Value::Builtin("random".to_string()));
@@ -2017,6 +2047,15 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "console_log",
     "console_error",
     "console_clear",
+    "logging_debug",
+    "logging_info",
+    "logging_warn",
+    "logging_error",
+    "logging_set_level",
+    "logging_level",
+    "logging_set_timestamps",
+    "logging_set_destination",
+    "logging_reset",
     "random",
     "random_seed",
     "random_number",
@@ -2402,6 +2441,42 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "console_clear() -> nothing; clears the screen",
     ),
     (
+        "logging_debug",
+        "logging.debug(text) -> nothing; writes a debug record at or above the threshold",
+    ),
+    (
+        "logging_info",
+        "logging.info(text) -> nothing; writes an info record at or above the threshold",
+    ),
+    (
+        "logging_warn",
+        "logging.warn(text) -> nothing; writes a warn record at or above the threshold",
+    ),
+    (
+        "logging_error",
+        "logging.error(text) -> nothing; writes an error record at or above the threshold",
+    ),
+    (
+        "logging_set_level",
+        "logging.set_level(text) -> nothing; sets the threshold to debug, info, warn, error or off",
+    ),
+    (
+        "logging_level",
+        "logging.level() -> text; the current threshold",
+    ),
+    (
+        "logging_set_timestamps",
+        "logging.set_timestamps(yes/no) -> nothing; whether records carry a timestamp",
+    ),
+    (
+        "logging_set_destination",
+        "logging.set_destination(text) -> nothing; stderr, stdout or a file path",
+    ),
+    (
+        "logging_reset",
+        "logging.reset() -> nothing; restores the default threshold, destination and timestamps",
+    ),
+    (
         "random",
         "random() -> a whole number from 0 to 99\nrandom(min, max) -> one between them",
     ),
@@ -2542,6 +2617,14 @@ pub const EFFECTFUL_BUILTINS: &[&str] = &[
     "console_log",
     "console_error",
     "console_clear",
+    "logging_debug",
+    "logging_info",
+    "logging_warn",
+    "logging_error",
+    "logging_set_level",
+    "logging_set_timestamps",
+    "logging_set_destination",
+    "logging_reset",
     "random",
     "random_seed",
     "random_number",

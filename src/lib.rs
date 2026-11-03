@@ -9,6 +9,7 @@ pub mod formatter;
 mod interpreter;
 pub mod lexer;
 pub mod linter;
+pub mod logging;
 pub mod lsp;
 pub mod manifest;
 pub mod parser;
@@ -104,6 +105,7 @@ pub fn run_source(source: &str) -> Result<(), Error> {
 /// a test, a host embedding the interpreter — can still be resolved against the
 /// manifest that belongs to it rather than against wherever the process is.
 pub fn run_source_in(source: &str, root: &Path) -> Result<(), Error> {
+    logging::reset();
     let tokens = Lexer::tokenize(source)?;
     let ast = parser::parse(tokens)?;
     analyzer::analyze_in(&ast, root)?;
@@ -125,6 +127,12 @@ pub fn run_source_value(source: &str) -> Result<Value, Error> {
 
 /// [`run_source_value`] against `root` — see [`run_source_in`].
 pub fn run_source_value_in(source: &str, root: &Path) -> Result<Value, Error> {
+    // A program starts from the documented defaults. The configuration is
+    // thread-local: this reset reaches the inline wasm path, and the interpreter
+    // resets again on the thread it actually runs the program on, so a native
+    // run cannot inherit an earlier program's threshold, destination or
+    // timestamp mode.
+    logging::reset();
     let tokens = Lexer::tokenize(source)?;
     let ast = parser::parse(tokens)?;
     analyzer::analyze_in(&ast, root)?;

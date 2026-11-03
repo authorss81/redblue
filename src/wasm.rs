@@ -23,7 +23,8 @@
 //! the ABI natively so a mistake in the pointer arithmetic fails in
 //! `cargo test`, not in a browser.
 
-use std::io::Write;
+use std::cell::Cell;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -40,6 +41,18 @@ static OVERFLOW: AtomicBool = AtomicBool::new(false);
 /// because `say` runs on the interpreter thread, not the thread that opened the
 /// capture, and on wasm there is only one thread anyway.
 static CAPTURED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+thread_local! {
+    /// Whether this thread is part of the run that owns the open capture.
+    ///
+    /// The capture itself is process-global because the program runs on an
+    /// interpreter thread of its own, but *membership* is not: a logging call
+    /// on an unrelated host thread must not append into a capture some other
+    /// run has open. [`begin_capture`] sets this on the thread that starts the
+    /// run, and `run_isolated` carries it into the interpreter thread it
+    /// spawns.
+    static IN_CAPTURE: Cell<bool> = const { Cell::new(false) };
+}
 
 /// The most output one run may produce, in bytes.
 ///
@@ -80,18 +93,53 @@ fn output_buffer() -> MutexGuard<'static, Vec<u8>> {
 /// reaches a [`LineWriter`](std::io::LineWriter) in the same shape `println!`
 /// did.
 pub fn emit(text: &str) {
-    if CAPTURING.load(Ordering::Relaxed) {
+    // `print!` ignores write failures too, and a Redblue program must not be
+    // able to abort the host process over a closed pipe.
+    let _ = try_emit(text);
+}
+
+/// Whether program output is being collected instead of written to a stream.
+///
+/// The logging module needs this to keep its `stdout` destination inside the
+/// capture a host opened, while still writing to the real descriptor when no
+/// capture is open. It is scoped to the threads that belong to the run, not to
+/// the process: another thread's open capture must not collect this thread's
+/// records.
+pub fn is_capturing() -> bool {
+    capture_member() && CAPTURING.load(Ordering::Relaxed)
+}
+
+/// Whether this thread belongs to the run that has the capture open.
+pub(crate) fn capture_member() -> bool {
+    IN_CAPTURE.with(|member| member.get())
+}
+
+/// Carries [`capture_member`] into the interpreter thread a run spawns.
+///
+/// The program does not run on the thread that called [`begin_capture`], so
+/// without this the interpreter thread would write its records and output to
+/// the real stream instead of the capture.
+pub(crate) fn join_capture(member: bool) {
+    IN_CAPTURE.with(|flag| flag.set(member));
+}
+
+/// Writes a program's output and reports a failed write.
+///
+/// [`emit`] is this function with the failure discarded, which is what `say`
+/// and `print` have always done. A caller that must not lose a record — the
+/// logging module — uses this instead, so a closed or unwritable stream reaches
+/// the program as a catchable error rather than as output that vanished.
+pub fn try_emit(text: &str) -> io::Result<()> {
+    if is_capturing() {
         let mut buffer = output_buffer();
         if buffer.len().saturating_add(text.len()) > MAX_OUTPUT_BYTES {
             OVERFLOW.store(true, Ordering::SeqCst);
-            return;
+            return Ok(());
         }
         buffer.extend_from_slice(text.as_bytes());
-        return;
+        return Ok(());
     }
-    // `print!` ignores write failures too, and a Redblue program must not be
-    // able to abort the host process over a closed pipe.
-    let _ = std::io::stdout().write_all(text.as_bytes());
+    std::io::stdout().write_all(text.as_bytes())
 }
 
 /// Serializes whole runs. There is one capture buffer and one program's output
@@ -126,11 +174,13 @@ pub fn begin_capture() {
     output_buffer().clear();
     OVERFLOW.store(false, Ordering::SeqCst);
     CAPTURING.store(true, Ordering::SeqCst);
+    IN_CAPTURE.with(|flag| flag.set(true));
 }
 
 /// Stops a capture and takes everything collected since [`begin_capture`].
 fn take_capture() -> String {
     CAPTURING.store(false, Ordering::SeqCst);
+    IN_CAPTURE.with(|flag| flag.set(false));
     let bytes = std::mem::take(&mut *output_buffer());
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -147,6 +197,7 @@ impl Drop for CaptureGuard {
     fn drop(&mut self) {
         CAPTURING.store(false, Ordering::SeqCst);
         OVERFLOW.store(false, Ordering::SeqCst);
+        IN_CAPTURE.with(|flag| flag.set(false));
     }
 }
 
@@ -861,10 +912,11 @@ pub extern "C" fn rb_keywords_len() -> i32 {
 /// rather than fail one run, so a playground that wants `time` calls this first
 /// with `Date.now() / 1000`.
 ///
-/// A negative or non-finite value is recorded as "no clock", which is what
-/// `time.now()` then reports — the same answer a host that never called this
-/// gets. It is not an error: the clock is not a parameter to a program, and
-/// refusing it would give the host a failure mode it cannot cause on purpose.
+/// A negative, non-finite or out-of-range value is recorded as "no clock",
+/// which is what `time.now()` then reports — the same answer a host that never
+/// called this gets. It is not an error: the clock is not a parameter to a
+/// program, and refusing it would give the host a failure mode it cannot cause
+/// on purpose.
 #[no_mangle]
 pub extern "C" fn rb_set_clock(seconds: f64) {
     #[cfg(target_arch = "wasm32")]
@@ -874,5 +926,62 @@ pub extern "C" fn rb_set_clock(seconds: f64) {
         // Natively `time.now()` reads the system clock and ignores this. The
         // export exists in both builds so one set of bindings drives both.
         let _ = seconds;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A capture belongs to the run that opened it, not to the process.
+    ///
+    /// The program runs on an interpreter thread of its own, so the capture
+    /// itself has to stay process-global; membership is what keeps an unrelated
+    /// thread from writing into it.
+    #[test]
+    fn edge_an_unrelated_thread_is_not_part_of_an_open_capture() {
+        let _run = run_lock();
+        begin_capture();
+        let guard = CaptureGuard;
+        assert!(
+            is_capturing(),
+            "the thread that opened the capture is a member"
+        );
+        let captured_before = output_buffer().len();
+
+        let (unrelated_member, unrelated_capturing, emitted) = std::thread::spawn(|| {
+            (
+                capture_member(),
+                is_capturing(),
+                try_emit("[unrelated thread]\n"),
+            )
+        })
+        .join()
+        .expect("the unrelated thread finishes");
+
+        let captured_after = output_buffer().len();
+        let captured = take_capture();
+        drop(guard);
+
+        assert!(
+            !unrelated_member,
+            "capture membership leaked into an unrelated thread"
+        );
+        assert!(
+            !unrelated_capturing,
+            "an unrelated thread considered itself part of an open capture"
+        );
+        assert!(
+            emitted.is_ok(),
+            "the unrelated thread's output should reach the real stream"
+        );
+        assert_eq!(
+            captured_after, captured_before,
+            "the unrelated thread's output landed in another run's capture"
+        );
+        assert!(
+            captured.is_empty(),
+            "an unrelated thread wrote into the open capture"
+        );
     }
 }

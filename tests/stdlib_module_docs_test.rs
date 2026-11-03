@@ -1128,6 +1128,63 @@ say "slept""#
             "console.clear()".into(),
             "\u{1b}[2J\u{1b}[1H".into(),
         ),
+        (
+            "logging_debug",
+            "logging.set_level(\"debug\")\nlogging.set_timestamps(no)\n\
+             logging.set_destination(\"stdout\")\nlogging.debug(\"d\")"
+                .into(),
+            "[DEBUG] d\n".into(),
+        ),
+        (
+            "logging_info",
+            "logging.set_level(\"info\")\nlogging.set_timestamps(no)\n\
+             logging.set_destination(\"stdout\")\nlogging.info(\"i\")"
+                .into(),
+            "[INFO] i\n".into(),
+        ),
+        (
+            "logging_warn",
+            "logging.set_level(\"warn\")\nlogging.set_timestamps(no)\n\
+             logging.set_destination(\"stdout\")\nlogging.warn(\"w\")"
+                .into(),
+            "[WARN] w\n".into(),
+        ),
+        (
+            "logging_error",
+            "logging.set_level(\"error\")\nlogging.set_timestamps(no)\n\
+             logging.set_destination(\"stdout\")\nlogging.error(\"e\")"
+                .into(),
+            "[ERROR] e\n".into(),
+        ),
+        (
+            "logging_set_level",
+            "logging.set_level(\"warn\")\nsay logging.level()".into(),
+            "warn\n".into(),
+        ),
+        (
+            "logging_level",
+            "say logging.level()".into(),
+            "off\n".into(),
+        ),
+        (
+            "logging_set_timestamps",
+            "logging.set_level(\"info\")\nlogging.set_destination(\"stdout\")\n\
+             logging.set_timestamps(no)\nlogging.info(\"x\")"
+                .into(),
+            "[INFO] x\n".into(),
+        ),
+        (
+            "logging_set_destination",
+            "logging.set_level(\"info\")\nlogging.set_timestamps(no)\n\
+             logging.set_destination(\"stdout\")\nlogging.info(\"x\")"
+                .into(),
+            "[INFO] x\n".into(),
+        ),
+        (
+            "logging_reset",
+            "logging.set_level(\"debug\")\nlogging.reset()\nsay logging.level()".into(),
+            "off\n".into(),
+        ),
         // Seeding first makes each draw reproducible; what is pinned is the *kind*
         // of answer, because a whole number from 1 to 6 is not a constant.
         (

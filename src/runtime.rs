@@ -496,6 +496,34 @@ fn now() -> Result<SystemTime> {
     Ok(SystemTime::now())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// An instant a unit test injects for [`current_instant`].
+    ///
+    /// The native clock cannot be moved before 1970, and `rb_set_clock` is a
+    /// playground export that is deliberately inert here. This is thread-local
+    /// so it cannot bleed into a test running in parallel, and it exists only
+    /// in the test build.
+    static TEST_CLOCK: Cell<Option<SystemTime>> = const { Cell::new(None) };
+}
+
+/// Runs `body` with [`current_instant`] answering `instant`, then restores the
+/// previous test clock however `body` ends.
+#[cfg(test)]
+pub(crate) fn with_test_clock<T>(instant: SystemTime, body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<SystemTime>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_CLOCK.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let previous = TEST_CLOCK.with(|slot| slot.replace(Some(instant)));
+    let _restore = Restore(previous);
+    body()
+}
+
 /// The playground's clock, as a [`Duration`] from the Unix epoch. `None` until
 /// the host has supplied one.
 #[cfg(target_arch = "wasm32")]
@@ -506,7 +534,7 @@ static HOST_CLOCK: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(No
 pub fn set_host_clock(seconds: f64) {
     if let Ok(mut slot) = HOST_CLOCK.lock() {
         *slot = if seconds.is_finite() && seconds >= 0.0 {
-            Some(Duration::from_secs_f64(seconds))
+            Duration::try_from_secs_f64(seconds).ok()
         } else {
             None
         };
@@ -529,7 +557,9 @@ fn now() -> Result<SystemTime> {
 
     // `UNIX_EPOCH + d` panics on overflow, and the host's clock is an input a
     // page can set to anything, so the round trip is checked rather than
-    // trusted: a host that sends 1e300 gets a clean error, not an abort.
+    // trusted. A value too large for a `Duration` was already recorded as "no
+    // clock"; one that fits a `Duration` but not a `SystemTime` gets a clean
+    // error here, not an abort.
     UNIX_EPOCH.checked_add(since_epoch).ok_or_else(|| {
         Error::Runtime(
             format!(
@@ -539,6 +569,23 @@ fn now() -> Result<SystemTime> {
             Span::unknown(),
         )
     })
+}
+
+/// The current instant, shared by `time.now()` and a logging record's
+/// timestamp.
+///
+/// The two read one clock on purpose: a record and a `time.now()` taken in the
+/// same program should agree, and the playground supplies only one clock
+/// through [`set_host_clock`]. Calling `SystemTime::now()` directly would panic
+/// on `wasm32-unknown-unknown`, where the logging module used to take its
+/// timestamp from `chrono::Utc::now()` and abort the whole module instead of
+/// writing a record.
+pub(crate) fn current_instant() -> Result<SystemTime> {
+    #[cfg(test)]
+    if let Some(instant) = TEST_CLOCK.with(Cell::get) {
+        return Ok(instant);
+    }
+    now()
 }
 
 /// The whole seconds `timestamp` names, counted from the Unix epoch, for
@@ -3528,6 +3575,93 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         }
         "console_clear" => {
             crate::wasm::emit("\x1B[2J\x1B[1H");
+            Ok(Some(Value::Nothing))
+        }
+        // Logging module
+        "logging_debug" | "logging_info" | "logging_warn" | "logging_error" => {
+            let level = match name {
+                "logging_debug" => crate::logging::Level::Debug,
+                "logging_info" => crate::logging::Level::Info,
+                "logging_warn" => crate::logging::Level::Warn,
+                _ => crate::logging::Level::Error,
+            };
+            let message = match args {
+                [Value::Text(message)] => message.clone(),
+                _ => {
+                    return Err(Error::Runtime(
+                        format!(
+                            "logging.{} requires one text message",
+                            name.trim_start_matches("logging_")
+                        ),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::write(level, &message).map_err(|e| {
+                Error::Io(format!(
+                    "logging.{} could not write to its destination: {e} (at {span})",
+                    name.trim_start_matches("logging_")
+                ))
+            })?;
+            Ok(Some(Value::Nothing))
+        }
+        "logging_set_level" => {
+            let level = match args {
+                [Value::Text(level)] => level,
+                _ => {
+                    return Err(Error::Runtime(
+                        "logging.set_level requires one text level".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::set_level(level).map_err(|message| Error::Runtime(message, span))?;
+            Ok(Some(Value::Nothing))
+        }
+        "logging_level" => {
+            if !args.is_empty() {
+                return Err(Error::Runtime(
+                    "logging.level takes no arguments".to_string(),
+                    span,
+                ));
+            }
+            Ok(Some(Value::Text(crate::logging::level())))
+        }
+        "logging_set_timestamps" => {
+            let on = match args {
+                [Value::YesNo(on)] => *on,
+                _ => {
+                    return Err(Error::Runtime(
+                        "logging.set_timestamps requires one yes/no value".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::set_timestamps(on);
+            Ok(Some(Value::Nothing))
+        }
+        "logging_set_destination" => {
+            let destination = match args {
+                [Value::Text(destination)] => destination,
+                _ => {
+                    return Err(Error::Runtime(
+                        "logging.set_destination requires one text destination".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::set_destination(destination)
+                .map_err(|message| Error::Runtime(message, span))?;
+            Ok(Some(Value::Nothing))
+        }
+        "logging_reset" => {
+            if !args.is_empty() {
+                return Err(Error::Runtime(
+                    "logging.reset takes no arguments".to_string(),
+                    span,
+                ));
+            }
+            crate::logging::reset();
             Ok(Some(Value::Nothing))
         }
         // Random module

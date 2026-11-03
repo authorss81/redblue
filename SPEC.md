@@ -1226,6 +1226,54 @@ again — `set ask to 1` is a program. Both spellings are refused: `ask("n")` is
 `Unknown function 'ask'`, and `ask "n"` — which is not a call at all, because a
 function is only called with parentheses — is `Unknown variable 'ask'`.
 
+### logging
+
+```redblue
+logging.set_level("info")          // debug, info, warn, error or off
+set threshold to logging.level()   // "info"
+logging.set_timestamps(no)         // deterministic records, with no timestamp
+logging.set_destination("stdout")  // "stderr", "stdout" or a file path
+logging.debug("looking up a row")  // below the threshold: not written
+logging.info("read 12 rows")
+logging.warn("the cache is cold")
+logging.error("the file does not exist")
+logging.reset()                    // threshold off, destination stderr, timestamps on
+```
+
+A record is written only when its level is at or above the threshold. The levels
+are ordered `debug`, `info`, `warn`, `error`, and the threshold is one of those
+four or `off`. The **default is `off`**, so a call added to a library writes
+nothing and cannot change what the program using it prints; a program has to ask
+for diagnostics before it gets any. The threshold is set with
+`logging.set_level` and read back with `logging.level`. `logging.reset` restores
+the defaults.
+
+The destination is `stderr` by default, which keeps diagnostics off the
+program's output stream, and `logging.set_destination` takes either the exact
+text `stderr`, the exact text `stdout`, or any other text as a file path. A file
+destination is appended to, one record per write, through the same filesystem as
+`files.write`, so a record written by one engine is readable by the other. A
+destination that cannot be written — a missing directory, a directory instead of
+a file — is a catchable `IoError` naming `logging`, not a process abort.
+
+A record has the shape `[timestamp] [LEVEL] message`, or `[LEVEL] message` when
+timestamps are off. Timestamps are **on by default**, because a log a reader
+cannot place in time is less useful; they make a record nondeterministic, so
+`logging.set_timestamps(no)` is the deterministic mode and is what a golden
+output or a corpus comparison should use. The timestamp is UTC, to the
+millisecond, in the form `2026-11-03T12:34:56.789Z`. A host with no clock — the
+WebAssembly playground before `rb_set_clock` — writes the record without the
+timestamp field rather than failing the run or aborting; the same situation
+makes `time.now()` a catchable error, because a logging call still has a record
+to write. The message is written exactly as given, including an empty message
+and the newlines of a multi-line one; the record itself ends with one newline.
+
+`logging.debug`, `logging.info`, `logging.warn` and `logging.error` each take one
+message. The four are functions of the module, so their bare spellings are not a
+second surface. The tree-walking VM and the bytecode VM share one implementation
+of the threshold, destination and formatting, so the same program writes the
+same records under both.
+
 ### text
 
 ```redblue
