@@ -190,6 +190,7 @@ pub fn run_isolated_with_depth_in(
     let limit = depth.max(1);
     let threaded = program.clone();
     let root = root.to_path_buf();
+    let capture_member = crate::wasm::capture_member();
     let builder = std::thread::Builder::new()
         .name("redblue-vm".to_string())
         .stack_size(limit.saturating_mul(STACK_BYTES_PER_CALL));
@@ -197,6 +198,7 @@ pub fn run_isolated_with_depth_in(
     let joined = match builder.spawn({
         let root = root.clone();
         move || {
+            crate::wasm::join_capture(capture_member);
             let mut vm = Vm::new_in(&root);
             let result = vm.run(&threaded);
             (vm, result)

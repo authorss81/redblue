@@ -506,7 +506,7 @@ static HOST_CLOCK: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(No
 pub fn set_host_clock(seconds: f64) {
     if let Ok(mut slot) = HOST_CLOCK.lock() {
         *slot = if seconds.is_finite() && seconds >= 0.0 {
-            Some(Duration::from_secs_f64(seconds))
+            Duration::try_from_secs_f64(seconds).ok()
         } else {
             None
         };
@@ -529,7 +529,9 @@ fn now() -> Result<SystemTime> {
 
     // `UNIX_EPOCH + d` panics on overflow, and the host's clock is an input a
     // page can set to anything, so the round trip is checked rather than
-    // trusted: a host that sends 1e300 gets a clean error, not an abort.
+    // trusted. A value too large for a `Duration` was already recorded as "no
+    // clock"; one that fits a `Duration` but not a `SystemTime` gets a clean
+    // error here, not an abort.
     UNIX_EPOCH.checked_add(since_epoch).ok_or_else(|| {
         Error::Runtime(
             format!(
@@ -539,6 +541,19 @@ fn now() -> Result<SystemTime> {
             Span::unknown(),
         )
     })
+}
+
+/// The current instant, shared by `time.now()` and a logging record's
+/// timestamp.
+///
+/// The two read one clock on purpose: a record and a `time.now()` taken in the
+/// same program should agree, and the playground supplies only one clock
+/// through [`set_host_clock`]. Calling `SystemTime::now()` directly would panic
+/// on `wasm32-unknown-unknown`, where the logging module used to take its
+/// timestamp from `chrono::Utc::now()` and abort the whole module instead of
+/// writing a record.
+pub(crate) fn current_instant() -> Result<SystemTime> {
+    now()
 }
 
 /// The whole seconds `timestamp` names, counted from the Unix epoch, for
@@ -3539,11 +3554,11 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 _ => crate::logging::Level::Error,
             };
             let message = match args {
-                [message] => message.to_string(),
+                [Value::Text(message)] => message.clone(),
                 _ => {
                     return Err(Error::Runtime(
                         format!(
-                            "logging.{} requires one message",
+                            "logging.{} requires one text message",
                             name.trim_start_matches("logging_")
                         ),
                         span,
@@ -3552,7 +3567,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             };
             crate::logging::write(level, &message).map_err(|e| {
                 Error::Io(format!(
-                    "logging.{} could not write to its destination: {e}",
+                    "logging.{} could not write to its destination: {e} (at {span})",
                     name.trim_start_matches("logging_")
                 ))
             })?;

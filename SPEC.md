@@ -1232,7 +1232,7 @@ function is only called with parentheses — is `Unknown variable 'ask'`.
 logging.set_level("info")          // debug, info, warn, error or off
 set threshold to logging.level()   // "info"
 logging.set_timestamps(no)         // deterministic records, with no timestamp
-logging.set_destination("app.log") // a file path, or "stderr" / "stdout"
+logging.set_destination("stdout")  // "stderr", "stdout" or a file path
 logging.debug("looking up a row")  // below the threshold: not written
 logging.info("read 12 rows")
 logging.warn("the cache is cold")
@@ -1261,9 +1261,12 @@ timestamps are off. Timestamps are **on by default**, because a log a reader
 cannot place in time is less useful; they make a record nondeterministic, so
 `logging.set_timestamps(no)` is the deterministic mode and is what a golden
 output or a corpus comparison should use. The timestamp is UTC, to the
-millisecond, in the form `2026-11-03T12:34:56.789Z`. The message is written
-exactly as given, including an empty message and the newlines of a multi-line
-one; the record itself ends with one newline.
+millisecond, in the form `2026-11-03T12:34:56.789Z`. A host with no clock — the
+WebAssembly playground before `rb_set_clock` — writes the record without the
+timestamp field rather than failing the run or aborting; the same situation
+makes `time.now()` a catchable error, because a logging call still has a record
+to write. The message is written exactly as given, including an empty message
+and the newlines of a multi-line one; the record itself ends with one newline.
 
 `logging.debug`, `logging.info`, `logging.warn` and `logging.error` each take one
 message. The four are functions of the module, so their bare spellings are not a

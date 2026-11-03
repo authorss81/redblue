@@ -1844,6 +1844,7 @@ mod logging_module {
             ("logging.level(1)", "logging.level"),
             ("logging.reset(1)", "logging.reset"),
             ("logging.info()", "logging.info"),
+            ("logging.info(5)", "logging.info"),
         ] {
             let tree = runtime_message(tree_walk(source).result.expect_err(source));
             let byte = runtime_message(bytecode(source).result.expect_err(source));
@@ -1852,6 +1853,198 @@ mod logging_module {
                 "`{source}` should name {part}, got {tree:?}"
             );
             assert_eq!(tree, byte, "the engines disagree about `{source}`");
+        }
+    }
+
+    /// A descriptor opened for reading refuses every write with `EBADF`, so a
+    /// child handed one as a standard stream has a genuinely closed
+    /// destination rather than a race against the parent.
+    #[cfg(unix)]
+    fn read_only_stream(dir: &Path) -> std::process::Stdio {
+        let sink = dir.join("read-only.txt");
+        fs::write(&sink, "not writable").expect("sink file");
+        std::process::Stdio::from(fs::File::open(&sink).expect("a read-only file"))
+    }
+
+    /// The write end of a pipe whose read end is already closed, so every write
+    /// to it fails with `EPIPE` — a different errno, and a different signal
+    /// path, from the `EBADF` a read-only file gives. The read end is closed in
+    /// the parent before the child inherits the write end.
+    #[cfg(unix)]
+    fn readerless_pipe() -> std::process::Stdio {
+        use std::os::fd::FromRawFd;
+
+        let mut fds = [0; 2];
+        // SAFETY: `fds` is a valid array for `pipe` to write two descriptors
+        // into, and both are owned below.
+        let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(
+            created,
+            0,
+            "a pipe must be creatable: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `fds[0]` is the read end `pipe` just created and this is its
+        // only owner.
+        unsafe { libc::close(fds[0]) };
+        // SAFETY: `fds[1]` is the write end `pipe` just created and this is its
+        // only owner; `Stdio` takes it over.
+        std::process::Stdio::from(unsafe { fs::File::from_raw_fd(fds[1]) })
+    }
+
+    /// The default stderr destination handed to the child read-only.
+    #[cfg(unix)]
+    #[test]
+    fn edge_a_closed_stderr_is_a_catchable_error() {
+        let dir = scratch("closed-stderr");
+        let file = dir.join("program.rb");
+        fs::write(
+            &file,
+            "logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             try\n\
+                 logging.info(\"to a closed stderr\")\n\
+             catch error of Io\n\
+                 say \"caught\"\n\
+             end\n\
+             say \"done\"\n",
+        )
+        .expect("program file");
+
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("run")
+            .arg(&file)
+            .stdout(std::process::Stdio::piped())
+            .stderr(read_only_stream(&dir))
+            .output()
+            .expect("rb runs");
+
+        assert!(
+            output.status.success(),
+            "the program failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "caught\ndone\n",
+            "a closed stderr must be catchable, not silently discarded"
+        );
+    }
+
+    /// The same failure on the `stdout` destination. The catch records itself
+    /// to a file because the program's own output stream is the broken one.
+    #[cfg(unix)]
+    #[test]
+    fn edge_a_closed_stdout_is_a_catchable_error() {
+        let dir = scratch("closed-stdout");
+        let file = dir.join("program.rb");
+        let marker = dir.join("caught.txt");
+        fs::write(
+            &file,
+            format!(
+                "logging.set_level(\"info\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"stdout\")\n\
+                 try\n\
+                     logging.info(\"to a closed stdout\")\n\
+                 catch error of Io\n\
+                     files.write(\"{}\", \"caught\")\n\
+                 end\n",
+                quoted(&marker)
+            ),
+        )
+        .expect("program file");
+
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("run")
+            .arg(&file)
+            .stdout(read_only_stream(&dir))
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .expect("rb runs");
+
+        assert!(
+            output.status.success(),
+            "the program failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).expect("the catch wrote its marker"),
+            "caught",
+            "a closed stdout must be catchable, not silently discarded"
+        );
+    }
+
+    /// A pipe with no reader is a different failure from a read-only
+    /// descriptor: it raises `EPIPE`, not `EBADF`. The logging module promises
+    /// both are the same catchable `IoError`, so this pins the pipe case too.
+    #[cfg(unix)]
+    #[test]
+    fn edge_a_readerless_pipe_is_a_catchable_error() {
+        let dir = scratch("readerless-pipe");
+        let file = dir.join("program.rb");
+        let marker = dir.join("caught.txt");
+        fs::write(
+            &file,
+            format!(
+                "logging.set_level(\"info\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"stdout\")\n\
+                 try\n\
+                     logging.info(\"to a pipe with no reader\")\n\
+                 catch error of Io\n\
+                     files.write(\"{}\", \"caught\")\n\
+                 end\n",
+                quoted(&marker)
+            ),
+        )
+        .expect("program file");
+
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("run")
+            .arg(&file)
+            .stdout(readerless_pipe())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .expect("rb runs");
+
+        assert!(
+            output.status.success(),
+            "the program failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).expect("the catch wrote its marker"),
+            "caught",
+            "a readerless pipe must be catchable, not a process abort"
+        );
+    }
+
+    /// A path that names a directory is a write failure on both engines, not a
+    /// panic and not a record that quietly goes nowhere.
+    #[test]
+    fn edge_a_directory_destination_is_a_catchable_error() {
+        let dir = scratch("directory-destination");
+        let target = dir.join("a-directory");
+        fs::create_dir_all(&target).expect("directory destination");
+
+        let source = format!(
+            "logging.reset()\n\
+             logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             logging.set_destination(\"{}\")\n\
+             try\n\
+                 logging.info(\"nowhere\")\n\
+             catch error of Io\n\
+                 say \"caught\"\n\
+             end\n\
+             say \"done\"\n",
+            quoted(&target)
+        );
+
+        for run in [tree_walk(&source), bytecode(&source)] {
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!(run.output, vec!["caught".to_string(), "done".to_string()]);
         }
     }
 }
