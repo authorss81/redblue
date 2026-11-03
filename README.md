@@ -352,6 +352,24 @@ console.clear()                  // clear the screen
 set name to input("Your name? ")  // read one line from the terminal
 ```
 
+### Logging
+```
+logging.set_level("info")          // debug, info, warn, error or off; default off
+logging.level()                    // the current threshold
+logging.set_timestamps(no)         // deterministic records without a timestamp
+logging.set_destination("app.log") // a file path, or "stderr" / "stdout"
+logging.debug("looking up a row")
+logging.info("read 12 rows")
+logging.warn("the cache is cold")
+logging.error("the file does not exist")
+logging.reset()                    // threshold off, stderr, timestamps on
+```
+
+The default threshold is `off`, so a library can call `logging.info` without
+changing its caller's output. Records go to stderr unless a file or stdout is
+chosen, carry a level and a message, and carry a UTC timestamp unless
+timestamps are turned off for deterministic output.
+
 ### List
 ```
 list.map(xs, to (x) give back x * 2)  // every member, through a function

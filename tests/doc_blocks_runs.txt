@@ -25,8 +25,8 @@
 # than quietly losing its bucket.
 #
 # COUNTS, as of the run that wrote this file
-#   SPEC.md 42 · docs/GRAMMAR.md 7 · README.md 7 · HANDOUT.md 4 · PHILOSOPHY.md 0
-#   60 of 111 blocks. The other 51 are 39 fragments and 12 known failures.
+#   SPEC.md 43 · docs/GRAMMAR.md 7 · README.md 7 · HANDOUT.md 4 · PHILOSOPHY.md 0
+#   61 of 112 blocks. The other 51 are 39 fragments and 12 known failures.
 
 # --- SPEC.md ---------------------------------------------------------------
 SPEC.md:40
@@ -59,18 +59,18 @@ SPEC.md:1058
 SPEC.md:1145
 SPEC.md:1160
 SPEC.md:1195
-SPEC.md:1231
-SPEC.md:1310
-SPEC.md:1373
-SPEC.md:1423
-SPEC.md:1457
-SPEC.md:1486
-SPEC.md:1561
-SPEC.md:1585
-SPEC.md:1634
-SPEC.md:1753
-SPEC.md:1804
-SPEC.md:1830
+SPEC.md:1279
+SPEC.md:1358
+SPEC.md:1421
+SPEC.md:1471
+SPEC.md:1505
+SPEC.md:1534
+SPEC.md:1609
+SPEC.md:1633
+SPEC.md:1682
+SPEC.md:1801
+SPEC.md:1852
+SPEC.md:1878
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:558
@@ -95,3 +95,4 @@ HANDOUT.md:126
 HANDOUT.md:149
 HANDOUT.md:156
 HANDOUT.md:250
+SPEC.md:1231
