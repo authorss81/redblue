@@ -1268,6 +1268,11 @@ fn every_module_the_documents_name_answers_a_call() {
             "hi\nnothing\n".to_string(),
         ),
         (
+            "logging",
+            r#"say logging.level()"#.to_string(),
+            "off\n".to_string(),
+        ),
+        (
             "csv",
             r#"say csv.parse("a,b")"#.to_string(),
             "[[a, b]]\n".to_string(),

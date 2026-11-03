@@ -9,6 +9,7 @@ pub mod formatter;
 mod interpreter;
 pub mod lexer;
 pub mod linter;
+pub mod logging;
 pub mod lsp;
 pub mod manifest;
 pub mod parser;

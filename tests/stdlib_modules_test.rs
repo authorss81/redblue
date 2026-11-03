@@ -1464,3 +1464,394 @@ fn edge_listing_a_file_is_an_io_error_not_a_list() {
     let error = run_source_value(&source).expect_err("a file is not a directory");
     assert_eq!(error.label(), "IoError", "{error}");
 }
+
+mod logging_module {
+    use std::fs;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct Run {
+        output: Vec<String>,
+        result: Result<Value, Error>,
+    }
+
+    fn tree_walk(source: &str) -> Run {
+        let tokens = redblue::lexer::Lexer::tokenize(source).expect("source tokenizes");
+        let ast = redblue::parser::parse(tokens).expect("source parses");
+        redblue::analyzer::analyze(&ast).expect("source analyzes");
+        let mut vm = redblue::Vm::new();
+        let result = vm.run_quietly(&ast);
+        Run {
+            output: vm.take_output(),
+            result,
+        }
+    }
+
+    fn bytecode(source: &str) -> Run {
+        let chunk = compile_source(source).expect("source compiles");
+        let mut vm = BytecodeVm::new();
+        vm.set_echo(false);
+        let result = vm.run(&chunk);
+        Run {
+            output: vm.take_output(),
+            result,
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/tmp/logging-tests")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn quoted(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "\\\\")
+    }
+
+    fn runtime_message(error: Error) -> String {
+        match error {
+            Error::Runtime(message, _) => message,
+            other => panic!("expected a Runtime error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn records_at_or_above_the_threshold_reach_a_file_destination() {
+        let dir = scratch("threshold");
+        let log = dir.join("records.log");
+        let source = format!(
+            "logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             logging.set_destination(\"{}\")\n\
+             logging.debug(\"below\")\n\
+             logging.info(\"at\")\n\
+             logging.warn(\"above\")\n",
+            quoted(&log)
+        );
+
+        let run = tree_walk(&source);
+        assert!(run.result.is_ok(), "{:?}", run.result);
+        assert_eq!(run.output.join("\n"), "");
+
+        assert_eq!(
+            fs::read_to_string(&log).expect("the destination holds the records"),
+            "[INFO] at\n[WARN] above\n",
+        );
+    }
+
+    #[test]
+    fn edge_every_adjacent_threshold_pair_filters_exactly() {
+        let dir = scratch("adjacent");
+        for (threshold, expected) in [
+            (
+                "debug",
+                "[DEBUG] debug\n[INFO] info\n[WARN] warn\n[ERROR] error\n",
+            ),
+            ("info", "[INFO] info\n[WARN] warn\n[ERROR] error\n"),
+            ("warn", "[WARN] warn\n[ERROR] error\n"),
+            ("error", "[ERROR] error\n"),
+            ("off", ""),
+        ] {
+            let log = dir.join(format!("{threshold}.log"));
+            let source = format!(
+                "logging.reset()\n\
+                 logging.set_level(\"{threshold}\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 logging.debug(\"debug\")\n\
+                 logging.info(\"info\")\n\
+                 logging.warn(\"warn\")\n\
+                 logging.error(\"error\")\n",
+                quoted(&log)
+            );
+            redblue::run_source_value(&source).expect("the program runs");
+            let written = fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(written, expected, "wrong records for threshold {threshold}");
+        }
+    }
+
+    #[test]
+    fn default_logging_emits_nothing_into_a_programs_output() {
+        let dir = scratch("default");
+        let log = dir.join("default.log");
+        let source = format!(
+            "logging.set_destination(\"{}\")\n\
+             say logging.level()\n\
+             logging.debug(\"debug\")\n\
+             logging.info(\"info\")\n\
+             logging.warn(\"warn\")\n\
+             logging.error(\"error\")\n\
+             say \"result\"\n",
+            quoted(&log)
+        );
+
+        let tree = tree_walk(&source);
+        let byte = bytecode(&source);
+
+        assert!(tree.result.is_ok(), "{:?}", tree.result);
+        assert!(byte.result.is_ok(), "{:?}", byte.result);
+        assert_eq!(tree.output.join("\n"), "off\nresult");
+        assert_eq!(byte.output, tree.output);
+        assert!(
+            !log.exists(),
+            "the default threshold wrote a record to {}",
+            log.display()
+        );
+    }
+
+    #[test]
+    fn edge_the_stdout_destination_joins_the_programs_captured_output() {
+        redblue::logging::reset();
+        let printed = redblue::wasm::run_program(
+            "logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             logging.set_destination(\"stdout\")\n\
+             logging.info(\"to stdout\")\n\
+             say \"result\"\n",
+        )
+        .expect("the program runs");
+        assert_eq!(printed, "[INFO] to stdout\nresult\n");
+    }
+
+    #[test]
+    fn edge_the_default_destination_is_stderr_not_stdout() {
+        let dir = scratch("stderr");
+        let file = dir.join("program.rb");
+        fs::write(
+            &file,
+            "logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             logging.info(\"diagnostic\")\n\
+             say \"result\"\n",
+        )
+        .expect("the program is written");
+
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("rb runs");
+
+        assert!(
+            output.status.success(),
+            "the program failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "result\n");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "[INFO] diagnostic\n"
+        );
+    }
+
+    #[test]
+    fn a_record_carries_a_timestamp_unless_deterministic_mode_omits_it() {
+        let dir = scratch("timestamps");
+        let stamped = dir.join("stamped.log");
+        let deterministic = dir.join("deterministic.log");
+
+        redblue::logging::reset();
+        let stamped_run = tree_walk(&format!(
+            "logging.set_level(\"info\")\n\
+             logging.set_timestamps(yes)\n\
+             logging.set_destination(\"{}\")\n\
+             logging.info(\"stamped\")\n",
+            quoted(&stamped)
+        ));
+        assert!(stamped_run.result.is_ok(), "{:?}", stamped_run.result);
+        assert_eq!(stamped_run.output.join("\n"), "");
+        let stamped_record = fs::read_to_string(&stamped).expect("stamped record");
+        let timestamp = regex::Regex::new(
+            r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[INFO\] stamped\n$",
+        )
+        .expect("timestamp pattern");
+        assert!(
+            timestamp.is_match(&stamped_record),
+            "a record without a timestamp: {stamped_record:?}"
+        );
+
+        redblue::logging::reset();
+        let deterministic_run = tree_walk(&format!(
+            "logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             logging.set_destination(\"{}\")\n\
+             logging.info(\"stamped\")\n",
+            quoted(&deterministic)
+        ));
+        assert!(
+            deterministic_run.result.is_ok(),
+            "{:?}",
+            deterministic_run.result
+        );
+        assert_eq!(deterministic_run.output.join("\n"), "");
+        assert_eq!(
+            fs::read_to_string(&deterministic).expect("deterministic record"),
+            "[INFO] stamped\n",
+        );
+    }
+
+    #[test]
+    fn the_tree_walker_and_the_bytecode_vm_emit_equal_records() {
+        let dir = scratch("engines");
+        let tree_log = dir.join("tree.log");
+        let byte_log = dir.join("byte.log");
+
+        let source = |path: &Path| {
+            format!(
+                "logging.reset()\n\
+                 logging.set_level(\"debug\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 logging.debug(\"debug\")\n\
+                 logging.info(\"info\")\n\
+                 logging.warn(\"warn\")\n\
+                 logging.error(\"error\")\n\
+                 say \"done\"\n",
+                quoted(path)
+            )
+        };
+
+        let tree = tree_walk(&source(&tree_log));
+        let byte = bytecode(&source(&byte_log));
+
+        assert!(tree.result.is_ok(), "{:?}", tree.result);
+        assert!(byte.result.is_ok(), "{:?}", byte.result);
+        assert_eq!(tree.output, vec!["done".to_string()]);
+        assert_eq!(byte.output, tree.output);
+        assert_eq!(
+            fs::read_to_string(&tree_log).expect("tree record"),
+            fs::read_to_string(&byte_log).expect("bytecode record"),
+        );
+    }
+
+    #[test]
+    fn edge_empty_and_multiline_messages_are_written_unchanged() {
+        let dir = scratch("messages");
+        let tree_log = dir.join("tree.log");
+        let byte_log = dir.join("byte.log");
+
+        let source = |path: &Path| {
+            format!(
+                "logging.reset()\n\
+                 logging.set_level(\"info\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 logging.info(\"\")\n\
+                 logging.warn(\"first\\nsecond\")\n\
+                 say \"done\"\n",
+                quoted(path)
+            )
+        };
+
+        let tree = tree_walk(&source(&tree_log));
+        let byte = bytecode(&source(&byte_log));
+        assert!(tree.result.is_ok(), "{:?}", tree.result);
+        assert!(byte.result.is_ok(), "{:?}", byte.result);
+        assert_eq!(tree.output, vec!["done".to_string()]);
+        assert_eq!(byte.output, tree.output);
+
+        let expected = "[INFO] \n[WARN] first\nsecond\n";
+        assert_eq!(
+            fs::read_to_string(&tree_log).expect("tree record"),
+            expected
+        );
+        assert_eq!(
+            fs::read_to_string(&byte_log).expect("bytecode record"),
+            expected
+        );
+    }
+
+    #[test]
+    fn edge_nested_calls_interleave_records_in_call_order() {
+        let dir = scratch("nested");
+        let tree_log = dir.join("tree.log");
+        let byte_log = dir.join("byte.log");
+
+        let source = |path: &Path| {
+            format!(
+                "logging.reset()\n\
+                 logging.set_level(\"info\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 to inner\n\
+                     logging.info(\"inner\")\n\
+                 end\n\
+                 to outer\n\
+                     logging.info(\"outer-before\")\n\
+                     inner()\n\
+                     logging.info(\"outer-after\")\n\
+                 end\n\
+                 outer()\n\
+                 say \"done\"\n",
+                quoted(path)
+            )
+        };
+
+        let tree = tree_walk(&source(&tree_log));
+        let byte = bytecode(&source(&byte_log));
+        assert!(tree.result.is_ok(), "{:?}", tree.result);
+        assert!(byte.result.is_ok(), "{:?}", byte.result);
+        assert_eq!(tree.output, vec!["done".to_string()]);
+        assert_eq!(byte.output, tree.output);
+
+        let expected = "[INFO] outer-before\n[INFO] inner\n[INFO] outer-after\n";
+        assert_eq!(
+            fs::read_to_string(&tree_log).expect("tree record"),
+            expected
+        );
+        assert_eq!(
+            fs::read_to_string(&byte_log).expect("bytecode record"),
+            expected
+        );
+    }
+
+    #[test]
+    fn edge_an_unwritable_destination_is_a_catchable_error() {
+        let dir = scratch("unwritable");
+        let missing = dir.join("missing").join("record.log");
+
+        let source = format!(
+            "logging.reset()\n\
+             logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             logging.set_destination(\"{}\")\n\
+             try\n\
+                 logging.info(\"never written\")\n\
+             catch error of Io\n\
+                 say \"caught\"\n\
+             end\n",
+            quoted(&missing)
+        );
+
+        for run in [tree_walk(&source), bytecode(&source)] {
+            assert!(run.result.is_ok(), "{:?}", run.result);
+            assert_eq!(run.output, vec!["caught".to_string()]);
+        }
+    }
+
+    #[test]
+    fn edge_invalid_levels_and_destinations_are_refused() {
+        for (source, part) in [
+            ("logging.set_level(\"chatty\")", "logging.set_level"),
+            ("logging.set_level(5)", "logging.set_level"),
+            ("logging.set_destination(\"\")", "logging.set_destination"),
+            ("logging.set_destination(5)", "logging.set_destination"),
+            ("logging.set_timestamps(\"yes\")", "logging.set_timestamps"),
+            ("logging.level(1)", "logging.level"),
+            ("logging.reset(1)", "logging.reset"),
+            ("logging.info()", "logging.info"),
+        ] {
+            let tree = runtime_message(tree_walk(source).result.expect_err(source));
+            let byte = runtime_message(bytecode(source).result.expect_err(source));
+            assert!(
+                tree.contains(part),
+                "`{source}` should name {part}, got {tree:?}"
+            );
+            assert_eq!(tree, byte, "the engines disagree about `{source}`");
+        }
+    }
+}

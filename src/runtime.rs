@@ -3530,6 +3530,93 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             crate::wasm::emit("\x1B[2J\x1B[1H");
             Ok(Some(Value::Nothing))
         }
+        // Logging module
+        "logging_debug" | "logging_info" | "logging_warn" | "logging_error" => {
+            let level = match name {
+                "logging_debug" => crate::logging::Level::Debug,
+                "logging_info" => crate::logging::Level::Info,
+                "logging_warn" => crate::logging::Level::Warn,
+                _ => crate::logging::Level::Error,
+            };
+            let message = match args {
+                [message] => message.to_string(),
+                _ => {
+                    return Err(Error::Runtime(
+                        format!(
+                            "logging.{} requires one message",
+                            name.trim_start_matches("logging_")
+                        ),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::write(level, &message).map_err(|e| {
+                Error::Io(format!(
+                    "logging.{} could not write to its destination: {e}",
+                    name.trim_start_matches("logging_")
+                ))
+            })?;
+            Ok(Some(Value::Nothing))
+        }
+        "logging_set_level" => {
+            let level = match args {
+                [Value::Text(level)] => level,
+                _ => {
+                    return Err(Error::Runtime(
+                        "logging.set_level requires one text level".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::set_level(level).map_err(|message| Error::Runtime(message, span))?;
+            Ok(Some(Value::Nothing))
+        }
+        "logging_level" => {
+            if !args.is_empty() {
+                return Err(Error::Runtime(
+                    "logging.level takes no arguments".to_string(),
+                    span,
+                ));
+            }
+            Ok(Some(Value::Text(crate::logging::level())))
+        }
+        "logging_set_timestamps" => {
+            let on = match args {
+                [Value::YesNo(on)] => *on,
+                _ => {
+                    return Err(Error::Runtime(
+                        "logging.set_timestamps requires one yes/no value".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::set_timestamps(on);
+            Ok(Some(Value::Nothing))
+        }
+        "logging_set_destination" => {
+            let destination = match args {
+                [Value::Text(destination)] => destination,
+                _ => {
+                    return Err(Error::Runtime(
+                        "logging.set_destination requires one text destination".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::logging::set_destination(destination)
+                .map_err(|message| Error::Runtime(message, span))?;
+            Ok(Some(Value::Nothing))
+        }
+        "logging_reset" => {
+            if !args.is_empty() {
+                return Err(Error::Runtime(
+                    "logging.reset takes no arguments".to_string(),
+                    span,
+                ));
+            }
+            crate::logging::reset();
+            Ok(Some(Value::Nothing))
+        }
         // Random module
         "random_number" => {
             let (min, max) = random_range(span, "random_number", args, 1.0)?;
