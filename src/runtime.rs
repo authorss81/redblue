@@ -21,8 +21,12 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
+use base64::engine::DecodePaddingMode;
+use base64::Engine as _;
 use chrono::format::{Item, StrftimeItems};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike};
+use sha2::{Digest, Sha256, Sha512};
 
 use crate::error::{Error, Result, Span};
 use crate::lexer::Lexer;
@@ -2584,6 +2588,130 @@ fn deque_length(span: Span, value: &Value) -> Result<usize> {
     Ok(total)
 }
 
+/// Standard base64 with the padding rule the language promises: encoding always
+/// emits canonical padding, and decoding accepts the same bytes with or without
+/// it. `RequireCanonical` would refuse the unpadded form every URL-safe
+/// transport uses; `RequireNone` would refuse the padded form every MIME header
+/// uses.
+const BASE64_ANY_PADDING: GeneralPurpose = GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
+
+/// Reads a builtin's text-or-bytes argument as bytes.
+///
+/// `bytes.from_text` already defines the byte form as a list of whole numbers
+/// 0 to 255. Hashing and encoding accept either that list or a text, so
+/// `hash.sha256("abc")` and `hash.sha256(bytes.from_text("abc"))` are the same
+/// input without adding a second byte type to the language.
+fn bytes_argument(span: Span, name: &str, value: Option<&Value>) -> Result<Vec<u8>> {
+    let Some(value) = value else {
+        return Err(Error::Runtime(
+            format!("{name} requires text or a list of byte values"),
+            span,
+        ));
+    };
+    match value {
+        Value::Text(text) => Ok(text.as_bytes().to_vec()),
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let Value::Number(value) = item else {
+                    return Err(Error::Runtime(
+                        format!(
+                            "{name} was given a {} where a byte belongs (item {})",
+                            item.type_name(),
+                            index + 1
+                        ),
+                        span,
+                    ));
+                };
+                if !value.is_finite() || value.fract() != 0.0 || *value < 0.0 || *value > 255.0 {
+                    return Err(Error::Runtime(
+                        format!(
+                            "{name} was given {value} at item {}, which is not a byte (0 to 255)",
+                            index + 1
+                        ),
+                        span,
+                    ));
+                }
+                out.push(*value as u8);
+            }
+            Ok(out)
+        }
+        other => Err(Error::Runtime(
+            format!(
+                "{name} requires text or a list of byte values, got {}",
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+/// Decodes strict hexadecimal, naming the first character that is not a digit
+/// and the position of an unpaired final digit.
+///
+/// The `hex` crate would silently stop at a bad character if asked to decode a
+/// slice it considered short enough; validating first is what keeps a decoder
+/// from turning corrupt input into a shorter byte list.
+fn decode_hex(span: Span, text: &str) -> Result<Vec<u8>> {
+    let mut digits = 0usize;
+    for (position, character) in text.chars().enumerate() {
+        if !character.is_ascii_hexdigit() {
+            return Err(Error::Runtime(
+                format!("hex.decode: invalid hex digit '{character}' at position {position}"),
+                span,
+            ));
+        }
+        digits += 1;
+    }
+    if !digits.is_multiple_of(2) {
+        return Err(Error::Runtime(
+            format!("hex.decode: odd number of hex digits ({digits}) ending at position {digits}"),
+            span,
+        ));
+    }
+    hex::decode(text).map_err(|error| Error::Runtime(format!("hex.decode: {error}"), span))
+}
+
+/// The character the original text holds at the byte position a decoder
+/// reported, falling back to the raw byte only if that position is not a
+/// character boundary. A non-ASCII character must be named as the program wrote
+/// it, not as the first byte read through Latin-1.
+fn offending_char(text: &str, position: usize, byte: u8) -> char {
+    text.get(position..)
+        .and_then(|rest| rest.chars().next())
+        .unwrap_or(char::from(byte))
+}
+
+/// Decodes strict base64 in every padding form a transport sends, naming the
+/// position of the byte that made it refuse.
+fn decode_base64(span: Span, text: &str) -> Result<Vec<u8>> {
+    BASE64_ANY_PADDING.decode(text).map_err(|error| {
+        use base64::DecodeError::{InvalidByte, InvalidLastSymbol, InvalidLength, InvalidPadding};
+        let message = match error {
+            InvalidByte(position, byte) => format!(
+                "base64.decode: invalid byte '{}' at position {position}",
+                offending_char(text, position, byte)
+            ),
+            InvalidLastSymbol(position, byte) => format!(
+                "base64.decode: invalid final symbol '{}' at position {position}",
+                offending_char(text, position, byte)
+            ),
+            InvalidLength => format!(
+                "base64.decode: incomplete base64 group ending at position {}",
+                text.len()
+            ),
+            InvalidPadding => format!(
+                "base64.decode: invalid padding at position {}",
+                text.rfind('=').unwrap_or(text.len())
+            ),
+        };
+        Error::Runtime(message, span)
+    })
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -3867,6 +3995,88 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 Ok(text) => Ok(Some(Value::Text(text))),
                 Err(e) => Err(Error::Runtime(
                     format!("bytes.text was given bytes that are not text: {e}"),
+                    span,
+                )),
+            }
+        }
+        "hex_encode" => {
+            let bytes = bytes_argument(span, "hex.encode", args.first())?;
+            Ok(Some(Value::Text(hex::encode(bytes))))
+        }
+        "hex_decode" => {
+            let text = match args.first() {
+                Some(Value::Text(text)) => text,
+                _ => {
+                    return Err(Error::Runtime(
+                        "hex.decode requires a text argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            Ok(Some(Value::list(
+                decode_hex(span, text)?
+                    .into_iter()
+                    .map(|byte| Value::Number(byte as f64))
+                    .collect(),
+            )))
+        }
+        "base64_encode" => {
+            let bytes = bytes_argument(span, "base64.encode", args.first())?;
+            Ok(Some(Value::Text(STANDARD.encode(bytes))))
+        }
+        "base64_decode" => {
+            let text = match args.first() {
+                Some(Value::Text(text)) => text,
+                _ => {
+                    return Err(Error::Runtime(
+                        "base64.decode requires a text argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            Ok(Some(Value::list(
+                decode_base64(span, text)?
+                    .into_iter()
+                    .map(|byte| Value::Number(byte as f64))
+                    .collect(),
+            )))
+        }
+        "hash_sha256" => {
+            let bytes = bytes_argument(span, "hash.sha256", args.first())?;
+            Ok(Some(Value::Text(hex::encode(Sha256::digest(bytes)))))
+        }
+        "hash_sha512" => {
+            let bytes = bytes_argument(span, "hash.sha512", args.first())?;
+            Ok(Some(Value::Text(hex::encode(Sha512::digest(bytes)))))
+        }
+        "uuid_generate" => {
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).map_err(|error| {
+                Error::Runtime(
+                    format!("uuid.generate: could not read random bytes: {error}"),
+                    span,
+                )
+            })?;
+            Ok(Some(Value::Text(
+                uuid::Builder::from_random_bytes(bytes)
+                    .into_uuid()
+                    .to_string(),
+            )))
+        }
+        "uuid_parse" => {
+            let text = match args.first() {
+                Some(Value::Text(text)) => text,
+                _ => {
+                    return Err(Error::Runtime(
+                        "uuid.parse requires a text argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            match uuid::Uuid::parse_str(text) {
+                Ok(id) => Ok(Some(Value::Text(id.hyphenated().to_string()))),
+                Err(_) => Err(Error::Runtime(
+                    format!("uuid.parse: '{text}' is not a UUID"),
                     span,
                 )),
             }
