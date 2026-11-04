@@ -1232,6 +1232,48 @@ say files.exists("{}")"#,
             "say bytes.text([104, 105])".into(),
             "hi\n".into(),
         ),
+        (
+            "base64_encode",
+            r#"say base64.encode(bytes.from_text("hi"))"#.into(),
+            "aGk=\n".into(),
+        ),
+        (
+            "base64_decode",
+            r#"say base64.decode("aGk=")"#.into(),
+            "[104, 105]\n".into(),
+        ),
+        (
+            "hex_encode",
+            r#"say hex.encode(bytes.from_text("hi"))"#.into(),
+            "6869\n".into(),
+        ),
+        (
+            "hex_decode",
+            r#"say hex.decode("6869")"#.into(),
+            "[104, 105]\n".into(),
+        ),
+        (
+            "hash_sha256",
+            r#"say hash.sha256("abc")"#.into(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n".into(),
+        ),
+        (
+            "hash_sha512",
+            r#"say hash.sha512("abc")"#.into(),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+             2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f\n"
+                .into(),
+        ),
+        (
+            "uuid_generate",
+            "say length(uuid.generate())".into(),
+            "36\n".into(),
+        ),
+        (
+            "uuid_parse",
+            r#"say uuid.parse("550E8400-E29B-41D4-A716-446655440000")"#.into(),
+            "550e8400-e29b-41d4-a716-446655440000\n".into(),
+        ),
         ("sys_argv", "say length(sys.argv())".into(), "0\n".into()),
         // Standard input is closed for every child `run_named` starts, so this
         // row reads end-of-input and gets the empty text. That is an answer, and

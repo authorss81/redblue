@@ -1534,6 +1534,55 @@ compiler writing a bytecode file cannot avoid. A value that is not a byte, or a
 byte list that is not valid UTF-8, is a refusal naming the byte rather than a
 wrapped value or a replacement character three files later.
 
+### hex and base64
+
+```redblue
+set data to bytes.from_text("Hi")
+say hex.encode(data)             // 4869
+say hex.decode("4869")           // [72, 105]
+say base64.encode(data)          // SGk=
+say base64.decode("SGk=")        // [72, 105]
+say base64.decode("SGk")         // [72, 105] — padding is optional on input
+```
+
+Both encoders take either a text or a byte list and answer text; `hex.encode`
+writes lowercase hexadecimal and `base64.encode` writes the standard alphabet
+with canonical `=` padding. Both decoders take text and answer a byte list.
+`base64.decode` accepts the same bytes with or without padding, because both
+spellings are sent by real protocols. Invalid input is never skipped: it is a
+catchable `Runtime` failure naming the offending position. An empty text is an
+empty byte list, and a single byte is a one-element byte list.
+
+### hash
+
+```redblue
+say hash.sha256("abc")                  // ba7816bf8f01...20015ad
+say hash.sha256(bytes.from_text("abc")) // the same digest
+say hash.sha512("abc")                  // ddaf35a19361...54ca49f
+```
+
+`hash.sha256` and `hash.sha512` take either a text, hashed as its UTF-8 bytes,
+or a byte list, and answer a lowercase hexadecimal digest. The digests are the
+`sha2` crate's, not an implementation in Redblue. There is no sentinel for bad
+input: a value that is neither text nor a byte list raises a catchable
+`Runtime` failure naming the function.
+
+### uuid
+
+```redblue
+set id to uuid.generate()                       // 550e8400-e29b-41d4-a716-446655440000
+say uuid.parse(id)                              // the same canonical text
+say uuid.parse("550E8400-E29B-41D4-A716-446655440000") // 550e8400-e29b-41d4-a716-446655440000
+say uuid.parse("{550e8400-e29b-41d4-a716-446655440000}") // the same
+say uuid.parse("urn:uuid:550e8400-e29b-41d4-a716-446655440000") // the same
+```
+
+`uuid.generate()` answers a new random version-4 UUID in canonical lowercase.
+`uuid.parse` accepts the hyphenated, simple, braced and `urn:uuid:` forms in
+either case and answers the canonical lowercase hyphenated text. A text that is
+not a UUID raises a catchable `Runtime` failure naming `uuid.parse`; there is no
+sentinel value.
+
 ### collections
 
 ```redblue

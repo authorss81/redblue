@@ -72,6 +72,11 @@ here either is already a dependency in `Cargo.toml` or exists on crates.io.
 | Statistics | class — not in the survey | `statrs` (crates.io) | Distributions and special functions are numeric precision work; a Redblue implementation would be slower and less accurate. |
 | Cryptography | class — not in the survey | `ring`, `aes-gcm`, `ed25519-dalek`, `sha2` (crates.io) | Primitives must be audited and constant-time; a readable-language implementation invites timing side channels. Bind, never hand-roll. |
 
+The encodings and digests row is now bound: `hex`, `base64`, `hash.sha256`,
+`hash.sha512`, `uuid.generate` and `uuid.parse` wrap the `hex`, `base64`, `sha2`
+and `uuid` crates behind the Redblue names. `percent-encoding` remains an open
+binding entry; it is not a module yet.
+
 A binding is acceptable only when it keeps the Redblue surface readable: one
 module name and a small set of English-shaped calls, errors caught as Redblue
 errors, and no leak of the crate's types into the language.

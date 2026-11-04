@@ -17,11 +17,14 @@ use std::collections::HashMap;
 /// `formats` would make a misspelling resolve to a namespace and fail later and
 /// less clearly than it does now.
 pub const MODULES: &[&str] = &[
+    "base64",
     "bytes",
     "collections",
     "console",
     "csv",
     "files",
+    "hash",
+    "hex",
     "json",
     "list",
     "logging",
@@ -32,6 +35,7 @@ pub const MODULES: &[&str] = &[
     "sys",
     "text",
     "time",
+    "uuid",
 ];
 
 /// The modules whose functions are the flat builtins of the same name rather
@@ -74,6 +78,7 @@ pub const ALIAS_MODULES: &[&str] = &["math", "text"];
 /// [`ALIAS_MODULES`]: their members are flat builtins, and spelling them
 /// `<module>.<member>` is how a program reaches them.
 pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
+    ("base64", &["encode", "decode"]),
     ("bytes", &["from_text", "text", "write"]),
     (
         "collections",
@@ -115,6 +120,8 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "read", "write", "append", "exists", "lines", "delete", "copy", "rename",
         ],
     ),
+    ("hash", &["sha256", "sha512"]),
+    ("hex", &["encode", "decode"]),
     ("json", &["parse", "stringify"]),
     // `filter` and `reduce` are **not** here, and leaving them out is what
     // `list.filter(xs, f)` needs rather than a detail. Both are registered as
@@ -189,6 +196,7 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "length",
         ],
     ),
+    ("uuid", &["generate", "parse"]),
     (
         "time",
         &[
@@ -677,6 +685,23 @@ pub fn builtins() -> HashMap<String, Value> {
         "bytes_text".to_string(),
         Value::Builtin("bytes_text".to_string()),
     );
+
+    // Encodings, digests and identifiers. The algorithms are the crates'
+    // (`base64`, `hex`, `sha2`, `uuid`), not versions written in Redblue: a
+    // hand-rolled digest is slow and easy to get wrong, and the policy in
+    // LIBRARIES.md requires a binding for this class.
+    for name in [
+        "base64_encode",
+        "base64_decode",
+        "hex_encode",
+        "hex_decode",
+        "hash_sha256",
+        "hash_sha512",
+        "uuid_generate",
+        "uuid_parse",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
 
     // Sys module
     globals.insert(
@@ -2050,6 +2075,14 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "bytes_from_text",
     "bytes_write",
     "bytes_text",
+    "base64_encode",
+    "base64_decode",
+    "hex_encode",
+    "hex_decode",
+    "hash_sha256",
+    "hash_sha512",
+    "uuid_generate",
+    "uuid_parse",
     "sys_argv",
     "input",
 ];
@@ -2488,6 +2521,38 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "bytes_write(path, bytes) -> write the byte values to a file",
     ),
     ("bytes_text", "bytes_text(bytes) -> the bytes as text"),
+    (
+        "base64_encode",
+        "base64.encode(bytes) -> base64 text with canonical padding",
+    ),
+    (
+        "base64_decode",
+        "base64.decode(text) -> a byte list; invalid input raises an error naming the position",
+    ),
+    (
+        "hex_encode",
+        "hex.encode(bytes) -> lowercase hexadecimal text",
+    ),
+    (
+        "hex_decode",
+        "hex.decode(text) -> a byte list; invalid input raises an error naming the position",
+    ),
+    (
+        "hash_sha256",
+        "hash.sha256(text or bytes) -> a lowercase SHA-256 digest",
+    ),
+    (
+        "hash_sha512",
+        "hash.sha512(text or bytes) -> a lowercase SHA-512 digest",
+    ),
+    (
+        "uuid_generate",
+        "uuid.generate() -> a new random UUID (version 4), canonical lowercase",
+    ),
+    (
+        "uuid_parse",
+        "uuid.parse(text) -> the canonical lowercase UUID; invalid input raises an error",
+    ),
     (
         "sys_argv",
         "sys_argv() -> the arguments the program was run with",
