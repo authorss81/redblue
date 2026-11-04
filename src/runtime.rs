@@ -2703,9 +2703,55 @@ fn first_invalid_base64_byte(text: &str) -> Option<usize> {
         .map(|(position, _)| position)
 }
 
+/// The first padding character that makes the layout invalid, with the reason.
+///
+/// The `base64` crate reports surplus padding either at the end of the text or
+/// at a symbol that is itself legal, so `"aGk=="` used to name position 5 while
+/// the extra `=` sits at position 4. Checking the padding shape first keeps the
+/// refusal anchored to the character a program has to remove.
+fn first_invalid_base64_padding(text: &str) -> Option<(usize, &'static str)> {
+    let first_pad = text.find('=')?;
+    // A `=` followed by data is not padding at all; name its own position.
+    if !text[first_pad..].bytes().all(|byte| byte == b'=') {
+        return Some((first_pad, "is followed by data"));
+    }
+    let padding = text.len() - first_pad;
+    let required = match first_pad % 4 {
+        0 => 0,
+        1 => return Some((first_pad, "cannot complete an incomplete group")),
+        2 => 2,
+        _ => 1,
+    };
+    if padding > required {
+        return Some((first_pad + required, "is more padding than the group needs"));
+    }
+    if padding < required {
+        return Some((first_pad, "does not finish the last group"));
+    }
+    None
+}
+
 /// Decodes strict base64 in every padding form a transport sends, naming the
 /// position of the first byte that made it refuse.
 fn decode_base64(span: Span, text: &str) -> Result<Vec<u8>> {
+    // An invalid symbol outranks a misplaced `=`: `"aGk=\n"` is refused at the
+    // newline, which is where the text first stops being base64.
+    if let Some(position) = first_invalid_base64_byte(text) {
+        let byte = text.as_bytes()[position];
+        return Err(Error::Runtime(
+            format!(
+                "base64.decode: invalid byte '{}' at position {position}",
+                offending_char(text, position, byte)
+            ),
+            span,
+        ));
+    }
+    if let Some((position, reason)) = first_invalid_base64_padding(text) {
+        return Err(Error::Runtime(
+            format!("base64.decode: padding '=' at position {position} {reason}"),
+            span,
+        ));
+    }
     BASE64_ANY_PADDING.decode(text).map_err(|error| {
         use base64::DecodeError::{InvalidByte, InvalidLastSymbol, InvalidLength, InvalidPadding};
         let message = match error {

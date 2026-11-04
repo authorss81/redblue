@@ -1548,10 +1548,10 @@ say base64.decode("SGk")         // [72, 105] — padding is optional on input
 Both encoders take either a text or a byte list and answer text; `hex.encode`
 writes lowercase hexadecimal and `base64.encode` writes the standard alphabet
 with canonical `=` padding. Both decoders take text and answer a byte list.
-`base64.decode` accepts the same bytes with or without padding, because both
-spellings are sent by real protocols. Invalid input is never skipped: it is a
-catchable `Runtime` failure naming the offending position. An empty text is an
-empty byte list, and a single byte is a one-element byte list.
+`base64.decode` accepts the same bytes fully padded or with no padding; a
+partial pad or `=` followed by data is a catchable `Runtime` failure naming
+that symbol. No invalid input is skipped. An empty text is an empty byte list,
+and a single byte is a one-element byte list.
 
 ### hash
 
@@ -1570,7 +1570,7 @@ input: a value that is neither text nor a byte list raises a catchable
 ### uuid
 
 ```redblue
-set id to uuid.generate()                       // 550e8400-e29b-41d4-a716-446655440000
+set id to uuid.generate()                       // a new random UUID each call
 say uuid.parse(id)                              // the same canonical text
 say uuid.parse("550E8400-E29B-41D4-A716-446655440000") // 550e8400-e29b-41d4-a716-446655440000
 say uuid.parse("{550e8400-e29b-41d4-a716-446655440000}") // the same

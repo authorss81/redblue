@@ -103,6 +103,7 @@ fn edge_base64_uses_canonical_padding_and_decodes_padded_or_unpadded() {
     assert_eq!(eval(r#"base64.decode("aGk=")"#), bytes(&[104, 105]));
     assert_eq!(eval(r#"base64.decode("aGk")"#), bytes(&[104, 105]));
     assert_eq!(eval(r#"base64.decode("")"#), bytes(&[]));
+    assert_eq!(eval(r#"base64.encode("hi")"#), text("aGk="));
 }
 
 /// A single byte is the boundary between an empty payload and a padded one, and
@@ -115,6 +116,7 @@ fn edge_hex_single_byte_empty_and_uppercase_inputs() {
     assert_eq!(eval(r#"hex.decode("")"#), bytes(&[]));
     assert_eq!(eval("hex.encode([0])"), text("00"));
     assert_eq!(eval("hex.encode([255])"), text("ff"));
+    assert_eq!(eval(r#"hex.encode("hi")"#), text("6869"));
 }
 
 /// A decoder that silently skips bad input is how corrupt data reaches a
@@ -252,6 +254,18 @@ fn edge_uuid_generates_parseable_values_and_parses_every_format() {
     };
     assert_eq!(items[0], items[2], "a generated UUID must parse to itself");
     assert_eq!(items[1], Value::Number(36.0), "a UUID is 36 characters");
+    let Value::Text(raw) = &items[2] else {
+        panic!("expected the generated UUID as text, got {:?}", items[2]);
+    };
+    assert_eq!(
+        raw.chars().nth(14),
+        Some('4'),
+        "a generated UUID must have version 4, got {raw}"
+    );
+    assert!(
+        matches!(raw.chars().nth(19), Some('8' | '9' | 'a' | 'b')),
+        "a generated UUID must carry the RFC 4122 variant, got {raw}"
+    );
 
     assert_eq!(
         eval("uuid.generate() == uuid.generate()"),
@@ -265,7 +279,9 @@ fn edge_uuid_generates_parseable_values_and_parses_every_format() {
         "550E8400-E29B-41D4-A716-446655440000",
         "550e8400e29b41d4a716446655440000",
         "{550e8400-e29b-41d4-a716-446655440000}",
+        "{550E8400-E29B-41D4-A716-446655440000}",
         "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        "URN:UUID:550E8400-E29B-41D4-A716-446655440000",
     ] {
         assert_eq!(
             eval(&format!("uuid.parse(\"{spelling}\")")),
@@ -286,6 +302,118 @@ fn edge_uuid_generates_parseable_values_and_parses_every_format() {
     }
 }
 
+/// Padding whose first `=` sits at a position that cannot complete any group,
+/// or that is longer than its group needs, is refused at the offending symbol.
+#[test]
+fn edge_base64_impossible_padding_shapes_are_refused_at_the_pad() {
+    for (source, position) in [
+        (r#"base64.decode("A===")"#, "position 1"),
+        (r#"base64.decode("AAAAA===")"#, "position 5"),
+        (r#"base64.decode("AA===")"#, "position 4"),
+    ] {
+        let result = redblue::run_source(source);
+        assert!(result.is_err(), "{source} should have been refused");
+        let error = result.expect_err("a failed result must carry an error");
+        let message = runtime_message(&error);
+        assert!(
+            message.contains("padding") && message.contains(position),
+            "{source} was refused as `{message}`, which does not name `{position}`"
+        );
+    }
+}
+
+/// Padding that cannot belong to the final group is refused at the symbol that
+/// is actually wrong, not at the end of the text or at a valid padding symbol.
+#[test]
+fn edge_base64_excess_padding_names_the_extra_symbol() {
+    for (source, position) in [
+        (r#"base64.decode("aGk==")"#, "position 4"),
+        (r#"base64.decode("aGk===")"#, "position 4"),
+        (r#"base64.decode("AAAA=")"#, "position 4"),
+        (r#"base64.decode("AAAAAAAA=")"#, "position 8"),
+        (r#"base64.decode("====")"#, "position 0"),
+    ] {
+        let result = redblue::run_source(source);
+        assert!(result.is_err(), "{source} should have been refused");
+        let error = result.expect_err("a failed result must carry an error");
+        let message = runtime_message(&error);
+        assert!(
+            message.contains("padding") && message.contains(position),
+            "{source} was refused as `{message}`, which does not name `{position}`"
+        );
+    }
+}
+
+/// A group that opens with padding but is not finished is refused at the first
+/// `=`, so a truncated transport frame cannot be mistaken for unpadded data.
+#[test]
+fn edge_base64_partial_padding_is_refused_at_the_pad() {
+    for (source, position) in [
+        (r#"base64.decode("AA=")"#, "position 2"),
+        (r#"base64.decode("AAA==")"#, "position 4"),
+    ] {
+        let result = redblue::run_source(source);
+        assert!(result.is_err(), "{source} should have been refused");
+        let error = result.expect_err("a failed result must carry an error");
+        let message = runtime_message(&error);
+        assert!(
+            message.contains("padding") && message.contains(position),
+            "{source} was refused as `{message}`, which does not name `{position}`"
+        );
+    }
+    assert_eq!(
+        eval(r#"base64.decode("AA")"#),
+        bytes(&[0]),
+        "the fully unpadded form must still decode"
+    );
+}
+
+/// Padding before the end is not padding at all. Both ends are named where the
+/// stray symbol actually sits.
+#[test]
+fn edge_base64_padding_in_the_middle_names_its_position() {
+    for (source, position) in [
+        (r#"base64.decode("aG=k")"#, "position 2"),
+        (r#"base64.decode("=aGk")"#, "position 0"),
+        (r#"base64.decode("aG==k")"#, "position 2"),
+    ] {
+        let result = redblue::run_source(source);
+        assert!(result.is_err(), "{source} should have been refused");
+        let error = result.expect_err("a failed result must carry an error");
+        let message = runtime_message(&error);
+        assert!(
+            message.contains(position),
+            "{source} was refused as `{message}`, which does not name `{position}`"
+        );
+    }
+}
+
+/// Canonical padded forms and their fully unpadded equivalents still decode, so
+/// the stricter padding check did not narrow a valid transport.
+#[test]
+fn edge_base64_complete_groups_decode_with_and_without_padding() {
+    for (padded, unpadded, expected) in [
+        (
+            r#"base64.decode("AA==")"#,
+            r#"base64.decode("AA")"#,
+            &[0u8][..],
+        ),
+        (
+            r#"base64.decode("AAA=")"#,
+            r#"base64.decode("AAA")"#,
+            &[0, 0][..],
+        ),
+        (
+            r#"base64.decode("aGk=")"#,
+            r#"base64.decode("aGk")"#,
+            &[104, 105][..],
+        ),
+    ] {
+        assert_eq!(eval(padded), bytes(expected), "padded {padded}");
+        assert_eq!(eval(unpadded), bytes(expected), "unpadded {unpadded}");
+    }
+}
+
 /// A wrong type and a malformed UUID are clean refusals naming the call, not
 /// panics and not sentinel values.
 #[test]
@@ -295,6 +423,7 @@ fn edge_bad_hasher_and_uuid_inputs_are_refused_by_name() {
         ("hex.encode(5)", "hex.encode"),
         ("hex.encode([256])", "hex.encode"),
         ("base64.encode([-1])", "base64.encode"),
+        ("uuid.parse(5)", "uuid.parse"),
         (r#"uuid.parse("not-a-uuid")"#, "uuid.parse"),
     ] {
         let error = eval_err(source);

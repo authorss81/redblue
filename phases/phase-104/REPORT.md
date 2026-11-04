@@ -21,6 +21,10 @@ content, or generate an identifier.
 
 | File | Lines | What |
 |---|---|---|
+| `src/runtime.rs` | +46 −0 | this run: validate the base64 padding shape before decoding, so surplus padding (`aGk==`), partial padding (`AA=`) and a `=` followed by data are named at the offending symbol instead of at the end of the text or at a legal pad |
+| `tests/encoding_hashing_test.rs` | +129 −0 | this run: five new edge tests for impossible, excess, partial and misplaced padding, plus the valid padded/unpadded forms that must keep decoding |
+| `SPEC.md` | +5 −5 | this run: state that partial and misplaced padding is refused at the symbol, not skipped; the `uuid.generate()` example no longer implies a fixed value |
+| `phases/phase-104/REPORT.md` | +22 −11 | this run: record the refreshed tests, edge matrix and gate results |
 | `Cargo.toml` | +5 | bind `base64`, `hex`, `sha2` and `uuid` (v4), plus `getrandom` for the fallible v4 path |
 | `Cargo.lock` | +93 | lock the five crates and their transitive dependencies |
 | `src/stdlib.rs` | +65 | register `base64`, `hex`, `hash` and `uuid` in `MODULES`/`MODULE_MEMBERS`, add the eight builtins to `BUILTIN_NAMES` and `BUILTIN_SIGNATURES` |
@@ -50,6 +54,11 @@ content, or generate an identifier.
 | `edge_bad_hasher_and_uuid_inputs_are_refused_by_name` | type mismatch, byte range `-1`/`256`, malformed UUID |
 | `edge_decoders_do_not_answer_a_valid_prefix_when_the_tail_is_bad` | malformed input: a valid prefix followed by garbage must still fail at the tail |
 | `edge_unicode_text_survives_hex_and_base64` | Unicode: accents, emoji, CJK, RTL, combining mark |
+| `edge_base64_impossible_padding_shapes_are_refused_at_the_pad` (this run) | malformed input: padding that cannot complete a group is refused at the first pad, naming the pad and its position |
+| `edge_base64_excess_padding_names_the_extra_symbol` (this run) | malformed input: surplus padding names the extra `=` after a full group (`aGk==` at 4, `AAAA=` at 4, `AAAAAAAA=` at 8) and all-padding input at position 0; asserts `is_err()` |
+| `edge_base64_partial_padding_is_refused_at_the_pad` (this run) | malformed input: a partial pad is refused at the pad, and the refusal names both `padding` and the position, while the fully unpadded form still decodes |
+| `edge_base64_padding_in_the_middle_names_its_position` (this run) | malformed input: a `=` followed by data is refused at its own position, at the start, middle and a double pad |
+| `edge_base64_complete_groups_decode_with_and_without_padding` (this run) | boundary: `AA==`/`AA`, `AAA=`/`AAA`, `aGk=`/`aGk` all decode to the same literal bytes |
 | `edge_decode_hex_names_the_unpaired_digit` (src unit) | boundary: odd-length hex names the digit with no pair |
 | `edge_decode_base64_accepts_padding_forms_and_names_invalid_bytes` (src unit) | empty/singleton padding forms and malformed input named by position |
 
@@ -66,7 +75,7 @@ content, or generate an identifier.
 | unicode | covered — UTF-8 text with accents, emoji, CJK, RTL and a combining mark survives both encodings. |
 | nesting_recursion | N/A — these are flat transformations over a byte list or a text; no nested structure or recursion is introduced. |
 | duplicate_missing_keys | N/A — there are no keys or records in this surface. |
-| malformed_input | covered — invalid hex digit, odd hex length (including the unpaired digit's position), whitespace, invalid base64 symbol, a valid prefix with a bad tail, and invalid UUID each produce a clean, catchable `Runtime` failure; hex/base64 failures name the position and nothing is skipped. |
+| malformed_input | covered — invalid hex digit, odd hex length (including the unpaired digit's position), whitespace, invalid base64 symbol, surplus/partial/misplaced base64 padding, a valid prefix with a bad tail, and invalid UUID each produce a clean, catchable `Runtime` failure; hex/base64 failures name the position and nothing is skipped. |
 | resource_limit | N/A — the input is one text or one byte list already in memory; there is no new unbounded loop, file, network or recursion path. |
 
 ## Gates
@@ -75,20 +84,22 @@ content, or generate an identifier.
 |---|---|
 | `cargo fmt --all -- --check` | pass — exit 0, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass — exit 0, no warnings |
-| `cargo test --all-targets` | pass — **2530 passed, 0 failed, 0 ignored** across 80 test binaries |
+| `cargo test --all-targets` | pass — **2535 passed, 0 failed, 0 ignored** across 80 test binaries |
 | `../rbops/verify.sh phase-104` | pass — `VERIFY PASS — phase-104` |
 
 The full suite was executed locally with cargo; `verify.sh` then re-ran the
 gates, the example sweep and the test-quota checks. It reported
-`cargo test: 2530 passed, 0 failed`, `diff substance: +122 -19`,
-`implementation touched src/`, and `VERIFY PASS — phase-104`. No gate was
-skipped, relaxed or weakened, and no `#[ignore]`, `// skip` or `allow(clippy::`
-suppression was added.
+`cargo test: 2535 passed, 0 failed`, `implementation touched src/`, five new
+Rust tests, and `VERIFY PASS — phase-104`. No gate was skipped, relaxed or
+weakened, and no `#[ignore]`, `// skip` or `allow(clippy::` suppression was
+added.
 
-This run resumed an already-merged attempt. Its implementation is in the prior
-`resume phase-104` delivery commit; this run acknowledged that delivery subject,
-made the strict-decoder positions more precise, added the missing verification,
-and re-ran every gate against the uncommitted diff.
+This run resumed an already-merged attempt. Its work was committed as the
+`resume phase-104` delivery, so the gate's diff saw no change at all and failed
+the diff, `must_touch` and test-quota checks. This run left a fresh on-topic
+diff: `decode_base64` now validates the padding shape before the crate decodes,
+so surplus, partial and misplaced padding name the offending symbol rather than
+the end of the text or a legal pad.
 
 ## Invariants touched
 
