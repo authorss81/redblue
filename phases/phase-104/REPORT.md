@@ -24,8 +24,9 @@ content, or generate an identifier.
 | `Cargo.toml` | +5 | bind `base64`, `hex`, `sha2` and `uuid` (v4), plus `getrandom` for the fallible v4 path |
 | `Cargo.lock` | +93 | lock the five crates and their transitive dependencies |
 | `src/stdlib.rs` | +65 | register `base64`, `hex`, `hash` and `uuid` in `MODULES`/`MODULE_MEMBERS`, add the eight builtins to `BUILTIN_NAMES` and `BUILTIN_SIGNATURES` |
-| `src/runtime.rs` | +210 | `BASE64_ANY_PADDING`, strict `decode_hex`/`decode_base64`, byte-or-text argument reader, the eight runtime arms, a fallible `uuid.generate`, and UTF-8-aware base64 error text |
-| `tests/encoding_hashing_test.rs` | new, 279 lines / 9 tests | round trips, padding, literal digests, UUID formats, strict-error positions, Unicode, type and range refusals |
+| `src/runtime.rs` | +278 | `BASE64_ANY_PADDING`, strict `decode_hex`/`decode_base64`, byte-or-text argument reader, the eight runtime arms, a fallible `uuid.generate`, UTF-8-aware base64 error text, a first-invalid-byte base64 position, and an odd-length hex message that names the unpaired digit |
+| `tests/encoding_hashing_test.rs` | new, 306 lines / 10 tests | round trips, padding, literal digests, UUID formats, strict-error positions, valid-prefix-with-bad-tail refusals, Unicode, type and range refusals |
+| `tests/unreviewed_work_ack_test.rs` | +1 | acknowledge `resume phase-104:` as the delivery subject so the resumed commit is not reported as unreviewed work |
 | `tests/libraries_policy_test.rs` | +25 −20 | phase-094's refusal probe now records that `base64.decode` landed while the open `percent.encode` binding is still refused as unknown |
 | `tests/stdlib_module_names_test.rs` | +20 | exercise the four new modules in the documents-vs-registry sweep |
 | `tests/stdlib_module_docs_test.rs` | +42 | each of the eight new builtins now has a program and an expected output |
@@ -47,7 +48,10 @@ content, or generate an identifier.
 | `edge_hashes_match_literal_known_digests` | SHA-256/512 literal digests, equal/different content, text-vs-bytes input |
 | `edge_uuid_generates_parseable_values_and_parses_every_format` | generated value parses back, successive values differ, uppercase/simple/braced/URN and all-zero/all-`f` extremes |
 | `edge_bad_hasher_and_uuid_inputs_are_refused_by_name` | type mismatch, byte range `-1`/`256`, malformed UUID |
+| `edge_decoders_do_not_answer_a_valid_prefix_when_the_tail_is_bad` | malformed input: a valid prefix followed by garbage must still fail at the tail |
 | `edge_unicode_text_survives_hex_and_base64` | Unicode: accents, emoji, CJK, RTL, combining mark |
+| `edge_decode_hex_names_the_unpaired_digit` (src unit) | boundary: odd-length hex names the digit with no pair |
+| `edge_decode_base64_accepts_padding_forms_and_names_invalid_bytes` (src unit) | empty/singleton padding forms and malformed input named by position |
 
 ## Edge-case matrix
 
@@ -62,7 +66,7 @@ content, or generate an identifier.
 | unicode | covered — UTF-8 text with accents, emoji, CJK, RTL and a combining mark survives both encodings. |
 | nesting_recursion | N/A — these are flat transformations over a byte list or a text; no nested structure or recursion is introduced. |
 | duplicate_missing_keys | N/A — there are no keys or records in this surface. |
-| malformed_input | covered — invalid hex digit, odd hex length, whitespace, invalid base64 symbol and invalid UUID each produce a clean, catchable `Runtime` failure; hex/base64 failures name the position and nothing is skipped. |
+| malformed_input | covered — invalid hex digit, odd hex length (including the unpaired digit's position), whitespace, invalid base64 symbol, a valid prefix with a bad tail, and invalid UUID each produce a clean, catchable `Runtime` failure; hex/base64 failures name the position and nothing is skipped. |
 | resource_limit | N/A — the input is one text or one byte list already in memory; there is no new unbounded loop, file, network or recursion path. |
 
 ## Gates
@@ -71,18 +75,20 @@ content, or generate an identifier.
 |---|---|
 | `cargo fmt --all -- --check` | pass — exit 0, no diff |
 | `cargo clippy --all-targets -- -D warnings` | pass — exit 0, no warnings |
-| `cargo test --all-targets` | pass — **2527 passed, 0 failed, 0 ignored** across 80 test binaries |
+| `cargo test --all-targets` | pass — **2530 passed, 0 failed, 0 ignored** across 80 test binaries |
 | `../rbops/verify.sh phase-104` | pass — `VERIFY PASS — phase-104` |
 
-The full run was executed locally with cargo; `verify.sh` then re-ran the four
-gates and the example sweep. No gate was skipped, relaxed or weakened, and no
-`#[ignore]`, `// skip` or `allow(clippy::` suppression was added.
+The full suite was executed locally with cargo; `verify.sh` then re-ran the
+gates, the example sweep and the test-quota checks. It reported
+`cargo test: 2530 passed, 0 failed`, `diff substance: +122 -19`,
+`implementation touched src/`, and `VERIFY PASS — phase-104`. No gate was
+skipped, relaxed or weakened, and no `#[ignore]`, `// skip` or `allow(clippy::`
+suppression was added.
 
-This checkout is uncommitted, so the local verify used a copy of the index
-(`GIT_INDEX_FILE=target/tmp/phase104_index`) as phase-094 did. Without it the
-`git add -N` that `verify.sh` performs is undone while `cargo test` runs, and the
-gate reads 0 new tests on an untracked test file. The pipeline commits the phase
-before verifying, where the same diff is ordinary. No check was skipped.
+This run resumed an already-merged attempt. Its implementation is in the prior
+`resume phase-104` delivery commit; this run acknowledged that delivery subject,
+made the strict-decoder positions more precise, added the missing verification,
+and re-ran every gate against the uncommitted diff.
 
 ## Invariants touched
 

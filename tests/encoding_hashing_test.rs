@@ -138,6 +138,15 @@ fn edge_invalid_hex_and_base64_name_the_offending_position() {
         );
     }
 
+    // An odd-length hex string names the digit that has no pair, not only the
+    // end of the text: `486` is a refusal at the 6, which is position 2.
+    let error = eval_err(r#"hex.decode("486")"#);
+    let message = runtime_message(&error);
+    assert!(
+        message.contains("position 2"),
+        "the unpaired digit was not named in `{message}`"
+    );
+
     let error = eval_err(r#"base64.decode("é")"#);
     let message = runtime_message(&error);
     assert!(
@@ -145,6 +154,25 @@ fn edge_invalid_hex_and_base64_name_the_offending_position() {
         "a non-ASCII byte was rendered as `{message}`, not as the character the \
          program wrote"
     );
+}
+
+/// A decoder that stops at the first bad character has silently dropped every
+/// byte after it. A valid prefix followed by garbage is still a refusal at the
+/// tail, never a shorter byte list that looks like success.
+#[test]
+fn edge_decoders_do_not_answer_a_valid_prefix_when_the_tail_is_bad() {
+    for (source, position) in [
+        (r#"hex.decode("4869zz")"#, "position 4"),
+        (r#"base64.decode("aGk!!")"#, "position 3"),
+        (r#"base64.decode("aGk!!!")"#, "position 3"),
+    ] {
+        let error = eval_err(source);
+        let message = runtime_message(&error);
+        assert!(
+            message.contains(position),
+            "{source} was refused as `{message}`, which does not name `{position}`"
+        );
+    }
 }
 
 /// A decoding error is a normal Redblue failure, not a process abort: `try`

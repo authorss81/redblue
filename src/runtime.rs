@@ -2668,7 +2668,11 @@ fn decode_hex(span: Span, text: &str) -> Result<Vec<u8>> {
     }
     if !digits.is_multiple_of(2) {
         return Err(Error::Runtime(
-            format!("hex.decode: odd number of hex digits ({digits}) ending at position {digits}"),
+            format!(
+                "hex.decode: odd number of hex digits ({digits}); the last digit at \
+                 position {} has no pair, so the input ends at position {digits}",
+                digits - 1
+            ),
             span,
         ));
     }
@@ -2685,16 +2689,33 @@ fn offending_char(text: &str, position: usize, byte: u8) -> char {
         .unwrap_or(char::from(byte))
 }
 
+/// The byte offset of the first character that cannot appear in base64, if any.
+///
+/// The `base64` crate can report a later byte for an input whose length makes it
+/// inspect more than one quantum, so a text with two bad bytes in the same
+/// quantum was named at the second one. Scanning first keeps every prefix that
+/// shares a bad byte reporting that same first position.
+fn first_invalid_base64_byte(text: &str) -> Option<usize> {
+    text.char_indices()
+        .find(|(_, character)| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '='))
+        })
+        .map(|(position, _)| position)
+}
+
 /// Decodes strict base64 in every padding form a transport sends, naming the
-/// position of the byte that made it refuse.
+/// position of the first byte that made it refuse.
 fn decode_base64(span: Span, text: &str) -> Result<Vec<u8>> {
     BASE64_ANY_PADDING.decode(text).map_err(|error| {
         use base64::DecodeError::{InvalidByte, InvalidLastSymbol, InvalidLength, InvalidPadding};
         let message = match error {
-            InvalidByte(position, byte) => format!(
-                "base64.decode: invalid byte '{}' at position {position}",
-                offending_char(text, position, byte)
-            ),
+            InvalidByte(position, byte) => {
+                let position = first_invalid_base64_byte(text).unwrap_or(position);
+                format!(
+                    "base64.decode: invalid byte '{}' at position {position}",
+                    offending_char(text, position, byte)
+                )
+            }
             InvalidLastSymbol(position, byte) => format!(
                 "base64.decode: invalid final symbol '{}' at position {position}",
                 offending_char(text, position, byte)
@@ -5090,5 +5111,52 @@ mod expect_builtin_tests {
                 failure
             );
         }
+    }
+
+    fn runtime_message(error: Error) -> String {
+        match error {
+            Error::Runtime(message, _) => message,
+            other => panic!("expected a Runtime error, got {other:?}"),
+        }
+    }
+
+    /// An odd number of hex digits is a refusal, and it names the digit that has
+    /// no pair rather than only the end of the text.
+    #[test]
+    fn edge_decode_hex_names_the_unpaired_digit() {
+        let message = runtime_message(
+            decode_hex(Span::new(1, 1), "486").expect_err("odd length must be refused"),
+        );
+        assert!(
+            message.contains("position 2") && message.contains("position 3"),
+            "the unpaired digit and the end must both be named, got `{message}`"
+        );
+        assert_eq!(
+            runtime_message(
+                decode_hex(Span::new(1, 1), "48 69").expect_err("space must be refused")
+            ),
+            "hex.decode: invalid hex digit ' ' at position 2"
+        );
+    }
+
+    /// Base64 accepts both padding forms and still names the byte that makes it
+    /// refuse, so a corrupt payload cannot pass as a shorter one.
+    #[test]
+    fn edge_decode_base64_accepts_padding_forms_and_names_invalid_bytes() {
+        assert_eq!(
+            decode_base64(Span::new(1, 1), "aGk=").expect("padded input"),
+            vec![104, 105]
+        );
+        assert_eq!(
+            decode_base64(Span::new(1, 1), "aGk").expect("unpadded input"),
+            vec![104, 105]
+        );
+        let message = runtime_message(
+            decode_base64(Span::new(1, 1), "aGk*").expect_err("invalid symbol must be refused"),
+        );
+        assert!(
+            message.contains("invalid byte '*'") && message.contains("position 3"),
+            "the invalid symbol must be named, got `{message}`"
+        );
     }
 }

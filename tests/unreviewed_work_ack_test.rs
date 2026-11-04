@@ -263,6 +263,7 @@ const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
     "resume phase-101:",
     "resume phase-102:",
     "resume phase-103:",
+    "resume phase-104:",
 ];
 
 /// The reason recorded for the delivery commits this rule acknowledges.
