@@ -1016,7 +1016,12 @@ mod tests {
         let offered = source.complete("say json.", 9);
         assert_eq!(
             offered,
-            vec!["json.parse".to_string(), "json.stringify".to_string()],
+            vec![
+                "json.parse".to_string(),
+                "json.parse_lines".to_string(),
+                "json.stringify".to_string(),
+                "json.stringify_lines".to_string(),
+            ],
             "a dotted call is completed from the module's members"
         );
         assert_eq!(
@@ -1116,7 +1121,12 @@ mod tests {
         );
         assert_eq!(
             source.complete("say \"a\" + json.", 15),
-            vec!["json.parse".to_string(), "json.stringify".to_string()],
+            vec![
+                "json.parse".to_string(),
+                "json.parse_lines".to_string(),
+                "json.stringify".to_string(),
+                "json.stringify_lines".to_string(),
+            ],
             "and a member after a closed string is completed as one"
         );
     }

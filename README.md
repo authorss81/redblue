@@ -327,7 +327,19 @@ network.post(url, body)
 ```
 json.parse(text)     // Parse JSON to record
 json.stringify(value)
+json.parse_lines(text)      // one JSON value per line -> list
+json.stringify_lines(list)  // a list -> one JSON value per line
 csv.parse(text)     // Parse CSV to list of lists
+csv.stringify(rows) // Write rows, quoting commas, quotes, newlines and space
+toml.parse(text)    // the documented TOML subset -> record
+```
+
+### Zip and Tar
+```
+zip.write(path, files)  // files is a record of names to text or byte lists
+zip.read(path)          // the same record, text when the bytes are UTF-8
+tar.write(path, files)
+tar.read(path)
 ```
 
 ### Math
