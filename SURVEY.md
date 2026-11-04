@@ -7,11 +7,12 @@ and diffing in phase-101; rank 6 gained date arithmetic in phase-096 and text
 parsing and formatting in phase-097. The entries are kept so the ranking and
 its history stay readable.
 
-- **Builtins in the registry**: 123 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1945`,
-  which closes with `"input"` at `src/stdlib.rs:2068`. The six module-only
+- **Builtins in the registry**: 114 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:1940`,
+  which closes with `"input"` at `src/stdlib.rs:2054`. The six module-only
   `text.wrap`, `text.diff`, `text.dedent`, `text.template`, `text.pad` and
   `text.align` utilities are deliberately not in this table, and neither is
-  `sys.parse`, whose only spelling is `sys.parse`.
+  `sys.parse` nor the nine `logging` calls, whose only spellings are
+  `sys.parse` and `logging.<member>`.
 - **Modules a dotted call may name**: 15 — `stdlib::MODULES` at `src/stdlib.rs:19`.
 - **Dotted members those modules accept**: 101 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:76`.
@@ -111,7 +112,7 @@ survey measures against, and it is short.
 Two observations from that table that the rest of this document depends on:
 
 - **`text` has no way to take a piece of a text.** `split` and `join` can get
-  there with loss (`src/stdlib.rs:832` — the separator is a literal, so
+  there with loss (`src/stdlib.rs:817` — the separator is a literal, so
   `split("a1b22c", "2")` loses the separators), but there is no `slice`, no
   `index_of`, no `pad_left`. Every "extract the field between the colons" task is
   rank 5.
@@ -166,7 +167,7 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:1584` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:1569` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -200,7 +201,7 @@ Before phase-095 the same program was refused as
   inside `if let Value::List(items)`, so a record is not a list and the loop body
   never runs. `src/runtime.rs:1525` — `length` refuses a record outright with
   *"length requires a list or text"*. And the registry holds no `keys` and no
-  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:2068` without one.
+  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:2054` without one.
 - **Why it matters more than it looks**: a record is Redblue's only map type. A
   program cannot count a record, iterate it, merge one into another, or turn one
   back into text. Grouping is the operation almost every data program performs
@@ -223,7 +224,7 @@ Prints nothing and exits 0. The same record answers `r.a` and refuses `length(r)
 - **Blocked programs**: 4 — 4, 8, 19, 26
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:137` — `map` and `length` are the whole `list`
-  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:1945`) holds no `sort`, `sort_by`,
+  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:1940`) holds no `sort`, `sort_by`,
   `reverse`, `min`, `max`, `sum`, `first` or `last`. The refusal for any of them
   is `src/interpreter.rs:2411`, which formats `Unknown function '{}'`.
 - **What is missing**: `sort`, `sort_by`, `reverse`, `min`, `max`, `sum`,
@@ -245,7 +246,7 @@ Refused as `RuntimeError: Unknown function 'sort'`.
 - **Evidence**: `src/stdlib.rs:165` — the `text` row now carries the ten original
   names plus `wrap`, `diff`, `dedent`, `template`, `pad` and `align`, none of
   which takes an index or produces a substring. `split` is documented at
-  `src/stdlib.rs:2114` as taking a literal separator, and `src/stdlib.rs:832` is
+  `src/stdlib.rs:2100` as taking a literal separator, and `src/stdlib.rs:817` is
   the comment explaining why there is no pattern to give it. `length` counts
   **characters**, not bytes (`src/runtime.rs:1522`), so a slicing design has a
   defined unit to slice by; the gap is that no slicing or searching call exists.
@@ -330,7 +331,7 @@ Refused as `RuntimeError: Module 'files' has no function 'glob'`.
   that cannot be worked around by any amount of loop.
 - **Note**: `bytes` cannot even report its own length or compare two of them; the
   registry has no `bytes_length`: the three `bytes` names are at
-  `src/stdlib.rs:685` through `src/stdlib.rs:694`.
+  `src/stdlib.rs:670` through `src/stdlib.rs:679`.
 
 ```redblue
 say base64.decode("aGk=")
@@ -346,7 +347,7 @@ Refused as `AnalyzerError: Unknown variable 'base64'`.
   `to_number` are the only two conversions between a number and anything else,
   and neither takes a second argument. There is no precision, no base, no
   thousands separator and no padding. The nearest thing to formatting is
-  `src/stdlib.rs:2269`, `to_text(any) -> text`, which is the default rendering.
+  `src/stdlib.rs:2255`, `to_text(any) -> text`, which is the default rendering.
 - **Why**: "print $1,234.50" is the last line of a money program, and
   "parse the integer after the marker" is a step of program 10. Both need the
   same thing — a format the caller states.
@@ -363,7 +364,7 @@ Refused as `RuntimeError: Unknown function 'to_fixed'`.
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:111` — the `csv` row is one name, `parse`.
   `src/stdlib.rs:118` — `json` has both directions, and
-  `src/stdlib.rs:2393` gives `json.stringify`'s whole shape —
+  `src/stdlib.rs:2379` gives `json.stringify`'s whole shape —
   `json_stringify(any) -> text` — so it takes no indent argument, so the output is one line regardless.
 - **Why**: reading data is solved and writing it back is not. A program that
   normalises, filters or summarises a CSV has nowhere to put its result. The
@@ -388,7 +389,7 @@ entries first.
 | No `sys` surface beyond `argv` and CLI flags: no environment variables, exit code, cwd, platform | `src/stdlib.rs:163` | 31, 32 |
 | No set algebra: `unique`, `flatten`, `reverse`, intersection | `src/stdlib.rs:137` | 3 |
 | No statistics or integer maths: no `min`/`max`, `sum`, `mean`, `gcd`, `log2`, inverse trig | `src/stdlib.rs:139` | 8 |
-| No UUID or token generation; `random_choice`/`random_shuffle` exist but no uuid-shaped call | `src/stdlib.rs:669` | 28 |
+| No UUID or token generation; `random_choice`/`random_shuffle` exist but no uuid-shaped call | `src/stdlib.rs:654` | 28 |
 | No concurrency, no timeout or retry control on `network.get` | `src/stdlib.rs:144` | 29 |
 | No `inspect`-style pretty printer; no assertion library beyond `expect`/`assert` | `src/stdlib.rs:626` | — |
 | No TOML/YAML/XML reader or writer | `src/stdlib.rs:19` | — |

@@ -4369,7 +4369,16 @@ impl Default for Limits {
 }
 
 /// Runs `chunk` and returns what `main` produced.
+///
+/// This is the one-shot entry point, like [`crate::run_source`], so it starts
+/// from the documented logging defaults. The configuration is thread-local and
+/// would otherwise survive from an earlier `rb vm` run in the same thread: a
+/// program would inherit the previous program's threshold, destination and
+/// timestamp mode. [`BytecodeVm::run`] does not reset, because the REPL reuses
+/// one VM across inputs and a logging call in one line must be visible to the
+/// next.
 pub fn run(chunk: &Chunk) -> Result<Value> {
+    crate::logging::reset();
     BytecodeVm::new().run(chunk)
 }
 

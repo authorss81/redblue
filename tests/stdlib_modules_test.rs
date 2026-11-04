@@ -2206,4 +2206,212 @@ mod logging_module {
             "reset sent a record to the old file destination"
         );
     }
+
+    /// The one-shot bytecode entry point is a program run, so it starts from
+    /// the documented defaults just as `rb run` does. The configuration is
+    /// thread-local and would otherwise survive into the next program in the
+    /// same thread.
+    #[test]
+    fn edge_the_bytecode_entry_point_starts_from_the_default_logging_configuration() {
+        let dir = scratch("bytecode-run-defaults");
+        let stale = dir.join("stale.log");
+        redblue::logging::reset();
+
+        let configure = compile_source(&format!(
+            "logging.set_level(\"info\")\n\
+             logging.set_timestamps(no)\n\
+             logging.set_destination(\"{}\")\n\
+             logging.info(\"first\")\n",
+            quoted(&stale)
+        ))
+        .expect("the first program compiles");
+        redblue::bytecode::vm::run(&configure).expect("the first program runs");
+        assert_eq!(
+            fs::read_to_string(&stale).expect("the first program logged"),
+            "[INFO] first\n"
+        );
+
+        let observe = compile_source("logging.info(\"leaked\")\nlogging.level()\n")
+            .expect("the second program compiles");
+        let value = redblue::bytecode::vm::run(&observe).expect("the second program runs");
+
+        assert_eq!(
+            value,
+            Value::Text("off".to_string()),
+            "the second program inherited the first program's threshold"
+        );
+        assert_eq!(
+            fs::read_to_string(&stale).expect("the first program's file"),
+            "[INFO] first\n",
+            "the second program inherited the first program's destination"
+        );
+    }
+
+    /// The bootstrap's stage-2 run is a one-shot program run too, so it starts
+    /// from the documented defaults even though it uses `BytecodeVm::run`
+    /// directly for its captured output.
+    #[test]
+    fn edge_the_bootstrap_stage_two_run_starts_from_the_default_logging_configuration() {
+        let dir = scratch("bootstrap-defaults");
+        let stale = dir.join("stale.log");
+        let input = dir.join("compiler.rb");
+        let output = dir.join("stage2.rbc");
+        fs::write(&input, "the stage-2 compiler source").expect("input file");
+
+        redblue::logging::reset();
+        redblue::logging::set_level("info").expect("info is a level");
+        redblue::logging::set_timestamps(false);
+        redblue::logging::set_destination(&stale.to_string_lossy())
+            .expect("the stale destination is a path");
+
+        let chunk = compile_source(&format!(
+            "logging.info(\"leaked\")\nfiles.write(\"{}\", \"compiled\")\n",
+            quoted(&output)
+        ))
+        .expect("the fake stage-2 compiler compiles");
+
+        redblue::bootstrap::run_compiler_on(&chunk, &input, &output)
+            .expect("the stage-2 run succeeds");
+        assert_eq!(
+            fs::read_to_string(&output).expect("the stage-2 run wrote its output"),
+            "compiled"
+        );
+        assert_eq!(
+            fs::read_to_string(&stale).unwrap_or_default(),
+            "",
+            "the stage-2 run inherited the previous logging configuration"
+        );
+    }
+
+    /// Text is opaque to logging: a message in any script, with combining marks
+    /// or emoji, is written byte-for-byte.
+    #[test]
+    fn edge_unicode_messages_are_written_unchanged() {
+        let dir = scratch("unicode");
+        let tree_log = dir.join("tree.log");
+        let byte_log = dir.join("byte.log");
+        let message = "héllo 世界 مرحبا 👩‍💻 e\u{0301}";
+
+        let source = |path: &Path| {
+            format!(
+                "logging.reset()\n\
+                 logging.set_level(\"info\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 logging.info(\"{message}\")\n\
+                 say \"done\"\n",
+                quoted(path)
+            )
+        };
+
+        let tree = tree_walk(&source(&tree_log));
+        let byte = bytecode(&source(&byte_log));
+        assert!(tree.result.is_ok(), "{:?}", tree.result);
+        assert!(byte.result.is_ok(), "{:?}", byte.result);
+        assert_eq!(tree.output, vec!["done".to_string()]);
+        assert_eq!(byte.output, tree.output);
+
+        let expected = format!("[INFO] {message}\n");
+        assert_eq!(
+            fs::read_to_string(&tree_log).expect("tree record"),
+            expected
+        );
+        assert_eq!(
+            fs::read_to_string(&byte_log).expect("bytecode record"),
+            expected
+        );
+    }
+
+    /// A message that already ends with a newline keeps it, and the record adds
+    /// exactly one more; the formatter does not strip or normalize either.
+    #[test]
+    fn edge_a_trailing_newline_in_a_message_is_preserved() {
+        let dir = scratch("trailing-newline");
+        let tree_log = dir.join("tree.log");
+        let byte_log = dir.join("byte.log");
+
+        let source = |path: &Path| {
+            format!(
+                "logging.reset()\n\
+                 logging.set_level(\"warn\")\n\
+                 logging.set_timestamps(no)\n\
+                 logging.set_destination(\"{}\")\n\
+                 logging.warn(\"line\\n\")\n\
+                 say \"done\"\n",
+                quoted(path)
+            )
+        };
+
+        let tree = tree_walk(&source(&tree_log));
+        let byte = bytecode(&source(&byte_log));
+        assert!(tree.result.is_ok(), "{:?}", tree.result);
+        assert!(byte.result.is_ok(), "{:?}", byte.result);
+        assert_eq!(tree.output, vec!["done".to_string()]);
+        assert_eq!(byte.output, tree.output);
+
+        let expected = "[WARN] line\n\n";
+        assert_eq!(
+            fs::read_to_string(&tree_log).expect("tree record"),
+            expected
+        );
+        assert_eq!(
+            fs::read_to_string(&byte_log).expect("bytecode record"),
+            expected
+        );
+    }
+
+    /// Both bad settings are failures, and neither one changes the threshold:
+    /// validation happens before the configuration is written.
+    #[test]
+    fn edge_an_unknown_level_and_a_blank_destination_are_refused() {
+        redblue::logging::reset();
+        assert!(
+            redblue::logging::set_level("verbose").is_err(),
+            "an unknown level must be refused"
+        );
+        assert!(
+            redblue::logging::set_destination("").is_err(),
+            "a blank destination must be refused"
+        );
+        assert_eq!(redblue::logging::level(), "off");
+
+        let tree = tree_walk("logging.set_level(\"verbose\")");
+        assert!(
+            tree.result.is_err(),
+            "a program can observe a refused level as an error"
+        );
+    }
+
+    /// The nine internal names are the module's storage spelling, not a second
+    /// surface. SPEC.md says the logging calls are functions of the module, so
+    /// a bare `logging_debug("x")` must be `Unknown function` on both engines.
+    #[test]
+    fn edge_the_logging_calls_have_no_bare_spelling() {
+        redblue::logging::reset();
+        for name in [
+            "logging_debug",
+            "logging_info",
+            "logging_warn",
+            "logging_error",
+            "logging_set_level",
+            "logging_level",
+            "logging_set_timestamps",
+            "logging_set_destination",
+            "logging_reset",
+        ] {
+            let source = format!("{name}(\"x\")");
+            let expected = format!("Unknown function '{name}'");
+
+            let tree = runtime_message(tree_walk(&source).result.expect_err(&source));
+            let byte = runtime_message(bytecode(&source).result.expect_err(&source));
+            assert_eq!(
+                tree, expected,
+                "the tree walker answered the bare internal name `{name}`"
+            );
+            assert_eq!(
+                byte, expected,
+                "the bytecode VM answered the bare internal name `{name}`"
+            );
+        }
+    }
 }

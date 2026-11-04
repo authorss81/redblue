@@ -1254,7 +1254,12 @@ text `stderr`, the exact text `stdout`, or any other text as a file path. A file
 destination is appended to, one record per write, through the same filesystem as
 `files.write`, so a record written by one engine is readable by the other. A
 destination that cannot be written — a missing directory, a directory instead of
-a file — is a catchable `IoError` naming `logging`, not a process abort.
+a file — is a catchable `IoError` naming `logging`, not a process abort. On Unix
+the same holds for a genuinely closed or broken `stdout`/`stderr` descriptor; the
+suite pins that with a read-only descriptor and a pipe whose reader is gone. Other
+targets write through the standard handle, which reports a closed or broken stream
+as the same `IoError`; the suite cannot close a child's descriptor portably, so
+that path is exercised on Unix only.
 
 A record has the shape `[timestamp] [LEVEL] message`, or `[LEVEL] message` when
 timestamps are off. Timestamps are **on by default**, because a log a reader

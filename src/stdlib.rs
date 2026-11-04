@@ -640,21 +640,6 @@ pub fn builtins() -> HashMap<String, Value> {
         Value::Builtin("console_clear".to_string()),
     );
 
-    // Logging module
-    for name in [
-        "logging_debug",
-        "logging_info",
-        "logging_warn",
-        "logging_error",
-        "logging_set_level",
-        "logging_level",
-        "logging_set_timestamps",
-        "logging_set_destination",
-        "logging_reset",
-    ] {
-        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
-    }
-
     // Random module
     globals.insert("random".to_string(), Value::Builtin("random".to_string()));
     globals.insert(
@@ -1830,17 +1815,18 @@ pub fn is_builtin(name: &str) -> bool {
 /// Whether `name` is an internal builtin whose only spelling is as a member of a
 /// module.
 ///
-/// The phase-101 text utilities and `sys.parse` are stored under
-/// `<module>_<member>` because that is the name a dotted call resolves to, but
-/// they are not part of the flat builtin surface: `text.wrap` and `sys.parse`
-/// answer and a bare `text_wrap` or `sys_parse` does not. They are deliberately
-/// absent from [`BUILTIN_NAMES`] and [`builtins`], so `is_builtin` does not
-/// advertise them and the analyzer, REPL completer, highlighter and
-/// introspection never offer a name a program cannot call. A program that wants
-/// a flat text helper keeps writing `wrap`, which remains an ordinary name it
-/// may declare. Both engines refuse the bare spelling unless the program has
-/// declared that name itself, so this cannot depend on which one ran the
-/// program.
+/// The phase-101 text utilities, `sys.parse` and the phase-103 logging calls
+/// are stored under `<module>_<member>` because that is the name a dotted call
+/// resolves to, but they are not part of the flat builtin surface: `text.wrap`,
+/// `sys.parse` and `logging.debug` answer and a bare `text_wrap`, `sys_parse`
+/// or `logging_debug` does not. They are deliberately absent from
+/// [`BUILTIN_NAMES`] and [`builtins`], so `is_builtin` does not advertise them
+/// and the analyzer, REPL completer, highlighter and introspection never offer
+/// a name a program cannot call. A program that wants a flat helper keeps
+/// writing `wrap`, or declares the exact internal spelling itself, because
+/// these remain ordinary names a program may declare. Both engines refuse the
+/// bare spelling unless the program has declared that name itself, so this
+/// cannot depend on which one ran the program.
 pub fn is_module_only_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -1851,6 +1837,15 @@ pub fn is_module_only_builtin(name: &str) -> bool {
             | "text_pad"
             | "text_align"
             | "sys_parse"
+            | "logging_debug"
+            | "logging_info"
+            | "logging_warn"
+            | "logging_error"
+            | "logging_set_level"
+            | "logging_level"
+            | "logging_set_timestamps"
+            | "logging_set_destination"
+            | "logging_reset"
     )
 }
 
@@ -2047,15 +2042,6 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "console_log",
     "console_error",
     "console_clear",
-    "logging_debug",
-    "logging_info",
-    "logging_warn",
-    "logging_error",
-    "logging_set_level",
-    "logging_level",
-    "logging_set_timestamps",
-    "logging_set_destination",
-    "logging_reset",
     "random",
     "random_seed",
     "random_number",
@@ -2648,12 +2634,14 @@ pub fn is_effectful(name: &str) -> bool {
 /// Should always be empty, and is checked rather than trusted for the same
 /// reason [`signatures_covering_nothing`] is: a refusal naming a builtin the
 /// language does not have refuses something that was never going to run, and
-/// reads as a bug in the command rather than as the rule.
+/// reads as a bug in the command rather than as the rule. A module-only name
+/// has no flat entry but is still a real builtin, so it is allowed here for the
+/// same reason it is allowed in [`signatures_covering_nothing`].
 pub fn effectful_names_that_are_not_builtins() -> Vec<&'static str> {
     EFFECTFUL_BUILTINS
         .iter()
         .copied()
-        .filter(|name| !BUILTIN_NAMES.contains(name))
+        .filter(|name| !BUILTIN_NAMES.contains(name) && !is_module_only_builtin(name))
         .collect()
 }
 

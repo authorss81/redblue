@@ -184,10 +184,12 @@ pub fn write(level: Level, message: &str) -> io::Result<()> {
 
 /// Writes a record to the real descriptor and reports a failed write.
 ///
-/// `std::io::stderr().write_all` treats `EBADF` as success, so a descriptor
-/// that is genuinely closed would still lose the record silently. Writing to
-/// the descriptor directly keeps a closed stream a failure the program can
-/// catch.
+/// On Unix this deliberately bypasses `std::io::stderr().write_all`, which
+/// treats `EBADF` as success, so a descriptor that is genuinely closed would
+/// still lose the record silently. Writing to the descriptor directly keeps a
+/// closed stream a failure the program can catch. Other targets have no
+/// portable descriptor path and use `write_fallibly` on the standard handle
+/// instead; see [`write_stderr`].
 #[cfg(unix)]
 fn write_descriptor(fd: libc::c_int, record: &str) -> io::Result<()> {
     let bytes = record.as_bytes();
@@ -234,9 +236,36 @@ fn write_stdout(record: &str) -> io::Result<()> {
     crate::wasm::try_emit(record)
 }
 
+/// Writes through a standard handle, reporting every failure it can.
+///
+/// There is no portable direct-descriptor spelling outside Unix, so this asks
+/// the handle to write and propagates a closed or broken stream as an `IoError`.
+/// A zero-length write is also a failure rather than a record silently lost.
+/// The suite can only hand a child a genuinely closed descriptor through
+/// `Stdio`, which is a Unix facility in these tests; other targets get the
+/// handle's own failure, the strongest guarantee available without a binding.
+#[cfg(not(unix))]
+fn write_fallibly(writer: &mut impl io::Write, bytes: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        match io::Write::write(writer, &bytes[written..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the log destination accepted no bytes",
+                ))
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    io::Write::flush(writer)
+}
+
 #[cfg(not(unix))]
 fn write_stderr(record: &str) -> io::Result<()> {
-    io::Write::write_all(&mut io::stderr(), record.as_bytes())
+    write_fallibly(&mut io::stderr(), record.as_bytes())
 }
 
 pub fn format_record(level: Level, message: &str, timestamp: Option<&str>) -> String {

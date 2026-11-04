@@ -375,6 +375,11 @@ pub fn run_compiler_on(chunk: &Chunk, input_path: &Path, output_path: &Path) -> 
 /// on both the success and the failure path before anything returns: a `?` on the
 /// way out would skip a restore written after the run.
 fn stage2_run(chunk: &Chunk) -> (crate::error::Result<crate::value::Value>, String) {
+    // A stage-2 run is a one-shot program run like `rb vm`, so it starts from
+    // the documented logging defaults. `BytecodeVm::run` deliberately does not
+    // reset because the REPL reuses one VM across inputs; a build must not
+    // inherit the thread's previous logging configuration either.
+    crate::logging::reset();
     let mut vm = BytecodeVm::new();
     vm.set_echo(false);
     let outcome = vm.run(chunk);
