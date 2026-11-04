@@ -33,9 +33,12 @@ pub const MODULES: &[&str] = &[
     "path",
     "regex",
     "sys",
+    "tar",
     "text",
     "time",
+    "toml",
     "uuid",
+    "zip",
 ];
 
 /// The modules whose functions are the flat builtins of the same name rather
@@ -113,7 +116,7 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "reset",
         ],
     ),
-    ("csv", &["parse"]),
+    ("csv", &["parse", "stringify"]),
     (
         "files",
         &[
@@ -122,7 +125,10 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
     ),
     ("hash", &["sha256", "sha512"]),
     ("hex", &["encode", "decode"]),
-    ("json", &["parse", "stringify"]),
+    (
+        "json",
+        &["parse", "stringify", "parse_lines", "stringify_lines"],
+    ),
     // `filter` and `reduce` are **not** here, and leaving them out is what
     // `list.filter(xs, f)` needs rather than a detail. Both are registered as
     // flat builtins and neither is implemented — `tests/stdlib_module_docs_test.rs`
@@ -196,7 +202,10 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
             "length",
         ],
     ),
+    ("toml", &["parse"]),
     ("uuid", &["generate", "parse"]),
+    ("zip", &["read", "write"]),
+    ("tar", &["read", "write"]),
     (
         "time",
         &[
@@ -606,6 +615,18 @@ pub fn builtins() -> HashMap<String, Value> {
         "csv_parse".to_string(),
         Value::Builtin("csv_parse".to_string()),
     );
+    for name in [
+        "csv_stringify",
+        "json_parse_lines",
+        "json_stringify_lines",
+        "toml_parse",
+        "zip_read",
+        "zip_write",
+        "tar_read",
+        "tar_write",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
 
     // Network module
     globals.insert(
@@ -2055,6 +2076,14 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "json_parse",
     "json_stringify",
     "csv_parse",
+    "csv_stringify",
+    "json_parse_lines",
+    "json_stringify_lines",
+    "toml_parse",
+    "tar_read",
+    "tar_write",
+    "zip_read",
+    "zip_write",
     "network_get",
     "network_post",
     "regex_match",
@@ -2415,6 +2444,29 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "csv_parse(text) -> a list of rows, each a list of text",
     ),
     (
+        "csv_stringify",
+        "csv_stringify(rows) -> text; quotes commas, quotes, newlines and surrounding space",
+    ),
+    (
+        "json_parse_lines",
+        "json_parse_lines(text) -> a list of the JSON values, one per line",
+    ),
+    (
+        "json_stringify_lines",
+        "json_stringify_lines(list) -> text; one JSON value per line",
+    ),
+    ("toml_parse", "toml_parse(text) -> a record of the TOML document"),
+    ("zip_read", "zip_read(path) -> a record of entry names to contents"),
+    (
+        "zip_write",
+        "zip_write(path, entries) -> nothing; a stored (uncompressed) zip archive",
+    ),
+    ("tar_read", "tar_read(path) -> a record of entry names to contents"),
+    (
+        "tar_write",
+        "tar_write(path, entries) -> nothing; a tar archive of the entries",
+    ),
+    (
         "network_get",
         "network_get(text) -> the body of the response",
     ),
@@ -2660,6 +2712,10 @@ pub const EFFECTFUL_BUILTINS: &[&str] = &[
     "files_copy",
     "files_rename",
     "path_list",
+    "zip_read",
+    "zip_write",
+    "tar_read",
+    "tar_write",
     "network_get",
     "network_post",
     "time_now",

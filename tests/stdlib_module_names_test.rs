@@ -1352,6 +1352,27 @@ say network.post("{address}/echo", "ping")"#
             "1970\n".to_string(),
         ),
         (
+            "toml",
+            "say toml.parse(\"name = \\\"Ada\\\"\")".to_string(),
+            "{name: Ada}\n".to_string(),
+        ),
+        (
+            "zip",
+            format!(
+                r#"zip.write("{scratch}/names.zip", {{a: "alpha"}})
+say zip.read("{scratch}/names.zip")"#
+            ),
+            "{a: alpha}\n".to_string(),
+        ),
+        (
+            "tar",
+            format!(
+                r#"tar.write("{scratch}/names.tar", {{a: "alpha"}})
+say tar.read("{scratch}/names.tar")"#
+            ),
+            "{a: alpha}\n".to_string(),
+        ),
+        (
             "uuid",
             r#"say length(uuid.generate())"#.to_string(),
             "36\n".to_string(),

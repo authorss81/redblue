@@ -980,13 +980,21 @@ mod tests {
 
         assert_eq!(
             completer.complete("json."),
-            vec!["json.parse".to_string(), "json.stringify".to_string()],
+            vec![
+                "json.parse".to_string(),
+                "json.parse_lines".to_string(),
+                "json.stringify".to_string(),
+                "json.stringify_lines".to_string(),
+            ],
             "`json.` offers the members spelled the way a program writes them, \\
              because the completion replaces the whole word"
         );
         assert_eq!(
             completer.complete("json.s"),
-            vec!["json.stringify".to_string()],
+            vec![
+                "json.stringify".to_string(),
+                "json.stringify_lines".to_string(),
+            ],
             "and a member prefix narrows to the members it completes"
         );
     }

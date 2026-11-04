@@ -3704,6 +3704,98 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             };
             parse_csv(text, span).map(Some)
         }
+        "csv_stringify" => {
+            let value = args
+                .first()
+                .ok_or_else(|| Error::Runtime("csv.stringify requires rows".to_string(), span))?;
+            let text = crate::formats::csv_stringify(value)
+                .map_err(|message| Error::Runtime(format!("csv.stringify: {message}"), span))?;
+            Ok(Some(Value::Text(text)))
+        }
+        "json_parse_lines" => {
+            let text = match args.first() {
+                Some(Value::Text(s)) => s,
+                _ => {
+                    return Err(Error::Runtime(
+                        "json.parse_lines requires text".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::formats::json_parse_lines(text, |line| {
+                parse_json(line, span).map_err(|error| error.message().to_string())
+            })
+            .map(Some)
+            .map_err(|message| Error::Runtime(message, span))
+        }
+        "json_stringify_lines" => {
+            let value = args.first().ok_or_else(|| {
+                Error::Runtime("json.stringify_lines requires a list".to_string(), span)
+            })?;
+            let text = crate::formats::json_stringify_lines(value).map_err(|message| {
+                Error::Runtime(format!("json.stringify_lines: {message}"), span)
+            })?;
+            Ok(Some(Value::Text(text)))
+        }
+        "toml_parse" => {
+            let text = match args.first() {
+                Some(Value::Text(s)) => s,
+                _ => return Err(Error::Runtime("toml.parse requires text".to_string(), span)),
+            };
+            crate::formats::toml_parse(text)
+                .map(Some)
+                .map_err(|message| Error::Runtime(message, span))
+        }
+        "zip_write" => {
+            let path = args.first().and_then(crate::path::text_of).ok_or_else(|| {
+                Error::Runtime("zip.write requires a text path".to_string(), span)
+            })?;
+            let entries = args.get(1).ok_or_else(|| {
+                Error::Runtime("zip.write requires a record of entries".to_string(), span)
+            })?;
+            let bytes = crate::formats::zip_write(entries)
+                .map_err(|message| Error::Runtime(format!("zip.write: {message}"), span))?;
+            crate::vfs::write_bytes(path, &bytes)
+                .map_err(|error| Error::Io(format!("Failed to write '{path}': {error}")))?;
+            Ok(Some(Value::Nothing))
+        }
+        "zip_read" => {
+            let path = args
+                .first()
+                .and_then(crate::path::text_of)
+                .ok_or_else(|| Error::Runtime("zip.read requires a text path".to_string(), span))?;
+            let bytes = crate::vfs::read_bytes(path).map_err(|error| {
+                Error::Io(format!("zip.read: Failed to read '{path}': {error}"))
+            })?;
+            crate::formats::zip_read(&bytes)
+                .map(Some)
+                .map_err(|message| Error::Runtime(format!("zip.read: {message}"), span))
+        }
+        "tar_write" => {
+            let path = args.first().and_then(crate::path::text_of).ok_or_else(|| {
+                Error::Runtime("tar.write requires a text path".to_string(), span)
+            })?;
+            let entries = args.get(1).ok_or_else(|| {
+                Error::Runtime("tar.write requires a record of entries".to_string(), span)
+            })?;
+            let bytes = crate::formats::tar_write(entries)
+                .map_err(|message| Error::Runtime(format!("tar.write: {message}"), span))?;
+            crate::vfs::write_bytes(path, &bytes)
+                .map_err(|error| Error::Io(format!("Failed to write '{path}': {error}")))?;
+            Ok(Some(Value::Nothing))
+        }
+        "tar_read" => {
+            let path = args
+                .first()
+                .and_then(crate::path::text_of)
+                .ok_or_else(|| Error::Runtime("tar.read requires a text path".to_string(), span))?;
+            let bytes = crate::vfs::read_bytes(path).map_err(|error| {
+                Error::Io(format!("tar.read: Failed to read '{path}': {error}"))
+            })?;
+            crate::formats::tar_read(&bytes)
+                .map(Some)
+                .map_err(|message| Error::Runtime(format!("tar.read: {message}"), span))
+        }
         // Network module
         "network_get" => {
             let url = match args.first() {

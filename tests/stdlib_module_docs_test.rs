@@ -1073,6 +1073,60 @@ say "slept""#
             "[[a, b]]\n".into(),
         ),
         (
+            "csv_stringify",
+            r#"say csv.stringify([["a", "b,c"]])"#.into(),
+            "a,\"b,c\"\n".into(),
+        ),
+        (
+            "json_parse_lines",
+            "say json.parse_lines(\"{\\\"a\\\": 1}\\n{\\\"b\\\": 2}\")".into(),
+            "[{a: 1}, {b: 2}]\n".into(),
+        ),
+        (
+            "json_stringify_lines",
+            "say json.stringify_lines([1, 2])".into(),
+            "1\n2\n".into(),
+        ),
+        (
+            "toml_parse",
+            "say toml.parse(\"name = \\\"Ada\\\"\")".into(),
+            "{name: Ada}\n".into(),
+        ),
+        (
+            "zip_write",
+            format!(
+                "zip.write(\"{}\", {{a: \"alpha\"}})\nsay \"ok\"",
+                path("rows_zip_write.zip")
+            ),
+            "ok\n".into(),
+        ),
+        (
+            "zip_read",
+            format!(
+                "zip.write(\"{}\", {{a: \"alpha\"}})\nsay zip.read(\"{}\")",
+                path("rows_zip_read.zip"),
+                path("rows_zip_read.zip")
+            ),
+            "{a: alpha}\n".into(),
+        ),
+        (
+            "tar_write",
+            format!(
+                "tar.write(\"{}\", {{a: \"alpha\"}})\nsay \"ok\"",
+                path("rows_tar_write.tar")
+            ),
+            "ok\n".into(),
+        ),
+        (
+            "tar_read",
+            format!(
+                "tar.write(\"{}\", {{a: \"alpha\"}})\nsay tar.read(\"{}\")",
+                path("rows_tar_read.tar"),
+                path("rows_tar_read.tar")
+            ),
+            "{a: alpha}\n".into(),
+        ),
+        (
             "network_get",
             format!(r#"say network.get("{address}/greeting")"#),
             format!("{NETWORK_BODY}\n"),
