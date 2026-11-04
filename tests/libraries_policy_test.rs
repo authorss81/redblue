@@ -191,32 +191,37 @@ fn edge_policy_is_linked_from_readme_and_agents() {
     }
 }
 
-/// The premise of the binding section, re-verified on this tree: a program that
-/// reaches for a binding-required library is refused today. If one of these
-/// calls started working, the entry would describe a gap that had closed.
+/// The premise of the binding section, re-verified on this tree: a library whose
+/// binding has landed runs, and one that has not is still refused. This is the
+/// update phase-094's report asked for when the first binding phase landed —
+/// the successful surface replaces the old refusal rather than deleting the
+/// check.
 #[test]
-fn binding_required_libraries_are_refused_today() {
-    let analyzer_refusal = refusal_of(
-        "say base64.decode(\"aGk=\")\n",
-        "a program called `base64.decode`, which LIBRARIES.md lists as a \
-         required binding. If it now runs, the policy's ranking has to be \
-         re-measured.",
+fn binding_required_libraries_report_whether_their_binding_has_landed() {
+    redblue::run_source("say base64.decode(\"aGk=\")\n").expect(
+        "`base64.decode` is one of the encodings LIBRARIES.md lists as a required \
+         binding, and its binding has landed. If it is refused again, the module \
+         has regressed.",
     );
-    assert!(
-        analyzer_refusal.contains("base64"),
-        "`base64.decode` was refused as `{analyzer_refusal}`, which does not name \
-         the library a reader would go looking for."
+    assert_eq!(
+        redblue::run_source_value("base64.decode(\"aGk=\")\n").expect("base64.decode runs"),
+        redblue::Value::list(vec![
+            redblue::Value::Number(104.0),
+            redblue::Value::Number(105.0)
+        ]),
+        "`base64.decode` must still answer the bytes it encoded"
     );
 
-    let runtime_refusal = refusal_of(
-        "set born to time.unix(\"1990-03-04 00:00:00\")\nsay time.add_days(born, 365)\n",
-        "`time.add_days` ran. LIBRARIES.md presents date arithmetic as a \
-         binding-required gap; if the gap closed, the entry is stale.",
+    let refusal = refusal_of(
+        "say percent.encode(\"a b\")\n",
+        "`percent.encode` ran. LIBRARIES.md records percent-encoding as an open \
+         binding entry with no module behind it; if it now answers, the entry is stale.",
     );
     assert!(
-        runtime_refusal.contains("add_days") && runtime_refusal.contains("time"),
-        "`time.add_days` was refused as `{runtime_refusal}`, which does not name \
-         both the module and the member."
+        refusal.contains("Unknown variable 'percent'"),
+        "`percent.encode` was refused as `{refusal}`, not as an unknown binding. \
+         The open entry has to stay refused for that reason, not because a \
+         different call happened to give it the wrong type."
     );
 }
 

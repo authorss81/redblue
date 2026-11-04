@@ -1251,9 +1251,24 @@ fn every_module_the_documents_name_answers_a_call() {
 
     let calls: Vec<(&str, String, String)> = vec![
         (
+            "base64",
+            r#"say base64.encode(bytes.from_text("hi"))"#.to_string(),
+            "aGk=\n".to_string(),
+        ),
+        (
             "bytes",
             r#"say length(bytes.from_text("hi"))"#.to_string(),
             "2\n".to_string(),
+        ),
+        (
+            "hash",
+            r#"say length(hash.sha256("abc"))"#.to_string(),
+            "64\n".to_string(),
+        ),
+        (
+            "hex",
+            r#"say hex.encode(bytes.from_text("hi"))"#.to_string(),
+            "6869\n".to_string(),
         ),
         (
             "collections",
@@ -1335,6 +1350,11 @@ say network.post("{address}/echo", "ping")"#
             "time",
             r#"say time.format(0, "%Y")"#.to_string(),
             "1970\n".to_string(),
+        ),
+        (
+            "uuid",
+            r#"say length(uuid.generate())"#.to_string(),
+            "36\n".to_string(),
         ),
     ];
 

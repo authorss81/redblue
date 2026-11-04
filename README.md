@@ -243,6 +243,23 @@ bytes.text(bytes)       // A byte list back to text
 bytes.write(path, bytes) // Write a byte list to a file
 ```
 
+### Base64, Hex, Hash and UUID
+```
+base64.encode(bytes)     // Standard base64 with canonical = padding
+base64.decode(text)      // A byte list; padded or unpadded input
+hex.encode(bytes)        // Lowercase hexadecimal text
+hex.decode(text)         // A byte list
+hash.sha256(text or bytes) // Lowercase SHA-256 digest
+hash.sha512(text or bytes) // Lowercase SHA-512 digest
+uuid.generate()          // A new random version-4 UUID, canonical lowercase
+uuid.parse(text)         // Canonical lowercase; accepts hyphenated, simple, braced and urn:uuid: forms
+```
+A decoder never skips bad input: `hex.decode` and `base64.decode` raise a
+catchable `Runtime` failure naming the offending position. `hex.encode` and
+`base64.encode` take a text or a byte list; the decoders answer a byte list.
+`uuid.parse` raises on a text that is not a UUID, and `hash.sha256` /
+`hash.sha512` raise on an input that is not text or a byte list.
+
 ### Collections
 ```
 collections.counter(items)                // {counts: [[key, count], ...], missing: 0}
