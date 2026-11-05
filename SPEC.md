@@ -1511,14 +1511,73 @@ this section used to carry did not parse. See "Asynchronous Programming" above.
 set obj to json.parse("{ \"name\": \"Alice\" }")  // {name: Alice}
 set text to json.stringify(obj)                   // {"name": "Alice"}
 set rows to csv.parse("name,age\nAlice,30")       // [[name, age], [Alice, 30]]
+set report to csv.stringify(rows)                 // "name,age\nAlice,30"
+set lines to json.stringify_lines([obj])          // one JSON value per line
+set decoded to json.parse_lines(lines)            // [obj]
+set config to toml.parse("name = \"Ada\"\n")      // {name: Ada}
 ```
 
 A text is written between double quotes, and a quote *inside* one is escaped
 `\"` — there are no single-quoted strings, so `'{"name": "Alice"}'` is a
 `LexerError` at the first quote rather than a JSON document.
 
-There is no `formats` module. JSON and CSV are their own modules, spelled
-`json.*` and `csv.*`.
+There is no `formats` module. JSON, CSV, TOML and the archive formats are
+their own modules, spelled `json.*`, `csv.*`, `toml.*`, `zip.*` and `tar.*`.
+
+`csv.stringify` writes a row of text cells and quotes a cell when it contains a
+comma, a quote, a carriage return or a newline, when it has leading or trailing
+whitespace, or when it is empty. A quote inside a quoted cell is doubled. The
+last two reasons are not cosmetic: `csv.parse` trims a bare field and reads
+empty text as no rows, so without the quotes the reader would not get the value
+back. A row with no cells is refused because CSV has no spelling that
+`csv.parse` reads back as an empty row; an empty list of rows writes the empty
+document.
+
+`json.stringify_lines` writes one JSON value per line and
+`json.parse_lines` reads them back, skipping blank lines. A newline inside a
+value is escaped by the JSON writer, so it cannot break the line structure.
+Empty text is an empty list, and a malformed line is a catchable error naming
+the line number.
+
+`toml.parse` reads this subset of TOML:
+
+- comments from `#` to the end of the line, outside strings;
+- bare keys (`A-Z a-z 0-9 _ -`), quoted keys, and dotted keys such as
+  `server.port = 80`;
+- tables (`[server]`) and arrays of tables (`[[users]]`);
+- basic strings with `\" \\ \b \t \n \f \r \uXXXX \UXXXXXXXX`, and
+  literal strings in single quotes;
+- decimal integers with `_` separators, and hexadecimal, octal and binary
+  integers with `0x`, `0o` and `0b`;
+- decimal floats with an exponent, and the booleans `true` and `false`;
+- arrays, including nested arrays, and inline tables such as
+  `{name = "Ada", port = 80}`.
+
+It does **not** support multiline strings, date and time values, non-finite
+floats (`inf`, `nan`), or dotted keys that reach through an array of tables.
+A non-finite float is refused rather than stored as a number Redblue cannot
+represent. An integer a Redblue number cannot hold exactly is refused by line
+rather than rounded, and re-opening a table or turning an array value into an
+array of tables is refused like any other duplicate definition. A duplicate key
+is refused, and every refusal is a catchable `RuntimeError` naming the line. A
+leading UTF-8 BOM is accepted.
+
+### zip and tar
+
+```redblue
+zip.write("records.zip", {a: "alpha"})   // a stored zip archive on disk
+set zipped to zip.read("records.zip")    // {a: alpha}
+tar.write("records.tar", {a: "alpha"})
+set unarchived to tar.read("records.tar")
+```
+
+`zip.write` writes a stored (uncompressed) zip archive and `zip.read` reads one.
+`tar.write` and `tar.read` do the same for a tar archive. Both take a record of
+entry names to contents, where a content is text or a byte list. Reading answers
+text for an entry whose bytes are valid UTF-8 and a byte list otherwise. A zip
+entry using a compression method other than stored is refused by name, naming
+the method (for example `compression method 8 (deflate)`); encrypted entries are
+refused as encrypted.
 
 ### bytes
 

@@ -5,6 +5,7 @@ mod cli;
 pub mod debugger;
 mod error;
 pub mod failure;
+mod formats;
 pub mod formatter;
 mod interpreter;
 pub mod lexer;

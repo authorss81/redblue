@@ -2414,4 +2414,40 @@ mod logging_module {
             );
         }
     }
+
+    #[test]
+    fn edge_phase105_csv_writer_round_trips_through_the_existing_reader() {
+        let written = eval(r#"csv.stringify([["a,b", "say \"hi\"", "line\nbreak"]])"#);
+        assert_eq!(
+            written,
+            Value::Text("\"a,b\",\"say \"\"hi\"\"\",\"line\nbreak\"".to_string()),
+            "the writer quotes the cells that need it"
+        );
+        let back = eval(r#"csv.parse(csv.stringify([["a,b", "say \"hi\"", "line\nbreak"]]))"#);
+        assert_eq!(
+            back,
+            Value::list(vec![Value::list(vec![
+                Value::Text("a,b".to_string()),
+                Value::Text("say \"hi\"".to_string()),
+                Value::Text("line\nbreak".to_string()),
+            ])]),
+            "the existing reader must read back what the new writer wrote"
+        );
+    }
+
+    #[test]
+    fn edge_phase105_json_lines_round_trip_and_refuse_a_bad_line() {
+        let back = eval("json.parse_lines(json.stringify_lines([1, 2]))");
+        assert_eq!(
+            back,
+            Value::list(vec![Value::Number(1.0), Value::Number(2.0)]),
+            "one JSON value per line round trips"
+        );
+        assert_runtime_error("json.parse_lines(\"[\")", "line 1");
+    }
+
+    #[test]
+    fn edge_phase105_toml_refusal_names_the_line() {
+        assert_runtime_error("toml.parse(\"a = \\\"unterminated\")", "line 1");
+    }
 }

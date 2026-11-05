@@ -65,6 +65,12 @@ mod native {
         std::fs::write(path, content)
     }
 
+    /// A binary read for the archive formats, which must see the file's bytes
+    /// rather than a UTF-8 conversion of them.
+    pub fn read_bytes(path: &str) -> io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+
     /// The names directly inside `path`, sorted so a listing is deterministic.
     ///
     /// A directory that does not exist is an error, as it is for `read_dir`
@@ -81,7 +87,7 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{append, exists, is_file, read_dir, write_bytes};
+pub use native::{append, exists, is_file, read_bytes, read_dir, write_bytes};
 
 /// The path `relative` names inside `root`, as the one string a read takes.
 ///
@@ -162,6 +168,12 @@ pub mod memory {
         let key = file_key(path)?;
         lock().insert(key, content.as_bytes().to_vec());
         Ok(())
+    }
+
+    /// A binary read from the same map, with no UTF-8 conversion.
+    pub fn read_bytes(path: &str) -> io::Result<Vec<u8>> {
+        let key = file_key(path)?;
+        lock().get(&key).cloned().ok_or_else(not_found)
     }
 
     /// `bytes.write`, against the same map as `files.write` — a byte-oriented
@@ -486,6 +498,6 @@ pub mod memory {
 
 #[cfg(target_arch = "wasm32")]
 pub use memory::{
-    append, copy, exists, is_file, read_dir, read_to_string, remove_file, rename, write,
-    write_bytes,
+    append, copy, exists, is_file, read_bytes, read_dir, read_to_string, remove_file, rename,
+    write, write_bytes,
 };
