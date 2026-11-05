@@ -539,10 +539,16 @@ impl fmt::Display for Value {
             }
             Value::Function(function) => write!(f, "<function {}>", function.name),
             Value::Builtin(name) => write!(f, "<builtin {}>", name),
-            Value::Object(name, fields) => match crate::path::object_text(name, fields) {
-                Some(text) => write!(f, "{}", text),
-                None => write!(f, "<object>"),
-            },
+            Value::Object(name, fields) => {
+                if let Some(text) = crate::matrix::text(name, fields) {
+                    write!(f, "{}", text)
+                } else {
+                    match crate::path::object_text(name, fields) {
+                        Some(text) => write!(f, "{}", text),
+                        None => write!(f, "<object>"),
+                    }
+                }
+            }
             Value::Date(date) => write!(f, "{}", date_text(*date)),
             Value::Duration(duration) => write!(f, "{}", display_duration(*duration)),
         }
@@ -612,6 +618,7 @@ impl Value {
             Value::YesNo(_) => "yes/no",
             Value::List(_) => "list",
             Value::Record(_) => "record",
+            Value::Object(name, fields) if crate::matrix::is_matrix(name, fields) => "matrix",
             Value::Object(name, fields) if crate::path::object_text(name, fields).is_some() => {
                 "path"
             }

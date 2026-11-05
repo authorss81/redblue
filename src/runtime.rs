@@ -144,6 +144,9 @@ fn duration_property(duration: TimeDelta, name: &str) -> Value {
 
 /// `list[index]`, and every failure a bad index is.
 pub fn index(span: Span, list: Value, index_value: Value) -> Result<Value> {
+    if crate::matrix::is_matrix_value(&list) {
+        return crate::matrix::index_row(span, &list, &index_value);
+    }
     let Value::List(items) = list else {
         return Err(Error::Runtime("Cannot index non-list".to_string(), span));
     };
@@ -2787,6 +2790,9 @@ fn decode_base64(span: Span, text: &str) -> Result<Vec<u8>> {
 /// that a bytecode `CALL` and a tree-walked call cannot drift apart: there is
 /// one implementation and both answer from it.
 pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> {
+    if let Some(value) = crate::matrix::builtin(span, name, args)? {
+        return Ok(Some(value));
+    }
     match name {
         "say" => {
             if let Some(arg) = args.first() {

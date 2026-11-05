@@ -646,6 +646,106 @@ fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
         ("tan", "say is_number(tan(0))".into(), "yes\n".into()),
         ("log", "say is_number(log(1))".into(), "yes\n".into()),
         ("exp", "say is_number(exp(1))".into(), "yes\n".into()),
+        (
+            "matrix_zeros",
+            "say matrix.sum(matrix.zeros(2, 3))".into(),
+            "0\n".into(),
+        ),
+        (
+            "matrix_ones",
+            "say matrix.sum(matrix.ones(2, 3))".into(),
+            "6\n".into(),
+        ),
+        (
+            "matrix_identity",
+            "say matrix.sum(matrix.identity(2))".into(),
+            "2\n".into(),
+        ),
+        (
+            "matrix_from_lists",
+            "say matrix.sum(matrix.from_lists([[1, 2], [3, 4]]))".into(),
+            "10\n".into(),
+        ),
+        (
+            "matrix_to_lists",
+            "say matrix.to_lists(matrix.from_lists([[1, 2]]))".into(),
+            "[[1, 2]]\n".into(),
+        ),
+        (
+            "matrix_shape",
+            "say matrix.shape(matrix.zeros(2, 3))".into(),
+            "[2, 3]\n".into(),
+        ),
+        (
+            "matrix_add",
+            "say matrix.sum(matrix.add(matrix.ones(2, 2), matrix.ones(2, 2)))".into(),
+            "8\n".into(),
+        ),
+        (
+            "matrix_subtract",
+            "say matrix.sum(matrix.subtract(matrix.ones(2, 2), matrix.ones(2, 2)))".into(),
+            "0\n".into(),
+        ),
+        (
+            "matrix_multiply",
+            "say matrix.sum(matrix.multiply(matrix.ones(2, 2), matrix.ones(2, 2)))".into(),
+            "4\n".into(),
+        ),
+        (
+            "matrix_divide",
+            "say matrix.sum(matrix.divide(matrix.ones(2, 2), matrix.ones(2, 2)))".into(),
+            "4\n".into(),
+        ),
+        (
+            "matrix_scale",
+            "say matrix.sum(matrix.scale(matrix.ones(2, 2), 3))".into(),
+            "12\n".into(),
+        ),
+        (
+            "matrix_matmul",
+            "say matrix.sum(matrix.matmul(matrix.identity(2), matrix.ones(2, 2)))".into(),
+            "4\n".into(),
+        ),
+        (
+            "matrix_transpose",
+            "say matrix.to_lists(matrix.transpose(matrix.from_lists([[1, 2], [3, 4]])))".into(),
+            "[[1, 3], [2, 4]]\n".into(),
+        ),
+        (
+            "matrix_sum",
+            "say matrix.sum(matrix.from_lists([[1, 2], [3, 4]]))".into(),
+            "10\n".into(),
+        ),
+        (
+            "matrix_mean",
+            "say matrix.mean(matrix.from_lists([[1, 2], [3, 4]]))".into(),
+            "2.5\n".into(),
+        ),
+        (
+            "matrix_min",
+            "say matrix.min(matrix.from_lists([[1, 2], [3, 4]]))".into(),
+            "1\n".into(),
+        ),
+        (
+            "matrix_max",
+            "say matrix.max(matrix.from_lists([[1, 2], [3, 4]]))".into(),
+            "4\n".into(),
+        ),
+        (
+            "matrix_at",
+            "say matrix.at(matrix.from_lists([[1, 2], [3, 4]]), 1, 0)".into(),
+            "3\n".into(),
+        ),
+        (
+            "matrix_row",
+            "say matrix.row(matrix.from_lists([[1, 2], [3, 4]]), 1)".into(),
+            "[3, 4]\n".into(),
+        ),
+        (
+            "matrix_column",
+            "say matrix.column(matrix.from_lists([[1, 2], [3, 4]]), 1)".into(),
+            "[2, 4]\n".into(),
+        ),
         ("uppercase", r#"say uppercase("hi")"#.into(), "HI\n".into()),
         ("lowercase", r#"say lowercase("HI")"#.into(), "hi\n".into()),
         ("trim", r#"say trim("  x  ")"#.into(), "x\n".into()),
