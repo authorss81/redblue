@@ -242,6 +242,14 @@ fn edge_out_of_bounds_and_type_mismatch_are_caught_errors() {
     }
 
     let message = runtime_message(&eval_err(
+        "matrix.at(matrix.from_lists([[1, 2], [3, 4]]), 0.5, 0)",
+    ));
+    assert!(
+        message.contains("2 rows") && message.contains("whole number"),
+        "a fractional row index must name the bound and the required type, got {message}"
+    );
+
+    let message = runtime_message(&eval_err(
         "matrix.add(matrix.from_lists([[1]]), \"not a matrix\")",
     ));
     assert!(
@@ -330,5 +338,129 @@ set m to matrix.add(matrix.matmul(a, b), matrix.transpose(a))
             numbers(&[45.0, 54.0]),
         ]),
         "the shared answer should be the hand-written one"
+    );
+}
+
+#[test]
+fn edge_mean_of_large_finite_values_stays_finite() {
+    assert_eq!(
+        eval("matrix.mean(matrix.from_lists([[1e308, 1e308]]))"),
+        Value::Number(1e308),
+        "the mean of two finite 1e308 values is finite and must not overflow while summing"
+    );
+    assert_eq!(
+        eval("matrix.mean(matrix.from_lists([[-1e308, -1e308]]))"),
+        Value::Number(-1e308),
+        "a negative large mean must stay finite too"
+    );
+    assert_eq!(
+        eval("matrix.mean(matrix.from_lists([[7]]))"),
+        Value::Number(7.0),
+        "the mean of a singleton is the element"
+    );
+    assert_eq!(
+        eval("matrix.mean(matrix.from_lists([[1e308, 1e308, -1e308, -1e308, 1e-308]]))"),
+        Value::Number(2e-309),
+        "the overflow fallback must keep a representable residual after cancellation"
+    );
+    assert_eq!(
+        eval("matrix.mean(matrix.from_lists([[1e308, 1e308, -1e308]]))"),
+        Value::Number(1e308 / 3.0),
+        "the overflow fallback must divide by a non-unit count, not just scale"
+    );
+    assert_eq!(
+        eval(
+            "matrix.mean(matrix.from_lists([[1.7976931348623157e308, 1.7976931348623157e308, 1.7976931348623157e308]]))"
+        ),
+        Value::Number(f64::MAX),
+        "the mean of three f64::MAX values is f64::MAX, not an overflow to infinity"
+    );
+    assert_eq!(
+        eval(
+            "matrix.mean(matrix.from_lists([[-1.7976931348623157e308, -1.7976931348623157e308, -1.7976931348623157e308]]))"
+        ),
+        Value::Number(-f64::MAX),
+        "a negative mean at f64::MAX must stay finite with a non-power-of-two count"
+    );
+}
+
+#[test]
+fn edge_mean_sums_before_dividing_for_exact_and_tiny_values() {
+    assert_eq!(
+        eval("matrix.mean(matrix.ones(1, 10))"),
+        Value::Number(1.0),
+        "ten ones have a mean of exactly 1, not 0.9999999999999999"
+    );
+    assert_eq!(
+        eval("matrix.mean(matrix.from_lists([[1, 2, 3, 4, 5]]))"),
+        Value::Number(3.0),
+        "an odd count must still divide after the exact sum"
+    );
+    assert_eq!(
+        eval("matrix.mean(matrix.from_lists([[1e-320, 1e-320, 1e-320]]))"),
+        Value::Number(1e-320),
+        "tiny finite elements must not underflow when divided one at a time"
+    );
+}
+
+#[test]
+fn edge_non_square_multiply_matches_hand_written_numbers() {
+    let value = eval(
+        r#"
+set a to matrix.from_lists([[1, 2, 3], [4, 5, 6]])
+set b to matrix.from_lists([[7, 8], [9, 10], [11, 12]])
+set product to matrix.matmul(a, b)
+[matrix.shape(product), matrix.to_lists(product)]
+"#,
+    );
+    assert_eq!(
+        value,
+        Value::list(vec![
+            numbers(&[2.0, 2.0]),
+            rows(&[&[58.0, 64.0], &[139.0, 154.0]]),
+        ]),
+        "a 2x3 times a 3x2 product did not match the hand-written answer"
+    );
+}
+
+#[test]
+fn edge_rank_mismatch_is_refused_by_name() {
+    let message = runtime_message(&eval_err("matrix.from_lists([1, 2])"));
+    assert!(
+        message.contains("row") && message.contains("list"),
+        "a flat list is not a rank-2 matrix and should be refused by name, got {message}"
+    );
+    let message = runtime_message(&eval_err("matrix.from_lists([[[1]]])"));
+    assert!(
+        message.contains("number") && message.contains("list"),
+        "a rank-3 row should be refused rather than flattened, got {message}"
+    );
+}
+
+#[test]
+fn edge_sum_keeps_large_f64_magnitudes_past_i64() {
+    assert_eq!(
+        eval("matrix.sum(matrix.from_lists([[9223372036854775807, 9223372036854775807]]))"),
+        Value::Number(18446744073709551616.0),
+        "an f64 sum past i64::MAX must keep its positive magnitude, not wrap"
+    );
+    assert_eq!(
+        eval("matrix.sum(matrix.from_lists([[-9223372036854775807, -9223372036854775807]]))"),
+        Value::Number(-18446744073709551616.0),
+        "an f64 sum below i64::MIN must keep its negative magnitude, not wrap"
+    );
+    assert_eq!(
+        eval(
+            "matrix.sum(matrix.from_lists([[1.7976931348623157e308, 1.7976931348623157e308, -1.7976931348623157e308]]))"
+        ),
+        Value::Number(f64::MAX),
+        "a finite sum whose intermediate overflows must not be refused"
+    );
+    assert_eq!(
+        eval(
+            "matrix.sum(matrix.from_lists([[-1.7976931348623157e308, -1.7976931348623157e308, 1.7976931348623157e308]]))"
+        ),
+        Value::Number(-f64::MAX),
+        "a negative finite sum whose intermediate overflows must not be refused"
     );
 }

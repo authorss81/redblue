@@ -242,8 +242,11 @@ fn index_of(span: Span, value: &Value, len: usize, what: &str) -> Result<usize> 
         return Err(failure(
             span,
             format!(
-                "Index {} is out of bounds: a matrix {what} index must be a whole number",
-                Value::Number(*n)
+                "Index {} is out of bounds: the matrix has {} {}{}, so a {what} index must be a whole number",
+                Value::Number(*n),
+                len,
+                what,
+                if len == 1 { "" } else { "s" }
             ),
         ));
     }
@@ -264,19 +267,73 @@ fn index_of(span: Span, value: &Value, len: usize, what: &str) -> Result<usize> 
     }
 }
 
-fn row_values(span: Span, array: &Array2<f64>, row: usize) -> Value {
+fn row_values(array: &Array2<f64>, row: usize) -> Value {
     let mut values = Vec::with_capacity(array.ncols());
     for col in 0..array.ncols() {
         values.push(Value::Number(array[[row, col]]));
     }
-    let _ = span;
     Value::list(values)
+}
+
+fn compensated_sum<I>(numbers: I) -> Option<f64>
+where
+    I: IntoIterator<Item = f64>,
+{
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for number in numbers {
+        let next = sum + number;
+        if !next.is_finite() {
+            return None;
+        }
+        if sum.abs() >= number.abs() {
+            correction += (sum - next) + number;
+        } else {
+            correction += (number - next) + sum;
+        }
+        sum = next;
+    }
+    let total = sum + correction;
+    total.is_finite().then_some(total)
+}
+
+fn overflow_scale(count: usize) -> f64 {
+    let exponent = count.max(1).next_power_of_two().trailing_zeros() + 1;
+    2f64.powi(exponent as i32)
+}
+
+fn scaled_compensated_sum(array: &Array2<f64>, scale: f64) -> f64 {
+    compensated_sum(array.iter().map(|number| number / scale))
+        .unwrap_or_else(|| array.iter().map(|number| number / scale).sum())
+}
+
+fn sum_of(array: &Array2<f64>) -> f64 {
+    if let Some(sum) = compensated_sum(array.iter().copied()) {
+        return sum;
+    }
+    let scale = overflow_scale(array.len());
+    scaled_compensated_sum(array, scale) * scale
+}
+
+fn mean_of(array: &Array2<f64>) -> f64 {
+    let count = array.len() as f64;
+    if let Some(sum) = compensated_sum(array.iter().copied()) {
+        return sum / count;
+    }
+    let scale = overflow_scale(array.len());
+    let scaled = scaled_compensated_sum(array, scale);
+    let restored = scaled * scale;
+    if restored.is_finite() {
+        restored / count
+    } else {
+        (scaled / count) * scale
+    }
 }
 
 pub fn index_row(span: Span, value: &Value, index: &Value) -> Result<Value> {
     let array = array_of(span, value)?;
     let row = index_of(span, index, array.nrows(), "row")?;
-    Ok(row_values(span, &array, row))
+    Ok(row_values(&array, row))
 }
 
 pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> {
@@ -331,13 +388,13 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                         None => cols = Some(values.len()),
                         _ => {}
                     }
+                    element_count(span, row_number + 1, values.len())?;
                     for value in values.iter() {
                         flat.push(finite_number(span, value)?);
                     }
                 }
                 let rows_count = rows.len();
                 let cols_count = cols.unwrap_or(0);
-                element_count(span, rows_count, cols_count)?;
                 let array = Array2::from_shape_vec((rows_count, cols_count), flat)
                     .map_err(|_| failure(span, "The matrix rows do not form a rectangle"))?;
                 value_of(span, &array)?
@@ -426,7 +483,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 return Err(failure(span, format!("{name} requires a matrix")));
             };
             let array = array_of(span, value)?;
-            Value::number(array.sum(), span)?
+            Value::number(sum_of(&array), span)?
         }
         "matrix_mean" => {
             let [value] = args else {
@@ -436,7 +493,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             if array.is_empty() {
                 return Err(failure(span, "Cannot take the mean of an empty matrix"));
             }
-            Value::number(array.sum() / array.len() as f64, span)?
+            Value::number(mean_of(&array), span)?
         }
         "matrix_min" | "matrix_max" => {
             let [value] = args else {
@@ -481,7 +538,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             let array = array_of(span, value)?;
             if name == "matrix_row" {
                 let row = index_of(span, index, array.nrows(), "row")?;
-                row_values(span, &array, row)
+                row_values(&array, row)
             } else {
                 let col = index_of(span, index, array.ncols(), "column")?;
                 let mut values = Vec::with_capacity(array.nrows());

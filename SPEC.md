@@ -2002,7 +2002,10 @@ Empty and zero-dimension matrices are defined rather than special cases.
 `matrix.zeros(0, 0)` has shape `[0, 0]`, `matrix.to_lists` of it is `[]`, and
 `matrix.sum` of it is `0`. A `2x0` matrix times a `0x3` matrix is a `2x3` matrix
 of zeros. `matrix.mean`, `matrix.min` and `matrix.max` of an empty matrix have no
-answer and are catchable failures naming the empty matrix.
+answer and are catchable failures naming the empty matrix. `matrix.mean` and
+`matrix.sum` use compensated summation, and when a sum would overflow they
+scale every element by an exact power of two before summing, so a large finite
+mean or sum stays finite and a residual left by cancellation is not lost.
 
 `matrix.at`, `matrix.row` and `matrix.column` index a matrix; `m[row]` is the
 same row as `matrix.row(m, row)`. A fractional, negative or out-of-range index is
