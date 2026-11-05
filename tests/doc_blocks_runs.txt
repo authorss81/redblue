@@ -72,8 +72,8 @@ SPEC.md:1725
 SPEC.md:1749
 SPEC.md:1798
 SPEC.md:1917
-SPEC.md:1968
-SPEC.md:1994
+SPEC.md:2033
+SPEC.md:2059
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:558

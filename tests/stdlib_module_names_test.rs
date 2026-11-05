@@ -1311,6 +1311,11 @@ say files.exists("{scratch}/no_such_file_here.rb")"#
             "[1]\n".to_string(),
         ),
         ("math", r#"say math.sqrt(9)"#.to_string(), "3\n".to_string()),
+        (
+            "matrix",
+            r#"say matrix.sum(matrix.from_lists([[1, 2], [3, 4]]))"#.to_string(),
+            "10\n".to_string(),
+        ),
         // Both spellings, both answered by the loopback server, neither guarded
         // by `might fail`. This row used to be `set answer to might fail
         // network.get("http://127.0.0.1:1/")` with no expected output at all, so

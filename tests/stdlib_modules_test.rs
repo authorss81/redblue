@@ -2451,3 +2451,55 @@ mod logging_module {
         assert_runtime_error("toml.parse(\"a = \\\"unterminated\")", "line 1");
     }
 }
+
+mod matrix_phase106 {
+    use super::*;
+
+    #[test]
+    fn matrix_matmul_shape_and_reductions_are_exact() {
+        let value = eval(
+            r#"
+set a to matrix.from_lists([[1, 2], [3, 4]])
+set b to matrix.from_lists([[5, 6], [7, 8]])
+[matrix.shape(matrix.matmul(a, b)), matrix.at(matrix.matmul(a, b), 1, 1), matrix.sum(a), matrix.mean(a)]
+"#,
+        );
+        assert_eq!(
+            value,
+            Value::list(vec![
+                Value::list(vec![Value::Number(2.0), Value::Number(2.0)]),
+                Value::Number(50.0),
+                Value::Number(10.0),
+                Value::Number(2.5),
+            ])
+        );
+    }
+
+    #[test]
+    fn edge_phase106_matrix_shape_mismatch_is_a_clean_error() {
+        let result = redblue::run_source_value("matrix.add(matrix.ones(2, 2), matrix.ones(2, 3))");
+        assert!(
+            result.is_err(),
+            "a shape mismatch must not produce a matrix"
+        );
+        let error = result.expect_err("checked above");
+        match error {
+            Error::Runtime(message, span) => {
+                assert!(message.contains("[2, 2]"), "the error names the left shape");
+                assert!(
+                    message.contains("[2, 3]"),
+                    "the error names the right shape"
+                );
+                assert!(span.is_known(), "the error carries a source span");
+            }
+            other => panic!("expected a Runtime error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edge_phase106_matrix_out_of_bounds_is_a_clean_error() {
+        let result = redblue::run_source_value("matrix.at(matrix.zeros(1, 1), -1, 0)");
+        assert!(result.is_err(), "a negative index must not read a matrix");
+        assert_runtime_error("matrix.at(matrix.zeros(1, 1), -1, 0)", "out of bounds");
+    }
+}

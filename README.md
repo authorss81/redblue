@@ -416,6 +416,39 @@ regex.split(text, pattern)             // the text between matches
 // text.split keeps its literal separator; regex.split is the pattern form.
 ```
 
+### Matrix
+```
+matrix.from_lists([[1, 2], [3, 4]])  // a 2x2 matrix; rows must be rectangular
+matrix.zeros(2, 3)                    // every element is 0
+matrix.ones(2, 3)                     // every element is 1
+matrix.identity(2)                    // a 2x2 identity
+matrix.shape(a)                       // [rows, columns]
+matrix.to_lists(a)                    // the rows as nested lists
+matrix.add(a, b)                      // elementwise; equal shapes required
+matrix.subtract(a, b)                 // elementwise; equal shapes required
+matrix.multiply(a, b)                 // elementwise; equal shapes required
+matrix.divide(a, b)                   // elementwise; a zero divisor is refused
+matrix.scale(a, 0.5)                  // every element times 0.5
+matrix.matmul(a, b)                   // matrix product; inner dimensions must match
+matrix.transpose(a)                   // rows and columns exchanged
+matrix.sum(a)                         // the sum; an empty matrix sums to 0
+matrix.mean(a)                        // the mean; an empty matrix is refused
+matrix.min(a)                         // the smallest element
+matrix.max(a)                         // the largest element
+matrix.at(a, 1, 0)                    // one element
+matrix.row(a, 0)                      // one row as a list
+matrix.column(a, 0)                   // one column as a list
+```
+
+`matrix` is a binding to the `ndarray` crate, not an implementation in Redblue.
+Every element is an `f64`, so integers are promoted on the way in and never
+truncated on the way out; a result that is not finite is refused rather than
+stored as `NaN` or infinity. Elementwise operations require exactly equal shapes
+and never broadcast. `matrix.at`, `matrix.row` and `matrix.column` refuse a
+fractional, negative or out-of-range index. A `0x0` matrix is defined: its sum is
+`0`, its rows are `[]`, and its mean, minimum and maximum are refused because an
+empty matrix has none.
+
 ## Project Structure
 
 ```
