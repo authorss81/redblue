@@ -103,18 +103,18 @@ survey measures against, and it is short.
 | `hash` | `sha256`, `sha512` | `src/stdlib.rs:126` |
 | `hex` | `encode`, `decode` | `src/stdlib.rs:127` |
 | `json` | `parse`, `stringify`, `parse_lines`, `stringify_lines` | `src/stdlib.rs:128` |
-| `list` | `map`, `length` | `src/stdlib.rs:147` |
+| `list` | `map`, `length` | `src/stdlib.rs:150` |
 | `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp` | `src/stdlib.rs:151` |
-| `network` | `get`, `post` | `src/stdlib.rs:154` |
+| `network` | `get`, `post` | `src/stdlib.rs:157` |
 | `path` | `join`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, `resolve`, `normalize`, `list` | `src/stdlib.rs:158` |
 | `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:172` |
 | `sys` | `argv`, `parse` | `src/stdlib.rs:173` |
-| `tar` | `read`, `write` | `src/stdlib.rs:205` |
+| `tar` | `read`, `write` | `src/stdlib.rs:208` |
 | `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`, `wrap`, `diff`, `dedent`, `template`, `pad`, `align` | `src/stdlib.rs:177` |
 | `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:209` |
-| `toml` | `parse` | `src/stdlib.rs:202` |
-| `uuid` | `generate`, `parse` | `src/stdlib.rs:203` |
-| `zip` | `read`, `write` | `src/stdlib.rs:204` |
+| `toml` | `parse` | `src/stdlib.rs:205` |
+| `uuid` | `generate`, `parse` | `src/stdlib.rs:206` |
+| `zip` | `read`, `write` | `src/stdlib.rs:207` |
 Two observations from that table that the rest of this document depends on:
 
 - **`text` has no way to take a piece of a text.** `split` and `join` can get
@@ -372,8 +372,8 @@ Refused as `RuntimeError: Unknown function 'to_fixed'`.
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:119` now exposes `csv.parse` and
   `csv.stringify`; `src/stdlib.rs:128` exposes both JSON directions and both
-  line-delimited directions; `src/stdlib.rs:202` reads the documented TOML
-  subset; `src/stdlib.rs:204` and `src/stdlib.rs:205` read and write zip and tar
+  line-delimited directions; `src/stdlib.rs:205` reads the documented TOML
+  subset; `src/stdlib.rs:207` and `src/stdlib.rs:208` read and write zip and tar
   archives.
 - **Why it was ranked**: reading data was solved and writing it back was not.
   A program that normalised, filtered or summarised a CSV had nowhere to put its

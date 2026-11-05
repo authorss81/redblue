@@ -1556,8 +1556,11 @@ the line number.
 It does **not** support multiline strings, date and time values, non-finite
 floats (`inf`, `nan`), or dotted keys that reach through an array of tables.
 A non-finite float is refused rather than stored as a number Redblue cannot
-represent. A duplicate key is refused, and every refusal is a catchable
-`RuntimeError` naming the line. A leading UTF-8 BOM is accepted.
+represent. An integer a Redblue number cannot hold exactly is refused by line
+rather than rounded, and re-opening a table or turning an array value into an
+array of tables is refused like any other duplicate definition. A duplicate key
+is refused, and every refusal is a catchable `RuntimeError` naming the line. A
+leading UTF-8 BOM is accepted.
 
 ### zip and tar
 

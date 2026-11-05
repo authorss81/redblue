@@ -64,16 +64,16 @@ SPEC.md:1363
 SPEC.md:1426
 SPEC.md:1476
 SPEC.md:1510
-SPEC.md:1595
-SPEC.md:1614
-SPEC.md:1628
-SPEC.md:1644
-SPEC.md:1719
-SPEC.md:1743
-SPEC.md:1792
-SPEC.md:1911
-SPEC.md:1962
-SPEC.md:1988
+SPEC.md:1598
+SPEC.md:1617
+SPEC.md:1631
+SPEC.md:1647
+SPEC.md:1722
+SPEC.md:1746
+SPEC.md:1795
+SPEC.md:1914
+SPEC.md:1965
+SPEC.md:1991
 
 # --- docs/GRAMMAR.md-----------------------------------------------------
 docs/GRAMMAR.md:558

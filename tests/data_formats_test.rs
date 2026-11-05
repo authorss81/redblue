@@ -329,18 +329,103 @@ fn edge_archive_empty_and_empty_entry() {
 #[test]
 fn edge_archive_rejects_missing_and_malformed_files() {
     let dir = scratch("archive_bad");
-    let missing = slash(&dir.join("missing.zip"));
-    let missing_message = refusal(&format!("zip.read(\"{missing}\")"));
-    assert!(
-        missing_message.contains("zip.read"),
-        "a missing archive must name the call, got: {missing_message}"
+    for module in ["zip", "tar"] {
+        let missing = slash(&dir.join(format!("missing.{module}")));
+        let missing_message = refusal(&format!("{module}.read(\"{missing}\")"));
+        assert!(
+            missing_message.contains(&format!("{module}.read")),
+            "a missing {module} archive must name the call, got: {missing_message}"
+        );
+
+        let bad = dir.join(format!("bad.{module}"));
+        std::fs::write(&bad, format!("not a {module}")).expect("bad fixture");
+        let message = refusal(&format!("{module}.read(\"{}\")", slash(&bad)));
+        assert!(
+            message.contains(&format!("not a {module} archive")),
+            "a non-{module} must be refused as one, got: {message}"
+        );
+    }
+}
+
+/// The smallest i64 is a decimal integer, not an overflow: parsing the digits
+/// without the sign used to reject `-9223372036854775808` while accepting every
+/// other value in the range. Both out-of-range neighbours stay refused.
+#[test]
+fn toml_reader_parses_i64_minimum_and_refuses_decimal_overflow() {
+    assert_eq!(
+        eval("toml.parse(\"smallest = -9223372036854775808\")"),
+        eval("{smallest: -9223372036854775808}"),
+        "the smallest i64 is representable and must parse"
     );
 
-    let bad = dir.join("bad.zip");
-    std::fs::write(&bad, b"not a zip").expect("bad fixture");
-    let message = refusal(&format!("zip.read(\"{}\")", slash(&bad)));
+    let too_big = run_source("toml.parse(\"too_big = 9223372036854775808\")");
     assert!(
-        message.contains("not a zip archive"),
-        "a non-zip must be refused as one, got: {message}"
+        too_big.is_err(),
+        "an integer past the largest i64 must be refused"
     );
+
+    let message = refusal("toml.parse(\"too_small = -9223372036854775809\")");
+    assert!(
+        message.contains("line 1") && message.contains("integer"),
+        "an integer past the smallest i64 must name its line, got: {message}"
+    );
+}
+
+/// A carriage return and a CRLF are data inside a quoted cell, and non-ASCII
+/// text is written and read back unchanged.
+#[test]
+fn edge_csv_writer_round_trips_carriage_return_and_unicode() {
+    let cells = ["a\rb", "\r", "café", "漢字", "🙂", "line\r\nbreak"];
+    let literals = cells
+        .iter()
+        .map(|cell| format!("{cell:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("csv.parse(csv.stringify([[{literals}]]))");
+    let expected = Value::list(vec![Value::list(
+        cells.iter().map(|cell| text(cell)).collect(),
+    )]);
+    assert_eq!(
+        eval(&source),
+        expected,
+        "CR, CRLF, accented, CJK and emoji cells must round-trip through csv.parse"
+    );
+}
+
+/// JSON Lines needs a list, and a leading BOM is not part of the first record.
+#[test]
+fn edge_json_lines_rejects_a_non_list_and_accepts_a_bom() {
+    let wrong = run_source("json.stringify_lines({a: 1})");
+    assert!(wrong.is_err(), "a record is not a list of records");
+    let message = refusal("json.stringify_lines({a: 1})");
+    assert!(
+        message.contains("list"),
+        "the refusal must say a list is required, got: {message}"
+    );
+
+    let source = "json.parse_lines(\"\u{feff}1\\n\")";
+    assert_eq!(
+        eval(source),
+        eval("[1]"),
+        "a BOM at the start of a JSON Lines file is not part of the first value"
+    );
+}
+
+/// Archive contents that are not UTF-8 come back as the same bytes that were
+/// written, not as lossy text.
+#[test]
+fn edge_archive_binary_contents_round_trip_through_zip_and_tar() {
+    let dir = scratch("archive_binary");
+    for module in ["zip", "tar"] {
+        let path = slash(&dir.join(format!("binary.{module}")));
+        let source = format!(
+            "{module}.write(\"{path}\", json.parse(\"{{\\\"data.bin\\\": \
+             [0, 128, 255, 1, 254]}}\"))\n{module}.read(\"{path}\")"
+        );
+        assert_eq!(
+            eval(&source),
+            eval("json.parse(\"{\\\"data.bin\\\": [0, 128, 255, 1, 254]}\")"),
+            "{module} must return the same bytes that were written"
+        );
+    }
 }
