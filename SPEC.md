@@ -1547,14 +1547,17 @@ the line number.
 - tables (`[server]`) and arrays of tables (`[[users]]`);
 - basic strings with `\" \\ \b \t \n \f \r \uXXXX \UXXXXXXXX`, and
   literal strings in single quotes;
+- multiline basic (`"""`) and literal (`'''`) strings, where a newline
+  immediately after the opening delimiter is trimmed, inner newlines are kept,
+  and a backslash at the end of a line continues a multiline basic string;
 - decimal integers with `_` separators, and hexadecimal, octal and binary
   integers with `0x`, `0o` and `0b`;
 - decimal floats with an exponent, and the booleans `true` and `false`;
 - arrays, including nested arrays, and inline tables such as
   `{name = "Ada", port = 80}`.
 
-It does **not** support multiline strings, date and time values, non-finite
-floats (`inf`, `nan`), or dotted keys that reach through an array of tables.
+It does **not** support date and time values, non-finite floats (`inf`, `nan`),
+or dotted keys that reach through an array of tables.
 A non-finite float is refused rather than stored as a number Redblue cannot
 represent. An integer a Redblue number cannot hold exactly is refused by line
 rather than rounded, and re-opening a table or turning an array value into an

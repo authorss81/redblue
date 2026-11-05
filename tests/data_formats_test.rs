@@ -429,3 +429,79 @@ fn edge_archive_binary_contents_round_trip_through_zip_and_tar() {
         );
     }
 }
+
+/// TOML's multiline basic and literal strings keep raw newlines, trim the
+/// newline immediately after the opening delimiter, and honour escapes in the
+/// basic form while leaving the literal form alone.
+#[test]
+fn toml_reader_parses_multiline_strings() {
+    let source = r#"toml.parse("basic = \"\"\"\nline one\nline \"two\"\n\"\"\"\nliteral = '''\nraw \\n stays\n'''\n")"#;
+    let expected = eval(r#"{basic: "line one\nline \"two\"\n", literal: "raw \\n stays\n"}"#);
+    assert_eq!(
+        eval(source),
+        expected,
+        "multiline strings must keep their inner newlines and trim only the first"
+    );
+}
+
+/// A backslash at the end of a line continues a multiline basic string: the
+/// newline and the next line's leading whitespace are not part of the value.
+#[test]
+fn toml_reader_parses_multiline_line_continuation() {
+    let source = r#"toml.parse("text = \"\"\"\none \\\n   two\"\"\"")"#;
+    assert_eq!(
+        eval(source),
+        eval("{text: \"one two\"}"),
+        "a line-ending backslash must join the two lines without the indentation"
+    );
+}
+
+/// Empty multiline strings, runs of one or two quotes, and a CRLF first line
+/// are all content rather than structure.
+#[test]
+fn edge_toml_multiline_strings_quote_runs_crlf_and_empty() {
+    let source = concat!(
+        "toml.parse(\"",
+        "empty = \\\"\\\"\\\"\\\"\\\"\\\"\\n",
+        "empty_lit = ''''''\\n",
+        "quotes = \\\"\\\"\\\"a\\\"\\\"b\\\"\\\"\\\"\\n",
+        "apostrophe = '''it''s'''\\n",
+        "crlf = \\\"\\\"\\\"\\r\\nline\\r\\n\\\"\\\"\\\"\\n",
+        "\")"
+    );
+    let expected = eval(
+        r#"{empty: "", empty_lit: "", quotes: "a\"\"b", apostrophe: "it''s", crlf: "line\r\n"}"#,
+    );
+    assert_eq!(
+        eval(source),
+        expected,
+        "empty strings, two-quote runs and a CRLF first line must parse as content"
+    );
+}
+
+/// An unterminated or badly escaped multiline string is a catchable error that
+/// names the line, not a panic or a silent truncation.
+#[test]
+fn edge_toml_multiline_string_refusal_names_the_line() {
+    let unterminated = run_source(r#"toml.parse("a = \"\"\"\nhello\n")"#);
+    assert!(
+        unterminated.is_err(),
+        "an unterminated multiline string must be refused"
+    );
+    let message = unterminated.unwrap_err().message().to_string();
+    assert!(
+        message.contains("line 3") && message.contains("unterminated"),
+        "the refusal must name the line, got: {message}"
+    );
+
+    let bad_escape = run_source(r#"toml.parse("a = \"\"\"\\q\"\"\"")"#);
+    assert!(
+        bad_escape.is_err(),
+        "an unknown escape in a multiline string must be refused"
+    );
+    let message = bad_escape.unwrap_err().message().to_string();
+    assert!(
+        message.contains("line 1") && message.contains("escape"),
+        "an unknown escape must name its line, got: {message}"
+    );
+}

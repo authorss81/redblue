@@ -16,12 +16,18 @@ Error: RuntimeError: Module 'csv' has no function 'stringify'
 The failing test `csv_writer_quotes_a_comma_a_quote_a_newline_and_space` was
 written first and failed with the same refusal before the writer existed.
 
+The resumed pass added multiline TOML strings. Its failing test
+`toml_reader_parses_multiline_strings` first failed with
+`Invalid TOML at line 1: unexpected '"' after the value`, which is how the
+old reader read `"""` as an empty basic string followed by a stray quote.
+
 ## What changed
 
 | File | Lines | What |
 |---|---|---|
 | src/formats.rs | +1317 | CSV writer, JSON Lines, TOML subset reader, zip stored writer/reader, tar USTAR writer/reader, CRC32 |
 | src/formats.rs | +3 −3 | signed decimal integers are parsed with the sign, so TOML's smallest i64 (`-9223372036854775808`) parses instead of being mistaken for overflow |
+| src/formats.rs | +134 −15 | multiline basic (`"""`) and literal (`'''`) TOML strings: first-newline trimming, raw inner newlines, two-quote runs, line-ending backslash continuation, and named refusals |
 | src/lib.rs | +1 | registers `formats` |
 | src/runtime.rs | +92 | dispatches `csv_stringify`, `json_parse_lines`, `json_stringify_lines`, `toml_parse`, `zip_write`, `zip_read`, `tar_write`, `tar_read` |
 | src/stdlib.rs | +60 | modules `tar`, `toml`, `zip`; members, builtin names, signatures and effectful calls |
@@ -29,14 +35,17 @@ written first and failed with the same refusal before the writer existed.
 | src/repl/completer.rs | +12 −2 | completer expectations for the two new JSON members |
 | src/repl/editor.rs | +14 −2 | editor expectations for the two new JSON members |
 | SPEC.md | +60 | CSV quoting, JSON Lines, TOML subset (including what is unsupported), zip/tar behaviour |
+| SPEC.md | +5 −2 | documents multiline TOML strings and removes them from the unsupported list |
 | README.md | +12 | the same public surface in the README table |
 | SURVEY.md | +83 | re-anchored registry counts/citations; records rank 10 closed |
 | tests/data_formats_test.rs | +429 | sixteen tests for the new formats |
+| tests/data_formats_test.rs | +76 | four multiline-TOML tests, including an empty/quote-run/CRLF edge case and a named-refusal failure |
 | tests/stdlib_module_docs_test.rs | +54 | eight answerable-builtin rows |
 | tests/stdlib_module_names_test.rs | +21 | tar, toml and zip module calls |
 | tests/stdlib_modules_test.rs | +36 | three tracked `edge_phase105_*` tests for quota and edge coverage |
 | tests/unreviewed_work_ack_test.rs | +1 | acknowledges the `resume phase-105:` delivery commit by subject |
 | tests/doc_blocks_*.txt | +23 | SPEC line-key re-anchoring plus one fragment entry for the archive example |
+| tests/doc_blocks_*.txt | +12 −12 | SPEC line keys after the multiline bullets moved ten run entries, one fragment and one known-fail entry by three lines |
 
 The API is `csv.stringify(rows)`, `json.parse_lines(text)`,
 `json.stringify_lines(list)`, `toml.parse(text)`, `zip.write(path, entries)`,
@@ -80,28 +89,33 @@ entries, and reading refuses any other method by name, including
 | edge_toml_refuses_time_only_and_single_digit_dates_as_dates | date/time refusal, malformed input |
 | edge_tar_refuses_a_non_utf8_entry_name | unicode / archive names |
 | edge_zip_refuses_a_local_offset_past_the_archive | out_of_bounds / malformed input |
+| toml_reader_parses_multiline_strings | nesting / multiline content |
+| toml_reader_parses_multiline_line_continuation | boundary / line continuation |
+| edge_toml_multiline_strings_quote_runs_crlf_and_empty | empty, quote runs, CRLF |
+| edge_toml_multiline_string_refusal_names_the_line | malformed input / asserts a failure |
 
-The sixteen tests in `tests/data_formats_test.rs` include the four added in the
-resumed pass; the three `edge_phase105_*` tests are in the tracked
+The twenty tests in `tests/data_formats_test.rs` include the eight added across
+the resumed passes; the three `edge_phase105_*` tests are in the tracked
 `tests/stdlib_modules_test.rs`; three existing tests were updated where the JSON
-member list legitimately grew. The resumed pass also adds `resume phase-105:` to
-the delivery-subject acknowledgement rule in `tests/unreviewed_work_ack_test.rs`,
-which is what makes the audit accept the pipeline's own delivery commit.
+member list legitimately grew. The first resumed pass also adds `resume
+phase-105:` to the delivery-subject acknowledgement rule in
+`tests/unreviewed_work_ack_test.rs`, which is what makes the audit accept the
+pipeline's own delivery commit.
 
 ## Edge-case matrix
 
 | Class | Status |
 |---|---|
-| empty | covered — empty CSV rows, empty JSON Lines, empty archive, empty entry |
+| empty | covered — empty CSV rows, empty JSON Lines, empty archive, empty entry, empty multiline TOML strings |
 | singleton | covered — one cell, one row, one archive entry |
-| boundary | covered — header-only CSV, whitespace-only field, very long field |
+| boundary | covered — header-only CSV, whitespace-only field, very long field, line-ending backslash continuation |
 | out_of_bounds | N/A — no indexed API is added |
 | type_mismatch | covered — non-text/byte archive entries and non-list JSON Lines input refuse by name |
 | numeric_boundary | covered — TOML integers that fit a Redblue number exactly parse, non-exact and out-of-range integers refuse by line, hex integers with `e`, and float exponents |
 | unicode | covered — UTF-8 text is preserved; archive bytes that are not UTF-8 return a byte list |
-| nesting_recursion | covered — nested arrays/inline TOML tables, nested JSON values, multiple archive entries |
+| nesting_recursion | covered — nested arrays/inline TOML tables, nested JSON values, multiple archive entries, multiline strings inside values |
 | duplicate_missing_keys | covered — TOML duplicate keys refuse; missing archive entries refuse by name |
-| malformed_input | covered — bad TOML line, malformed JSON line, truncated zip/tar, BOM |
+| malformed_input | covered — bad TOML line, malformed JSON line, unterminated multiline string, unknown escape, truncated zip/tar, BOM |
 | resource_limit | covered — missing archive path, malformed archive, deep TOML nesting refuse cleanly |
 
 ## Gates
@@ -110,7 +124,7 @@ which is what makes the audit accept the pipeline's own delivery commit.
 |---|---|
 | cargo fmt --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | pass — 2569 passed, 0 failed |
+| cargo test --all-targets | pass — 2573 passed, 0 failed |
 | rbops/verify.sh phase-105 | pass |
 
 ## Invariants touched
@@ -126,12 +140,15 @@ which is what makes the audit accept the pipeline's own delivery commit.
   `-9223372036854775808` parses; an integer a Redblue number cannot hold
   exactly is refused by line rather than rounded. An array value is not
   re-opened as an array of tables, and a table header cannot be repeated.
+- TOML multiline strings trim only the newline immediately after the opening
+  delimiter, keep inner newlines and two-quote runs, and treat a line-ending
+  backslash as a continuation in the basic form only.
 
 ## Known gaps / follow-ups
 
 - Zip writing is stored-only; deflate writing is not implemented. The reader
   names method 8 rather than decoding it.
-- TOML does not support multiline strings, date/time values, `inf`/`nan`, or
-  dotted keys that reach through arrays of tables; SPEC.md states this.
+- TOML does not support date/time values, `inf`/`nan`, or dotted keys that
+  reach through arrays of tables; SPEC.md states this.
 - Tar is USTAR only; PAX/GNU long names and sparse files are not handled.
 - YAML and XML remain unread and unwritten, recorded under SURVEY.md "Not surveyed".

@@ -433,6 +433,12 @@ impl TomlParser {
 
     fn parse_value_at_current_depth(&mut self) -> Result<Toml, String> {
         match self.peek() {
+            Some('"') if self.peek_at(1) == Some('"') && self.peek_at(2) == Some('"') => Ok(
+                Toml::Value(Value::Text(self.parse_multiline_basic_string()?)),
+            ),
+            Some('\'') if self.peek_at(1) == Some('\'') && self.peek_at(2) == Some('\'') => Ok(
+                Toml::Value(Value::Text(self.parse_multiline_literal_string()?)),
+            ),
             Some('"') => Ok(Toml::Value(Value::Text(self.parse_basic_string()?))),
             Some('\'') => Ok(Toml::Value(Value::Text(self.parse_literal_string()?))),
             Some('[') => self.parse_array(),
@@ -452,25 +458,27 @@ impl TomlParser {
                 Some('"') => return Ok(out),
                 Some('\n') => return self.error("a string cannot contain a raw newline"),
                 Some('\\') => {
-                    let escaped = match self.bump() {
-                        Some('"') => '"',
-                        Some('\\') => '\\',
-                        Some('b') => '\u{8}',
-                        Some('t') => '\t',
-                        Some('n') => '\n',
-                        Some('f') => '\u{c}',
-                        Some('r') => '\r',
-                        Some('u') => self.parse_unicode_escape(4)?,
-                        Some('U') => self.parse_unicode_escape(8)?,
-                        Some(other) => {
-                            return self.error(format!("unknown string escape '\\{other}'"))
-                        }
-                        None => return self.error("an unterminated string escape"),
-                    };
+                    let escaped = self.parse_escape()?;
                     out.push(escaped);
                 }
                 Some(c) => out.push(c),
             }
+        }
+    }
+
+    fn parse_escape(&mut self) -> Result<char, String> {
+        match self.bump() {
+            Some('"') => Ok('"'),
+            Some('\\') => Ok('\\'),
+            Some('b') => Ok('\u{8}'),
+            Some('t') => Ok('\t'),
+            Some('n') => Ok('\n'),
+            Some('f') => Ok('\u{c}'),
+            Some('r') => Ok('\r'),
+            Some('u') => self.parse_unicode_escape(4),
+            Some('U') => self.parse_unicode_escape(8),
+            Some(other) => self.error(format!("unknown string escape '\\{other}'")),
+            None => self.error("an unterminated string escape"),
         }
     }
 
@@ -485,6 +493,117 @@ impl TomlParser {
                 Some(c) => out.push(c),
             }
         }
+    }
+
+    fn parse_multiline_basic_string(&mut self) -> Result<String, String> {
+        self.bump();
+        self.bump();
+        self.bump();
+        self.trim_leading_newline();
+        let mut out = String::new();
+        loop {
+            match self.peek() {
+                None => return self.error("an unterminated multiline string"),
+                Some('"') => {
+                    let run = self.quote_run('"');
+                    if run >= 3 {
+                        out.extend(std::iter::repeat_n('"', run - 3));
+                        for _ in 0..run {
+                            self.bump();
+                        }
+                        return Ok(out);
+                    }
+                    out.extend(std::iter::repeat_n('"', run));
+                    for _ in 0..run {
+                        self.bump();
+                    }
+                }
+                Some('\\') => {
+                    self.bump();
+                    if self.skip_line_continuation() {
+                        continue;
+                    }
+                    let escaped = self.parse_escape()?;
+                    out.push(escaped);
+                }
+                Some(c) => {
+                    out.push(c);
+                    self.bump();
+                }
+            }
+        }
+    }
+
+    fn parse_multiline_literal_string(&mut self) -> Result<String, String> {
+        self.bump();
+        self.bump();
+        self.bump();
+        self.trim_leading_newline();
+        let mut out = String::new();
+        loop {
+            match self.peek() {
+                None => return self.error("an unterminated multiline literal string"),
+                Some('\'') => {
+                    let run = self.quote_run('\'');
+                    if run >= 3 {
+                        out.extend(std::iter::repeat_n('\'', run - 3));
+                        for _ in 0..run {
+                            self.bump();
+                        }
+                        return Ok(out);
+                    }
+                    out.extend(std::iter::repeat_n('\'', run));
+                    for _ in 0..run {
+                        self.bump();
+                    }
+                }
+                Some(c) => {
+                    out.push(c);
+                    self.bump();
+                }
+            }
+        }
+    }
+
+    fn quote_run(&self, quote: char) -> usize {
+        let mut run = 0;
+        while self.peek_at(run) == Some(quote) {
+            run += 1;
+        }
+        run
+    }
+
+    fn trim_leading_newline(&mut self) {
+        if self.peek() == Some('\r') && self.peek_at(1) == Some('\n') {
+            self.bump();
+            self.bump();
+        } else if self.peek() == Some('\n') {
+            self.bump();
+        }
+    }
+
+    /// Consumes the whitespace of a multiline basic string's line-ending
+    /// backslash, answering whether one was found. The backslash itself is
+    /// already consumed; a backslash that does not end the line is left for
+    /// `parse_escape` to refuse.
+    fn skip_line_continuation(&mut self) -> bool {
+        if !matches!(self.peek(), Some(' ' | '\t' | '\r' | '\n')) {
+            return false;
+        }
+        let at = self.at;
+        let line = self.line;
+        while matches!(self.peek(), Some(' ' | '\t')) {
+            self.bump();
+        }
+        if !matches!(self.peek(), Some('\r' | '\n')) {
+            self.at = at;
+            self.line = line;
+            return false;
+        }
+        while matches!(self.peek(), Some(' ' | '\t' | '\r' | '\n')) {
+            self.bump();
+        }
+        true
     }
 
     fn parse_unicode_escape(&mut self, digits: usize) -> Result<char, String> {
