@@ -13,6 +13,7 @@ pub mod linter;
 pub mod logging;
 pub mod lsp;
 pub mod manifest;
+mod matrix;
 pub mod parser;
 pub mod path;
 pub mod repl;

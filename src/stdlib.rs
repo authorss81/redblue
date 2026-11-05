@@ -29,6 +29,7 @@ pub const MODULES: &[&str] = &[
     "list",
     "logging",
     "math",
+    "matrix",
     "network",
     "path",
     "regex",
@@ -152,6 +153,31 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
         "math",
         &[
             "abs", "floor", "ceil", "round", "sqrt", "pow", "sin", "cos", "tan", "log", "exp",
+        ],
+    ),
+    (
+        "matrix",
+        &[
+            "zeros",
+            "ones",
+            "identity",
+            "from_lists",
+            "to_lists",
+            "shape",
+            "add",
+            "subtract",
+            "multiply",
+            "divide",
+            "scale",
+            "matmul",
+            "transpose",
+            "sum",
+            "mean",
+            "min",
+            "max",
+            "at",
+            "row",
+            "column",
         ],
     ),
     ("network", &["get", "post"]),
@@ -624,6 +650,34 @@ pub fn builtins() -> HashMap<String, Value> {
         "zip_write",
         "tar_read",
         "tar_write",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
+
+    // Matrix module: a dense numeric array. The kernels are `ndarray`'s, not
+    // loops written in Redblue, because dense numeric work is exactly what an
+    // interpreter loses on; LIBRARIES.md § 2 requires the binding.
+    for name in [
+        "matrix_zeros",
+        "matrix_ones",
+        "matrix_identity",
+        "matrix_from_lists",
+        "matrix_to_lists",
+        "matrix_shape",
+        "matrix_add",
+        "matrix_subtract",
+        "matrix_multiply",
+        "matrix_divide",
+        "matrix_scale",
+        "matrix_matmul",
+        "matrix_transpose",
+        "matrix_sum",
+        "matrix_mean",
+        "matrix_min",
+        "matrix_max",
+        "matrix_at",
+        "matrix_row",
+        "matrix_column",
     ] {
         globals.insert(name.to_string(), Value::Builtin(name.to_string()));
     }
@@ -2084,6 +2138,26 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "tar_write",
     "zip_read",
     "zip_write",
+    "matrix_zeros",
+    "matrix_ones",
+    "matrix_identity",
+    "matrix_from_lists",
+    "matrix_to_lists",
+    "matrix_shape",
+    "matrix_add",
+    "matrix_subtract",
+    "matrix_multiply",
+    "matrix_divide",
+    "matrix_scale",
+    "matrix_matmul",
+    "matrix_transpose",
+    "matrix_sum",
+    "matrix_mean",
+    "matrix_min",
+    "matrix_max",
+    "matrix_at",
+    "matrix_row",
+    "matrix_column",
     "network_get",
     "network_post",
     "regex_match",
@@ -2465,6 +2539,86 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     (
         "tar_write",
         "tar_write(path, entries) -> nothing; a tar archive of the entries",
+    ),
+    (
+        "matrix_zeros",
+        "matrix.zeros(rows, columns) -> a matrix of zeros",
+    ),
+    (
+        "matrix_ones",
+        "matrix.ones(rows, columns) -> a matrix of ones",
+    ),
+    (
+        "matrix_identity",
+        "matrix.identity(size) -> a square identity matrix",
+    ),
+    (
+        "matrix_from_lists",
+        "matrix.from_lists(rows) -> a rectangular matrix; a ragged list is refused",
+    ),
+    (
+        "matrix_to_lists",
+        "matrix.to_lists(matrix) -> the rows as a list of lists",
+    ),
+    (
+        "matrix_shape",
+        "matrix.shape(matrix) -> [rows, columns]",
+    ),
+    (
+        "matrix_add",
+        "matrix.add(left, right) -> elementwise sum; shapes must match exactly",
+    ),
+    (
+        "matrix_subtract",
+        "matrix.subtract(left, right) -> elementwise difference; shapes must match exactly",
+    ),
+    (
+        "matrix_multiply",
+        "matrix.multiply(left, right) -> elementwise product; shapes must match exactly",
+    ),
+    (
+        "matrix_divide",
+        "matrix.divide(left, right) -> elementwise quotient; shapes must match exactly, and a zero divisor is refused",
+    ),
+    (
+        "matrix_scale",
+        "matrix.scale(matrix, number) -> every element multiplied by the number",
+    ),
+    (
+        "matrix_matmul",
+        "matrix.matmul(left, right) -> matrix product; the inner dimensions must match",
+    ),
+    (
+        "matrix_transpose",
+        "matrix.transpose(matrix) -> rows and columns exchanged",
+    ),
+    (
+        "matrix_sum",
+        "matrix.sum(matrix) -> the sum of every element; an empty matrix sums to 0",
+    ),
+    (
+        "matrix_mean",
+        "matrix.mean(matrix) -> the arithmetic mean; an empty matrix is refused",
+    ),
+    (
+        "matrix_min",
+        "matrix.min(matrix) -> the smallest element; an empty matrix is refused",
+    ),
+    (
+        "matrix_max",
+        "matrix.max(matrix) -> the largest element; an empty matrix is refused",
+    ),
+    (
+        "matrix_at",
+        "matrix.at(matrix, row, column) -> one element; a bad index is refused",
+    ),
+    (
+        "matrix_row",
+        "matrix.row(matrix, row) -> that row as a list",
+    ),
+    (
+        "matrix_column",
+        "matrix.column(matrix, column) -> that column as a list",
     ),
     (
         "network_get",

@@ -1945,6 +1945,74 @@ pattern that backtracks catastrophically in another engine cannot hang a
 Redblue program. `text.split` is unchanged: its separator is still literal, and
 `regex.split` is the pattern form.
 
+### matrix
+
+```
+set a to matrix.from_lists([[1, 2], [3, 4]])        // a 2x2 matrix
+set z to matrix.zeros(2, 3)                          // every element is 0
+set o to matrix.ones(2, 3)                           // every element is 1
+set i to matrix.identity(2)                          // a 2x2 identity
+set shape to matrix.shape(a)                         // [2, 2]
+set rows to matrix.to_lists(a)                       // [[1, 2], [3, 4]]
+set sum to matrix.add(a, a)                          // elementwise
+set difference to matrix.subtract(a, a)              // elementwise
+set product to matrix.multiply(a, a)                 // elementwise, not matrix product
+set quotient to matrix.divide(a, o)                  // elementwise
+set scaled to matrix.scale(a, 0.5)                   // every element times 0.5
+set dot to matrix.matmul(a, a)                       // matrix product
+set transposed to matrix.transpose(a)                // rows and columns exchanged
+set total to matrix.sum(a)                           // 10
+set average to matrix.mean(a)                        // 2.5
+set smallest to matrix.min(a)                        // 1
+set largest to matrix.max(a)                         // 4
+set cell to matrix.at(a, 1, 0)                       // 3
+set first_row to matrix.row(a, 0)                    // [1, 2]
+set first_column to matrix.column(a, 0)              // [1, 3]
+```
+
+The `matrix` module is a **binding to the `ndarray` crate**, in the sense
+[LIBRARIES.md](LIBRARIES.md) § 2 requires: a dense numeric kernel is native work,
+and an interpreted loop over a matrix would be slower by orders of magnitude. It
+is not a matrix implementation written in Redblue.
+
+A matrix is an ordinary object named `matrix` with three fields: `rows`, `cols`
+and row-major `data`. It is not a new `Value` variant, so it prints and compares
+as data without changing the language's value kinds. `matrix.to_lists` is the
+explicit conversion back to nested Redblue lists, and `matrix.from_lists` builds
+a matrix from them. Every row must have the same length; a ragged list is a
+catchable `Runtime` failure naming the row that differs.
+
+**Promotion rule.** Every element is an `f64`, because every Redblue number is an
+`f64`. An integer-looking value is promoted to `f64` on the way in, and it is
+never truncated on the way out: `matrix.scale(matrix.from_lists([[1, 2]]), 0.5)`
+is `[[0.5, 1]]`, not `[[0, 0]]`. No operation has an integer mode. A value past
+`2^53` loses the bits `f64` cannot hold, exactly as the same literal does outside
+a matrix. A result that is not finite is refused with a catchable `Runtime`
+failure rather than stored as `NaN` or infinity, so an overflowing product cannot
+enter a program as a value no comparison can settle.
+
+`matrix.add`, `matrix.subtract`, `matrix.multiply` and `matrix.divide` are
+elementwise and require **exactly equal shapes**. There is no broadcasting: a
+`1x1` matrix added to a `1x2` matrix is a failure naming both shapes, not a
+silent expansion. `matrix.matmul` is the matrix product and requires the left
+column count to equal the right row count; a mismatch names both shapes. A zero
+divisor in `matrix.divide` is refused by name.
+
+Empty and zero-dimension matrices are defined rather than special cases.
+`matrix.zeros(0, 0)` has shape `[0, 0]`, `matrix.to_lists` of it is `[]`, and
+`matrix.sum` of it is `0`. A `2x0` matrix times a `0x3` matrix is a `2x3` matrix
+of zeros. `matrix.mean`, `matrix.min` and `matrix.max` of an empty matrix have no
+answer and are catchable failures naming the empty matrix. `matrix.mean` and
+`matrix.sum` use compensated summation, and when a sum would overflow they
+scale every element by an exact power of two before summing, so a large finite
+mean or sum stays finite and a residual left by cancellation is not lost.
+
+`matrix.at`, `matrix.row` and `matrix.column` index a matrix; `m[row]` is the
+same row as `matrix.row(m, row)`. A fractional, negative or out-of-range index is
+a catchable `Runtime` failure naming the index and the bound, never a panic.
+Dimensions are whole numbers of at least zero, and a matrix whose element count
+would exceed the module's limit is refused before it is allocated.
+
 ## Iteration and memoisation
 
 ### Iteration helpers
