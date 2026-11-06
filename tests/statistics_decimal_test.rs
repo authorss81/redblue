@@ -366,6 +366,65 @@ fn edge_decimal_remainder_is_exact_and_handles_the_minimum_without_panicking() {
 }
 
 #[test]
+fn edge_decimal_cross_scale_arithmetic_cancels_before_overflowing() {
+    // Aligning the left operand to the other's scale multiplies it by ten,
+    // which is past i128::MAX, but the exact results all fit.
+    let maximum = "17014118346046923173168730371588410573";
+    let negative = "-17014118346046923173168730371588410572.7";
+    let positive = "17014118346046923173168730371588410572.7";
+    decimal_text(
+        &format!("decimal.from_text(\"{maximum}\") + decimal.from_text(\"{negative}\")"),
+        "0.3",
+    );
+    decimal_text(
+        &format!("decimal.from_text(\"{maximum}\") - decimal.from_text(\"{positive}\")"),
+        "0.3",
+    );
+    decimal_text(
+        &format!("decimal.from_text(\"{maximum}\") mod decimal.from_text(\"{negative}\")"),
+        "0.3",
+    );
+}
+
+#[test]
+fn edge_decimal_mixing_is_refused_inside_lists_and_membership() {
+    for source in [
+        "[decimal.from_text(\"1\")] is [1]",
+        "[1] is [decimal.from_text(\"1\")]",
+        "[1, decimal.from_text(\"1\")] is [1]",
+        "[1] is [1, decimal.from_text(\"1\")]",
+        "decimal.from_text(\"1\") is in [1]",
+        "1 is in [decimal.from_text(\"1\")]",
+    ] {
+        let message = runtime_message(source);
+        assert!(
+            message.contains("decimal") && message.contains("number"),
+            "`{source}` must name both kinds, got: {message}"
+        );
+    }
+    assert_eq!(
+        eval("[decimal.from_text(\"1.0\")] is [decimal.from_text(\"1\")]"),
+        Value::YesNo(true),
+        "lists of the same kind still compare structurally"
+    );
+    assert_eq!(
+        eval("decimal.from_text(\"1\") is in [decimal.from_text(\"1.0\")]"),
+        Value::YesNo(true)
+    );
+}
+
+#[test]
+fn edge_membership_keeps_a_yes_or_no_answer_for_non_decimal_kinds() {
+    assert_eq!(
+        eval("time.date(2024, 1, 1) is in [5, time.date(2024, 1, 1)]"),
+        Value::YesNo(true),
+        "membership answers by value even when another element has a different kind"
+    );
+    assert_eq!(eval("time.date(2024, 1, 1) is in [5]"), Value::YesNo(false));
+    assert_eq!(eval("time.duration(60) is in [5]"), Value::YesNo(false));
+}
+
+#[test]
 fn edge_decimal_sum_cancels_intermediate_overflow() {
     decimal_text(
         "decimal.sum([decimal.from_text(\"170141183460469231731687303715884105727\"), decimal.from_text(\"170141183460469231731687303715884105727\"), decimal.from_text(\"-170141183460469231731687303715884105727\")])",
@@ -378,6 +437,40 @@ fn edge_variance_of_opposing_large_finite_values_is_refused_as_non_finite() {
     assert_eq!(number("mean([1e308, -1e308])"), 0.0);
     let message = runtime_message("variance([1e308, -1e308])");
     assert!(message.contains("not a finite number"), "{message}");
+}
+
+#[test]
+fn edge_variance_survives_a_sum_of_squares_that_would_overflow() {
+    // The deviations are exactly +1e154 and -1e154, so the population variance
+    // is (1e154)^2 = 1e308, which is a finite number. Adding the two squared
+    // deviations first reaches infinity even though their mean does not.
+    assert_eq!(number("variance([1e154, -1e154])"), 1e308);
+    assert_eq!(number("standard_deviation([1e154, -1e154])"), 1e154);
+}
+
+#[test]
+fn edge_correlation_refuses_mismatched_lists_with_a_runtime_failure() {
+    let error = eval_err("correlation([1, 2], [1, 2, 3])");
+    assert!(
+        matches!(error, Error::Runtime(..)),
+        "mismatched lists should be a clean runtime failure, got {error:?}"
+    );
+    assert!(runtime_message("correlation([1, 2], [1, 2, 3])").contains("same length"));
+}
+
+#[test]
+fn edge_mode_treats_negative_zero_as_the_same_value_as_zero() {
+    assert_eq!(
+        eval("mode([0, -0.0])"),
+        Value::list(vec![Value::Number(0.0)]),
+        "equal values must not be split into two modes by their sign"
+    );
+}
+
+#[test]
+fn edge_decimal_from_number_below_the_scale_is_refused_rather_than_zero() {
+    let message = runtime_message("decimal.from_number(0.0000000000000000001)");
+    assert!(message.contains("at most 18"), "{message}");
 }
 
 #[test]

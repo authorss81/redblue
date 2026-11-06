@@ -235,11 +235,16 @@ fn modes_of(span: Span, name: &str, numbers: &[f64]) -> Result<Vec<f64>> {
 fn variance_of(span: Span, name: &str, numbers: &[f64]) -> Result<f64> {
     non_empty(span, name, numbers)?;
     let mean = mean_of(numbers);
-    Ok(numbers
+    // Average the squared deviations instead of summing them and dividing.
+    // Their total can overflow to infinity even when their mean is a finite
+    // number: [1e154, -1e154] has variance 1e308, but 1e308 + 1e308 is not
+    // representable. `mean_of` scales only when the plain sum overflows, so
+    // ordinary lists keep the direct path.
+    let squares: Vec<f64> = numbers
         .iter()
         .map(|number| (number - mean) * (number - mean))
-        .sum::<f64>()
-        / numbers.len() as f64)
+        .collect();
+    Ok(mean_of(&squares))
 }
 
 fn percentile_of(span: Span, numbers: &[f64], rank: f64) -> Result<f64> {

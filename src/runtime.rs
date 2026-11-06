@@ -347,7 +347,12 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
         BinaryOp::Or => Ok(Value::YesNo(left.is_truthy() || right.is_truthy())),
         BinaryOp::In => {
             if let Value::List(items) = right {
-                Ok(Value::YesNo(items.contains(&left)))
+                for item in items.iter() {
+                    if membership(span, &left, item)? {
+                        return Ok(Value::YesNo(true));
+                    }
+                }
+                Ok(Value::YesNo(false))
             } else {
                 Err(Error::Runtime(
                     "Right side of 'in' must be a list".to_string(),
@@ -406,24 +411,17 @@ fn date_sub(span: Span, date: NaiveDateTime, delta: TimeDelta) -> Result<Value> 
         })
 }
 
-/// `is` and `is not`, refusing a date or a duration mixed with a number.
+/// `is` and `is not`, refusing a date, duration or decimal mixed with a number.
 ///
-/// Ordering already treats the two kinds as incomparable, and equality is the
-/// same question: `date is 5` used to answer a silent `no`, which looks like a
-/// real answer to a program that compared the wrong kinds. The refusal names
-/// both kinds, exactly as ordering does, so a `try … catch error of Runtime`
-/// can report it.
+/// Ordering already treats the kinds as incomparable, and equality is the same
+/// question: `date is 5` used to answer a silent `no`, which looks like a real
+/// answer to a program that compared the wrong kinds. The refusal names both
+/// kinds, exactly as ordering does, so a `try … catch error of Runtime` can
+/// report it. It reaches through lists, records and objects, because a list
+/// holding a decimal and one holding a number are just as mixed as their
+/// elements, and answering `no` there would hide the same mistake.
 fn equality(span: Span, left: Value, right: Value, negated: bool) -> Result<Value> {
-    let mixed = match (&left, &right) {
-        (Value::Date(_), Value::Number(_)) => Some(("date", "number")),
-        (Value::Number(_), Value::Date(_)) => Some(("number", "date")),
-        (Value::Duration(_), Value::Number(_)) => Some(("duration", "number")),
-        (Value::Number(_), Value::Duration(_)) => Some(("number", "duration")),
-        (Value::Decimal(_), Value::Number(_)) => Some(("decimal", "number")),
-        (Value::Number(_), Value::Decimal(_)) => Some(("number", "decimal")),
-        _ => None,
-    };
-    if let Some((left_kind, right_kind)) = mixed {
+    if let Some((left_kind, right_kind)) = mixed_kinds(&left, &right) {
         return Err(Error::Runtime(
             format!("Cannot compare a {left_kind} with a {right_kind}"),
             span,
@@ -431,6 +429,112 @@ fn equality(span: Span, left: Value, right: Value, negated: bool) -> Result<Valu
     }
     let equal = left == right;
     Ok(Value::YesNo(if negated { !equal } else { equal }))
+}
+
+/// Whether `left` is one of the members, refusing only the decimal/number mix.
+///
+/// Membership asks whether a value equals an element, not whether the two are
+/// comparable in every kind: `date in [5, date]` has a `yes` answer even though
+/// `date is 5` is refused. The decimal/number mix is different because the
+/// phase that added decimals made every operation between them explicit, so a
+/// membership answer of `no` would hide a conversion the program did not write.
+fn membership(span: Span, left: &Value, item: &Value) -> Result<bool> {
+    if let Some((left_kind, right_kind)) = decimal_mixed_kinds(left, item) {
+        return Err(Error::Runtime(
+            format!("Cannot compare a {left_kind} with a {right_kind}"),
+            span,
+        ));
+    }
+    Ok(left == item)
+}
+
+/// The first pair of directly mixed kinds found at or below `left` and `right`.
+fn mixed_kinds(left: &Value, right: &Value) -> Option<(&'static str, &'static str)> {
+    find_mixed_kinds(left, right, direct_mixed_kinds)
+}
+
+/// The first decimal/number mix found at or below `left` and `right`.
+fn decimal_mixed_kinds(left: &Value, right: &Value) -> Option<(&'static str, &'static str)> {
+    find_mixed_kinds(left, right, direct_decimal_mixed_kinds)
+}
+
+fn direct_mixed_kinds(left: &Value, right: &Value) -> Option<(&'static str, &'static str)> {
+    match (left, right) {
+        (Value::Date(_), Value::Number(_)) => Some(("date", "number")),
+        (Value::Number(_), Value::Date(_)) => Some(("number", "date")),
+        (Value::Duration(_), Value::Number(_)) => Some(("duration", "number")),
+        (Value::Number(_), Value::Duration(_)) => Some(("number", "duration")),
+        (Value::Decimal(_), Value::Number(_)) => Some(("decimal", "number")),
+        (Value::Number(_), Value::Decimal(_)) => Some(("number", "decimal")),
+        _ => None,
+    }
+}
+
+fn direct_decimal_mixed_kinds(left: &Value, right: &Value) -> Option<(&'static str, &'static str)> {
+    match (left, right) {
+        (Value::Decimal(_), Value::Number(_)) => Some(("decimal", "number")),
+        (Value::Number(_), Value::Decimal(_)) => Some(("number", "decimal")),
+        _ => None,
+    }
+}
+
+fn find_mixed_kinds(
+    left: &Value,
+    right: &Value,
+    direct: fn(&Value, &Value) -> Option<(&'static str, &'static str)>,
+) -> Option<(&'static str, &'static str)> {
+    if let Some(found) = direct(left, right) {
+        return Some(found);
+    }
+    match (left, right) {
+        (Value::List(a), Value::List(b)) => find_list_mixed(a, b, direct),
+        (Value::Record(a), Value::Record(b)) => a.iter().find_map(|(name, value)| {
+            b.get(name)
+                .and_then(|other| find_mixed_kinds(value, other, direct))
+        }),
+        (Value::Object(a_name, a_fields), Value::Object(b_name, b_fields)) if a_name == b_name => {
+            a_fields.iter().find_map(|(name, value)| {
+                b_fields
+                    .get(name)
+                    .and_then(|other| find_mixed_kinds(value, other, direct))
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Finds a mixed pair even when the two lists are different lengths.
+///
+/// A plain zip stops at the shorter list, so `[1, decimal] is [1]` compared only
+/// the first elements and answered `no` even though the decimal was mixed with
+/// the number on the other side. An unpaired element is checked against every
+/// element of the other list, so the mix is found wherever it sits.
+fn find_list_mixed(
+    a: &[Value],
+    b: &[Value],
+    direct: fn(&Value, &Value) -> Option<(&'static str, &'static str)>,
+) -> Option<(&'static str, &'static str)> {
+    for index in 0..a.len().max(b.len()) {
+        match (a.get(index), b.get(index)) {
+            (Some(a), Some(b)) => {
+                if let Some(found) = find_mixed_kinds(a, b, direct) {
+                    return Some(found);
+                }
+            }
+            (Some(a), None) => {
+                if let Some(found) = b.iter().find_map(|b| find_mixed_kinds(a, b, direct)) {
+                    return Some(found);
+                }
+            }
+            (None, Some(b)) => {
+                if let Some(found) = a.iter().find_map(|a| find_mixed_kinds(a, b, direct)) {
+                    return Some(found);
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    None
 }
 
 /// `<`, `<=`, `>` and `>=` over numbers, dates and durations.

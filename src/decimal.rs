@@ -106,16 +106,18 @@ impl Decimal {
             ));
         }
 
-        let mut mantissa = 0i128;
+        let mut magnitude = 0u128;
         for digit in whole.bytes().chain(fraction.bytes()) {
-            mantissa = mantissa
+            magnitude = magnitude
                 .checked_mul(10)
-                .and_then(|value| value.checked_add(i128::from(digit - b'0')))
+                .and_then(|value| value.checked_add(u128::from(digit - b'0')))
                 .ok_or_else(|| format!("'{text}' is too large to hold as a decimal"))?;
         }
-        if negative {
-            mantissa = -mantissa;
-        }
+        let mantissa = mantissa_from_magnitude(
+            negative,
+            magnitude,
+            &format!("'{text}' is too large to hold as a decimal"),
+        )?;
         Decimal::new(mantissa, scale)
     }
 
@@ -149,25 +151,28 @@ impl Decimal {
     }
 
     /// `self + other`, exact.
+    ///
+    /// Aligning a wide-mantissa operand to the other's scale can overflow
+    /// before the two values cancel, so the sum is accumulated as signed
+    /// decimal digits and only the final value has to fit.
     pub fn sum_with(self, other: Decimal) -> Result<Decimal, String> {
         let scale = self.scale.max(other.scale);
-        let left = self.mantissa_at(scale)?;
-        let right = other.mantissa_at(scale)?;
-        let mantissa = left
-            .checked_add(right)
-            .ok_or_else(|| "the decimal sum is too large to hold".to_string())?;
-        Decimal::new(mantissa, scale)
+        let mut total = SignedDigits::zero();
+        total.add(self.mantissa, (scale - self.scale) as usize);
+        total.add(other.mantissa, (scale - other.scale) as usize);
+        total.into_decimal(scale)
     }
 
     /// `self - other`, exact.
+    ///
+    /// Like [`sum_with`](Self::sum_with), cancellation happens before the
+    /// result is checked against the `i128` range.
     pub fn difference(self, other: Decimal) -> Result<Decimal, String> {
         let scale = self.scale.max(other.scale);
-        let left = self.mantissa_at(scale)?;
-        let right = other.mantissa_at(scale)?;
-        let mantissa = left
-            .checked_sub(right)
-            .ok_or_else(|| "the decimal difference is too large to hold".to_string())?;
-        Decimal::new(mantissa, scale)
+        let mut total = SignedDigits::zero();
+        total.add(self.mantissa, (scale - self.scale) as usize);
+        total.subtract(other.mantissa, (scale - other.scale) as usize);
+        total.into_decimal(scale)
     }
 
     /// `self * other`, exact while the mantissa fits and the scale is at most
@@ -231,24 +236,50 @@ impl Decimal {
             mantissa = reduced;
             scale -= 1;
         }
-        let mantissa = mantissa
-            .to_i128()
+        let magnitude = mantissa
+            .to_u128()
             .ok_or_else(|| "the decimal quotient is too large to hold".to_string())?;
         let negative = (self.mantissa < 0) != (other.mantissa < 0);
-        Decimal::new(if negative { -mantissa } else { mantissa }, scale)
+        let mantissa = mantissa_from_magnitude(
+            negative,
+            magnitude,
+            "the decimal quotient is too large to hold",
+        )?;
+        Decimal::new(mantissa, scale)
     }
 
     /// `self % other`, exact.
+    ///
+    /// The aligned dividend or divisor can need more than an `i128` even when
+    /// the remainder fits, so this uses wide arithmetic rather than scaling
+    /// both operands first. The remainder is smaller than one of the two
+    /// unaligned mantissas, which is always an `i128`, so the answer fits.
     pub fn remainder(self, other: Decimal) -> Result<Decimal, String> {
         if other.mantissa == 0 {
             return Err("Modulo by zero".to_string());
         }
         let scale = self.scale.max(other.scale);
-        let left = self.mantissa_at(scale)?;
-        let right = other.mantissa_at(scale)?;
-        // The only overflow `i128` remainder has is `MIN % -1`, whose exact
-        // answer is zero.
-        let mantissa = left.checked_rem(right).unwrap_or_default();
+        let negative = self.mantissa < 0;
+        let left = self.mantissa.unsigned_abs();
+        let right = other.mantissa.unsigned_abs();
+        let remainder = if self.scale >= other.scale {
+            let factor = pow10_wide(self.scale - other.scale)?;
+            match right.checked_mul(factor) {
+                Some(aligned) => left % aligned,
+                // The aligned divisor is past `u128`, and therefore past the
+                // dividend too, so the dividend is already the remainder.
+                None => left,
+            }
+        } else {
+            let numerator = Wide::product(left, pow10_wide(other.scale - self.scale)?);
+            let (_, remainder) = numerator.divide(right);
+            remainder
+        };
+        let mantissa = mantissa_from_magnitude(
+            negative,
+            remainder,
+            "the decimal remainder is too large to hold",
+        )?;
         Decimal::new(mantissa, scale)
     }
 
@@ -339,14 +370,6 @@ impl Decimal {
         }
         Decimal { mantissa, scale }
     }
-
-    fn mantissa_at(self, scale: u32) -> Result<i128, String> {
-        debug_assert!(scale >= self.scale);
-        let factor = pow10(scale - self.scale)?;
-        self.mantissa
-            .checked_mul(factor)
-            .ok_or_else(|| "the decimal is too large to hold".to_string())
-    }
 }
 
 fn compare_unsigned(left: u128, left_scale: u32, right: u128, right_scale: u32) -> Ordering {
@@ -371,17 +394,6 @@ fn compare_unsigned(left: u128, left_scale: u32, right: u128, right_scale: u32) 
         }
         other => other,
     }
-}
-
-fn pow10(power: u32) -> Result<i128, String> {
-    if power > MAX_SCALE {
-        return Err(format!(
-            "a decimal can have at most {MAX_SCALE} places after the point"
-        ));
-    }
-    10i128
-        .checked_pow(power)
-        .ok_or_else(|| "the decimal is too large to hold".to_string())
 }
 
 fn pow10_wide(power: u32) -> Result<u128, String> {
@@ -459,21 +471,14 @@ impl Wide {
         }
         Some(u128::from(self.0[0]) | (u128::from(self.0[1]) << 64))
     }
-
-    fn to_i128(self) -> Option<i128> {
-        if self.0[2] != 0 || self.0[3] != 0 {
-            return None;
-        }
-        let value = u128::from(self.0[0]) | (u128::from(self.0[1]) << 64);
-        i128::try_from(value).ok()
-    }
 }
 
 /// A signed integer in base ten, least-significant digit first.
 ///
-/// It exists only for [`Decimal::sum_all`]: a list can cancel to a value that
-/// fits even when an intermediate partial sum does not, so the accumulator is
-/// not limited to an `i128`.
+/// It backs [`Decimal::sum_with`], [`Decimal::difference`] and
+/// [`Decimal::sum_all`]: values can cancel to a sum that fits even when an
+/// aligned operand or an intermediate partial sum does not, so the accumulator
+/// is not limited to an `i128`.
 struct SignedDigits {
     negative: bool,
     digits: Vec<u8>,
@@ -488,10 +493,18 @@ impl SignedDigits {
     }
 
     fn add(&mut self, mantissa: i128, trailing_zeros: usize) {
+        self.add_signed(mantissa, trailing_zeros, false);
+    }
+
+    fn subtract(&mut self, mantissa: i128, trailing_zeros: usize) {
+        self.add_signed(mantissa, trailing_zeros, true);
+    }
+
+    fn add_signed(&mut self, mantissa: i128, trailing_zeros: usize, negate: bool) {
         if mantissa == 0 {
             return;
         }
-        let negative = mantissa < 0;
+        let negative = (mantissa < 0) != negate;
         let mut magnitude = mantissa.unsigned_abs();
         let mut other = Vec::new();
         while magnitude > 0 {
@@ -695,6 +708,27 @@ mod tests {
     }
 
     #[test]
+    fn edge_negative_minimum_is_representable_as_text_and_quotient() {
+        let minimum = Decimal::new(i128::MIN, 0).unwrap();
+        assert_eq!(
+            d("-170141183460469231731687303715884105728"),
+            minimum,
+            "negative 2^127 is i128::MIN, not an overflow"
+        );
+        assert_eq!(
+            d("-170141183460469231731687303715884105728")
+                .quotient(d("1"))
+                .unwrap(),
+            minimum,
+            "a negative quotient of magnitude 2^127 is i128::MIN"
+        );
+        assert!(
+            Decimal::parse("170141183460469231731687303715884105728").is_err(),
+            "positive 2^127 is still one past the i128 range"
+        );
+    }
+
+    #[test]
     fn addition_is_exact_where_f64_is_not() {
         assert_eq!(d("0.1").sum_with(d("0.2")).unwrap(), d("0.3"));
         assert_ne!(0.1f64 + 0.2, 0.3);
@@ -766,6 +800,16 @@ mod tests {
         );
         let tiny = d("0.000000000000000001");
         assert!(tiny.product(tiny).is_err());
+    }
+
+    #[test]
+    fn edge_cross_scale_arithmetic_cancels_before_alignment_overflow() {
+        let large = d("17014118346046923173168730371588410573");
+        let negative = d("-17014118346046923173168730371588410572.7");
+        let positive = d("17014118346046923173168730371588410572.7");
+        assert_eq!(large.sum_with(negative).unwrap(), d("0.3"));
+        assert_eq!(large.difference(positive).unwrap(), d("0.3"));
+        assert_eq!(large.remainder(negative).unwrap(), d("0.3"));
     }
 
     #[test]
