@@ -2011,7 +2011,14 @@ mean or sum stays finite and a residual left by cancellation is not lost.
 same row as `matrix.row(m, row)`. A fractional, negative or out-of-range index is
 a catchable `Runtime` failure naming the index and the bound, never a panic.
 Dimensions are whole numbers of at least zero, and a matrix whose element count
-would exceed the module's limit is refused before it is allocated.
+would exceed the module's limit is refused before it is allocated. A
+`matrix.matmul` also has a work limit, because the element ceiling bounds
+storage and not arithmetic: a product is refused before the kernel starts when
+it would need more than 500,000,000 scalar multiply-adds. The refusal is a
+catchable `Runtime` failure naming both shapes and the limit, so a program
+cannot turn a small amount of source into an unbounded native loop. A product of
+two `1,000 by 1,000` matrices is past that limit (it needs a billion
+multiply-adds); a `700 by 700` product is under it.
 
 ## Iteration and memoisation
 

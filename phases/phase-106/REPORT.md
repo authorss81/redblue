@@ -43,6 +43,7 @@ sum at `f64::MAX` with a non-power-of-two count.
 |---|---|---|
 | src/matrix.rs | +488 | dense row-major `f64` matrix, argument validation, shape checks, elementwise operations, `ndarray` matmul/transpose/reductions, indexing and display |
 | src/matrix.rs | +41 −5 | `matrix.sum` and `matrix.mean` use compensated summation, scale by an exact power of two when that sum would overflow, divide the mean after restoring the scale, check `from_lists` for the element limit before copying, and name the bound for a fractional index |
+| src/matrix.rs | +65 | `matrix.matmul` refuses a product whose scalar multiply-add work exceeds 500,000,000 before the kernel starts; two unit tests pin the exact threshold and one step over |
 | src/lib.rs | +1 | registers the `matrix` module |
 | src/runtime.rs | +6 | dispatches `matrix.*` through the one builtin path and returns a row for `matrix[row]` |
 | src/value.rs | +11 −4 | matrix display and `type_of` name |
@@ -51,9 +52,12 @@ sum at `f64::MAX` with a non-power-of-two count.
 | Cargo.lock | +48 | the `ndarray` dependency graph |
 | SPEC.md | +65 | matrix surface, `f64` promotion, exact-shape rules, empty dimensions, indexing and binding cost |
 | SPEC.md | +3 −1 | documents compensated summation and the power-of-two overflow fallback for `matrix.sum` and `matrix.mean` |
+| SPEC.md | +8 −1 | documents the `matrix.matmul` work limit, its catchable refusal and the shapes it names |
 | README.md | +33 | the same public surface in the README |
 | SURVEY.md | +59 −58 | re-anchors registry counts and citations; records the `matrix` module |
 | tests/matrix_test.rs | +390 | sixteen matrix tests (five added by this run) |
+| tests/matrix_test.rs | +42 | three matmul work-limit tests: over-limit refusal, rectangular refusal naming both shapes, and a large-inner-dimension product under the limit |
+| tests/doc_blocks_runs.txt | +2 −2 | re-anchors the two SPEC blocks after the work-limit paragraph |
 | tests/stdlib_modules_test.rs | +52 | three tracked phase-106 tests, including failure and out-of-bounds checks |
 | tests/stdlib_module_docs_test.rs | +100 | twenty answerable `matrix.*` rows |
 | tests/stdlib_module_names_test.rs | +5 | a documented `matrix` module call |
@@ -65,7 +69,9 @@ row-major `data` field, so no variant was added to the public `Value` enum. All
 elements are Redblue numbers (`f64`); integer-looking literals promote without
 truncation. Elementwise operations require identical shapes and never broadcast;
 a mismatch names both shapes. Matmul names both operand shapes when the inner
-dimensions disagree. Division by zero, non-finite results, empty
+dimensions disagree, and refuses a product that would need more than
+500,000,000 multiply-adds before the kernel starts. Division by zero, non-finite
+results, empty
 `mean`/`min`/`max`, negative or fractional indexes, and matrices over 1,000,000
 elements are catchable `RuntimeError`s. Empty `sum` is `0`; `0x0`, `Nx0` and
 `0xN` shapes have defined elementwise, transpose and reduction behaviour.
@@ -112,6 +118,11 @@ product.
 | matrix_matmul_shape_and_reductions_are_exact | numeric boundary / exact arithmetic |
 | edge_phase106_matrix_shape_mismatch_is_a_clean_error | type mismatch / asserts a failure |
 | edge_phase106_matrix_out_of_bounds_is_a_clean_error | out_of_bounds / asserts a failure |
+| edge_matmul_over_the_work_limit_is_refused | resource limit / asserts a failure |
+| edge_matmul_work_limit_names_both_shapes_for_a_rectangle | resource limit / non-square, asserts a failure |
+| edge_matmul_with_a_large_inner_dimension_below_the_limit_runs | boundary / work below the limit |
+| edge_matmul_work_limit_allows_the_exact_threshold | boundary / exact threshold |
+| edge_matmul_work_limit_refuses_one_step_over | boundary / one multiply-add over, asserts a failure |
 
 `tests/unreviewed_work_ack_test.rs` also recognises `resume phase-106:` as this
 phase's delivery subject, so the adopted work commit is acknowledged by the
@@ -132,7 +143,7 @@ line keys moved by two with the SPEC paragraph.
 | nesting_recursion | covered — `from_lists` validates nested row depth; a flat or rank-3 row is refused, and deep recursion is not exposed |
 | duplicate_missing_keys | N/A — matrices have positional dimensions, not keys |
 | malformed_input | covered — ragged rows, bad dimensions and empty reductions refuse |
-| resource_limit | covered — the 1,000,000-element ceiling and dimension validation |
+| resource_limit | covered — the 1,000,000-element ceiling, dimension validation, and the 500,000,000 multiply-add `matrix.matmul` ceiling |
 
 ## Gates
 
@@ -140,7 +151,7 @@ line keys moved by two with the SPEC paragraph.
 |---|---|
 | cargo fmt --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | pass — 2592 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | pass — 2597 passed, 0 failed, 0 ignored |
 | rbops/verify.sh phase-106 | pass |
 
 ## Invariants touched
@@ -163,3 +174,6 @@ line keys moved by two with the SPEC paragraph.
   ragged input by row.
 - Storage is row-major `f64`; very large values follow `f64` precision and
   non-finite results are refused rather than stored.
+- `matrix.matmul` is capped at 500,000,000 scalar multiply-adds per call; a
+  larger product must be split into blocks or handled by a future phase that
+  exposes a batch API.
