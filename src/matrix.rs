@@ -8,6 +8,13 @@ const ROWS_FIELD: &str = "rows";
 const COLS_FIELD: &str = "cols";
 const DATA_FIELD: &str = "data";
 const MAX_ELEMENTS: usize = 1_000_000;
+/// The most scalar multiply-adds one `matrix.matmul` call may ask for.
+///
+/// The element ceiling bounds storage, not work: two 1,000 by 1,000 operands
+/// are each exactly at the element limit and their product needs a billion
+/// multiply-adds. The guard runs before the kernel, so a program cannot turn a
+/// small amount of source into an unbounded native loop.
+const MAX_MULTIPLY_ADDS: u128 = 500_000_000;
 
 pub fn is_matrix(name: &str, fields: &Fields) -> bool {
     name == OBJECT_NAME
@@ -73,6 +80,28 @@ fn element_count(span: Span, rows: usize, cols: usize) -> Result<usize> {
         ));
     }
     Ok(elements)
+}
+
+/// Refuses a product whose kernel work is past [`MAX_MULTIPLY_ADDS`].
+///
+/// The count is `rows(left) * columns(left) * columns(right)` — the number of
+/// scalar multiply-adds a dense product performs — and it is checked before
+/// `ndarray` starts, so the refusal costs no matrix work.
+fn check_matmul_work(span: Span, left: &Array2<f64>, right: &Array2<f64>) -> Result<()> {
+    let work = left.nrows() as u128 * left.ncols() as u128 * right.ncols() as u128;
+    if work <= MAX_MULTIPLY_ADDS {
+        return Ok(());
+    }
+    let (left_rows, left_cols) = left.dim();
+    let (right_rows, right_cols) = right.dim();
+    Err(failure(
+        span,
+        format!(
+            "Cannot multiply matrices with shapes {} and {}: the product needs {work} multiply-adds, above the limit of {MAX_MULTIPLY_ADDS}",
+            shape_text(left_rows, left_cols),
+            shape_text(right_rows, right_cols)
+        ),
+    ))
 }
 
 fn finite_number(span: Span, value: &Value) -> Result<f64> {
@@ -469,6 +498,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
                 ));
             }
             element_count(span, left.nrows(), right.ncols())?;
+            check_matmul_work(span, &left, &right)?;
             value_of(span, &left.dot(&right))?
         }
         "matrix_transpose" => {
@@ -551,4 +581,39 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
         _ => return Ok(None),
     };
     Ok(Some(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_matmul_work_limit_allows_the_exact_threshold() {
+        let left = Array2::<f64>::zeros((500, 1000));
+        let right = Array2::<f64>::zeros((1000, 1000));
+        assert_eq!(
+            500u128 * 1000 * 1000,
+            MAX_MULTIPLY_ADDS,
+            "the fixture must sit exactly on the threshold"
+        );
+        assert!(
+            check_matmul_work(Span::unknown(), &left, &right).is_ok(),
+            "a product at exactly the limit must be allowed"
+        );
+    }
+
+    #[test]
+    fn edge_matmul_work_limit_refuses_one_step_over() {
+        let left = Array2::<f64>::zeros((501, 1000));
+        let right = Array2::<f64>::zeros((1000, 1000));
+        let error = check_matmul_work(Span::unknown(), &left, &right)
+            .expect_err("a product one multiply-add over the limit must be refused");
+        let Error::Runtime(message, _) = error else {
+            panic!("the refusal must be a catchable runtime error, got {error:?}");
+        };
+        assert!(
+            message.contains("multiply-adds") && message.contains("limit of 500000000"),
+            "the refusal must name the work and the limit, got {message}"
+        );
+    }
 }

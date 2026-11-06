@@ -464,3 +464,45 @@ fn edge_sum_keeps_large_f64_magnitudes_past_i64() {
         "a negative finite sum whose intermediate overflows must not be refused"
     );
 }
+
+#[test]
+fn edge_matmul_over_the_work_limit_is_refused() {
+    let message = runtime_message(&eval_err(
+        "matrix.matmul(matrix.ones(1000, 1000), matrix.ones(1000, 1000))",
+    ));
+    assert!(
+        message.contains("multiply-adds") && message.contains("limit of 500000000"),
+        "an oversized product should be refused for its work, got {message}"
+    );
+    assert!(
+        message.contains("[1000, 1000]"),
+        "the refusal should name the operand shape, got {message}"
+    );
+}
+
+#[test]
+fn edge_matmul_work_limit_names_both_shapes_for_a_rectangle() {
+    let message = runtime_message(&eval_err(
+        "matrix.matmul(matrix.ones(800, 700), matrix.ones(700, 900))",
+    ));
+    assert!(
+        message.contains("[800, 700]") && message.contains("[700, 900]"),
+        "the refusal should name both operand shapes, got {message}"
+    );
+    assert!(
+        message.contains("multiply-adds"),
+        "the refusal should name the work, got {message}"
+    );
+}
+
+#[test]
+fn edge_matmul_with_a_large_inner_dimension_below_the_limit_runs() {
+    let value = eval(
+        "set a to matrix.ones(1, 1000)\nset b to matrix.ones(1000, 1)\nset product to matrix.matmul(a, b)\n[matrix.shape(product), matrix.at(product, 0, 0)]",
+    );
+    assert_eq!(
+        value,
+        Value::list(vec![numbers(&[1.0, 1.0]), Value::Number(1000.0)]),
+        "a product with 1,000 inner steps is small work and must still run"
+    );
+}
