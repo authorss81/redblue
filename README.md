@@ -363,6 +363,7 @@ decimal.from_number(19.99)     // the number's shortest round-tripping text
 decimal.to_text(d)             // the exact decimal text
 decimal.to_number(d)           // an f64, lossy when d is finer than an f64 holds
 decimal.sum(xs)                // add a list of decimals exactly; [] is decimal zero
+abs(d), floor(d), ceil(d), round(d)  // stay decimal; round ties away from zero
 ```
 
 A decimal never mixes implicitly with a `number`: `decimal.from_text("0.1") + 0.2`

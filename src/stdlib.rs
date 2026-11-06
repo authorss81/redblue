@@ -2259,10 +2259,22 @@ pub const BUILTIN_NAMES: &[&str] = &[
 /// `yes/no`, `list` — rather than Rust's, because they are shown to someone
 /// writing Redblue. `text.length` answers bytes, and says so.
 pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
-    ("abs", "abs(number) -> number"),
-    ("floor", "floor(number) -> number"),
-    ("ceil", "ceil(number) -> number"),
-    ("round", "round(number) -> number"),
+    (
+        "abs",
+        "abs(number or decimal) -> the same kind, without its sign",
+    ),
+    (
+        "floor",
+        "floor(number or decimal) -> number or decimal, rounded down",
+    ),
+    (
+        "ceil",
+        "ceil(number or decimal) -> number or decimal, rounded up",
+    ),
+    (
+        "round",
+        "round(number or decimal) -> number or decimal, nearest, ties away from zero",
+    ),
     ("sqrt", "sqrt(number) -> number, or nothing for a negative"),
     (
         "pow",
@@ -3014,6 +3026,10 @@ impl Value {
     fn abs(&self) -> Value {
         match self {
             Value::Number(n) => Value::Number(n.abs()),
+            Value::Decimal(decimal) => decimal
+                .absolute()
+                .map(Value::Decimal)
+                .unwrap_or(Value::Nothing),
             _ => Value::Nothing,
         }
     }
@@ -3021,6 +3037,7 @@ impl Value {
     fn floor(&self) -> Value {
         match self {
             Value::Number(n) => Value::Number(n.floor()),
+            Value::Decimal(decimal) => Value::Decimal(decimal.floor()),
             _ => Value::Nothing,
         }
     }
@@ -3028,6 +3045,7 @@ impl Value {
     fn ceil(&self) -> Value {
         match self {
             Value::Number(n) => Value::Number(n.ceil()),
+            Value::Decimal(decimal) => Value::Decimal(decimal.ceil()),
             _ => Value::Nothing,
         }
     }
@@ -3035,6 +3053,7 @@ impl Value {
     fn round(&self) -> Value {
         match self {
             Value::Number(n) => Value::Number(n.round()),
+            Value::Decimal(decimal) => Value::Decimal(decimal.round()),
             _ => Value::Nothing,
         }
     }

@@ -344,6 +344,66 @@ impl Decimal {
         })
     }
 
+    /// The absolute value, exact except for the one value an `i128` cannot
+    /// make positive: `-2^127`, whose magnitude is one past `i128::MAX`.
+    pub fn absolute(self) -> Result<Decimal, String> {
+        let mantissa = self
+            .mantissa
+            .checked_abs()
+            .ok_or_else(|| "the decimal is too small to make positive".to_string())?;
+        Ok(Decimal {
+            mantissa,
+            scale: self.scale,
+        })
+    }
+
+    /// The greatest whole decimal no greater than this one, exactly.
+    ///
+    /// A decimal with no fractional part is already whole. Otherwise the
+    /// mantissa is divided by its scale, which is exact integer arithmetic:
+    /// `floor(-1.2)` is `-2`, not `-1` by truncation.
+    pub fn floor(self) -> Decimal {
+        self.whole(Whole::Floor)
+    }
+
+    /// The least whole decimal no less than this one, exactly.
+    pub fn ceil(self) -> Decimal {
+        self.whole(Whole::Ceil)
+    }
+
+    /// The nearest whole decimal, with a tie rounded away from zero, exactly.
+    ///
+    /// This is the same tie rule as `round` on a `number`, and it never leaves
+    /// the decimal kind, so money does not become an `f64` on the way.
+    pub fn round(self) -> Decimal {
+        self.whole(Whole::Round)
+    }
+
+    fn whole(self, direction: Whole) -> Decimal {
+        if self.scale == 0 {
+            return self;
+        }
+        let divisor = pow10_i128(self.scale);
+        let quotient = self.mantissa / divisor;
+        let remainder = self.mantissa % divisor;
+        let rounded = match direction {
+            Whole::Floor if self.mantissa < 0 && remainder != 0 => quotient - 1,
+            Whole::Ceil if self.mantissa > 0 && remainder != 0 => quotient + 1,
+            Whole::Round if remainder.unsigned_abs() * 2 >= divisor as u128 => {
+                if self.mantissa < 0 {
+                    quotient - 1
+                } else {
+                    quotient + 1
+                }
+            }
+            _ => quotient,
+        };
+        Decimal {
+            mantissa: rounded,
+            scale: 0,
+        }
+    }
+
     /// The decimal with the opposite sign.
     pub fn negated(self) -> Result<Decimal, String> {
         Ok(Decimal {
@@ -400,6 +460,19 @@ fn pow10_wide(power: u32) -> Result<u128, String> {
     10u128
         .checked_pow(power)
         .ok_or_else(|| "the decimal quotient is too large to hold".to_string())
+}
+
+/// `10^power` as an `i128`, for a scale that [`MAX_SCALE`] already bounds.
+fn pow10_i128(power: u32) -> i128 {
+    10i128.pow(power)
+}
+
+/// The direction [`Decimal::whole`] rounds in.
+#[derive(Clone, Copy)]
+enum Whole {
+    Floor,
+    Ceil,
+    Round,
 }
 
 #[derive(Clone, Copy)]

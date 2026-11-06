@@ -505,6 +505,53 @@ fn edge_decimal_comparison_and_equality_are_exact_across_scales() {
     assert!(runtime_message("decimal.from_text(\"1\") < 2").contains("decimal with a number"));
 }
 
+#[test]
+fn decimal_math_functions_stay_exact_and_keep_the_decimal_kind() {
+    decimal_text("abs(decimal.from_text(\"-19.99\"))", "19.99");
+    decimal_text("floor(decimal.from_text(\"19.99\"))", "19");
+    decimal_text("ceil(decimal.from_text(\"19.01\"))", "20");
+    decimal_text("round(decimal.from_text(\"19.50\"))", "20");
+    decimal_text("round(decimal.from_text(\"-19.50\"))", "-20");
+    decimal_text("round(decimal.from_text(\"19.49\"))", "19");
+    decimal_text("abs(decimal.from_text(\"-0.00\"))", "0");
+    decimal_text("math.abs(decimal.from_text(\"-2.5\"))", "2.5");
+    // The number functions keep their old answers beside the decimal kind.
+    assert_eq!(number("round(-19.5)"), -20.0);
+    assert_eq!(number("abs(-19.99)"), 19.99);
+}
+
+#[test]
+fn edge_decimal_math_functions_handle_negative_and_minimum_values() {
+    decimal_text("floor(decimal.from_text(\"-1.01\"))", "-2");
+    decimal_text("ceil(decimal.from_text(\"-1.01\"))", "-1");
+    decimal_text("floor(decimal.from_text(\"-1.00\"))", "-1");
+    decimal_text("ceil(decimal.from_text(\"0.000000000000000001\"))", "1");
+    decimal_text("floor(decimal.from_text(\"0.000000000000000001\"))", "0");
+    decimal_text("round(decimal.from_text(\"-0.000000000000000001\"))", "0");
+    decimal_text(
+        "abs(decimal.from_text(\"-170141183460469231731687303715884105727\"))",
+        "170141183460469231731687303715884105727",
+    );
+}
+
+#[test]
+fn edge_decimal_abs_of_the_negative_minimum_is_a_runtime_failure() {
+    let result =
+        tree_outcome("abs(decimal.from_text(\"-170141183460469231731687303715884105728\"))");
+    assert!(
+        result.is_err(),
+        "the one decimal an i128 cannot make positive must be refused"
+    );
+    let message = result.unwrap_err();
+    assert!(message.contains("abs has no answer"), "{message}");
+}
+
+#[test]
+fn edge_decimal_math_functions_refuse_a_text_argument() {
+    let message = runtime_message("floor(\"1.2\")");
+    assert!(message.contains("floor has no answer"), "{message}");
+}
+
 /// The same program on the tree-walking VM, as data (or a failure message).
 #[track_caller]
 fn tree_outcome(source: &str) -> Result<Value, String> {
@@ -535,6 +582,10 @@ fn tree_walker_and_bytecode_vm_agree_on_statistics_and_decimals() {
         "decimal.sum([decimal.from_text(\"0.1\"), decimal.from_text(\"0.2\")])",
         "decimal.from_text(\"1\") / decimal.from_text(\"3\")",
         "decimal.from_text(\"0.1\") + 0.2",
+        "abs(decimal.from_text(\"-2.5\"))",
+        "floor(decimal.from_text(\"19.99\"))",
+        "ceil(decimal.from_text(\"19.01\"))",
+        "round(decimal.from_text(\"-19.50\"))",
         "mean([])",
         "median([\"a\"])",
     ] {

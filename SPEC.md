@@ -1480,6 +1480,14 @@ number's shortest round-tripping text, and `decimal.to_number(d)` converts back
 to an `f64`. Both are lossy when the value needs more precision than an `f64`
 holds, and both say so by being functions the program has to call.
 
+`abs`, `floor`, `ceil` and `round` accept a decimal as well as a number, and a
+decimal in gives a decimal out: `abs(decimal.from_text("-19.99"))` is
+`19.99`, and `round(decimal.from_text("19.50"))` is `20`, with a tie rounded
+away from zero. These operate on the decimal's own digits, so they do not turn
+money into an `f64` on the way. `abs` of the one decimal an `i128` cannot make
+positive, `-170141183460469231731687303715884105728`, is a catchable runtime
+error rather than a wrapped value.
+
 ```redblue
 set price to decimal.from_text("19.99")
 set tax to decimal.from_text("1.60")

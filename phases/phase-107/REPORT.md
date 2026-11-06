@@ -32,6 +32,20 @@ mixed operation is a catchable runtime error, and `decimal.from_number` /
 subtraction, multiplication and remainder are exact while the value fits 18 places
 and the integer range; non-terminating division rounds half away from zero.
 
+### Continuation pass (resumed work)
+
+| File | Lines | What |
+|---|---|---|
+| src/decimal.rs | +73 | exact `absolute`, `floor`, `ceil` and `round` over decimals; ties round away from zero and the one unpositive `i128` value is refused |
+| src/stdlib.rs | +27 −2 | `abs`, `floor`, `ceil` and `round` now answer a decimal as a decimal, and their signatures say so |
+| tests/statistics_decimal_test.rs | +51 | four resumed-pass tests; one asserts the `abs` of the negative minimum is a failure |
+| SPEC.md | +8 | documents the decimal forms and the negative-minimum refusal |
+| README.md | +1 | documents that the four functions stay decimal |
+| tests/doc_blocks_*.txt | +14 −16 | re-anchors SPEC block line keys after the resumed-pass paragraph |
+
+The resumed pass completes the one gap the first pass recorded: money can now be
+made positive, rounded, and rounded up or down without converting to `f64`.
+
 ## Acceptance evidence
 
 | Acceptance item | Evidence |
@@ -47,6 +61,8 @@ and the integer range; non-terminating division rounds half away from zero.
 | tree-walker and bytecode agree | `tree_walker_and_bytecode_vm_agree_on_statistics_and_decimals` |
 | required edge classes | empty, singleton, negative, very large magnitude, non-terminating division, malformed text, rank/type failures |
 | a finite variance is not lost to a sum-of-squares overflow | `edge_variance_survives_a_sum_of_squares_that_would_overflow` |
+| decimal `abs`/`floor`/`ceil`/`round` stay exact and decimal | `decimal_math_functions_stay_exact_and_keep_the_decimal_kind`; `edge_decimal_math_functions_handle_negative_and_minimum_values`; both engines agree in `tree_walker_and_bytecode_vm_agree_on_statistics_and_decimals` |
+| a decimal that cannot be made positive is a clean failure | `edge_decimal_abs_of_the_negative_minimum_is_a_runtime_failure` |
 
 ## Tests added
 
@@ -81,6 +97,10 @@ and the integer range; non-terminating division rounds half away from zero.
 | edge_decimal_arithmetic_refuses_a_result_beyond_its_precision_or_range | precision / overflow / failure |
 | edge_decimal_comparison_and_equality_are_exact_across_scales | scale / equality |
 | tree_walker_and_bytecode_vm_agree_on_statistics_and_decimals | cross-engine parity |
+| decimal_math_functions_stay_exact_and_keep_the_decimal_kind | exact rounding / decimal kind preserved |
+| edge_decimal_math_functions_handle_negative_and_minimum_values | negative values / minimum i128 / scale boundary |
+| edge_decimal_abs_of_the_negative_minimum_is_a_runtime_failure | numeric boundary / failure |
+| edge_decimal_math_functions_refuse_a_text_argument | type mismatch / failure |
 | src/decimal.rs unit tests (14) | parsing, negative minimum text and quotient, exact addition, remainder/minimum i128, product normalization, cancelling list sum, cross-scale cancellation, rounded division/zero divisor, large representable quotient, overflow, display, cross-scale comparison |
 | src/statistics.rs unit tests (11) | hand values, empty, ties, population forms, large finite mean/variance, percentile rank, correlation, type mismatch |
 
@@ -92,7 +112,7 @@ and the integer range; non-terminating division rounds half away from zero.
 | singleton | covered — singleton mean/median/mode/variance/stdev |
 | boundary | covered — percentile 0 and 100, 2^53 and 2^53+1, 18-place scale |
 | out_of_bounds | covered — percentile ranks -1 and 101 are clean runtime errors |
-| type_mismatch | covered — non-number list items, non-list arguments, decimal/number mixing |
+| type_mismatch | covered — non-number list items, non-list arguments, decimal/number mixing, and text passed to `floor` |
 | numeric_boundary | covered — 2^53 boundary, i128 mantissa overflow, non-terminating division |
 | unicode | N/A — the change consumes numbers and ASCII decimal text; it adds no text-indexing or Unicode-sensitive behaviour |
 | nesting_recursion | N/A — statistics are flat reductions and decimal arithmetic is non-recursive; no nesting or call-depth change |
@@ -106,7 +126,7 @@ and the integer range; non-terminating division rounds half away from zero.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2651 passed, 0 failed, 0 ignored across 83 test binaries |
+| cargo test --all-targets | 2655 passed, 0 failed, 0 ignored across 83 test binaries |
 | rbops/verify.sh phase-107 | pass (0 failed) |
 
 ## Known gaps
@@ -117,9 +137,9 @@ and the integer range; non-terminating division rounds half away from zero.
 - `decimal` supports `+`, `-`, `*`, `/`, `mod`, unary negation, equality and
   ordering. There is no decimal square root, power, trigonometry or logarithm;
   those still convert to `number` explicitly with `decimal.to_number`.
-- Decimal values are not accepted by every numeric builtin (for example `abs`,
-  `floor`, `round` and the matrix functions take numbers). This phase keeps the
-  type's conversion boundary explicit rather than broadening every call site.
+- Decimal values are accepted by `abs`, `floor`, `ceil` and `round`, but not by
+  every numeric builtin: `sqrt`, `pow`, trigonometry and the matrix functions
+  still take numbers, so those convert explicitly with `decimal.to_number`.
 - Decimal text is parsed from ordinary `1.23` / `-1.23` decimal notation, not
   exponent notation or grouped text such as `1,234.56`.
 - No JSON schema change: `json.stringify` writes a decimal as an unquoted exact
