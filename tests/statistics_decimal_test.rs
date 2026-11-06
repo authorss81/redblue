@@ -254,6 +254,12 @@ fn edge_decimal_division_of_large_representable_quotients_does_not_overflow() {
 fn edge_mean_and_variance_do_not_overflow_on_large_finite_values() {
     assert_eq!(number("mean([1e308, 1e308])"), 1e308);
     assert_eq!(number("variance([1e308, 1e308])"), 0.0);
+    assert_eq!(number("correlation([1e200, -1e200], [1, 2])"), -1.0);
+    let extreme = number("correlation([1.7976931348623157e308, -1.7976931348623157e308], [1, 2])");
+    assert!(
+        (extreme + 1.0).abs() < 1e-12,
+        "the extreme falling line was {extreme}"
+    );
 }
 
 #[test]
@@ -272,6 +278,10 @@ fn edge_decimal_parsing_rejects_malformed_and_too_fine_text() {
     }
     let message = runtime_message("decimal.from_text(0.1)");
     assert!(message.contains("requires text"), "{message}");
+    decimal_text(
+        "decimal.from_text(\"0.0000000000000000010\")",
+        "0.000000000000000001",
+    );
 }
 
 #[test]
@@ -334,6 +344,43 @@ fn edge_decimal_arithmetic_refuses_a_result_beyond_its_precision_or_range() {
 }
 
 #[test]
+fn edge_decimal_product_normalizes_trailing_zeros_before_the_scale_check() {
+    decimal_text(
+        "decimal.from_text(\"0.0000000025\") * decimal.from_text(\"0.0000000004\")",
+        "0.000000000000000001",
+    );
+}
+
+#[test]
+fn edge_decimal_remainder_is_exact_and_handles_the_minimum_without_panicking() {
+    decimal_text(
+        "decimal.from_text(\"7.5\") mod decimal.from_text(\"2\")",
+        "1.5",
+    );
+    decimal_text(
+        "(decimal.from_text(\"-85070591730234615865843651857942052864\") * decimal.from_text(\"2\")) mod decimal.from_text(\"-1\")",
+        "0",
+    );
+    let message = runtime_message("decimal.from_text(\"1\") mod decimal.from_text(\"0\")");
+    assert_eq!(message, "Modulo by zero");
+}
+
+#[test]
+fn edge_decimal_sum_cancels_intermediate_overflow() {
+    decimal_text(
+        "decimal.sum([decimal.from_text(\"170141183460469231731687303715884105727\"), decimal.from_text(\"170141183460469231731687303715884105727\"), decimal.from_text(\"-170141183460469231731687303715884105727\")])",
+        "170141183460469231731687303715884105727",
+    );
+}
+
+#[test]
+fn edge_variance_of_opposing_large_finite_values_is_refused_as_non_finite() {
+    assert_eq!(number("mean([1e308, -1e308])"), 0.0);
+    let message = runtime_message("variance([1e308, -1e308])");
+    assert!(message.contains("not a finite number"), "{message}");
+}
+
+#[test]
 fn edge_decimal_comparison_and_equality_are_exact_across_scales() {
     assert_eq!(
         eval("decimal.from_text(\"1.0\") is decimal.from_text(\"1\")"),
@@ -345,6 +392,19 @@ fn edge_decimal_comparison_and_equality_are_exact_across_scales() {
     );
     assert_eq!(
         eval("decimal.from_text(\"1.01\") < decimal.from_text(\"1.1\")"),
+        Value::YesNo(true)
+    );
+    assert_eq!(
+        eval(
+            "decimal.from_text(\"170141183460469231731687303715884105727\") > decimal.from_text(\"0.000000000000000001\")"
+        ),
+        Value::YesNo(true),
+        "comparing values across scales must not overflow"
+    );
+    assert_eq!(
+        eval(
+            "decimal.from_text(\"0.000000000000000001\") < decimal.from_text(\"170141183460469231731687303715884105727\")"
+        ),
         Value::YesNo(true)
     );
     // Comparing a decimal with a number is refused just as arithmetic is.

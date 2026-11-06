@@ -275,17 +275,35 @@ fn correlation_of(span: Span, left: &[f64], right: &[f64]) -> Result<f64> {
             span,
         ));
     }
-    let left_mean = mean_of(left);
-    let right_mean = mean_of(right);
+    let left_scale = left
+        .iter()
+        .fold(0.0f64, |scale, value| scale.max(value.abs()));
+    let right_scale = right
+        .iter()
+        .fold(0.0f64, |scale, value| scale.max(value.abs()));
+    if left_scale == 0.0 || right_scale == 0.0 {
+        return Err(Error::Runtime(
+            "correlation has no answer when either list never varies".to_string(),
+            span,
+        ));
+    }
+    let left_mean = mean_of(left) / left_scale;
+    let right_mean = mean_of(right) / right_scale;
     let mut numerator = 0.0;
     let mut left_squares = 0.0;
     let mut right_squares = 0.0;
     for (left_item, right_item) in left.iter().zip(right) {
-        let left_delta = left_item - left_mean;
-        let right_delta = right_item - right_mean;
+        let left_delta = left_item / left_scale - left_mean;
+        let right_delta = right_item / right_scale - right_mean;
         numerator += left_delta * right_delta;
         left_squares += left_delta * left_delta;
         right_squares += right_delta * right_delta;
+    }
+    if !numerator.is_finite() || !left_squares.is_finite() || !right_squares.is_finite() {
+        return Err(Error::Runtime(
+            "correlation is too large to hold as a finite number".to_string(),
+            span,
+        ));
     }
     if left_squares == 0.0 || right_squares == 0.0 {
         return Err(Error::Runtime(
@@ -296,7 +314,14 @@ fn correlation_of(span: Span, left: &[f64], right: &[f64]) -> Result<f64> {
     // Rounding can put a perfect correlation a hair outside [-1, 1]; the
     // definition has no value there, so the answer is clamped rather than
     // allowed to state a correlation greater than one.
-    Ok((numerator / (left_squares.sqrt() * right_squares.sqrt())).clamp(-1.0, 1.0))
+    let denominator = (left_squares * right_squares).sqrt();
+    if !denominator.is_finite() {
+        return Err(Error::Runtime(
+            "correlation is too large to hold as a finite number".to_string(),
+            span,
+        ));
+    }
+    Ok((numerator / denominator).clamp(-1.0, 1.0))
 }
 
 #[cfg(test)]
@@ -427,6 +452,25 @@ mod tests {
         assert!(
             (falling + 1.0).abs() < 1e-12,
             "the falling line was {falling}"
+        );
+    }
+
+    #[test]
+    fn edge_correlation_does_not_overflow_on_very_large_finite_values() {
+        let left = numbers(&["1e200", "-1e200"]);
+        let right = numbers(&["1", "2"]);
+        assert_eq!(
+            run("correlation", &[list(&left), list(&right)]).unwrap(),
+            Value::Number(-1.0)
+        );
+        let maximum = numbers(&["1.7976931348623157e308", "-1.7976931348623157e308"]);
+        let answer = run("correlation", &[list(&maximum), list(&right)]).unwrap();
+        let Value::Number(answer) = answer else {
+            panic!("correlation should answer a number, got {answer:?}");
+        };
+        assert!(
+            (answer + 1.0).abs() < 1e-12,
+            "the extreme falling line was {answer}"
         );
     }
 

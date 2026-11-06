@@ -62,10 +62,10 @@ SPEC.md:881	excerpt - `process` is bound nowhere in the block, and `config.rb` i
 SPEC.md:1009	network - `network.get("https://api.example.com")` is a live HTTP request to a host that does not exist; AGENTS.md § 3.1.4 forbids a test that depends on the network. Also elided: the `if` has no `then`
 SPEC.md:1018	excerpt - `process` is bound nowhere in the block, and `files.open`/`files.close` are illustrative names
 SPEC.md:1108	excerpt - `body` is bound nowhere: the guarded read was bound to `report`, so the last line reads a field that is not in scope
-SPEC.md:1427	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
-SPEC.md:1658	excerpt - writes `records.zip` and `records.tar` into the working directory, so it is not run as a document; the archive round trips are exercised in tests/data_formats_test.rs
-SPEC.md:1501	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
-SPEC.md:1587	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
+SPEC.md:1430	excerpt - `xs` is bound nowhere in the block; the four `random*` calls are shown against a list the prose has not written
+SPEC.md:1661	excerpt - writes `records.zip` and `records.tar` into the working directory, so it is not run as a document; the archive round trips are exercised in tests/data_formats_test.rs
+SPEC.md:1504	excerpt - placeholder body (`// ...`) on the closing `if`, and the block reads and rewrites files it never creates
+SPEC.md:1590	network - `network.get` and `network.post` are live HTTP requests; `data` is also bound nowhere. AGENTS.md § 3.1.4
 
 # --- docs/GRAMMAR.md --------------------------------------------------------
 

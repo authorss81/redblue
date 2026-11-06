@@ -34,12 +34,14 @@ impl Decimal {
     /// A decimal from an integer mantissa and a scale, normalized so that
     /// `Decimal::new(10, 1)` and `Decimal::new(1, 0)` are the same value.
     pub fn new(mantissa: i128, scale: u32) -> Result<Decimal, String> {
-        if scale > MAX_SCALE {
+        let normalized = Self::normalize(mantissa, scale);
+        if normalized.scale > MAX_SCALE {
             return Err(format!(
-                "a decimal can have at most {MAX_SCALE} places after the point, but this one has {scale}"
+                "a decimal can have at most {MAX_SCALE} places after the point, but this one has {}",
+                normalized.scale
             ));
         }
-        Ok(Self::normalize(mantissa, scale))
+        Ok(normalized)
     }
 
     /// The integer zero.
@@ -91,7 +93,7 @@ impl Decimal {
                 "'{text}' is not a decimal: only digits, a sign and one point are allowed"
             ));
         }
-        let fraction = fraction.unwrap_or("");
+        let fraction = fraction.unwrap_or("").trim_end_matches('0');
         if !fraction.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!(
                 "'{text}' is not a decimal: only digits, a sign and one point are allowed"
@@ -171,19 +173,34 @@ impl Decimal {
     /// `self * other`, exact while the mantissa fits and the scale is at most
     /// [`MAX_SCALE`].
     pub fn product(self, other: Decimal) -> Result<Decimal, String> {
-        let mantissa = self
-            .mantissa
-            .checked_mul(other.mantissa)
-            .ok_or_else(|| "the decimal product is too large to hold".to_string())?;
-        let scale = self.scale.checked_add(other.scale).ok_or_else(|| {
+        let negative = (self.mantissa < 0) != (other.mantissa < 0);
+        let mut magnitude =
+            Wide::product(self.mantissa.unsigned_abs(), other.mantissa.unsigned_abs());
+        let mut scale = self.scale.checked_add(other.scale).ok_or_else(|| {
             "the decimal product needs too many places after the point".to_string()
         })?;
+        while scale > 0 {
+            let mut reduced = magnitude;
+            if reduced.divide_small(10) != 0 {
+                break;
+            }
+            magnitude = reduced;
+            scale -= 1;
+        }
         if scale > MAX_SCALE {
             return Err(format!(
                 "the decimal product needs {scale} places after the point; a decimal can have at most {MAX_SCALE}"
             ));
         }
-        Decimal::new(mantissa, scale)
+        let magnitude = magnitude
+            .to_u128()
+            .ok_or_else(|| "the decimal product is too large to hold".to_string())?;
+        let mantissa = mantissa_from_magnitude(
+            negative,
+            magnitude,
+            "the decimal product is too large to hold",
+        )?;
+        Ok(Decimal { mantissa, scale })
     }
 
     /// `self / other`, to [`MAX_SCALE`] places rounded half away from zero.
@@ -229,13 +246,71 @@ impl Decimal {
         let scale = self.scale.max(other.scale);
         let left = self.mantissa_at(scale)?;
         let right = other.mantissa_at(scale)?;
-        Decimal::new(left % right, scale)
+        // The only overflow `i128` remainder has is `MIN % -1`, whose exact
+        // answer is zero.
+        let mantissa = left.checked_rem(right).unwrap_or_default();
+        Decimal::new(mantissa, scale)
+    }
+
+    /// Adds a whole list exactly, cancelling opposite signs before the `i128`
+    /// range is checked.
+    ///
+    /// Folding [`sum_with`](Self::sum_with) over a list can overflow on an
+    /// intermediate even when the exact total fits: two `i128::MAX` values
+    /// followed by `-i128::MAX` total `i128::MAX`. This accumulates the aligned
+    /// mantissas as signed decimal digits, so only the final value has to fit.
+    pub fn sum_all(values: &[Decimal]) -> Result<Decimal, String> {
+        let scale = values.iter().map(|value| value.scale).max().unwrap_or(0);
+        let mut total = SignedDigits::zero();
+        for value in values {
+            total.add(value.mantissa, (scale - value.scale) as usize);
+        }
+        total.into_decimal(scale)
     }
 
     /// Orders two decimals exactly.
+    ///
+    /// The comparison works from the leading digit and scale rather than
+    /// aligning both mantissas to a common scale, so it cannot overflow even
+    /// when the values span the whole `i128` range.
     pub fn compare(self, other: Decimal) -> Result<Ordering, String> {
-        let scale = self.scale.max(other.scale);
-        Ok(self.mantissa_at(scale)?.cmp(&other.mantissa_at(scale)?))
+        if self.mantissa == 0 && other.mantissa == 0 {
+            return Ok(Ordering::Equal);
+        }
+        if self.mantissa == 0 {
+            return Ok(if other.mantissa < 0 {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            });
+        }
+        if other.mantissa == 0 {
+            return Ok(if self.mantissa < 0 {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            });
+        }
+        let self_negative = self.mantissa < 0;
+        let other_negative = other.mantissa < 0;
+        if self_negative != other_negative {
+            return Ok(if self_negative {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            });
+        }
+        let ordering = compare_unsigned(
+            self.mantissa.unsigned_abs(),
+            self.scale,
+            other.mantissa.unsigned_abs(),
+            other.scale,
+        );
+        Ok(if self_negative {
+            ordering.reverse()
+        } else {
+            ordering
+        })
     }
 
     /// The decimal with the opposite sign.
@@ -255,6 +330,9 @@ impl Decimal {
     }
 
     fn normalize(mut mantissa: i128, mut scale: u32) -> Decimal {
+        if mantissa == 0 {
+            return Decimal::zero();
+        }
         while scale > 0 && mantissa % 10 == 0 {
             mantissa /= 10;
             scale -= 1;
@@ -268,6 +346,30 @@ impl Decimal {
         self.mantissa
             .checked_mul(factor)
             .ok_or_else(|| "the decimal is too large to hold".to_string())
+    }
+}
+
+fn compare_unsigned(left: u128, left_scale: u32, right: u128, right_scale: u32) -> Ordering {
+    let left_digits = left.to_string();
+    let right_digits = right.to_string();
+    let left_leading = left_digits.len() as i64 - 1 - i64::from(left_scale);
+    let right_leading = right_digits.len() as i64 - 1 - i64::from(right_scale);
+    match left_leading.cmp(&right_leading) {
+        Ordering::Equal => {
+            let width = left_digits.len().max(right_digits.len());
+            let left = left_digits.as_bytes();
+            let right = right_digits.as_bytes();
+            (0..width)
+                .map(|index| {
+                    left.get(index)
+                        .copied()
+                        .unwrap_or(b'0')
+                        .cmp(&right.get(index).copied().unwrap_or(b'0'))
+                })
+                .find(|ordering| *ordering != Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
+        }
+        other => other,
     }
 }
 
@@ -351,12 +453,191 @@ impl Wide {
         }
     }
 
+    fn to_u128(self) -> Option<u128> {
+        if self.0[2] != 0 || self.0[3] != 0 {
+            return None;
+        }
+        Some(u128::from(self.0[0]) | (u128::from(self.0[1]) << 64))
+    }
+
     fn to_i128(self) -> Option<i128> {
         if self.0[2] != 0 || self.0[3] != 0 {
             return None;
         }
         let value = u128::from(self.0[0]) | (u128::from(self.0[1]) << 64);
         i128::try_from(value).ok()
+    }
+}
+
+/// A signed integer in base ten, least-significant digit first.
+///
+/// It exists only for [`Decimal::sum_all`]: a list can cancel to a value that
+/// fits even when an intermediate partial sum does not, so the accumulator is
+/// not limited to an `i128`.
+struct SignedDigits {
+    negative: bool,
+    digits: Vec<u8>,
+}
+
+impl SignedDigits {
+    fn zero() -> SignedDigits {
+        SignedDigits {
+            negative: false,
+            digits: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, mantissa: i128, trailing_zeros: usize) {
+        if mantissa == 0 {
+            return;
+        }
+        let negative = mantissa < 0;
+        let mut magnitude = mantissa.unsigned_abs();
+        let mut other = Vec::new();
+        while magnitude > 0 {
+            other.push((magnitude % 10) as u8);
+            magnitude /= 10;
+        }
+        if trailing_zeros > 0 {
+            let mut shifted = vec![0u8; trailing_zeros];
+            shifted.extend_from_slice(&other);
+            other = shifted;
+        }
+        if self.digits.is_empty() {
+            self.negative = negative;
+            self.digits = other;
+            return;
+        }
+        if self.negative == negative {
+            self.add_magnitude(&other);
+            return;
+        }
+        match compare_magnitude(&self.digits, &other) {
+            Ordering::Greater => self.subtract_magnitude(&other),
+            Ordering::Less => {
+                self.digits = subtract_magnitude(&other, &self.digits);
+                self.negative = negative;
+            }
+            Ordering::Equal => {
+                self.digits.clear();
+                self.negative = false;
+            }
+        }
+    }
+
+    fn add_magnitude(&mut self, other: &[u8]) {
+        let mut carry = 0u8;
+        for index in 0..self.digits.len().max(other.len()) {
+            let sum = self.digits.get(index).copied().unwrap_or(0)
+                + other.get(index).copied().unwrap_or(0)
+                + carry;
+            let digit = sum % 10;
+            if index < self.digits.len() {
+                self.digits[index] = digit;
+            } else {
+                self.digits.push(digit);
+            }
+            carry = sum / 10;
+        }
+        if carry > 0 {
+            self.digits.push(carry);
+        }
+    }
+
+    fn subtract_magnitude(&mut self, other: &[u8]) {
+        let mut borrow = 0i8;
+        for index in 0..self.digits.len() {
+            let mut difference = i8::try_from(self.digits[index]).unwrap()
+                - i8::try_from(other.get(index).copied().unwrap_or(0)).unwrap()
+                - borrow;
+            if difference < 0 {
+                difference += 10;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            self.digits[index] = difference as u8;
+        }
+        trim(&mut self.digits);
+    }
+
+    fn into_decimal(mut self, mut scale: u32) -> Result<Decimal, String> {
+        if self.digits.is_empty() {
+            return Ok(Decimal::zero());
+        }
+        while scale > 0 && self.digits.first() == Some(&0) {
+            self.digits.remove(0);
+            scale -= 1;
+        }
+        if self.digits.is_empty() {
+            return Ok(Decimal::zero());
+        }
+        if scale > MAX_SCALE {
+            return Err(format!(
+                "the decimal sum needs {scale} places after the point; a decimal can have at most {MAX_SCALE}"
+            ));
+        }
+        let mut magnitude = 0u128;
+        for digit in self.digits.iter().rev() {
+            magnitude = magnitude
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u128::from(*digit)))
+                .ok_or_else(|| "the decimal sum is too large to hold".to_string())?;
+        }
+        let mantissa = mantissa_from_magnitude(
+            self.negative,
+            magnitude,
+            "the decimal sum is too large to hold",
+        )?;
+        Decimal::new(mantissa, scale)
+    }
+}
+
+fn mantissa_from_magnitude(negative: bool, magnitude: u128, message: &str) -> Result<i128, String> {
+    if negative {
+        if magnitude == i128::MAX as u128 + 1 {
+            Ok(i128::MIN)
+        } else if magnitude <= i128::MAX as u128 {
+            Ok(-(magnitude as i128))
+        } else {
+            Err(message.to_string())
+        }
+    } else if magnitude <= i128::MAX as u128 {
+        Ok(magnitude as i128)
+    } else {
+        Err(message.to_string())
+    }
+}
+
+fn compare_magnitude(left: &[u8], right: &[u8]) -> Ordering {
+    match left.len().cmp(&right.len()) {
+        Ordering::Equal => left.iter().rev().cmp(right.iter().rev()),
+        other => other,
+    }
+}
+
+fn subtract_magnitude(larger: &[u8], smaller: &[u8]) -> Vec<u8> {
+    let mut difference = larger.to_vec();
+    let mut borrow = 0i8;
+    for (index, digit) in difference.iter_mut().enumerate() {
+        let mut value = i8::try_from(*digit).unwrap()
+            - i8::try_from(smaller.get(index).copied().unwrap_or(0)).unwrap()
+            - borrow;
+        if value < 0 {
+            value += 10;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        *digit = value as u8;
+    }
+    trim(&mut difference);
+    difference
+}
+
+fn trim(digits: &mut Vec<u8>) {
+    while digits.last() == Some(&0) {
+        digits.pop();
     }
 }
 
@@ -401,6 +682,7 @@ mod tests {
         assert_eq!(d("-0.0"), Decimal::zero());
         assert_eq!(d(".5"), d("0.5"));
         assert_eq!(d("5."), d("5"));
+        assert_eq!(d("0.0000000000000000010"), d("0.000000000000000001"));
     }
 
     #[test]
@@ -459,6 +741,50 @@ mod tests {
     }
 
     #[test]
+    fn edge_remainder_is_exact_and_handles_the_minimum() {
+        assert_eq!(d("7").remainder(d("3")).unwrap(), d("1"));
+        assert_eq!(d("-7").remainder(d("3")).unwrap(), d("-1"));
+        assert_eq!(d("7.5").remainder(d("2")).unwrap(), d("1.5"));
+        let minimum = d("-85070591730234615865843651857942052864")
+            .product(d("2"))
+            .expect("the minimum i128 should be representable");
+        assert_eq!(minimum.remainder(d("-1")).unwrap(), Decimal::zero());
+        assert!(d("1").remainder(d("0")).is_err());
+    }
+
+    #[test]
+    fn edge_product_normalizes_before_refusing_the_scale() {
+        assert_eq!(
+            d("0.0000000025").product(d("0.0000000004")).unwrap(),
+            d("0.000000000000000001")
+        );
+        assert_eq!(
+            d("17014118346046923173168730371588410572.5")
+                .product(d("2"))
+                .unwrap(),
+            d("34028236692093846346337460743176821145")
+        );
+        let tiny = d("0.000000000000000001");
+        assert!(tiny.product(tiny).is_err());
+    }
+
+    #[test]
+    fn edge_sum_all_cancels_before_checking_the_mantissa_range() {
+        let maximum = d("170141183460469231731687303715884105727");
+        assert_eq!(
+            Decimal::sum_all(&[maximum, maximum, maximum.negated().unwrap()]).unwrap(),
+            maximum
+        );
+        let tiny = d("0.000000000000000001");
+        assert_eq!(
+            Decimal::sum_all(&[maximum, maximum.negated().unwrap(), tiny]).unwrap(),
+            tiny
+        );
+        assert_eq!(Decimal::sum_all(&[]).unwrap(), Decimal::zero());
+        assert!(Decimal::sum_all(&[maximum, maximum]).is_err());
+    }
+
+    #[test]
     fn display_keeps_the_written_scale() {
         assert_eq!(d("0").to_string(), "0");
         assert_eq!(d("-1.20").to_string(), "-1.2");
@@ -471,5 +797,21 @@ mod tests {
         assert_eq!(d("1.0").compare(d("1")).unwrap(), Ordering::Equal);
         assert_eq!(d("1.01").compare(d("1.1")).unwrap(), Ordering::Less);
         assert_eq!(d("-2").compare(d("-1.999")).unwrap(), Ordering::Less);
+    }
+
+    #[test]
+    fn edge_compare_does_not_overflow_when_scales_differ_widely() {
+        let maximum = d("170141183460469231731687303715884105727");
+        let tiny = d("0.000000000000000001");
+        assert_eq!(maximum.compare(tiny).unwrap(), Ordering::Greater);
+        assert_eq!(tiny.compare(maximum).unwrap(), Ordering::Less);
+        assert_eq!(
+            maximum.negated().unwrap().compare(tiny).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            d("1.000000000000000000").compare(d("1")).unwrap(),
+            Ordering::Equal
+        );
     }
 }

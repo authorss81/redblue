@@ -1399,7 +1399,10 @@ set r to math.correlation(xs, ys)  // 1
   numeric order. A list whose values all occur once therefore has every value
   as a mode, rather than no mode.
 - `variance` and `standard_deviation` are the **population** forms: they divide
-  by `n`, not `n - 1`, so the variance of a one-element list is `0`.
+  by `n`, not `n - 1`, so the variance of a one-element list is `0`. A variance
+  whose squared deviation leaves the finite `number` range is a catchable
+  `Runtime` error rather than an infinity; for example `variance([1e308,
+  -1e308])` is refused even though its mean is `0`.
 - `percentile(xs, p)` sorts ascending, takes `p` from `0` to `100`, and
   interpolates linearly at position `(n - 1) * p / 100`. With four values,
   `percentile([1, 2, 3, 4], 25)` sits a quarter of the way from `1` to `2` and

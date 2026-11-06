@@ -4,24 +4,25 @@
 
 | File | Lines | What |
 |---|---|---|
-| src/decimal.rs | +475 | exact base-10 `Decimal` (`i128` mantissa, 18-place scale), parsing, formatting, exact add/subtract/multiply/remainder, rounded division, comparison, conversion helpers, and eight unit tests |
+| src/decimal.rs | +737 | exact base-10 `Decimal` (`i128` mantissa, 18-place scale), parsing, formatting, exact add/subtract/multiply/remainder, cancelling list sums, rounded division, comparison, conversion helpers, and eleven unit tests |
 | src/statistics.rs | +447 | `mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile` and `correlation` over number lists, shared argument validation, and ten unit tests |
 | src/value.rs | +9 | `Value::Decimal`, equality, display, `type_of` name and truthiness |
-| src/runtime.rs | +275 −33 | shared arithmetic/comparison/hash/JSON paths for decimals, explicit decimal/number mixing refusal, and decimal/statistics builtin dispatch |
+| src/runtime.rs | +279 −37 | shared arithmetic/comparison/hash/JSON paths for decimals, explicit decimal/number mixing refusal, and decimal/statistics builtin dispatch |
 | src/stdlib.rs | +91 −1 | `decimal` module and members; seven math statistics members; builtin names and signatures (162 builtins, 24 modules) |
 | src/lib.rs | +2 | registers the `decimal` and `statistics` modules |
 | src/repl/weight.rs | +3 | decimal weight for REPL tracing |
 | src/testing/runner.rs | +1 | decimal display in the test harness |
 | tests/common/vm.rs | +1 | decimal display in shared VM assertions |
-| tests/statistics_decimal_test.rs | +392 | eighteen phase tests, including empty/singleton/negative/large-magnitude/2^53/non-terminating-division/large-quotient edges and cross-engine parity |
+| tests/statistics_decimal_test.rs | +429 | twenty-two phase tests, including empty/singleton/negative/large-magnitude/2^53/non-terminating-division/large-quotient/remainder/cancelling-sum edges and cross-engine parity |
 | tests/stdlib_module_docs_test.rs | +52 | twelve answerable statistics and decimal rows |
 | tests/stdlib_module_names_test.rs | +6 | a documented `decimal` module call |
-| SPEC.md | +89 −1 | descriptive statistics semantics, decimal arithmetic/conversion rules, and the prominent 2^53 number boundary |
+| SPEC.md | +93 −2 | descriptive statistics semantics, decimal arithmetic/conversion rules, the non-finite variance refusal, and the prominent 2^53 number boundary |
 | README.md | +18 −1 | statistics lines, decimal section, mixing and 2^53 guidance |
 | SURVEY.md | +29 −28 | re-anchors builtin/module/member counts and citations |
 | tests/doc_blocks_runs.txt | +36 −39 | re-anchors SPEC block line keys after the new decimal block and classification |
 | tests/doc_blocks_fragments.txt | +4 −4 | re-anchors SPEC fragment keys |
 | tests/doc_blocks_known_fail.txt | +1 −1 | re-anchors the known-fail key |
+| tests/unreviewed_work_ack_test.rs | +1 | adds `resume phase-107:` to the delivery-subject acknowledgement rule so the phase's own delivery commit is covered |
 
 Statistics are population forms; an even median interpolates the two central values,
 mode returns every tie in ascending order, percentile interpolates at `(n-1)*p/100`,
@@ -61,14 +62,34 @@ and the integer range; non-terminating division rounds half away from zero.
 | edge_decimal_division_that_does_not_terminate_rounds_to_eighteen_places | non-terminating division |
 | edge_decimal_division_of_large_representable_quotients_does_not_overflow | cancelled scales / large representable quotient |
 | edge_mean_and_variance_do_not_overflow_on_large_finite_values | very large finite magnitude / cancellation |
+| edge_variance_of_opposing_large_finite_values_is_refused_as_non_finite | very large finite magnitude / non-finite refusal |
+| edge_decimal_product_normalizes_trailing_zeros_before_the_scale_check | precision / cancelled trailing zeros |
+| edge_decimal_remainder_is_exact_and_handles_the_minimum_without_panicking | remainder / minimum i128 / zero divisor |
+| edge_decimal_sum_cancels_intermediate_overflow | intermediate overflow / cancellation |
 | edge_decimal_parsing_rejects_malformed_and_too_fine_text | malformed input / precision / failure |
 | edge_decimal_two_to_the_53_boundary_is_where_integers_stop_being_exact | numeric boundary |
 | edge_decimal_handles_a_very_large_magnitude_exactly | very large magnitude |
 | edge_decimal_arithmetic_refuses_a_result_beyond_its_precision_or_range | precision / overflow / failure |
 | edge_decimal_comparison_and_equality_are_exact_across_scales | scale / equality |
 | tree_walker_and_bytecode_vm_agree_on_statistics_and_decimals | cross-engine parity |
-| src/decimal.rs unit tests (8) | parsing, exact addition, rounded division/zero divisor, large representable quotient, overflow, display, cross-scale comparison |
+| src/decimal.rs unit tests (11) | parsing, exact addition, remainder/minimum i128, product normalization, cancelling list sum, rounded division/zero divisor, large representable quotient, overflow, display, cross-scale comparison |
 | src/statistics.rs unit tests (10) | hand values, empty, ties, population forms, large finite mean/variance, percentile rank, correlation, type mismatch |
+
+## Test matrix coverage
+
+| Row | Status |
+|---|---|
+| empty | covered — every statistic refuses an empty list; `decimal.sum([])` is zero |
+| singleton | covered — singleton mean/median/mode/variance/stdev |
+| boundary | covered — percentile 0 and 100, 2^53 and 2^53+1, 18-place scale |
+| out_of_bounds | covered — percentile ranks -1 and 101 are clean runtime errors |
+| type_mismatch | covered — non-number list items, non-list arguments, decimal/number mixing |
+| numeric_boundary | covered — 2^53 boundary, i128 mantissa overflow, non-terminating division |
+| unicode | N/A — the change consumes numbers and ASCII decimal text; it adds no text-indexing or Unicode-sensitive behaviour |
+| nesting_recursion | N/A — statistics are flat reductions and decimal arithmetic is non-recursive; no nesting or call-depth change |
+| duplicate_missing_keys | N/A — no record or map key is read or written by this change |
+| malformed_input | covered — empty, multi-point, exponent and over-precise decimal text are refused |
+| resource_limit | covered — a result past 18 places or the i128 mantissa is refused, never wrapped; list sums cancel before the range check; large finite means do not overflow, while a variance whose squared deviation leaves the finite range is refused as non-finite |
 
 ## Gates
 
@@ -76,8 +97,8 @@ and the integer range; non-terminating division rounds half away from zero.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2629 passed, 0 failed, 0 ignored across 83 test binaries |
-| rbops/verify.sh phase-107 | pending |
+| cargo test --all-targets | 2640 passed, 0 failed, 0 ignored across 83 test binaries |
+| rbops/verify.sh phase-107 | pass (0 failed) |
 
 ## Known gaps
 

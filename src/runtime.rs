@@ -2975,7 +2975,7 @@ fn decimal_builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Valu
                     ))
                 }
             };
-            let mut total = crate::decimal::Decimal::zero();
+            let mut decimals = Vec::with_capacity(items.len());
             for (index, item) in items.iter().enumerate() {
                 let Value::Decimal(decimal) = item else {
                     return Err(Error::Runtime(
@@ -2986,10 +2986,10 @@ fn decimal_builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Valu
                         span,
                     ));
                 };
-                total = total
-                    .sum_with(*decimal)
-                    .map_err(|message| Error::Runtime(message, span))?;
+                decimals.push(*decimal);
             }
+            let total = crate::decimal::Decimal::sum_all(&decimals)
+                .map_err(|message| Error::Runtime(message, span))?;
             Value::Decimal(total)
         }
         _ => return Ok(None),
