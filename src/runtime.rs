@@ -200,6 +200,16 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
     match op {
         BinaryOp::Add => match (left, right) {
             (Value::Number(a), Value::Number(b)) => Value::number(a + b, span),
+            (Value::Decimal(a), Value::Decimal(b)) => a
+                .sum_with(b)
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span)),
+            (Value::Decimal(_), other) => {
+                Err(decimal_mixed(span, "add", "a decimal", other.type_name()))
+            }
+            (other, Value::Decimal(_)) => {
+                Err(decimal_mixed(span, "add", other.type_name(), "a decimal"))
+            }
             (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{}{}", a, b))),
             (Value::Date(date), Value::Duration(delta)) => date_add(span, date, delta),
             (Value::Duration(delta), Value::Date(date)) => date_add(span, date, delta),
@@ -215,6 +225,22 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
         },
         BinaryOp::Sub => match (left, right) {
             (Value::Number(a), Value::Number(b)) => Value::number(a - b, span),
+            (Value::Decimal(a), Value::Decimal(b)) => a
+                .difference(b)
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span)),
+            (Value::Decimal(_), other) => Err(decimal_mixed(
+                span,
+                "subtract",
+                "a decimal",
+                other.type_name(),
+            )),
+            (other, Value::Decimal(_)) => Err(decimal_mixed(
+                span,
+                "subtract",
+                other.type_name(),
+                "a decimal",
+            )),
             (Value::Date(a), Value::Date(b)) => Ok(Value::Duration(a - b)),
             (Value::Date(date), Value::Duration(delta)) => date_sub(span, date, delta),
             (Value::Duration(a), Value::Duration(b)) => a
@@ -230,44 +256,87 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
                 span,
             )),
         },
-        BinaryOp::Mul => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
-                Value::number(a * b, span)
-            } else {
-                Err(Error::Runtime(
-                    "Cannot multiply non-numbers".to_string(),
-                    span,
-                ))
-            }
-        }
-        BinaryOp::Div => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
+        BinaryOp::Mul => match (left, right) {
+            (Value::Number(a), Value::Number(b)) => Value::number(a * b, span),
+            (Value::Decimal(a), Value::Decimal(b)) => a
+                .product(b)
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span)),
+            (Value::Decimal(_), other) => Err(decimal_mixed(
+                span,
+                "multiply",
+                "a decimal",
+                other.type_name(),
+            )),
+            (other, Value::Decimal(_)) => Err(decimal_mixed(
+                span,
+                "multiply",
+                other.type_name(),
+                "a decimal",
+            )),
+            _ => Err(Error::Runtime(
+                "Cannot multiply non-numbers".to_string(),
+                span,
+            )),
+        },
+        BinaryOp::Div => match (left, right) {
+            (Value::Number(a), Value::Number(b)) => {
                 if b == 0.0 {
                     Err(Error::Runtime("Division by zero".to_string(), span))
                 } else {
                     Value::number(a / b, span)
                 }
-            } else {
-                Err(Error::Runtime(
-                    "Cannot divide non-numbers".to_string(),
-                    span,
-                ))
             }
-        }
-        BinaryOp::Mod => {
-            if let (Value::Number(a), Value::Number(b)) = (left, right) {
+            (Value::Decimal(a), Value::Decimal(b)) => a
+                .quotient(b)
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span)),
+            (Value::Decimal(_), other) => Err(decimal_mixed(
+                span,
+                "divide",
+                "a decimal",
+                other.type_name(),
+            )),
+            (other, Value::Decimal(_)) => Err(decimal_mixed(
+                span,
+                "divide",
+                other.type_name(),
+                "a decimal",
+            )),
+            _ => Err(Error::Runtime(
+                "Cannot divide non-numbers".to_string(),
+                span,
+            )),
+        },
+        BinaryOp::Mod => match (left, right) {
+            (Value::Number(a), Value::Number(b)) => {
                 if b == 0.0 {
                     Err(Error::Runtime("Modulo by zero".to_string(), span))
                 } else {
                     Value::number(a % b, span)
                 }
-            } else {
-                Err(Error::Runtime(
-                    "Cannot modulo non-numbers".to_string(),
-                    span,
-                ))
             }
-        }
+            (Value::Decimal(a), Value::Decimal(b)) => a
+                .remainder(b)
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span)),
+            (Value::Decimal(_), other) => Err(decimal_mixed(
+                span,
+                "modulo",
+                "a decimal",
+                other.type_name(),
+            )),
+            (other, Value::Decimal(_)) => Err(decimal_mixed(
+                span,
+                "modulo",
+                other.type_name(),
+                "a decimal",
+            )),
+            _ => Err(Error::Runtime(
+                "Cannot modulo non-numbers".to_string(),
+                span,
+            )),
+        },
         BinaryOp::Equal => equality(span, left, right, false),
         BinaryOp::NotEqual => equality(span, left, right, true),
         BinaryOp::Less => compare(span, op, left, right),
@@ -287,6 +356,29 @@ pub fn binary_op(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result
             }
         }
     }
+}
+
+/// The refusal a binary operator gives when one side is a decimal and the other
+/// is not. The conversion is deliberately not implicit: `0.1` as a number is not
+/// exactly one tenth, and quietly treating it as one would be the money bug the
+/// decimal type exists to prevent.
+fn decimal_mixed(span: Span, operation: &str, left: &str, right: &str) -> Error {
+    fn with_article(kind: &str) -> String {
+        if kind.starts_with("a ") || kind.starts_with("an ") {
+            kind.to_string()
+        } else {
+            format!("a {kind}")
+        }
+    }
+    Error::Runtime(
+        format!(
+            "Cannot {operation} {} with {}; convert explicitly with \
+             decimal.from_number or decimal.to_number",
+            with_article(left),
+            with_article(right)
+        ),
+        span,
+    )
 }
 
 /// `date + duration` and `duration + date`, refusing a span that leaves the
@@ -327,6 +419,8 @@ fn equality(span: Span, left: Value, right: Value, negated: bool) -> Result<Valu
         (Value::Number(_), Value::Date(_)) => Some(("number", "date")),
         (Value::Duration(_), Value::Number(_)) => Some(("duration", "number")),
         (Value::Number(_), Value::Duration(_)) => Some(("number", "duration")),
+        (Value::Decimal(_), Value::Number(_)) => Some(("decimal", "number")),
+        (Value::Number(_), Value::Decimal(_)) => Some(("number", "decimal")),
         _ => None,
     };
     if let Some((left_kind, right_kind)) = mixed {
@@ -349,6 +443,10 @@ fn compare(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result<Value
 
     let ordering = match (&left, &right) {
         (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
+        (Value::Decimal(a), Value::Decimal(b)) => Some(
+            a.compare(*b)
+                .map_err(|message| Error::Runtime(message, span))?,
+        ),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Duration(a), Value::Duration(b)) => Some(a.cmp(b)),
         (Value::Date(_), other) => {
@@ -372,6 +470,18 @@ fn compare(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result<Value
         (other, Value::Duration(_)) => {
             return Err(Error::Runtime(
                 format!("Cannot compare a {} with a duration", other.type_name()),
+                span,
+            ))
+        }
+        (Value::Decimal(_), other) => {
+            return Err(Error::Runtime(
+                format!("Cannot compare a decimal with a {}", other.type_name()),
+                span,
+            ))
+        }
+        (other, Value::Decimal(_)) => {
+            return Err(Error::Runtime(
+                format!("Cannot compare a {} with a decimal", other.type_name()),
                 span,
             ))
         }
@@ -402,13 +512,14 @@ fn compare(span: Span, op: &BinaryOp, left: Value, right: Value) -> Result<Value
 /// The value of a unary operator, and the failure for the wrong type.
 pub fn unary_op(span: Span, op: &UnaryOp, value: Value) -> Result<Value> {
     match op {
-        UnaryOp::Neg => {
-            if let Value::Number(n) = value {
-                Ok(Value::Number(-n))
-            } else {
-                Err(Error::Runtime("Cannot negate non-number".to_string(), span))
-            }
-        }
+        UnaryOp::Neg => match value {
+            Value::Number(n) => Ok(Value::Number(-n)),
+            Value::Decimal(decimal) => decimal
+                .negated()
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span)),
+            _ => Err(Error::Runtime("Cannot negate non-number".to_string(), span)),
+        },
         UnaryOp::Not => Ok(Value::YesNo(!value.is_truthy())),
     }
 }
@@ -1731,6 +1842,7 @@ const HASH_FIELD_NAME: u8 = 13;
 const HASH_BUILTIN: u8 = 14;
 const HASH_DATE: u8 = 15;
 const HASH_DURATION: u8 = 16;
+const HASH_DECIMAL: u8 = 17;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -1804,6 +1916,7 @@ fn group_value_hash(value: &Value) -> u64 {
         Value::Duration(duration) => {
             hash_tagged_bytes(HASH_DURATION, format!("{:?}", duration).as_bytes())
         }
+        Value::Decimal(decimal) => hash_tagged_bytes(HASH_DECIMAL, decimal.to_string().as_bytes()),
     }
 }
 
@@ -2782,6 +2895,125 @@ fn decode_base64(span: Span, text: &str) -> Result<Vec<u8>> {
     })
 }
 
+/// The `decimal` module, bound to [`crate::decimal`].
+///
+/// Creation and conversion are named functions rather than implicit coercions:
+/// a number and a decimal never mix in arithmetic, and `from_number` is the one
+/// place a caller says out loud that it is trading exactness for an `f64`.
+fn decimal_builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> {
+    let answer = match name {
+        "decimal_from_text" => {
+            let text = match args.first() {
+                Some(Value::Text(text)) => text,
+                Some(other) => {
+                    return Err(Error::Runtime(
+                        format!(
+                            "decimal.from_text requires text, but was given {}",
+                            other.type_name()
+                        ),
+                        span,
+                    ))
+                }
+                None => {
+                    return Err(Error::Runtime(
+                        "decimal.from_text requires a text argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::decimal::Decimal::parse(text)
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span))?
+        }
+        "decimal_from_number" => {
+            let number = match args.first() {
+                Some(Value::Number(number)) => *number,
+                Some(other) => {
+                    return Err(Error::Runtime(
+                        format!(
+                            "decimal.from_number requires a number, but was given {}",
+                            other.type_name()
+                        ),
+                        span,
+                    ))
+                }
+                None => {
+                    return Err(Error::Runtime(
+                        "decimal.from_number requires a number argument".to_string(),
+                        span,
+                    ))
+                }
+            };
+            crate::decimal::Decimal::from_f64(number)
+                .map(Value::Decimal)
+                .map_err(|message| Error::Runtime(message, span))?
+        }
+        "decimal_to_text" => {
+            let decimal = decimal_argument(span, "decimal.to_text", args)?;
+            Value::Text(decimal.to_string())
+        }
+        "decimal_to_number" => {
+            let decimal = decimal_argument(span, "decimal.to_number", args)?;
+            Value::number(decimal.to_f64(), span)?
+        }
+        "decimal_sum" => {
+            let items = match args.first() {
+                Some(Value::List(items)) => items,
+                Some(other) => {
+                    return Err(Error::Runtime(
+                        format!(
+                            "decimal.sum requires a list of decimals, but was given {}",
+                            other.type_name()
+                        ),
+                        span,
+                    ))
+                }
+                None => {
+                    return Err(Error::Runtime(
+                        "decimal.sum requires a list of decimals".to_string(),
+                        span,
+                    ))
+                }
+            };
+            let mut decimals = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let Value::Decimal(decimal) = item else {
+                    return Err(Error::Runtime(
+                        format!(
+                            "decimal.sum requires a list of decimals, but item {index} is {}",
+                            item.type_name()
+                        ),
+                        span,
+                    ));
+                };
+                decimals.push(*decimal);
+            }
+            let total = crate::decimal::Decimal::sum_all(&decimals)
+                .map_err(|message| Error::Runtime(message, span))?;
+            Value::Decimal(total)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(answer))
+}
+
+fn decimal_argument(span: Span, name: &str, args: &[Value]) -> Result<crate::decimal::Decimal> {
+    match args.first() {
+        Some(Value::Decimal(decimal)) => Ok(*decimal),
+        Some(other) => Err(Error::Runtime(
+            format!(
+                "{name} requires a decimal, but was given {}",
+                other.type_name()
+            ),
+            span,
+        )),
+        None => Err(Error::Runtime(
+            format!("{name} requires a decimal argument"),
+            span,
+        )),
+    }
+}
+
 /// Every function that is not a user-defined one, in the one place both VMs
 /// reach for.
 ///
@@ -2790,6 +3022,12 @@ fn decode_base64(span: Span, text: &str) -> Result<Vec<u8>> {
 /// that a bytecode `CALL` and a tree-walked call cannot drift apart: there is
 /// one implementation and both answer from it.
 pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> {
+    if let Some(value) = crate::statistics::builtin(span, name, args)? {
+        return Ok(Some(value));
+    }
+    if let Some(value) = decimal_builtin(span, name, args)? {
+        return Ok(Some(value));
+    }
     if let Some(value) = crate::matrix::builtin(span, name, args)? {
         return Ok(Some(value));
     }
@@ -4806,6 +5044,10 @@ pub(crate) fn json_stringify(value: &Value) -> std::result::Result<String, Strin
         },
         Value::Date(date) => Ok(json_escape_text(&crate::value::date_text(*date))),
         Value::Duration(duration) => Ok(format!("{}", duration.as_seconds_f64())),
+        // A decimal is written as an unquoted JSON number, using its exact
+        // base-10 text. JSON numbers have no fixed precision, so nothing is
+        // rounded on the way out.
+        Value::Decimal(decimal) => Ok(decimal.to_string()),
     }
 }
 

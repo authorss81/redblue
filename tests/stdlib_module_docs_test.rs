@@ -646,6 +646,58 @@ fn answerable_builtins(address: &str) -> Vec<(String, String, String)> {
         ("tan", "say is_number(tan(0))".into(), "yes\n".into()),
         ("log", "say is_number(log(1))".into(), "yes\n".into()),
         ("exp", "say is_number(exp(1))".into(), "yes\n".into()),
+        ("mean", "say mean([1, 2, 3, 4])".into(), "2.5\n".into()),
+        ("median", "say median([1, 2, 3, 4])".into(), "2.5\n".into()),
+        (
+            "mode",
+            "say mode([3, 1, 3, 1, 2])".into(),
+            "[1, 3]\n".into(),
+        ),
+        (
+            "variance",
+            "say variance([2, 4, 4, 4, 5, 5, 7, 9])".into(),
+            "4\n".into(),
+        ),
+        (
+            "standard_deviation",
+            "say standard_deviation([2, 4, 4, 4, 5, 5, 7, 9])".into(),
+            "2\n".into(),
+        ),
+        (
+            "percentile",
+            "say percentile([1, 2, 3, 4], 25)".into(),
+            "1.75\n".into(),
+        ),
+        (
+            "correlation",
+            "say correlation([1, 2, 3], [2, 4, 6]) > 0.999".into(),
+            "yes\n".into(),
+        ),
+        (
+            "decimal_from_text",
+            "say decimal.from_text(\"19.99\")".into(),
+            "19.99\n".into(),
+        ),
+        (
+            "decimal_from_number",
+            "say decimal.from_number(19.99)".into(),
+            "19.99\n".into(),
+        ),
+        (
+            "decimal_to_text",
+            "say decimal.to_text(decimal.from_text(\"0.30\"))".into(),
+            "0.3\n".into(),
+        ),
+        (
+            "decimal_to_number",
+            "say decimal.to_number(decimal.from_text(\"19.99\"))".into(),
+            "19.99\n".into(),
+        ),
+        (
+            "decimal_sum",
+            "say decimal.sum([decimal.from_text(\"0.1\"), decimal.from_text(\"0.2\")])".into(),
+            "0.3\n".into(),
+        ),
         (
             "matrix_zeros",
             "say matrix.sum(matrix.zeros(2, 3))".into(),

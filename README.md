@@ -349,9 +349,26 @@ math.abs(x), math.floor(x), math.ceil(x)
 math.round(x), math.sqrt(x), math.pow(x, y)
 math.sin(x), math.cos(x), math.tan(x)
 math.log(x), math.exp(x)
-// every one of them is also spelled flat: abs(x), sqrt(x), ...
+math.mean(xs), math.median(xs), math.mode(xs)
+math.variance(xs), math.standard_deviation(xs)
+math.percentile(xs, p), math.correlation(xs, ys)
+// every one of them is also spelled flat: abs(x), sqrt(x), mean(xs), ...
 // math.random is not implemented, and there is no math.random
 ```
+
+### Decimal
+```
+decimal.from_text("19.99")     // exact base-10 text; max 18 places after the point
+decimal.from_number(19.99)     // the number's shortest round-tripping text
+decimal.to_text(d)             // the exact decimal text
+decimal.to_number(d)           // an f64, lossy when d is finer than an f64 holds
+decimal.sum(xs)                // add a list of decimals exactly; [] is decimal zero
+```
+
+A decimal never mixes implicitly with a `number`: `decimal.from_text("0.1") + 0.2`
+is a runtime error naming both kinds. Convert with `decimal.from_number` or
+`decimal.to_number` when that is what the program means. A `number` is exact only
+to 2^53; use a decimal for money and for any larger integer that must stay exact.
 
 ### Text
 ```

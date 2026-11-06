@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{NaiveDateTime, TimeDelta};
+
+use crate::decimal::Decimal;
 use indexmap::IndexMap;
 
 use crate::bytecode::Chunk;
@@ -401,6 +403,9 @@ pub enum Value {
     Date(NaiveDateTime),
     /// A signed span of time, as the difference between two dates.
     Duration(TimeDelta),
+    /// An exact base-10 number, for money and other values an `f64` cannot
+    /// hold exactly. See [`crate::decimal`].
+    Decimal(Decimal),
 }
 
 /// Value equality, with one exception to structural comparison: two deques
@@ -440,6 +445,7 @@ impl PartialEq for Value {
             (Value::Builtin(left), Value::Builtin(right)) => left == right,
             (Value::Date(left), Value::Date(right)) => left == right,
             (Value::Duration(left), Value::Duration(right)) => left == right,
+            (Value::Decimal(left), Value::Decimal(right)) => left == right,
             _ => false,
         }
     }
@@ -551,6 +557,7 @@ impl fmt::Display for Value {
             }
             Value::Date(date) => write!(f, "{}", date_text(*date)),
             Value::Duration(duration) => write!(f, "{}", display_duration(*duration)),
+            Value::Decimal(decimal) => write!(f, "{}", decimal),
         }
     }
 }
@@ -627,6 +634,7 @@ impl Value {
             Value::Builtin(_) => "builtin",
             Value::Date(_) => "date",
             Value::Duration(_) => "duration",
+            Value::Decimal(_) => "decimal",
         }
     }
 
@@ -643,6 +651,7 @@ impl Value {
             Value::Builtin(_) => true,
             Value::Date(_) => true,
             Value::Duration(_) => true,
+            Value::Decimal(decimal) => !decimal.is_zero(),
         }
     }
 }

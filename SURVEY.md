@@ -7,26 +7,26 @@ and diffing in phase-101; rank 6 gained date arithmetic in phase-096 and text
 parsing and formatting in phase-097; rank 8 gained encodings, digests and UUIDs
 in phase-104; rank 10 gained the CSV writer, JSON Lines, TOML and archives in phase-105. The entries are kept so the ranking and its history stay readable.
 
-- **Builtins in the registry**: 150 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:2040`,
-  which closes with `"input"` at `src/stdlib.rs:2190`. The six module-only
+- **Builtins in the registry**: 162 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:2082`,
+  which closes with `"input"` at `src/stdlib.rs:2244`. The six module-only
   `text.wrap`, `text.diff`, `text.dedent`, `text.template`, `text.pad` and
   `text.align` utilities are deliberately not in this table, and neither is
   `sys.parse` nor the nine `logging` calls, whose only spellings are
   `sys.parse` and `logging.<member>`.
-- **Modules a dotted call may name**: 23 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 137 — `stdlib::MODULE_MEMBERS` at
-  `src/stdlib.rs:84`.
+- **Modules a dotted call may name**: 24 — `stdlib::MODULES` at `src/stdlib.rs:19`.
+- **Dotted members those modules accept**: 149 — `stdlib::MODULE_MEMBERS` at
+  `src/stdlib.rs:85`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
 of what a dotted call is allowed to reach, because a name not in them is refused
-before a call happens (`src/stdlib.rs:270`, `module_has_member`). So the ceiling
+before a call happens (`src/stdlib.rs:292`, `module_has_member`). So the ceiling
 of the language is knowable by reading one file, and that is what this survey
 reads.
 
 ## Method
 
 1. **Enumerate what exists.** `MODULES` (`src/stdlib.rs:19`) and
-   `MODULE_MEMBERS` (`src/stdlib.rs:84`) are the authoritative surface, and
+   `MODULE_MEMBERS` (`src/stdlib.rs:85`) are the authoritative surface, and
    `tests/stdlib_module_names_test.rs` reconciles them against `SPEC.md` and
    `README.md` in both directions. Anything absent from those tables is absent
    from the language, whether or not a registry entry exists.
@@ -93,29 +93,30 @@ survey measures against, and it is short.
 
 | Module | Members | Line |
 |---|---|---|
-| `base64` | `encode`, `decode` | `src/stdlib.rs:85` |
-| `bytes` | `from_text`, `text`, `write` | `src/stdlib.rs:86` |
+| `base64` | `encode`, `decode` | `src/stdlib.rs:86` |
+| `bytes` | `from_text`, `text`, `write` | `src/stdlib.rs:87` |
 | `collections` | `counter`, `count`, `most_common`, `defaultdict`, `get`, `put`, `deque`, `push_left`, `push_right`, `pop_left`, `pop_right`, `namedtuple`, `field` | `src/stdlib.rs:88` |
-| `console` | `log`, `error`, `clear` | `src/stdlib.rs:105` |
+| `console` | `log`, `error`, `clear` | `src/stdlib.rs:106` |
 | `logging` | `debug`, `info`, `warn`, `error`, `set_level`, `level`, `set_timestamps`, `set_destination`, `reset` | `src/stdlib.rs:107` |
-| `csv` | `parse`, `stringify` | `src/stdlib.rs:120` |
+| `csv` | `parse`, `stringify` | `src/stdlib.rs:121` |
+| `decimal` | `from_text`, `from_number`, `to_text`, `to_number`, `sum` | `src/stdlib.rs:176` |
 | `files` | `read`, `write`, `append`, `exists`, `lines`, `delete`, `copy`, `rename` | `src/stdlib.rs:122` |
-| `hash` | `sha256`, `sha512` | `src/stdlib.rs:127` |
-| `hex` | `encode`, `decode` | `src/stdlib.rs:128` |
+| `hash` | `sha256`, `sha512` | `src/stdlib.rs:128` |
+| `hex` | `encode`, `decode` | `src/stdlib.rs:129` |
 | `json` | `parse`, `stringify`, `parse_lines`, `stringify_lines` | `src/stdlib.rs:130` |
-| `list` | `map`, `length` | `src/stdlib.rs:151` |
-| `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp` | `src/stdlib.rs:153` |
-| `matrix` | `zeros`, `ones`, `identity`, `from_lists`, `to_lists`, `shape`, `add`, `subtract`, `multiply`, `divide`, `scale`, `matmul`, `transpose`, `sum`, `mean`, `min`, `max`, `at`, `row`, `column` | `src/stdlib.rs:159` |
-| `network` | `get`, `post` | `src/stdlib.rs:183` |
-| `path` | `join`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, `resolve`, `normalize`, `list` | `src/stdlib.rs:185` |
-| `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:199` |
-| `sys` | `argv`, `parse` | `src/stdlib.rs:202` |
-| `tar` | `read`, `write` | `src/stdlib.rs:234` |
-| `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`, `wrap`, `diff`, `dedent`, `template`, `pad`, `align` | `src/stdlib.rs:204` |
-| `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:236` |
-| `toml` | `parse` | `src/stdlib.rs:231` |
-| `uuid` | `generate`, `parse` | `src/stdlib.rs:232` |
-| `zip` | `read`, `write` | `src/stdlib.rs:233` |
+| `list` | `map`, `length` | `src/stdlib.rs:152` |
+| `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp`, `mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile`, `correlation` | `src/stdlib.rs:153` |
+| `matrix` | `zeros`, `ones`, `identity`, `from_lists`, `to_lists`, `shape`, `add`, `subtract`, `multiply`, `divide`, `scale`, `matmul`, `transpose`, `sum`, `mean`, `min`, `max`, `at`, `row`, `column` | `src/stdlib.rs:180` |
+| `network` | `get`, `post` | `src/stdlib.rs:205` |
+| `path` | `join`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, `resolve`, `normalize`, `list` | `src/stdlib.rs:206` |
+| `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:220` |
+| `sys` | `argv`, `parse` | `src/stdlib.rs:224` |
+| `tar` | `read`, `write` | `src/stdlib.rs:256` |
+| `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`, `wrap`, `diff`, `dedent`, `template`, `pad`, `align` | `src/stdlib.rs:225` |
+| `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:257` |
+| `toml` | `parse` | `src/stdlib.rs:253` |
+| `uuid` | `generate`, `parse` | `src/stdlib.rs:254` |
+| `zip` | `read`, `write` | `src/stdlib.rs:255` |
 Two observations from that table that the rest of this document depends on:
 
 - **`text` has no way to take a piece of a text.** `split` and `join` can get
@@ -174,7 +175,7 @@ Refused as `RuntimeError: filter was called with arguments it cannot use`.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:1669` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:1711` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -396,7 +397,7 @@ entries first.
 |---|---|---|
 | No `sys` surface beyond `argv` and CLI flags: no environment variables, exit code, cwd, platform | `src/stdlib.rs:202` | 31, 32 |
 | No set algebra: `unique`, `flatten`, `reverse`, intersection | `src/stdlib.rs:151` | 3 |
-| No statistics or integer maths: no `min`/`max`, `sum`, `mean`, `gcd`, `log2`, inverse trig | `src/stdlib.rs:153` | 8 |
+| No integer maths or `min`/`max` over a list: `gcd`, `log2` and inverse trig are still absent, and the descriptive statistics (`mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile`, `correlation`) are now in `math` | `src/stdlib.rs:153` | 8 |
 | No token generation beyond `uuid.generate`; `random_choice`/`random_shuffle` exist but no token-shaped call | `src/stdlib.rs:737` | 28 |
 | No concurrency, no timeout or retry control on `network.get` | `src/stdlib.rs:183` | 29 |
 | No `inspect`-style pretty printer; no assertion library beyond `expect`/`assert` | `src/stdlib.rs:709` | — |
