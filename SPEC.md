@@ -1374,7 +1374,49 @@ set c to math.cos(0)  // 1
 set t to math.tan(0)  // 0
 set lg to math.log(1)  // 0
 set raised to math.exp(0)  // 1
+set xs to [1, 2, 3, 4]
+set ys to [2, 4, 6, 8]
+set m to math.mean(xs)  // 2.5
+set middle to math.median(xs)  // 2.5
+set modes to math.mode(xs)  // [1, 2, 3, 4]
+set v to math.variance(xs)  // 1.25
+set sd to math.standard_deviation(xs)
+set q1 to math.percentile(xs, 25)  // 1.75
+set r to math.correlation(xs, ys)  // 1
 ```
+
+#### Descriptive statistics
+
+`mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile` and
+`correlation` summarise a list of numbers. Each has a flat spelling and a
+`math.` spelling, and both reach the same function.
+
+- `mean` is the arithmetic mean, `sum(xs) / length(xs)`.
+- `median` sorts the list; an odd-length list answers its middle value, and an
+  even-length list answers the **interpolated** middle, the mean of the two
+  central values. `median([1, 2, 3, 4])` is `2.5`, not `2`.
+- `mode` answers **every** value tied for the highest count, in ascending
+  numeric order. A list whose values all occur once therefore has every value
+  as a mode, rather than no mode.
+- `variance` and `standard_deviation` are the **population** forms: they divide
+  by `n`, not `n - 1`, so the variance of a one-element list is `0`.
+- `percentile(xs, p)` sorts ascending, takes `p` from `0` to `100`, and
+  interpolates linearly at position `(n - 1) * p / 100`. With four values,
+  `percentile([1, 2, 3, 4], 25)` sits a quarter of the way from `1` to `2` and
+  answers `1.75`; ranks `0` and `100` answer the smallest and largest values.
+- `correlation(xs, ys)` is Pearson's correlation coefficient, from `-1` to `1`.
+  The two lists must have the same length and at least two elements, and a list
+  that never varies has no correlation to report and is refused.
+
+The dotted spellings are `math.mean(xs)`, `math.median(xs)`, `math.mode(xs)`,
+`math.variance(xs)`, `math.standard_deviation(xs)`,
+`math.percentile(xs, p)` and `math.correlation(xs, ys)`, and each has the flat
+spelling of the same name.
+
+Every one of these refuses an empty list where a value is required, and refuses
+a list holding anything other than numbers, naming the index and kind of the
+first item that is not a number. A failure is a catchable `Runtime` error, not a
+silent `0`.
 
 `PI` and `E` are globals, not module members: a module has functions, so
 `math.PI` is not a name in the language.
@@ -1407,6 +1449,52 @@ numbers in its range, so a fractional bound narrows the range rather than making
 the draw a fraction: `random(0, 100.5)` answers `0` to `100`, and a range holding
 no whole number at all, such as `random(0.2, 0.8)`, is refused. `random_choice`
 refuses an empty list, since it has no member to choose.
+
+### decimal
+
+A `number` is a 64-bit float, and that is the right type for measurement and
+the wrong type for money: `0.1 + 0.2` is not `0.3`, and no amount of rounding
+makes a column of invoices add up. A `decimal` is an exact base-10 value for
+that work.
+
+`decimal.from_text(text)` reads ordinary decimal text and keeps every digit.
+The module spells its members `decimal.from_text(text)`,
+`decimal.from_number(number)`, `decimal.to_text(decimal)`,
+`decimal.to_number(decimal)` and `decimal.sum(list of decimal)`.
+A decimal holds at most 18 places after the point. Addition, subtraction,
+multiplication and remainder are exact while the result fits; a result that
+would need more than 18 places, or that leaves the integer range, is a runtime
+error rather than a rounded value. Division is the one exception: `1 / 3` has no
+finite decimal expansion, so it is answered to 18 places, rounded half away from
+zero. `decimal.sum(xs)` adds a list of decimals exactly, and the empty list is
+the decimal zero.
+
+A decimal and a `number` never mix implicitly. `decimal.from_text("0.1") + 0.2`
+is a runtime error naming both kinds, because the number `0.1` is not exactly
+one tenth and treating it as if it were is the defect this type removes. The
+conversions are therefore named and explicit: `decimal.from_number(n)` reads a
+number's shortest round-tripping text, and `decimal.to_number(d)` converts back
+to an `f64`. Both are lossy when the value needs more precision than an `f64`
+holds, and both say so by being functions the program has to call.
+
+```redblue
+set price to decimal.from_text("19.99")
+set tax to decimal.from_text("1.60")
+set total to price + tax
+say decimal.to_text(total)                 // 21.59
+set kinds to decimal.sum([price, tax])
+say decimal.to_text(kinds)                 // 21.59
+set as_number to decimal.to_number(total)
+say decimal.to_text(decimal.from_number(as_number))
+```
+
+**The `number` boundary is 2^53.** A whole `number` is exact only up to
+`9007199254740992` (2^53); the next whole number, `9007199254740993`, is held
+as `9007199254740992` because an `f64` cannot tell them apart. Use `decimal` for
+integers or amounts beyond that boundary, or for any fractional amount that
+must add up exactly. This limit applies to `number` values and to literals read
+as numbers; decimal text is not subject to it, and `decimal.from_number` is
+where a number has already lost the distinction.
 
 ### files and path
 

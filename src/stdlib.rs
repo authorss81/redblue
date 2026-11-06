@@ -22,6 +22,7 @@ pub const MODULES: &[&str] = &[
     "collections",
     "console",
     "csv",
+    "decimal",
     "files",
     "hash",
     "hex",
@@ -152,8 +153,29 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
     (
         "math",
         &[
-            "abs", "floor", "ceil", "round", "sqrt", "pow", "sin", "cos", "tan", "log", "exp",
+            "abs",
+            "floor",
+            "ceil",
+            "round",
+            "sqrt",
+            "pow",
+            "sin",
+            "cos",
+            "tan",
+            "log",
+            "exp",
+            "mean",
+            "median",
+            "mode",
+            "variance",
+            "standard_deviation",
+            "percentile",
+            "correlation",
         ],
+    ),
+    (
+        "decimal",
+        &["from_text", "from_number", "to_text", "to_number", "sum"],
     ),
     (
         "matrix",
@@ -448,6 +470,26 @@ pub fn builtins() -> HashMap<String, Value> {
     globals.insert("tan".to_string(), Value::Builtin("tan".to_string()));
     globals.insert("log".to_string(), Value::Builtin("log".to_string()));
     globals.insert("exp".to_string(), Value::Builtin("exp".to_string()));
+    for name in [
+        "mean",
+        "median",
+        "mode",
+        "variance",
+        "standard_deviation",
+        "percentile",
+        "correlation",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
+    for name in [
+        "decimal_from_text",
+        "decimal_from_number",
+        "decimal_to_text",
+        "decimal_to_number",
+        "decimal_sum",
+    ] {
+        globals.insert(name.to_string(), Value::Builtin(name.to_string()));
+    }
 
     // Text functions
     globals.insert(
@@ -2049,6 +2091,13 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "tan",
     "log",
     "exp",
+    "mean",
+    "median",
+    "mode",
+    "variance",
+    "standard_deviation",
+    "percentile",
+    "correlation",
     "uppercase",
     "lowercase",
     "trim",
@@ -2095,6 +2144,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "to_number",
     "to_list",
     "type_of",
+    "decimal_from_text",
+    "decimal_from_number",
+    "decimal_to_text",
+    "decimal_to_number",
+    "decimal_sum",
     "files_read",
     "files_write",
     "files_append",
@@ -2219,6 +2273,25 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("tan", "tan(number) -> number, or nothing at a pole"),
     ("log", "log(number) -> number, or nothing for zero or less"),
     ("exp", "exp(number) -> number, or nothing when it overflows"),
+    ("mean", "mean(list of number) -> number; the list must not be empty"),
+    ("median", "median(list of number) -> number; an even list averages the two middle values"),
+    ("mode", "mode(list of number) -> list of number; every tied value, ascending"),
+    (
+        "variance",
+        "variance(list of number) -> number; the population variance",
+    ),
+    (
+        "standard_deviation",
+        "standard_deviation(list of number) -> number; the population square root of the variance",
+    ),
+    (
+        "percentile",
+        "percentile(list of number, number) -> number; rank 0 to 100, linearly interpolated",
+    ),
+    (
+        "correlation",
+        "correlation(list of number, list of number) -> number from -1 to 1",
+    ),
     (
         "uppercase",
         "uppercase(text) -> text, with each character's uppercase form",
@@ -2398,6 +2471,23 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "to_list(list) -> the list; to_list(text) -> its whitespace-separated words",
     ),
     ("type_of", "type_of(any) -> the name of its kind"),
+    (
+        "decimal_from_text",
+        "decimal.from_text(text) -> decimal, exactly as written",
+    ),
+    (
+        "decimal_from_number",
+        "decimal.from_number(number) -> decimal, the number's shortest round-tripping text",
+    ),
+    ("decimal_to_text", "decimal.to_text(decimal) -> text"),
+    (
+        "decimal_to_number",
+        "decimal.to_number(decimal) -> number, which is lossy when the decimal is finer than an f64",
+    ),
+    (
+        "decimal_sum",
+        "decimal.sum(list of decimal) -> decimal, exactly; the empty list is zero",
+    ),
     ("files_read", "files_read(text) -> the whole file as text"),
     (
         "files_write",

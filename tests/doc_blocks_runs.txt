@@ -27,8 +27,28 @@
 # COUNTS, as of the run that wrote this file
 #   SPEC.md 46 · docs/GRAMMAR.md 7 · README.md 7 · HANDOUT.md 4 · PHILOSOPHY.md 0
 #   64 of 115 blocks. The other 51 are 39 fragments and 12 known failures.
-
 # --- SPEC.md ---------------------------------------------------------------
+# --- docs/GRAMMAR.md-----------------------------------------------------
+docs/GRAMMAR.md:558
+docs/GRAMMAR.md:605
+docs/GRAMMAR.md:610
+docs/GRAMMAR.md:626
+docs/GRAMMAR.md:633
+docs/GRAMMAR.md:642
+docs/GRAMMAR.md:657
+# --- HANDOUT.md----------------------------------------------------------
+# --- README.md-----------------------------------------------------------
+HANDOUT.md:126
+HANDOUT.md:149
+HANDOUT.md:156
+HANDOUT.md:250
+README.md:9
+README.md:33
+README.md:46
+README.md:57
+README.md:139
+README.md:150
+README.md:162
 SPEC.md:40
 SPEC.md:58
 SPEC.md:132
@@ -59,43 +79,20 @@ SPEC.md:1058
 SPEC.md:1145
 SPEC.md:1160
 SPEC.md:1195
+SPEC.md:1231
 SPEC.md:1284
 SPEC.md:1363
-SPEC.md:1426
-SPEC.md:1476
-SPEC.md:1510
-SPEC.md:1601
-SPEC.md:1620
-SPEC.md:1634
-SPEC.md:1650
-SPEC.md:1725
-SPEC.md:1749
-SPEC.md:1798
-SPEC.md:1917
-SPEC.md:2043
-SPEC.md:2069
-
-# --- docs/GRAMMAR.md-----------------------------------------------------
-docs/GRAMMAR.md:558
-docs/GRAMMAR.md:605
-docs/GRAMMAR.md:610
-docs/GRAMMAR.md:626
-docs/GRAMMAR.md:633
-docs/GRAMMAR.md:642
-docs/GRAMMAR.md:657
-
-# --- HANDOUT.md----------------------------------------------------------
-
-# --- README.md-----------------------------------------------------------
-README.md:9
-README.md:33
-README.md:46
-README.md:57
-README.md:139
-README.md:150
-README.md:162
-HANDOUT.md:126
-HANDOUT.md:149
-HANDOUT.md:156
-HANDOUT.md:250
-SPEC.md:1231
+SPEC.md:1480
+SPEC.md:1514
+SPEC.md:1564
+SPEC.md:1598
+SPEC.md:1689
+SPEC.md:1708
+SPEC.md:1722
+SPEC.md:1738
+SPEC.md:1813
+SPEC.md:1837
+SPEC.md:1886
+SPEC.md:2005
+SPEC.md:2131
+SPEC.md:2157
