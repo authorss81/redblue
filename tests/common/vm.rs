@@ -56,6 +56,7 @@ impl Typed {
             Value::Builtin(name) => Typed::Opaque(format!("Builtin {name}")),
             Value::Date(date) => Typed::Opaque(format!("Date {date}")),
             Value::Duration(duration) => Typed::Opaque(format!("Duration {duration:?}")),
+            Value::Decimal(decimal) => Typed::Opaque(format!("Decimal {decimal}")),
         }
     }
 

@@ -56,6 +56,9 @@ pub fn value_bytes(value: &Value) -> usize {
                 | Value::Date(_)
                 | Value::Duration(_),
             ) => {}
+            Pending::Value(Value::Decimal(_)) => {
+                bytes += std::mem::size_of::<crate::decimal::Decimal>()
+            }
             Pending::Value(Value::Text(text)) => bytes += text.len(),
             Pending::Value(Value::Builtin(name)) => bytes += name.len(),
             Pending::Value(Value::List(items)) => {

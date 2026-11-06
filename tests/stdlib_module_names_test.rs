@@ -1312,6 +1312,12 @@ say files.exists("{scratch}/no_such_file_here.rb")"#
         ),
         ("math", r#"say math.sqrt(9)"#.to_string(), "3\n".to_string()),
         (
+            "decimal",
+            r#"say decimal.to_text(decimal.from_text("19.99") + decimal.from_text("1.60"))"#
+                .to_string(),
+            "21.59\n".to_string(),
+        ),
+        (
             "matrix",
             r#"say matrix.sum(matrix.from_lists([[1, 2], [3, 4]]))"#.to_string(),
             "10\n".to_string(),
