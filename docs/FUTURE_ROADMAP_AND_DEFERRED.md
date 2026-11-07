@@ -428,7 +428,7 @@ Embedding end-user applications (`rb-httpd`, `rb-todo`, `rb-kv`, `rb-markdown`, 
 
 ---
 
-## 14. Rigor & Precision Audit Track: Eliminating "Shallow Implementations" (Phases 159–165)
+## 14. Rigor & Precision Audit Track: Eliminating "Shallow Implementations" (Phases 159–167)
 
 Every major programming language in history has suffered from "shallow feature" shortcuts taken during early prototyping that became multi-decade design flaws:
 - **JavaScript**: `typeof null === "object"` (a shallow C-pointer check hack from 1995 that can never be fixed); lack of 64-bit integers.
@@ -436,7 +436,7 @@ Every major programming language in history has suffered from "shallow feature" 
 - **Go**: Loop variable capture bugs in goroutines (only fixed after 12 years in Go 1.22); nil interface pointer traps (`var p *int = nil; var i any = p; i != nil`).
 - **PHP**: Inconsistent parameter ordering across stdlib functions (`needle, haystack` vs `haystack, needle`).
 
-To ensure Redblue achieves world-class mathematical and architectural rigor, **Phases 159–165 establish a systematic audit and remediation track across all existing modules**:
+To ensure Redblue achieves world-class mathematical and architectural rigor, **Phases 159–167 establish a systematic audit and remediation track across all existing modules**:
 
 ### 14.1 Guarding Survey Phases Against 3-Hour Timeouts and Infinite Loops
 A major historical failure mode in autonomous coding pipelines is the **"Open-Ended Survey Trap"**:
@@ -445,50 +445,48 @@ A major historical failure mode in autonomous coding pipelines is the **"Open-En
 - All discovered defects are lost. On the next tick, `dispatch.sh` selects the same phase again from scratch, causing an **infinite loop of timeouts and wasted compute**.
 
 #### Mandatory Pipeline Safeguards for Audits:
-1. **20-Minute Incremental Checkpointing Rule**:
+1. **Strictly Sequential Integer Phase IDs**: Every phase in `rbops` must follow the canonical `phase-NNN` integer format (e.g., `phase-159`, `phase-160`, `phase-161`) so branch naming, directory layout (`phases/phase-NNN`), and `verify.sh` parsers never break on alphanumeric suffixes.
+2. **20-Minute Incremental Checkpointing Rule**:
    - The agent must append each discovered defect immediately to a checked-in file ([`docs/AUDIT_FINDINGS.md`](file:///c:/Users/USER/3D%20Objects/wsl/redblue/docs/AUDIT_FINDINGS.md)) and commit every 20 minutes or after every 2 modules inspected.
    - If a runner times out, the WIP branch preserves all findings recorded up to that minute. The resumed runner adopts the checkpoint and continues directly with the remaining modules.
-2. **Partitioned Sub-Phases (Max 8 Modules per Run)**:
-   - Rather than one monolithic survey, the audit is split into three bounded, concrete sub-phases:
-     - **Phase 159-A: Numeric, Arithmetic & Temporal Precision Audit** (`number`, `math`, `decimal`, `matrix`, `statistics`, `time`).
-     - **Phase 159-B: Text, Unicode & Collection Semantics Audit** (`text`, `list`, `record`, `collections`, `formats`, `json`, `csv`, `toml`).
-     - **Phase 159-C: Systems, Network, VFS & Concurrency Audit** (`files`, `path`, `vfs`, `network`, `logging`, `crypto`, `cli`).
-3. **Standardized 5-Column Finding Schema**:
+3. **Partitioned Sub-Phases (Max 8 Modules per Run)**:
+   - Rather than one monolithic survey, the audit is split into three bounded, concrete sequential phases: `phase-159`, `phase-160`, and `phase-161`.
+4. **Standardized 5-Column Finding Schema**:
    - Every finding must be documented with an executable reproduction snippet:
      `| Module | Function / Path | Shallow Implementation | Reproduction Snippet | Target Remediation Phase |`
 
-### Phase 159-A: Numeric, Arithmetic & Temporal Precision Audit
+### Phase 159: Numeric, Arithmetic & Temporal Precision Audit
 - **Modules**: `number`, `math`, `decimal`, `matrix`, `statistics`, `time`.
 - **Target Flaws**: Negative timestamp floor division (pre-epoch dates), float overflow on extreme finite means, `NaN` / `Infinity` leaks, and subnormal float rounding.
 
-### Phase 159-B: Text, Unicode & Collection Semantics Audit
+### Phase 160: Text, Unicode & Collection Semantics Audit
 - **Modules**: `text`, `list`, `record`, `collections`, `formats`, `json`, `csv`, `toml`.
 - **Target Flaws**: Multi-byte emoji slicing, combining accent corruption, shallow list copies, and non-deterministic map iteration orders.
 
-### Phase 159-C: Systems, Network, VFS & Concurrency Audit
+### Phase 161: Systems, Network, VFS & Concurrency Audit
 - **Modules**: `files`, `path`, `vfs`, `network`, `logging`, `crypto`, `cli`.
 - **Target Flaws**: Unbuffered large file reads, socket timeout leaks, unmasked secrets in error messages, and cross-platform path separator inconsistencies.
 
-### Phase 160: Unicode Grapheme Cluster & Scalar Slicing Rigor
+### Phase 162: Unicode Grapheme Cluster & Scalar Slicing Rigor
 - **Goal**: Upgrade string operations (`split`, `slice`, `length`, `at`) from naive UTF-8 byte or code unit indexing to **Unicode Extended Grapheme Clusters**.
 - **Why**: Prevents corrupting multi-byte emoji sequences (👨‍👩‍👧‍👦), accented characters (é formed by `e` + combining acute), and non-Latin scripts.
 
-### Phase 161: Lexical Scope & Loop Variable Binding Isolation
+### Phase 163: Lexical Scope & Loop Variable Binding Isolation
 - **Goal**: Enforce per-iteration lexical binding for all loop variables (`for each x in ...`, `repeat n times`).
 - **Why**: Eliminates the infamous Go/Python late-binding bug where closures created inside a loop mistakenly share a single mutating loop variable.
 
-### Phase 162: Streaming Large-File I/O & Zero-Copy Iterators
+### Phase 164: Streaming Large-File I/O & Zero-Copy Iterators
 - **Goal**: Introduce memory-mapped and streaming line iterators (`files.stream_lines`, `files.stream_bytes`) alongside the existing `files.read`.
 - **Why**: Prevents out-of-memory crashes when processing multi-gigabyte server logs or CSV datasets.
 
-### Phase 163: Structural Deep Equality & Cycle-Safe Hashing
+### Phase 165: Structural Deep Equality & Cycle-Safe Hashing
 - **Goal**: Guarantee that equality (`==`) and hashing over recursive records, nested lists, and objects terminate cleanly with cycle detection.
 - **Why**: Prevents runtime stack overflow panics when comparing self-referential or cyclic data structures.
 
-### Phase 164: Explicit Numeric Boundary Safety & BigInt Promotion
+### Phase 166: Explicit Numeric Boundary Safety & BigInt Promotion
 - **Goal**: Formalize the numeric threshold where numbers transition past $2^{53}$ (`MAX_EXACT_INT`).
 - **Behavior**: Refuse silent float roundoff of integers past $2^{53}$ unless explicitly converted, or seamlessly promote large whole numbers to an exact arbitrary-precision integer (`BigInt`) representation.
 
-### Phase 165: Parameter Order & Standard Library Consistency Normalization
+### Phase 167: Parameter Order & Standard Library Consistency Normalization
 - **Goal**: Strict audit of all 24+ standard library modules to guarantee standard parameter order (`target, pattern` or `collection, predicate`) across all methods.
 - **Why**: Completely avoids the PHP/C "argument order lottery" where developers must constantly look up whether `needle` or `haystack` comes first.
