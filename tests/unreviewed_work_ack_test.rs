@@ -245,12 +245,15 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// **The in-flight phases**, so there is one prefix per phase. The
 /// pipeline keeps one recovery branch per phase and re-creates that phase's
 /// delivery commit on top of the current `main` on every round: phase-084's
-/// reviewer-permission work, phase-063's REPL printing trio, phase-088's
-/// value assertions, and phase-096's date and duration values are all in this
-/// history, arrived in a delivery commit, and none of their delivery commits'
-/// SHAs are knowable while the work is being written.
+/// reviewer-permission work, phase-073's benchmark harness (`tests/bench/mod.rs`,
+/// `tests/bench/runner.rs`, `tests/bench_test.rs`, and `BENCH.md`), phase-063's
+/// REPL printing trio, phase-088's value assertions, and phase-096's date and
+/// duration values are all in this history, arrived in a delivery commit, and
+/// none of their delivery commits' SHAs are knowable while the work is being
+/// written.
 const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
     "resume phase-068:",
+    "resume phase-073:",
     "resume phase-084:",
     "resume phase-063:",
     "resume phase-088:",
@@ -284,7 +287,9 @@ const DELIVERY_REASON: &str = "resume phase-NNN: adopt preserved work. The deliv
     repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the \
     phase's own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
     acknowledgement data in tests/unreviewed_work_ack_test.rs, and the phase's REPORT.md and \
-    FINDINGS.md; for phase-063 the REPL printing trio `.pretty`/`.json`/`.table` (src/repl/render.rs \
+    FINDINGS.md; for phase-073 the benchmark harness (tests/bench/mod.rs, tests/bench/runner.rs, \
+    and tests/bench_test.rs), the checked-in BENCH.md baseline, and the phase's REPORT.md; for \
+    phase-063 the REPL printing trio `.pretty`/`.json`/`.table` (src/repl/render.rs \
     is new, plus the three command rows in src/repl/commands.rs, the dispatch and answer methods in \
     src/repl/mod.rs, the per-command refusal in src/repl/introspect.rs, and the phase's own tests); \
     for phase-088 the reachability-only assertion conversions to value contracts across 10 test suites \
