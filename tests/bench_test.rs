@@ -257,6 +257,51 @@ fn edge_a_hung_workload_fails_loudly_at_its_budget() {
 }
 
 #[test]
+fn edge_a_hung_child_process_is_killed_at_its_budget() {
+    let dir = unique_temp_dir("hung-child");
+    let sentinel = dir.join("hang");
+    std::env::set_var(bench::HANG_SENTINEL_ENV, &sentinel);
+
+    let budget = Duration::from_millis(300);
+    let started = Instant::now();
+    let error = bench::run_workload(bench::HANG_WORKLOAD_NAME, 1_500, budget)
+        .expect_err("a child that outlives its budget must be killed");
+    let elapsed = started.elapsed();
+    std::env::remove_var(bench::HANG_SENTINEL_ENV);
+
+    assert!(
+        elapsed < Duration::from_millis(1_200),
+        "the caller should return at the budget, not wait for the child's own sleep: {elapsed:?}"
+    );
+    match error {
+        BenchError::BudgetExceeded {
+            workload,
+            budget: reported,
+        } => {
+            assert_eq!(workload, bench::HANG_WORKLOAD_NAME);
+            assert_eq!(reported, budget);
+        }
+        other => panic!("expected the child's budget error, got {other:?}"),
+    }
+
+    let started_marker = sentinel.with_extension("started");
+    let finished_marker = sentinel.with_extension("finished");
+    assert!(
+        started_marker.is_file(),
+        "the hidden workload should have run in a child process and written {}",
+        started_marker.display()
+    );
+    thread::sleep(Duration::from_millis(1_400));
+    assert!(
+        !finished_marker.exists(),
+        "the child survived its budget and wrote {}",
+        finished_marker.display()
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn edge_exhausted_shared_budget_is_reported_as_exhausted() {
     let error = bench::run_all(Duration::ZERO)
         .expect_err("an exhausted shared budget must fail before the first workload starts");
@@ -675,7 +720,9 @@ fn edge_cli_compare_reruns_every_baseline_row() {
 | Workload | Size | Answer | Wall time |\n\
 |---|---:|---:|---:|\n\
 | fibonacci | 10 | 55 | 1.000 ms |\n\
-| primes | 50 | 15 | 2.000 ms |\n";
+| primes | 50 | 15 | 2.000 ms |\n\
+| concat | 7 | ababababababab | 1.000 ms |\n\
+| lex | 10 | 10 | 1.000 ms |\n";
     fs::write(&baseline_path, baseline).expect("the temporary baseline is writable");
     let output = dir.join("BENCH.md");
 
@@ -683,6 +730,8 @@ fn edge_cli_compare_reruns_every_baseline_row() {
         .expect("a well-formed baseline should be re-run and rendered");
     assert!(table.contains("fibonacci"), "{table}");
     assert!(table.contains("primes"), "{table}");
+    assert!(table.contains("concat"), "{table}");
+    assert!(table.contains("lex"), "{table}");
     assert!(table.contains("10"), "{table}");
     assert!(table.contains("50"), "{table}");
     assert!(table.contains("ms"), "{table}");
@@ -755,6 +804,39 @@ fn edge_cli_compare_refuses_an_empty_baseline() {
 }
 
 #[test]
+fn edge_cli_compare_refuses_a_baseline_missing_a_workload() {
+    let dir = unique_temp_dir("compare-missing-workload");
+    let baseline_path = dir.join("PARTIAL.md");
+    let baseline = "\
+# Redblue benchmarks\n\n\
+| Workload | Size | Answer | Wall time |\n\
+|---|---:|---:|---:|\n\
+| fibonacci | 10 | 55 | 1.000 ms |\n";
+    fs::write(&baseline_path, baseline).expect("the temporary baseline is writable");
+    let output = dir.join("BENCH.md");
+
+    let error = bench::comparison_table(&baseline_path)
+        .expect_err("a baseline that omits workloads must not compare as a smaller baseline");
+    for missing in ["primes", "concat", "lex"] {
+        assert!(
+            error.contains(missing),
+            "the refusal should name the missing workload `{missing}`: {error}"
+        );
+    }
+
+    assert_eq!(
+        bench::run_cli_with_path(
+            &["--compare".to_string(), baseline_path.display().to_string()],
+            &output,
+        ),
+        1,
+        "the CLI should fail when the baseline omits a workload"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn edge_cli_compare_requires_exactly_one_baseline_path() {
     let dir = unique_temp_dir("compare-arity");
     let output = dir.join("BENCH.md");
@@ -788,7 +870,10 @@ fn edge_cli_compare_refuses_a_corrupted_baseline_answer() {
 # Redblue benchmarks\n\n\
 | Workload | Size | Answer | Wall time |\n\
 |---|---:|---:|---:|\n\
-| fibonacci | 10 | 54 | 1.000 ms |\n";
+| fibonacci | 10 | 54 | 1.000 ms |\n\
+| primes | 50 | 15 | 2.000 ms |\n\
+| concat | 7 | ababababababab | 1.000 ms |\n\
+| lex | 10 | 10 | 1.000 ms |\n";
     fs::write(&baseline_path, baseline).expect("the temporary baseline is writable");
     let output = dir.join("BENCH.md");
 
@@ -959,6 +1044,14 @@ fn edge_baseline_parser_rejects_unknown_duplicate_and_oversized_rows() {
         "the refusal should name the unknown workload: {unknown}"
     );
 
+    let unknown_with_bad_size =
+        bench::parse_baseline_markdown("| fibonacii | many | 6765 | 1.250 ms |\n")
+            .expect_err("an unknown workload must not be skipped when its size is malformed too");
+    assert!(
+        unknown_with_bad_size.contains("fibonacii"),
+        "the refusal should name the unknown workload: {unknown_with_bad_size}"
+    );
+
     let duplicate = bench::parse_baseline_markdown(
         "| fibonacci | 20 | 6765 | 1.250 ms |\n\
          | fibonacci | 20 | 6765 | 1.250 ms |\n",
@@ -1053,4 +1146,115 @@ fn edge_render_markdown_records_each_measurement_wall_time() {
             "the recorded wall time should be the measured elapsed time:\n{line}"
         );
     }
+}
+
+#[test]
+fn edge_table_truncates_long_answers_by_characters() {
+    let long = "漢字".repeat(30);
+    let row = bench::Measurement {
+        workload: "concat",
+        size: 60,
+        answer: Value::Text(long.clone()),
+        elapsed: Duration::from_millis(1),
+    };
+    let table = bench::render_table(&[row]);
+    let line = table
+        .lines()
+        .find(|line| line.starts_with("concat"))
+        .unwrap_or_else(|| panic!("missing concat row:\n{table}"));
+    let expected = format!("{}...", long.chars().take(17).collect::<String>());
+    assert_eq!(
+        expected.chars().count(),
+        20,
+        "the truncated cell should be the full 20-character column width"
+    );
+    assert!(
+        line.contains(&expected),
+        "the table should keep the first 17 characters and add `...`:\n{line}"
+    );
+    assert!(
+        !line.contains(&long),
+        "the full long answer should not be printed in the table:\n{line}"
+    );
+
+    let exact = "x".repeat(20);
+    let row = bench::Measurement {
+        workload: "concat",
+        size: 10,
+        answer: Value::Text(exact.clone()),
+        elapsed: Duration::from_millis(1),
+    };
+    let table = bench::render_table(&[row]);
+    let line = table
+        .lines()
+        .find(|line| line.starts_with("concat"))
+        .unwrap_or_else(|| panic!("missing concat row:\n{table}"));
+    assert!(
+        line.contains(&exact) && !line.contains("..."),
+        "an answer that exactly fits should not be truncated:\n{line}"
+    );
+}
+
+#[test]
+fn edge_baseline_parser_ignores_header_separator_and_prose() {
+    let text = "\
+# Redblue benchmarks\n\n\
+This prose mentions wall time and workloads but is not a data row.\n\n\
+| Workload | Size | Answer | Wall time |\n\
+|---|---:|---:|---:|\n";
+    let rows = bench::parse_baseline_markdown(text)
+        .expect("a header-only baseline should parse as zero data rows");
+    assert!(
+        rows.is_empty(),
+        "only four-cell rows naming a known workload are data rows, got {rows:?}"
+    );
+}
+
+#[test]
+fn edge_check_size_supported_rejects_negative_and_unknown_names() {
+    let negative = bench::check_size_supported("fibonacci", -1);
+    assert!(
+        negative.is_err(),
+        "a negative size must be refused before the workload starts"
+    );
+    let negative = negative.expect_err("a negative size is an error");
+    assert!(matches!(negative, BenchError::Usage(_)), "{negative:?}");
+    assert!(
+        negative.to_string().contains("-1"),
+        "the refusal should name the negative size: {negative}"
+    );
+
+    let unknown = bench::check_size_supported("not-a-workload", 1);
+    assert!(unknown.is_err(), "an unknown workload name must be refused");
+    let unknown = unknown.expect_err("an unknown workload is an error");
+    assert!(matches!(unknown, BenchError::Usage(_)), "{unknown:?}");
+    assert!(
+        unknown.to_string().contains("not-a-workload"),
+        "the refusal should name the unknown workload: {unknown}"
+    );
+    for name in WORKLOAD_NAMES {
+        assert!(
+            unknown.to_string().contains(name),
+            "the refusal should list `{name}`: {unknown}"
+        );
+    }
+}
+
+#[test]
+fn edge_timings_path_stays_beside_a_file_or_inside_a_directory() {
+    let dir = unique_temp_dir("timings-path");
+    let file_output = dir.join("BASELINE.md");
+
+    assert_eq!(
+        bench::timings_path(&file_output),
+        dir.join("BENCH_TIMINGS.md"),
+        "a file baseline should put its timing artifact beside it"
+    );
+    assert_eq!(
+        bench::timings_path(&dir),
+        dir.join("BENCH_TIMINGS.md"),
+        "a directory baseline should keep its timing artifact inside it"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }

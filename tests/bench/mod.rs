@@ -8,7 +8,9 @@
 //! inside the normal test gate.
 
 use std::fmt;
-use std::path::Path;
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,13 +22,12 @@ use redblue::Value;
 
 /// The budget every harness workload runs under.
 ///
-/// A benchmark that hangs must fail instead of waiting forever. The runner
-/// enforces this itself with a worker thread and `recv_timeout`; the interpreter
-/// has no cancellation hook, so a timed-out worker is detached and may keep
-/// running after the error. The budget bounds the wait, not the work. A single
-/// `run_workload` spends this on one workload; `run_all` spends it once across
-/// all four, so the no-argument runner is bounded by one budget rather than
-/// four.
+/// A benchmark that hangs must fail instead of waiting forever. Production
+/// measurements run in a child process; when the budget expires the parent
+/// kills and reaps that child, so a timed-out workload cannot outlive its
+/// budget. The budget bounds the wait and the work. A single `run_workload`
+/// spends this on one workload; `run_all` spends it once across all four, so
+/// the no-argument runner is bounded by one budget rather than four.
 pub const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 
 /// The largest size each workload is allowed to run.
@@ -187,15 +188,49 @@ pub const WORKLOADS: &[Workload] = &[
     },
 ];
 
+/// The hidden workload the child-process timeout test drives through
+/// [`run_workload`]. It is not part of [`WORKLOADS`], so it never appears in a
+/// baseline, the usage text, or the no-argument run. The worker sleeps for the
+/// requested size in milliseconds and writes a start marker before sleeping and
+/// a finish marker after, so a test can prove the parent killed it.
+pub const HANG_WORKLOAD_NAME: &str = "__hang";
+
+/// The environment variable naming the marker path for [`HANG_WORKLOAD_NAME`].
+pub const HANG_SENTINEL_ENV: &str = "RB_BENCH_HANG_SENTINEL";
+
+#[cfg(test)]
+static HANG_WORKLOAD: Workload = Workload {
+    name: HANG_WORKLOAD_NAME,
+    default_size: 0,
+    max_size: i64::MAX,
+    run: run_hang,
+    expected: expected_hang,
+};
+
+#[cfg(test)]
+fn run_hang(size: i64) -> Result<Value, String> {
+    thread::sleep(Duration::from_millis(size.max(0) as u64));
+    Ok(Value::Number(1.0))
+}
+
+#[cfg(test)]
+fn expected_hang(_size: i64) -> Expected {
+    Expected::Number(1.0)
+}
+
 pub fn workload_names() -> Vec<&'static str> {
     WORKLOADS.iter().map(|workload| workload.name).collect()
 }
 
 fn workload_named(name: &str) -> Result<&'static Workload, BenchError> {
-    WORKLOADS
-        .iter()
-        .find(|workload| workload.name == name)
-        .ok_or_else(|| BenchError::Usage(unknown_workload(name)))
+    if let Some(workload) = WORKLOADS.iter().find(|workload| workload.name == name) {
+        return Ok(workload);
+    }
+    #[cfg(test)]
+    if name == HANG_WORKLOAD_NAME {
+        return Ok(&HANG_WORKLOAD);
+    }
+    Err(BenchError::Usage(unknown_workload(name)))
 }
 
 fn unknown_workload(name: &str) -> String {
@@ -229,13 +264,13 @@ pub fn parse_size(text: &str) -> Result<i64, BenchError> {
     Ok(size)
 }
 
-/// Runs `f` on a worker thread and gives up after `budget`.
+/// Runs a synthetic test closure on a worker thread and gives up after `budget`.
 ///
-/// The worker cannot be cancelled: the interpreter has no cancellation hook, so
-/// a timed-out thread is detached and may keep consuming CPU until the process
-/// exits. What this bounds is the caller's wait — a hung workload returns a loud
-/// error at the deadline instead of blocking the gate forever. A normal
-/// benchmark is far below the budget, so the thread is only a safety net.
+/// This is the in-process helper for tests that deliberately hang or break a
+/// closure. Real measurements do not use it: [`measure_with_reference`] runs the
+/// workload in a child process and kills it on timeout, so a hung benchmark
+/// cannot outlive its budget.
+#[cfg(test)]
 pub fn run_with_budget<T, F>(
     workload: &str,
     budget: Duration,
@@ -299,22 +334,300 @@ fn measure(
     check_expected(workload, size, expected, answer, elapsed)
 }
 
-/// The reference answer is computed on the same worker as the workload, so the
-/// budget covers both. Computing it on the caller's thread first made an
-/// enormous size hang or abort before any deadline could fire.
+/// The reference answer is computed after the size check, so it is bounded by
+/// the workload's checkable maximum and cannot hang before the budget starts.
+/// The workload itself runs in a child process so a timeout can kill it.
 fn measure_with_reference(
     workload: &'static Workload,
     size: i64,
     budget: Duration,
 ) -> Result<Measurement, BenchError> {
     ensure_workload_size_supported(workload, size)?;
-    let ((answer, expected, elapsed), _) = run_with_budget(workload.name, budget, move || {
-        let expected = (workload.expected)(size);
-        let started = Instant::now();
-        let answer = (workload.run)(size)?;
-        Ok((answer, expected, started.elapsed()))
-    })?;
+    let (answer, elapsed) = measure_in_worker(workload, size, budget)?;
+    let expected = (workload.expected)(size);
     check_expected(workload, size, expected, answer, elapsed)
+}
+
+fn measure_in_worker(
+    workload: &'static Workload,
+    size: i64,
+    budget: Duration,
+) -> Result<(Value, Duration), BenchError> {
+    if let Some(binary) = worker_binary() {
+        return measure_in_child(&binary, workload, size, budget);
+    }
+    #[cfg(test)]
+    {
+        run_with_budget(workload.name, budget, move || (workload.run)(size))
+    }
+    #[cfg(not(test))]
+    {
+        Err(BenchError::Load(format!(
+            "cannot locate the rb-bench worker binary to measure '{}'",
+            workload.name
+        )))
+    }
+}
+
+fn worker_binary() -> Option<PathBuf> {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_rb-bench") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let current = std::env::current_exe().ok()?;
+    if current.file_stem().and_then(|stem| stem.to_str()) == Some("rb-bench") {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+fn measure_in_child(
+    binary: &Path,
+    workload: &'static Workload,
+    size: i64,
+    budget: Duration,
+) -> Result<(Value, Duration), BenchError> {
+    let mut child = Command::new(binary)
+        .arg("--worker")
+        .arg(workload.name)
+        .arg(size.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            BenchError::Load(format!(
+                "could not start the '{}' worker: {error}",
+                workload.name
+            ))
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| BenchError::Load(format!("the '{}' worker has no stdout", workload.name)))?;
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut output = String::new();
+        let result = reader.read_to_string(&mut output).map(|_| output);
+        let _ = sender.send(result);
+    });
+
+    match receiver.recv_timeout(budget) {
+        Ok(Ok(output)) => {
+            let status = child.wait().map_err(|error| {
+                BenchError::Load(format!(
+                    "could not reap the '{}' worker: {error}",
+                    workload.name
+                ))
+            })?;
+            let _ = reader.join();
+            if !status.success() {
+                return Err(BenchError::Load(format!(
+                    "workload '{}' worker exited with {status}: {}",
+                    workload.name,
+                    output.trim()
+                )));
+            }
+            parse_worker_output(workload.name, &output)
+        }
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            Err(BenchError::Load(format!(
+                "could not read the '{}' worker output: {error}",
+                workload.name
+            )))
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            Err(BenchError::BudgetExceeded {
+                workload: workload.name.to_string(),
+                budget,
+            })
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            Err(BenchError::Load(format!(
+                "workload '{}' stopped without producing an answer",
+                workload.name
+            )))
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn measure_direct(workload: &'static Workload, size: i64) -> Result<Measurement, BenchError> {
+    ensure_workload_size_supported(workload, size)?;
+    let expected = (workload.expected)(size);
+    let started = Instant::now();
+    let answer = (workload.run)(size).map_err(BenchError::Load)?;
+    let elapsed = started.elapsed();
+    check_expected(workload, size, expected, answer, elapsed)
+}
+
+/// Runs one measurement for the hidden child-process mode and prints a single
+/// machine-readable line on stdout. The parent kills this process on timeout.
+#[cfg(not(test))]
+pub fn run_worker(arguments: &[String]) -> i32 {
+    if arguments.len() != 2 {
+        println!("ERR worker mode expects a workload and a size");
+        return 2;
+    }
+    if arguments[0] == HANG_WORKLOAD_NAME {
+        let size = match parse_size(&arguments[1]) {
+            Ok(size) => size,
+            Err(error) => {
+                println!("ERR {error}");
+                return 1;
+            }
+        };
+        if let Some(base) = std::env::var_os(HANG_SENTINEL_ENV) {
+            let base = PathBuf::from(base);
+            let _ = std::fs::write(base.with_extension("started"), b"started");
+            thread::sleep(Duration::from_millis(size as u64));
+            let _ = std::fs::write(base.with_extension("finished"), b"finished");
+        } else {
+            thread::sleep(Duration::from_millis(size as u64));
+        }
+        println!("OK 0 n {:016x}", 1.0f64.to_bits());
+        return 0;
+    }
+    let workload = match workload_named(&arguments[0]) {
+        Ok(workload) => workload,
+        Err(error) => {
+            println!("ERR {error}");
+            return 1;
+        }
+    };
+    let size = match parse_size(&arguments[1]) {
+        Ok(size) => size,
+        Err(error) => {
+            println!("ERR {error}");
+            return 1;
+        }
+    };
+    match measure_direct(workload, size) {
+        Ok(measurement) => match encode_worker_answer(&measurement) {
+            Ok(line) => {
+                println!("{line}");
+                0
+            }
+            Err(error) => {
+                println!("ERR {error}");
+                1
+            }
+        },
+        Err(error) => {
+            println!("ERR {error}");
+            1
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn encode_worker_answer(measurement: &Measurement) -> Result<String, BenchError> {
+    let nanos = measurement.elapsed.as_nanos();
+    match &measurement.answer {
+        Value::Number(number) => Ok(format!("OK {nanos} n {:016x}", number.to_bits())),
+        Value::Text(text) => Ok(format!("OK {nanos} t {}", encode_hex(text.as_bytes()))),
+        other => Err(BenchError::Load(format!(
+            "workload '{}' returned an unsupported answer kind: {other:?}",
+            measurement.workload
+        ))),
+    }
+}
+
+fn parse_worker_output(workload: &str, output: &str) -> Result<(Value, Duration), BenchError> {
+    let line = output
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    if let Some(message) = line.strip_prefix("ERR ") {
+        return Err(BenchError::Load(format!(
+            "workload '{workload}' failed: {message}"
+        )));
+    }
+    let mut parts = line.splitn(4, ' ');
+    let (Some("OK"), Some(nanos), Some(tag), Some(payload)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(BenchError::Load(format!(
+            "workload '{workload}' worker produced an unreadable answer: {line:?}"
+        )));
+    };
+    let nanos: u64 = nanos.parse().map_err(|_| {
+        BenchError::Load(format!(
+            "workload '{workload}' worker reported an unreadable duration: {nanos:?}"
+        ))
+    })?;
+    let value = match tag {
+        "n" => {
+            let bits = u64::from_str_radix(payload, 16).map_err(|_| {
+                BenchError::Load(format!(
+                    "workload '{workload}' worker reported an unreadable number: {payload:?}"
+                ))
+            })?;
+            Value::Number(f64::from_bits(bits))
+        }
+        "t" => {
+            let bytes = decode_hex(payload).map_err(|error| {
+                BenchError::Load(format!(
+                    "workload '{workload}' worker reported unreadable text: {error}"
+                ))
+            })?;
+            let text = String::from_utf8(bytes).map_err(|error| {
+                BenchError::Load(format!(
+                    "workload '{workload}' worker reported non-UTF-8 text: {error}"
+                ))
+            })?;
+            Value::Text(text)
+        }
+        other => {
+            return Err(BenchError::Load(format!(
+                "workload '{workload}' worker reported an unknown answer tag: {other:?}"
+            )))
+        }
+    };
+    Ok((value, Duration::from_nanos(nanos)))
+}
+
+#[cfg(not(test))]
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
+    if !text.len().is_multiple_of(2) {
+        return Err("odd-length hex payload".to_string());
+    }
+    let mut decoded = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks(2) {
+        let high = hex_digit(pair[0])?;
+        let low = hex_digit(pair[1])?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+fn hex_digit(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("invalid hex digit {:?}", byte as char)),
+    }
 }
 
 /// Refuses a size whose reference answer cannot be materialized safely.
@@ -639,14 +952,30 @@ pub struct BaselineRow {
     pub wall_time_ms: f64,
 }
 
+/// True for the table's header row, whose first cell names the workload column.
+fn is_table_header(cells: &[&str]) -> bool {
+    cells
+        .first()
+        .is_some_and(|cell| cell.eq_ignore_ascii_case("workload"))
+}
+
+/// True for a markdown separator row such as `|---|---:|---:|---:|`.
+fn is_table_separator(cells: &[&str]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            !cell.is_empty() && cell.chars().all(|character| matches!(character, '-' | ':'))
+        })
+}
+
 /// Parses the data rows of a `BENCH.md` table.
 ///
 /// Header, separator, and prose lines are ignored. A row that names a known
 /// workload but carries the wrong number of cells, an unreadable size, or an
 /// unreadable wall time is an error rather than a silently skipped row, so a
-/// corrupted baseline cannot compare as if it had fewer workloads. A four-cell
-/// row with a numeric size but an unknown workload name is also an error, and a
-/// repeated `(workload, size)` row is refused.
+/// corrupted baseline cannot compare as if it had fewer workloads. Any other
+/// four-cell row is an error too, whether or not its size cell parses: a
+/// misspelled workload name must not silently shrink the baseline. A repeated
+/// `(workload, size)` row is refused.
 pub fn parse_baseline_markdown(text: &str) -> Result<Vec<BaselineRow>, String> {
     let mut rows: Vec<BaselineRow> = Vec::new();
     let known = workload_names();
@@ -656,6 +985,9 @@ pub fn parse_baseline_markdown(text: &str) -> Result<Vec<BaselineRow>, String> {
             continue;
         }
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if is_table_header(&cells) || is_table_separator(&cells) {
+            continue;
+        }
         if cells.len() != 4 {
             if cells.first().is_some_and(|cell| known.contains(cell)) {
                 return Err(format!(
@@ -667,14 +999,11 @@ pub fn parse_baseline_markdown(text: &str) -> Result<Vec<BaselineRow>, String> {
             continue;
         }
         if !known.contains(&cells[0]) {
-            if cells[1].parse::<i64>().is_ok() {
-                return Err(format!(
-                    "baseline row names unknown workload `{}`; choose one of: {}",
-                    cells[0],
-                    known.join(", ")
-                ));
-            }
-            continue;
+            return Err(format!(
+                "baseline row names unknown workload `{}`; choose one of: {}",
+                cells[0],
+                known.join(", ")
+            ));
         }
         let size: i64 = cells[1].parse().map_err(|_| {
             format!(
@@ -782,6 +1111,18 @@ pub fn comparison_table(path: &Path) -> Result<String, String> {
         return Err(format!(
             "{} has no benchmark rows to compare",
             path.display()
+        ));
+    }
+    let missing: Vec<&str> = WORKLOADS
+        .iter()
+        .map(|workload| workload.name)
+        .filter(|name| !baseline.iter().any(|row| row.workload == *name))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{} is missing benchmark rows for: {}",
+            path.display(),
+            missing.join(", ")
         ));
     }
 
@@ -1142,6 +1483,83 @@ mod tests {
                 parse_wall_time_ms(malformed).is_err(),
                 "{malformed:?} should be refused as a wall time"
             );
+        }
+    }
+
+    #[test]
+    fn edge_the_hidden_hang_workload_is_not_a_listed_workload() {
+        assert!(
+            !workload_names().contains(&HANG_WORKLOAD_NAME),
+            "the timeout helper must not appear in the baseline or the usage text"
+        );
+        assert_eq!(HANG_SENTINEL_ENV, "RB_BENCH_HANG_SENTINEL");
+    }
+
+    #[test]
+    fn edge_worker_output_parser_decodes_well_formed_lines() {
+        let (number, elapsed) = parse_worker_output("fibonacci", "OK 42 n 4008000000000000\n")
+            .expect("a well-formed number line parses");
+        assert_eq!(elapsed, Duration::from_nanos(42));
+        assert_eq!(number, Value::Number(3.0));
+
+        let (text, elapsed) =
+            parse_worker_output("concat", "OK 7 t 6869\n").expect("a well-formed text line parses");
+        assert_eq!(elapsed, Duration::from_nanos(7));
+        assert_eq!(text, Value::Text("hi".to_string()));
+    }
+
+    #[test]
+    fn edge_worker_output_parser_refuses_an_error_line() {
+        let error = parse_worker_output("fibonacci", "ERR the workload broke\n")
+            .expect_err("an ERR line must be a load error, never an answer");
+        match error {
+            BenchError::Load(message) => assert!(
+                message.contains("the workload broke"),
+                "the load error should carry the worker message: {message}"
+            ),
+            other => panic!("expected a load error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edge_worker_output_parser_refuses_unreadable_fields() {
+        for (line, expected) in [
+            ("OK 12 n\n", "unreadable answer"),
+            (
+                "OK not-a-number n 4008000000000000\n",
+                "unreadable duration",
+            ),
+            ("OK 12 n nothex\n", "unreadable number"),
+            ("OK 12 x 4008000000000000\n", "unknown answer tag"),
+        ] {
+            let error = parse_worker_output("workload", line)
+                .expect_err("a malformed worker line must be a load error");
+            match error {
+                BenchError::Load(message) => assert!(
+                    message.contains(expected),
+                    "{line:?} should mention {expected:?}: {message}"
+                ),
+                other => panic!("expected a load error for {line:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn edge_worker_output_parser_refuses_bad_text_payloads() {
+        for (line, expected) in [
+            ("OK 12 t ff\n", "non-UTF-8 text"),
+            ("OK 12 t abc\n", "unreadable text"),
+            ("OK 12 t zz\n", "unreadable text"),
+        ] {
+            let error = parse_worker_output("workload", line)
+                .expect_err("a bad text payload must be a load error");
+            match error {
+                BenchError::Load(message) => assert!(
+                    message.contains(expected),
+                    "{line:?} should mention {expected:?}: {message}"
+                ),
+                other => panic!("expected a load error for {line:?}, got {other:?}"),
+            }
         }
     }
 }
