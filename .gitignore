@@ -34,5 +34,9 @@ secrets.txt
 # Test outputs
 *.tmp
 *.log
+
+# Per-run benchmark timings are machine-specific; the checked-in landing-machine
+# baseline (answers + timings and its hardware note) is BENCH.md.
+BENCH_TIMINGS.md
 # Local build redirect (my machine puts target/ on F); not project config.
 .cargo/
