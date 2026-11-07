@@ -15,7 +15,7 @@ mod bench;
 
 use std::fs;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bench::{BenchError, DEFAULT_BUDGET};
 use redblue::Value;
@@ -39,8 +39,12 @@ fn bench_md_exists_and_names_all_workloads() {
         "BENCH.md should name the hardware it was measured on:\n{text}"
     );
     assert!(
-        text.contains("ms") && text.to_lowercase().contains("workload"),
-        "BENCH.md should be a table with a workload column and wall times:\n{text}"
+        text.to_lowercase().contains("workload") && text.contains("Answer"),
+        "BENCH.md should be a table with a workload column and verified answers:\n{text}"
+    );
+    assert!(
+        !text.contains("Wall time"),
+        "the checked-in baseline must not record volatile wall times:\n{text}"
     );
 
     let mut seen: Vec<&str> = Vec::new();
@@ -50,7 +54,7 @@ fn bench_md_exists_and_names_all_workloads() {
             continue;
         }
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
-        if cells.len() != 4 || !WORKLOAD_NAMES.contains(&cells[0]) {
+        if cells.len() != 3 || !WORKLOAD_NAMES.contains(&cells[0]) {
             continue;
         }
         let name = cells[0];
@@ -160,6 +164,12 @@ fn edge_singleton_sizes_are_exact() {
         Value::Number(1.0)
     );
     assert_eq!(
+        bench::run_workload("primes", 1, DEFAULT_BUDGET)
+            .expect("primes below 1")
+            .answer,
+        Value::Number(0.0)
+    );
+    assert_eq!(
         bench::run_workload("primes", 2, DEFAULT_BUDGET)
             .expect("primes below 2")
             .answer,
@@ -240,6 +250,42 @@ fn edge_a_hung_workload_fails_loudly_at_its_budget() {
 }
 
 #[test]
+fn edge_exhausted_shared_budget_is_reported_as_exhausted() {
+    let error = bench::run_all(Duration::ZERO)
+        .expect_err("an exhausted shared budget must fail before the first workload starts");
+
+    match &error {
+        BenchError::BudgetExhausted { workload, budget } => {
+            assert_eq!(workload, WORKLOAD_NAMES[0]);
+            assert_eq!(*budget, Duration::ZERO);
+        }
+        other => panic!("expected an exhausted-budget error, got {other:?}"),
+    }
+
+    let message = error.to_string();
+    assert!(
+        message.contains("exhausted"),
+        "the error should say the shared budget ran out: {message}"
+    );
+    assert!(
+        !message.contains("did not finish within"),
+        "a workload that never started must not claim its own timeout: {message}"
+    );
+}
+
+#[test]
+fn edge_bench_md_path_is_the_working_directory() {
+    if std::env::var_os("RB_BENCH_OUTPUT").is_none() {
+        let cwd = std::env::current_dir().expect("the test process has a working directory");
+        assert_eq!(
+            bench::bench_md_path(),
+            cwd.join("BENCH.md"),
+            "the installed binary must write relative to where it was invoked"
+        );
+    }
+}
+
+#[test]
 fn edge_reference_computation_is_inside_the_budget() {
     let budget = Duration::from_millis(20);
     let started = Instant::now();
@@ -250,16 +296,29 @@ fn edge_reference_computation_is_inside_the_budget() {
         "the caller waited {:?}; the reference computation escaped the budget",
         started.elapsed()
     );
-    match error {
-        BenchError::BudgetExceeded {
+    match &error {
+        BenchError::SizeTooLarge {
             workload,
-            budget: reported,
+            size,
+            max,
         } => {
-            assert_eq!(workload, "fibonacci");
-            assert_eq!(reported, budget);
+            assert_eq!(*workload, "fibonacci");
+            assert_eq!(*size, i64::MAX);
+            assert_eq!(*max, bench::max_size("fibonacci").expect("known workload"));
         }
-        other => panic!("expected a budget error for an oversized reference, got {other:?}"),
+        other => {
+            panic!("expected a size-too-large error for an oversized reference, got {other:?}")
+        }
     }
+    let message = error.to_string();
+    assert!(
+        message.contains("exceeds the checkable maximum"),
+        "the refusal should say the size is too large: {message}"
+    );
+    assert!(
+        !message.contains("did not finish within"),
+        "an oversized size never started, so it must not claim a timeout: {message}"
+    );
 }
 
 #[test]
@@ -281,10 +340,57 @@ fn edge_oversized_references_are_refused_before_allocation() {
             started.elapsed()
         );
         assert!(
-            matches!(error, BenchError::BudgetExceeded { .. }),
-            "{name} at {size} should report an uncheckable size as over budget, got {error:?}"
+            matches!(error, BenchError::SizeTooLarge { .. }),
+            "{name} at {size} should report an uncheckable size as too large, got {error:?}"
         );
     }
+}
+
+#[test]
+fn edge_size_limit_boundary_is_exact_per_workload() {
+    for name in WORKLOAD_NAMES {
+        let max = bench::max_size(name).expect("a listed workload has a maximum");
+        assert!(
+            max >= bench::default_size(name).expect("a listed workload has a default"),
+            "`{name}` must be able to check its default size"
+        );
+        let row = bench::run_workload(name, max, DEFAULT_BUDGET).unwrap_or_else(|error| {
+            panic!("`{name}` at its maximum {max} should be measurable: {error}")
+        });
+        assert_eq!(row.workload, *name);
+        assert_eq!(row.size, max);
+
+        let error = bench::check_size_supported(name, max + 1)
+            .expect_err("one past the checkable maximum must be refused");
+        match &error {
+            BenchError::SizeTooLarge {
+                workload,
+                size,
+                max: reported,
+            } => {
+                assert_eq!(*workload, *name);
+                assert_eq!(*size, max + 1);
+                assert_eq!(*reported, max);
+            }
+            other => panic!("expected a size-too-large error for `{name}`, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn edge_fibonacci_is_capped_where_f64_is_exact() {
+    let max = bench::max_size("fibonacci").expect("known workload");
+    assert_eq!(max, 78, "fib(78) is the last value below 2^53");
+    let row = bench::run_workload("fibonacci", max, DEFAULT_BUDGET)
+        .expect("the capped maximum should still run and check");
+    assert_eq!(row.answer, Value::Number(8_944_394_323_791_464.0));
+
+    let error = bench::run_workload("fibonacci", max + 1, DEFAULT_BUDGET)
+        .expect_err("one past the exact f64 range must be refused");
+    assert!(
+        matches!(error, BenchError::SizeTooLarge { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -355,9 +461,20 @@ fn bench_markdown_shape_names_answers_and_hardware() {
     let markdown = bench::render_markdown(&rows, &bench::hardware_note());
 
     assert!(markdown.to_lowercase().contains("hardware"), "{markdown}");
-    assert!(markdown.contains("Wall time"), "{markdown}");
+    assert!(markdown.contains("Answer"), "{markdown}");
+    assert!(
+        !markdown.contains("Wall time"),
+        "the checked-in baseline should be reproducible, not timing-dependent:\n{markdown}"
+    );
     for name in WORKLOAD_NAMES {
         assert!(markdown.contains(name), "missing {name}:\n{markdown}");
+    }
+
+    let timings = bench::render_timings(&rows, &bench::hardware_note());
+    assert!(timings.contains("Wall time"), "{timings}");
+    assert!(timings.contains("ms"), "{timings}");
+    for name in WORKLOAD_NAMES {
+        assert!(timings.contains(name), "missing {name}:\n{timings}");
     }
 }
 
@@ -383,4 +500,153 @@ fn edge_cli_unknown_workload_with_size_is_a_usage_error() {
         2,
         "an unknown workload without a size is a usage error"
     );
+}
+
+#[test]
+fn edge_cli_too_many_arguments_is_a_usage_error() {
+    assert_eq!(
+        bench::run_cli(&[
+            "fibonacci".to_string(),
+            "20".to_string(),
+            "extra".to_string(),
+        ]),
+        2,
+        "a third argument must be refused rather than silently ignored"
+    );
+}
+
+#[test]
+fn edge_unknown_workload_error_names_every_workload() {
+    let error = bench::run_workload("bogus", 1, DEFAULT_BUDGET)
+        .expect_err("an unknown workload must be refused");
+    assert!(matches!(error, BenchError::Usage(_)), "{error:?}");
+    let message = error.to_string();
+    for name in WORKLOAD_NAMES {
+        assert!(
+            message.contains(name),
+            "the unknown-workload error should list `{name}`: {message}"
+        );
+    }
+}
+
+#[test]
+fn edge_size_parsing_boundaries() {
+    assert_eq!(bench::parse_size("0").expect("zero is legal"), 0);
+    assert_eq!(
+        bench::parse_size(&i64::MAX.to_string()).expect("i64::MAX parses"),
+        i64::MAX
+    );
+    let overflow =
+        bench::parse_size("9223372036854775808").expect_err("one past i64::MAX must fail");
+    assert!(matches!(overflow, BenchError::Usage(_)), "{overflow:?}");
+}
+
+fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rb-bench-{tag}-{}-{unique}", std::process::id()));
+    fs::create_dir_all(&dir).expect("the temporary directory is creatable");
+    dir
+}
+
+#[test]
+fn edge_cli_no_arguments_runs_all_and_writes_a_parseable_baseline() {
+    let dir = unique_temp_dir("baseline");
+    let path = dir.join("BENCH.md");
+
+    assert_eq!(
+        bench::run_cli_with_path(&[], &path),
+        0,
+        "the documented no-argument runner should succeed"
+    );
+
+    let text = fs::read_to_string(&path).expect("the no-argument runner writes its baseline");
+    assert!(
+        !text.contains("Wall time"),
+        "the checked-in baseline should not record volatile wall times:\n{text}"
+    );
+    let mut seen: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() != 3 || !WORKLOAD_NAMES.contains(&cells[0]) {
+            continue;
+        }
+        let size: i64 = cells[1]
+            .parse()
+            .unwrap_or_else(|_| panic!("a whole size, got {:?}", cells[1]));
+        assert!(
+            !cells[2].is_empty(),
+            "the written baseline should carry the verified answer for `{}`",
+            cells[0]
+        );
+        assert_eq!(
+            size,
+            bench::default_size(cells[0]).expect("the row names a known workload"),
+            "the written baseline should record `{}` at its default size",
+            cells[0]
+        );
+        seen.push(cells[0]);
+    }
+    let mut expected = WORKLOAD_NAMES.to_vec();
+    expected.sort_unstable();
+    seen.sort_unstable();
+    assert_eq!(
+        seen, expected,
+        "the written baseline should have one row per workload:\n{text}"
+    );
+
+    let timings = bench::timings_path(&path);
+    let timing_text =
+        fs::read_to_string(&timings).expect("the no-argument runner writes its timing artifact");
+    assert!(
+        timing_text.contains("Wall time") && timing_text.contains("ms"),
+        "the timing artifact should carry machine-specific wall times:\n{timing_text}"
+    );
+    for name in WORKLOAD_NAMES {
+        assert!(
+            timing_text.contains(name),
+            "the timing artifact should carry `{name}`:\n{timing_text}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edge_cli_no_arguments_reports_a_write_failure() {
+    let dir = unique_temp_dir("write-failure");
+
+    assert_eq!(
+        bench::run_cli_with_path(&[], &dir),
+        1,
+        "a baseline path that cannot be written should fail loudly"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edge_workload_names_are_unique_and_defaults_are_positive() {
+    let names = bench::workload_names();
+    let mut unique = names.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "a duplicated workload name would make rows ambiguous: {names:?}"
+    );
+    for name in &names {
+        assert!(!name.is_empty(), "a workload name must not be empty");
+        assert!(
+            bench::default_size(name).expect("a listed workload has a default") > 0,
+            "`{name}` should have a positive default size"
+        );
+    }
 }

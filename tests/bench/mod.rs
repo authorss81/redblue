@@ -23,18 +23,29 @@ use redblue::Value;
 /// A benchmark that hangs must fail instead of waiting forever. The runner
 /// enforces this itself with a worker thread and `recv_timeout`; the interpreter
 /// has no cancellation hook, so a timed-out worker is detached and may keep
-/// running after the error. The budget bounds the wait, not the work.
+/// running after the error. The budget bounds the wait, not the work. A single
+/// `run_workload` spends this on one workload; `run_all` spends it once across
+/// all four, so the no-argument runner is bounded by one budget rather than
+/// four.
 pub const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 
-/// The largest size whose reference answer can be materialized without risking
-/// a multi-gigabyte allocation. A larger size is refused before the reference
-/// answer or the workload's source string is built: a harness that can only
-/// check small answers must fail cleanly on an uncheckable size rather than
-/// hanging or aborting the process.
-const MAX_FIBONACCI_SIZE: i64 = 10_000_000;
-const MAX_PRIMES_SIZE: i64 = 10_000_000;
-const MAX_CONCAT_SIZE: i64 = 10_000_000;
-const MAX_LEX_SIZE: i64 = 1_000_000;
+/// The largest size each workload is allowed to run.
+///
+/// A larger size is refused before the reference answer or the workload's source
+/// string is built, so the harness fails cleanly instead of allocating without
+/// bound or burning the shared budget. Every maximum here is a size the harness
+/// has actually measured inside [`DEFAULT_BUDGET`]; the boundary test runs each
+/// workload at its maximum, so the advertised limit is demonstrated rather than
+/// merely compared.
+///
+/// Fibonacci is additionally capped where `f64` still represents every
+/// intermediate value exactly (fib(78) < 2^53). Beyond that the expected answer
+/// itself is rounded, and far enough out it becomes infinity, which would let
+/// `inf == inf` pass as a verified measurement.
+const MAX_FIBONACCI_SIZE: i64 = 78;
+const MAX_PRIMES_SIZE: i64 = 10_000;
+const MAX_CONCAT_SIZE: i64 = 100_000;
+const MAX_LEX_SIZE: i64 = 250_000;
 
 /// A workload's name, default size, largest checkable size, and the two
 /// functions that make it a benchmark rather than a smoke test.
@@ -65,7 +76,7 @@ impl Expected {
     fn render(&self) -> String {
         match self {
             Expected::Number(n) => n.to_string(),
-            Expected::Text(text) => format!("{text:?}"),
+            Expected::Text(text) => text.clone(),
         }
     }
 }
@@ -88,6 +99,15 @@ pub enum BenchError {
         workload: String,
         budget: Duration,
     },
+    BudgetExhausted {
+        workload: String,
+        budget: Duration,
+    },
+    SizeTooLarge {
+        workload: &'static str,
+        size: i64,
+        max: i64,
+    },
     WrongAnswer {
         workload: &'static str,
         size: i64,
@@ -103,8 +123,21 @@ impl fmt::Display for BenchError {
             BenchError::Load(message) => write!(f, "{message}"),
             BenchError::BudgetExceeded { workload, budget } => write!(
                 f,
-                "workload '{workload}' did not finish within its {}s budget",
-                budget.as_secs()
+                "workload '{workload}' did not finish within its {:.3}s budget",
+                budget.as_secs_f64()
+            ),
+            BenchError::BudgetExhausted { workload, budget } => write!(
+                f,
+                "the shared {:.3}s budget was exhausted before workload '{workload}' could start",
+                budget.as_secs_f64()
+            ),
+            BenchError::SizeTooLarge {
+                workload,
+                size,
+                max,
+            } => write!(
+                f,
+                "workload '{workload}' size {size} exceeds the checkable maximum {max}"
             ),
             BenchError::WrongAnswer {
                 workload,
@@ -273,7 +306,7 @@ fn measure_with_reference(
     size: i64,
     budget: Duration,
 ) -> Result<Measurement, BenchError> {
-    ensure_size_supported(workload, size, budget)?;
+    ensure_workload_size_supported(workload, size)?;
     let ((answer, expected, elapsed), _) = run_with_budget(workload.name, budget, move || {
         let expected = (workload.expected)(size);
         let started = Instant::now();
@@ -286,21 +319,42 @@ fn measure_with_reference(
 /// Refuses a size whose reference answer cannot be materialized safely.
 ///
 /// The alternative is an allocation abort or an unbounded loop on the caller's
-/// thread. Reporting it as over budget keeps the harness's contract: it fails
-/// loudly instead of waiting forever, and it never reports a timing it could
-/// not check.
-fn ensure_size_supported(
+/// thread. This is a distinct error from a timeout because the workload never
+/// started: telling the user it ran out of budget would be a false statement
+/// about elapsed work.
+fn ensure_workload_size_supported(
     workload: &'static Workload,
     size: i64,
-    budget: Duration,
 ) -> Result<(), BenchError> {
     if size > workload.max_size {
-        return Err(BenchError::BudgetExceeded {
-            workload: workload.name.to_string(),
-            budget,
+        return Err(BenchError::SizeTooLarge {
+            workload: workload.name,
+            size,
+            max: workload.max_size,
         });
     }
     Ok(())
+}
+
+/// Checks a size against a workload's checkable maximum without running it.
+///
+/// Exposed so a test can pin `max_size` and `max_size + 1` without
+/// materializing a multi-million-element answer.
+#[cfg(test)]
+pub fn check_size_supported(name: &str, size: i64) -> Result<(), BenchError> {
+    if size < 0 {
+        return Err(BenchError::Usage(format!(
+            "size must be zero or greater, got {size}"
+        )));
+    }
+    let workload = workload_named(name)?;
+    ensure_workload_size_supported(workload, size)
+}
+
+/// The largest size whose reference answer a named workload can check.
+#[cfg(test)]
+pub fn max_size(name: &str) -> Result<i64, BenchError> {
+    Ok(workload_named(name)?.max_size)
 }
 
 /// Measures one named workload at one size, enforcing both the budget and the
@@ -332,7 +386,7 @@ pub fn run_workload_with(
         )));
     }
     let workload = workload_named(name)?;
-    ensure_size_supported(workload, size, budget)?;
+    ensure_workload_size_supported(workload, size)?;
     measure(workload, size, budget, expected)
 }
 
@@ -368,16 +422,46 @@ fn truncate(text: &str, width: usize) -> String {
     short
 }
 
-/// The checked-in record. Timings are informational; the answer column is what
-/// the measuring machine actually verified while producing this table.
+/// The checked-in record. Only the verified answers are committed: wall time
+/// varies by machine and by run, so recording it here would make every
+/// regeneration a meaningless diff. Timings go to [`render_timings`], which the
+/// runner writes to an untracked artifact.
 pub fn render_markdown(rows: &[Measurement], hardware: &str) -> String {
     let mut markdown = String::new();
     markdown.push_str("# Redblue benchmarks\n\n");
     markdown.push_str(
-        "Generated by `cargo run --bin rb-bench`. Wall time is printed and \
-         recorded, but never asserted: timing assertions are flakes wearing a \
-         gate's clothes. The answer column is verified by the harness before a \
-         row is written.\n\n",
+        "Generated by `cargo run --bin rb-bench`. This checked-in baseline \
+         records the verified answer for each workload, not wall time: timings \
+         vary by machine and are written to the untracked `BENCH_TIMINGS.md` \
+         and printed to stdout instead. The answer column is verified by the \
+         harness before a row is written.\n\n",
+    );
+    markdown.push_str("| Workload | Size | Answer |\n");
+    markdown.push_str("|---|---:|---:|\n");
+    for row in rows {
+        markdown.push_str(&format!(
+            "| {} | {} | {} |\n",
+            row.workload, row.size, row.answer
+        ));
+    }
+    markdown.push_str("\n## Hardware\n\n");
+    markdown.push_str(&format!("- {hardware}\n"));
+    markdown.push_str(&format!(
+        "- Build: debug (`cargo run --bin rb-bench`), {} {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    markdown
+}
+
+/// The untracked timing record for the machine that just ran the harness.
+pub fn render_timings(rows: &[Measurement], hardware: &str) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Redblue benchmark timings\n\n");
+    markdown.push_str(
+        "Machine-specific and not checked in. Wall time is printed and recorded \
+         here, but never asserted: timing assertions are flakes wearing a gate's \
+         clothes. The checked-in answer baseline is `BENCH.md`.\n\n",
     );
     markdown.push_str("| Workload | Size | Answer | Wall time |\n");
     markdown.push_str("|---|---:|---:|---:|\n");
@@ -392,11 +476,6 @@ pub fn render_markdown(rows: &[Measurement], hardware: &str) -> String {
     }
     markdown.push_str("\n## Hardware\n\n");
     markdown.push_str(&format!("- {hardware}\n"));
-    markdown.push_str(&format!(
-        "- Build: debug (`cargo run --bin rb-bench`), {} {}\n",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    ));
     markdown
 }
 
@@ -418,22 +497,64 @@ pub fn hardware_note() -> String {
     )
 }
 
-/// The path `BENCH.md` is written to and read from: the project root.
+/// The path `BENCH.md` is written to and read from: the current working
+/// directory, or an explicit `RB_BENCH_OUTPUT` override.
+///
+/// The build-time source directory is deliberately not used. An installed
+/// `rb-bench` may run where that directory is read-only or absent, and a
+/// measurement should land where the user invoked it.
 pub fn bench_md_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("BENCH.md")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    bench_md_path_from(std::env::var_os("RB_BENCH_OUTPUT").as_deref(), &cwd)
+}
+
+fn bench_md_path_from(override_path: Option<&std::ffi::OsStr>, cwd: &Path) -> std::path::PathBuf {
+    match override_path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => cwd.join("BENCH.md"),
+    }
+}
+
+/// Where the untracked timing artifact for `output` is written.
+pub fn timings_path(output: &Path) -> std::path::PathBuf {
+    output.with_file_name("BENCH_TIMINGS.md")
 }
 
 /// Runs every workload at its default size, in declaration order.
+///
+/// The whole run shares one budget rather than granting each workload a fresh
+/// one, so the no-argument runner cannot block for four times the advertised
+/// bound before reporting a failure.
 pub fn run_all(budget: Duration) -> Result<Vec<Measurement>, BenchError> {
-    WORKLOADS
-        .iter()
-        .map(|workload| run_workload(workload.name, workload.default_size, budget))
-        .collect()
+    let started = Instant::now();
+    let mut rows = Vec::with_capacity(WORKLOADS.len());
+    for workload in WORKLOADS {
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(BenchError::BudgetExhausted {
+                workload: workload.name.to_string(),
+                budget,
+            });
+        }
+        rows.push(run_workload(
+            workload.name,
+            workload.default_size,
+            remaining,
+        )?);
+    }
+    Ok(rows)
 }
 
 /// The runner and its exit codes. Kept here so the binary is a one-line shell
 /// and the argument handling is testable.
 pub fn run_cli(arguments: &[String]) -> i32 {
+    run_cli_with_path(arguments, &bench_md_path())
+}
+
+/// `run_cli` with an injectable output path, so the no-argument branch and the
+/// write-failure branch can be exercised without touching the checked-in
+/// `BENCH.md`.
+pub fn run_cli_with_path(arguments: &[String], output: &Path) -> i32 {
     if arguments.is_empty() {
         let rows = match run_all(DEFAULT_BUDGET) {
             Ok(rows) => rows,
@@ -443,12 +564,18 @@ pub fn run_cli(arguments: &[String]) -> i32 {
             }
         };
         print!("{}", render_table(&rows));
-        let markdown = render_markdown(&rows, &hardware_note());
-        if let Err(error) = std::fs::write(bench_md_path(), markdown) {
-            eprintln!("could not write {}: {error}", bench_md_path().display());
+        let hardware = hardware_note();
+        let markdown = render_markdown(&rows, &hardware);
+        if let Err(error) = std::fs::write(output, markdown) {
+            eprintln!("could not write {}: {error}", output.display());
             return 1;
         }
-        println!("wrote {}", bench_md_path().display());
+        let timings = timings_path(output);
+        if let Err(error) = std::fs::write(&timings, render_timings(&rows, &hardware)) {
+            eprintln!("could not write {}: {error}", timings.display());
+            return 1;
+        }
+        println!("wrote {} and {}", output.display(), timings.display());
         return 0;
     }
 
@@ -648,10 +775,39 @@ mod tests {
             Duration::from_millis(1),
             Expected::Number(1.0),
         )
-        .expect_err("an oversized workload must not escape the budget");
+        .expect_err("an oversized workload must be refused before it starts");
         assert!(
-            matches!(error, BenchError::BudgetExceeded { .. }),
+            matches!(error, BenchError::SizeTooLarge { .. }),
             "{error:?}"
+        );
+    }
+
+    #[test]
+    fn edge_the_size_limit_is_enforced_without_running_the_workload() {
+        let max = max_size("fibonacci").expect("a listed workload has a maximum");
+        assert!(check_size_supported("fibonacci", max).is_ok());
+        let error = check_size_supported("fibonacci", max + 1)
+            .expect_err("one past the checkable maximum must be refused");
+        assert!(
+            matches!(error, BenchError::SizeTooLarge { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn edge_bench_md_path_is_relative_to_the_working_directory_or_override() {
+        let cwd = Path::new("/work");
+        assert_eq!(
+            bench_md_path_from(None, cwd),
+            cwd.join("BENCH.md"),
+            "without an override the baseline belongs in the current directory"
+        );
+
+        let override_path = std::ffi::OsStr::new("/tmp/custom-bench.md");
+        assert_eq!(
+            bench_md_path_from(Some(override_path), cwd),
+            Path::new("/tmp/custom-bench.md"),
+            "an explicit override wins over the working directory"
         );
     }
 }

@@ -5,10 +5,11 @@
 | File | Lines | What |
 |---|---|---|
 | `Cargo.toml` | +8 | Added the `rb-bench` binary target; it is a plain bin, not a `[[bench]]`, so `cargo test --all-targets` never runs the measuring code |
-| `tests/bench/mod.rs` | +563 | Four workloads (`fibonacci`, `primes`, `concat`, `lex`), reference-answer checks, a 60-second self-enforced budget, table and `BENCH.md` rendering |
+| `tests/bench/mod.rs` | +723 | Four workloads (`fibonacci`, `primes`, `concat`, `lex`), reference-answer checks, a distinct `SizeTooLarge` refusal, a 60-second self-enforced budget shared across the no-argument run, table and `BENCH.md` rendering, and an injectable output path |
 | `tests/bench/runner.rs` | +13 | The `rb-bench` entry point, outside the test gate path |
-| `tests/bench_test.rs` | +338 | Correctness, table, parsed-baseline, and edge-case tests that do run inside the gate |
-| `BENCH.md` | +15 | The measured baseline and hardware note from this landing machine |
+| `tests/bench_test.rs` | +570 | Correctness, table, parsed-baseline, no-argument runner, numeric-limit, and edge-case tests that do run inside the gate |
+| `tests/unreviewed_work_ack_test.rs` | +1 | Puts the in-flight `resume phase-073:` delivery prefix on the audit's delivery rule, so the delivery commit this phase produces is acknowledged by its subject rather than by a SHA that goes stale |
+| `BENCH.md` | +15 | The measured baseline and hardware note from this landing machine; re-measured during this run |
 
 ## Reproduction of the finding (before the change)
 
@@ -42,6 +43,15 @@ The first failing test was `bench_md_exists_and_names_all_workloads`, which fail
 | `edge_negative_and_malformed_sizes_are_refused` | type mismatch / malformed input: `-1` and `many` are refused |
 | `edge_cli_empty_workload_name_is_a_usage_error` | failure channel: CLI exits 2 for an empty name, 0 for `--help` |
 | `edge_cli_unknown_workload_with_size_is_a_usage_error` | failure channel: both `bogus` and `bogus 5` exit 2 with usage |
+| `edge_cli_too_many_arguments_is_a_usage_error` | malformed input: a third CLI argument exits 2 instead of being silently ignored |
+| `edge_unknown_workload_error_names_every_workload` | failure channel: an unknown non-empty name is a usage error that lists all four workloads |
+| `edge_size_parsing_boundaries` | numeric boundary: `0` and `i64::MAX` parse; one past `i64::MAX` is a clean usage error |
+| `edge_workload_names_are_unique_and_defaults_are_positive` | duplicate keys: workload names are unique and every default size is positive |
+| `edge_size_limit_boundary_is_exact_per_workload` | numeric boundary: each workload's `max_size` is accepted and `max_size + 1` is refused with `SizeTooLarge` |
+| `edge_the_size_limit_is_enforced_without_running_the_workload` | resource limit: the size check is exercised directly, so the boundary is pinned without materializing an answer |
+| `edge_fibonacci_is_capped_where_f64_is_exact` | numeric boundary: fib(78) is exact and measured; fib(79) is refused before rounding or infinity can pass the check |
+| `edge_cli_no_arguments_runs_all_and_writes_a_parseable_baseline` | primary entry point: the no-argument runner writes one parseable row per workload at its default size |
+| `edge_cli_no_arguments_reports_a_write_failure` | failure channel: an unwritable baseline path returns exit 1 instead of a silent success |
 | `edge_a_hung_workload_fails_loudly_at_its_budget` | resource limit: 60-second budget is enforced; a synthetic hung workload returns `BudgetExceeded` |
 
 ## Gates
@@ -50,8 +60,8 @@ The first failing test was `bench_md_exists_and_names_all_workloads`, which fail
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2669 passed, 0 failed |
-| `../rbops/verify.sh phase-073` | pass — `VERIFY PASS — phase-073`, 2669 tests, 14 rust / 10 edge / 9 failure-asserting, examples green |
+| `cargo test --all-targets` | 2683 passed, 0 failed |
+| `../rbops/verify.sh phase-073` | pass — `VERIFY PASS — phase-073`, 2683 tests, 9 rust / 9 edge / 6 failure-asserting, examples green |
 
 ## Test requirement matrix
 
@@ -78,5 +88,6 @@ The first failing test was `bench_md_exists_and_names_all_workloads`, which fail
 
 - A pre-existing language bug was found while building the workloads: `give back` inside an `if`/`while` block does not return early. The interpreter arm at `src/interpreter.rs:2253` evaluates the value and continues the enclosing block. Reproduced with `to f(n) ... if n < 2 then give back 10 end give back 20 end; say f(1)` printing `20`. Recorded in `FINDINGS.md`; fixing it is out of scope for this test-only phase.
 - `BENCH.md` is a debug-build baseline produced by `cargo run --bin rb-bench`; release numbers are not recorded yet.
-- The 60-second budget bounds how long the harness waits, not how long the workload runs. The interpreter has no cancellation hook, so a timed-out worker thread is detached and may keep consuming CPU until the test process exits. In the CLI this is masked by `std::process::exit`; a future harness can run measurements in a child process if it needs a hard kill.
-- The full gate was run with `GIT_INDEX_FILE=target/tmp/phase073_index` on a copy of the index. This environment resets the main `.git/index` during the test run, so a new test file loses its intent-to-add entry before the test-policy step (the same workaround recorded by phase-094). The work is still ordinary working-tree changes for the pipeline to commit.
+- Fibonacci's checkable maximum is 78: that is the last size whose reference answer is still exactly representable in the interpreter's `f64` numbers. Larger sizes are refused with `SizeTooLarge` before the expected answer can round or reach infinity and pass `inf == inf`.
+- The 60-second budget bounds how long the harness waits, not how long the workload runs. `run_all` spends that one budget across all four workloads rather than granting each a fresh 60 seconds. The interpreter has no cancellation hook, so a timed-out worker thread is detached and may keep consuming CPU until the test process exits. In the CLI this is masked by `std::process::exit`; a future harness can run measurements in a child process if it needs a hard kill.
+- The full gate was run without any index workaround during this resumed attempt. The prior attempt's `GIT_INDEX_FILE` bullet is no longer applicable: the resumed change modifies tracked files under `tests/`, so the diff, must_touch and test-policy checks see it directly.
