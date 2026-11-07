@@ -13,6 +13,14 @@ categories = ["compiler", "development-tools"]
 name = "rb"
 path = "src/main.rs"
 
+# The benchmark harness. It is a plain binary, not a `[[bench]]` target: a
+# `[[bench]]` is built and executed by `cargo test --all-targets`, and a
+# measurement that writes `BENCH.md` must not run inside the test gate. The
+# workloads' correctness checks do run there, via `tests/bench_test.rs`.
+[[bin]]
+name = "rb-bench"
+path = "tests/bench/runner.rs"
+
 # `cdylib` is what makes the WebAssembly playground module: it is the crate type
 # that emits a `.wasm` and exports every `#[no_mangle]` symbol the library
 # defines, which is what `wasm/redblue.js` calls. Built with:

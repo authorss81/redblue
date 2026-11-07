@@ -34,5 +34,8 @@ secrets.txt
 # Test outputs
 *.tmp
 *.log
+
+# Benchmark timings are machine-specific; only the verified answers are tracked.
+BENCH_TIMINGS.md
 # Local build redirect (my machine puts target/ on F); not project config.
 .cargo/
