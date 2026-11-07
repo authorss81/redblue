@@ -44,35 +44,37 @@ A comparison against [`authorss81/Ipp`](https://github.com/authorss81/Ipp) and [
 
 ---
 
-## 3. Real-World Practical Apps (The Dogfooding Ladder)
+## 3. Real-World Practical Apps (The `authorss81/rb-apps` Incubator Track)
 
-To move Redblue from synthetic test cases (`corpus/*.rb`) into a battle-tested language, the following practical applications are queued:
+To move Redblue from synthetic test cases (`corpus/*.rb`) into a battle-tested language, practical applications are queued. 
+**Per Section 13, these applications live in `authorss81/rb-apps`, NOT in `redblue`'s compiler repository.** 
+They run in the dedicated `rb-apps` pipeline powered by autonomous OpenCode agents, consuming the compiled `rb` toolchain:
 
-### Phase 132: `rb-httpd` — Micro Web Server in Pure Redblue
+### App-Phase 001 (`app-httpd`): Micro Web Server in Pure Redblue
 - **Goal**: A concurrent HTTP/1.1 web server written in Redblue that routes requests, serves static assets, and parses JSON payloads.
 - **What it tests**: Socket stability, string parsing under load, timeout handling, and error recovery.
 
-### Phase 133: `rb-todo` — Production CLI Tool
+### App-Phase 002 (`app-todo`): Production CLI Tool
 - **Goal**: A modern, colorful task and project management CLI tool with subcommands (`add`, `list`, `done`), flags, and persistent file storage.
 - **What it tests**: CLI argument parsing (`argparse`), terminal colors, and JSON file serialization.
 
-### Phase 134: `rb-markdown` — Pure Redblue Markdown Parser
+### App-Phase 003 (`app-markdown`): Pure Redblue Markdown Parser
 - **Goal**: A CommonMark-compliant Markdown parser that converts Markdown documents into HTML.
 - **What it tests**: String slicing, nested list parsing, and regex engine performance.
 
-### Phase 135: `rb-kv` — Embedded Persistent Key-Value Store
+### App-Phase 004 (`app-kv`): Embedded Persistent Key-Value Store
 - **Goal**: An embedded ACID key-value database written entirely in Redblue using an append-only write-ahead log (WAL) and memory-mapped index.
 - **What it tests**: File I/O reliability, binary encoding/decoding, crash recovery, and transaction rollback.
 
-### Phase 136: `rb-ssg` — Static Site Generator
+### App-Phase 005 (`app-ssg`): Static Site Generator
 - **Goal**: A fast documentation and blog generator that parses markdown files with YAML/JSON frontmatter, applies layout templates, and emits clean static HTML.
 - **What it tests**: Recursive directory traversal, template interpolation, and string formatting at scale.
 
-### Phase 137: `rb-git` — Content-Addressable Version Control
+### App-Phase 006 (`app-git`): Content-Addressable Version Control
 - **Goal**: A minimal Git implementation in Redblue that computes SHA object hashes, creates blob/tree/commit objects, and checks out branches.
 - **What it tests**: Cryptographic hashing, raw byte manipulation, tree recursion, and filesystem state tracking.
 
-### Phase 138: `rb-lsp` — Language Server Protocol Daemon
+### App-Phase 007 (`app-lsp`): Language Server Protocol Daemon
 - **Goal**: A stdio JSON-RPC daemon that speaks LSP to VS Code and Neovim, providing live syntax diagnostics, symbol outlines, hover docstrings, and code formatting.
 - **What it tests**: Inter-process communication, JSON-RPC streaming, parser error tolerance, and non-blocking I/O.
 
@@ -200,9 +202,10 @@ Rather than building the Operating System inside the `authorss81/redblue` langua
    - **Do not modify `rbops/phases.json` now.**
    - Keeping the active queue fixed at 126 phases ensures the current CI pipeline runs uninterrupted without merge conflicts or moving target completion dates.
 2. **At Phase 126 Completion**:
-   - Append queued future phases (Visual Polish, Real-World Apps, VM Optimizations, Memory Safety, and Dependency Tooling) to the end of `rbops/phases.json`.
-   - Initialize `authorss81/rbos` as a standalone repo for OS development.
-   - Because `phases.json` operates strictly as a FIFO queue, they will seamlessly trigger one by one.
+   - **In `authorss81/redblue` (`rbops/phases.json`)**: Append only core compiler toolchain phases (Visual Polish, VM Optimizations, Memory Safety, Hermetic Dependencies, and the Precision Audit Track).
+   - **In `authorss81/rbos`**: Initialize the OS repository for the userspace simulator / shell (Stage 1).
+   - **In `authorss81/rb-apps`**: Initialize the application incubator repository with App-Phases 001–007 (`app-todo`, `app-markdown`, `app-ssg`, `app-lsp`, `app-httpd`, `app-kv`, `app-git`).
+   - Because each repository operates with its own independent autonomous pipeline, they execute in parallel without competing for tokens or CI concurrency.
 
 ---
 
@@ -435,9 +438,36 @@ Every major programming language in history has suffered from "shallow feature" 
 
 To ensure Redblue achieves world-class mathematical and architectural rigor, **Phases 159–165 establish a systematic audit and remediation track across all existing modules**:
 
-### Phase 159: Comprehensive "Shallow Implementation" & Edge Survey
-- **Goal**: Systematic audit of all standard library functions and runtime conversions against known language design traps.
-- **Focus**: Identify any place where Redblue used a naive truncation, an unbuffered copy, an inconsistent argument order, or an unconstrained type conversion.
+### 14.1 Guarding Survey Phases Against 3-Hour Timeouts and Infinite Loops
+A major historical failure mode in autonomous coding pipelines is the **"Open-Ended Survey Trap"**:
+- When an agent is given an unconstrained task like *"Audit all modules for shallow bugs"*, it spends 3 hours reading source files, tracing calls, and planning in memory.
+- At the 3-hour runner timeout (`RBOPS_MODEL_TIMEOUT: 10800`), the workflow is cancelled before any commit is pushed.
+- All discovered defects are lost. On the next tick, `dispatch.sh` selects the same phase again from scratch, causing an **infinite loop of timeouts and wasted compute**.
+
+#### Mandatory Pipeline Safeguards for Audits:
+1. **20-Minute Incremental Checkpointing Rule**:
+   - The agent must append each discovered defect immediately to a checked-in file ([`docs/AUDIT_FINDINGS.md`](file:///c:/Users/USER/3D%20Objects/wsl/redblue/docs/AUDIT_FINDINGS.md)) and commit every 20 minutes or after every 2 modules inspected.
+   - If a runner times out, the WIP branch preserves all findings recorded up to that minute. The resumed runner adopts the checkpoint and continues directly with the remaining modules.
+2. **Partitioned Sub-Phases (Max 8 Modules per Run)**:
+   - Rather than one monolithic survey, the audit is split into three bounded, concrete sub-phases:
+     - **Phase 159-A: Numeric, Arithmetic & Temporal Precision Audit** (`number`, `math`, `decimal`, `matrix`, `statistics`, `time`).
+     - **Phase 159-B: Text, Unicode & Collection Semantics Audit** (`text`, `list`, `record`, `collections`, `formats`, `json`, `csv`, `toml`).
+     - **Phase 159-C: Systems, Network, VFS & Concurrency Audit** (`files`, `path`, `vfs`, `network`, `logging`, `crypto`, `cli`).
+3. **Standardized 5-Column Finding Schema**:
+   - Every finding must be documented with an executable reproduction snippet:
+     `| Module | Function / Path | Shallow Implementation | Reproduction Snippet | Target Remediation Phase |`
+
+### Phase 159-A: Numeric, Arithmetic & Temporal Precision Audit
+- **Modules**: `number`, `math`, `decimal`, `matrix`, `statistics`, `time`.
+- **Target Flaws**: Negative timestamp floor division (pre-epoch dates), float overflow on extreme finite means, `NaN` / `Infinity` leaks, and subnormal float rounding.
+
+### Phase 159-B: Text, Unicode & Collection Semantics Audit
+- **Modules**: `text`, `list`, `record`, `collections`, `formats`, `json`, `csv`, `toml`.
+- **Target Flaws**: Multi-byte emoji slicing, combining accent corruption, shallow list copies, and non-deterministic map iteration orders.
+
+### Phase 159-C: Systems, Network, VFS & Concurrency Audit
+- **Modules**: `files`, `path`, `vfs`, `network`, `logging`, `crypto`, `cli`.
+- **Target Flaws**: Unbuffered large file reads, socket timeout leaks, unmasked secrets in error messages, and cross-platform path separator inconsistencies.
 
 ### Phase 160: Unicode Grapheme Cluster & Scalar Slicing Rigor
 - **Goal**: Upgrade string operations (`split`, `slice`, `length`, `at`) from naive UTF-8 byte or code unit indexing to **Unicode Extended Grapheme Clusters**.
