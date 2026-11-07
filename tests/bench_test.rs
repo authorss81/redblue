@@ -24,7 +24,7 @@ const WORKLOAD_NAMES: &[&str] = &["fibonacci", "primes", "concat", "lex"];
 
 #[test]
 fn bench_md_exists_and_names_all_workloads() {
-    let path = bench::bench_md_path();
+    let path = bench::checked_in_baseline_path();
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} should exist: {error}", path.display()));
 
@@ -43,8 +43,8 @@ fn bench_md_exists_and_names_all_workloads() {
         "BENCH.md should be a table with a workload column and verified answers:\n{text}"
     );
     assert!(
-        !text.contains("Wall time"),
-        "the checked-in baseline must not record volatile wall times:\n{text}"
+        text.contains("Wall time"),
+        "the checked-in baseline must record a measured wall time so a later phase can detect a regression:\n{text}"
     );
 
     let mut seen: Vec<&str> = Vec::new();
@@ -54,7 +54,7 @@ fn bench_md_exists_and_names_all_workloads() {
             continue;
         }
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
-        if cells.len() != 3 || !WORKLOAD_NAMES.contains(&cells[0]) {
+        if cells.len() != 4 || !WORKLOAD_NAMES.contains(&cells[0]) {
             continue;
         }
         let name = cells[0];
@@ -65,6 +65,13 @@ fn bench_md_exists_and_names_all_workloads() {
             )
         });
         let recorded = cells[2];
+        let wall_time = bench::parse_wall_time_ms(cells[3]).unwrap_or_else(|error| {
+            panic!("BENCH.md wall time for `{name}` is malformed: {error}")
+        });
+        assert!(
+            wall_time >= 0.0 && wall_time.is_finite(),
+            "BENCH.md wall time for `{name}` should be a real measurement, got {wall_time}"
+        );
         assert!(
             !seen.contains(&name),
             "BENCH.md has more than one row for `{name}`:\n{text}"
@@ -463,11 +470,26 @@ fn bench_markdown_shape_names_answers_and_hardware() {
     assert!(markdown.to_lowercase().contains("hardware"), "{markdown}");
     assert!(markdown.contains("Answer"), "{markdown}");
     assert!(
-        !markdown.contains("Wall time"),
-        "the checked-in baseline should be reproducible, not timing-dependent:\n{markdown}"
+        markdown.contains("Wall time") && markdown.contains("ms"),
+        "the checked-in baseline should record the measured wall time:\n{markdown}"
     );
     for name in WORKLOAD_NAMES {
         assert!(markdown.contains(name), "missing {name}:\n{markdown}");
+        let row = markdown
+            .lines()
+            .find(|line| line.starts_with(&format!("| {name} |")))
+            .unwrap_or_else(|| panic!("missing {name} row:\n{markdown}"));
+        let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+        assert_eq!(
+            cells.len(),
+            4,
+            "the {name} row should carry a wall time:\n{row}"
+        );
+        assert!(
+            bench::parse_wall_time_ms(cells[3]).is_ok(),
+            "the {name} wall time should be a measurement, got {:?}",
+            cells[3]
+        );
     }
 
     let timings = bench::render_timings(&rows, &bench::hardware_note());
@@ -564,8 +586,8 @@ fn edge_cli_no_arguments_runs_all_and_writes_a_parseable_baseline() {
 
     let text = fs::read_to_string(&path).expect("the no-argument runner writes its baseline");
     assert!(
-        !text.contains("Wall time"),
-        "the checked-in baseline should not record volatile wall times:\n{text}"
+        text.contains("Wall time"),
+        "the written baseline should record the measured wall times:\n{text}"
     );
     let mut seen: Vec<&str> = Vec::new();
     for line in text.lines() {
@@ -574,7 +596,7 @@ fn edge_cli_no_arguments_runs_all_and_writes_a_parseable_baseline() {
             continue;
         }
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
-        if cells.len() != 3 || !WORKLOAD_NAMES.contains(&cells[0]) {
+        if cells.len() != 4 || !WORKLOAD_NAMES.contains(&cells[0]) {
             continue;
         }
         let size: i64 = cells[1]
@@ -584,6 +606,12 @@ fn edge_cli_no_arguments_runs_all_and_writes_a_parseable_baseline() {
             !cells[2].is_empty(),
             "the written baseline should carry the verified answer for `{}`",
             cells[0]
+        );
+        assert!(
+            bench::parse_wall_time_ms(cells[3]).is_ok(),
+            "the written baseline should carry a wall time for `{}`, got {:?}",
+            cells[0],
+            cells[3]
         );
         assert_eq!(
             size,
@@ -647,6 +675,179 @@ fn edge_workload_names_are_unique_and_defaults_are_positive() {
         assert!(
             bench::default_size(name).expect("a listed workload has a default") > 0,
             "`{name}` should have a positive default size"
+        );
+    }
+}
+
+#[test]
+fn edge_recorded_wall_times_are_present_for_every_workload() {
+    let path = bench::checked_in_baseline_path();
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} should exist: {error}", path.display()));
+
+    let mut seen: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() != 4 || !WORKLOAD_NAMES.contains(&cells[0]) {
+            continue;
+        }
+        let milliseconds = bench::parse_wall_time_ms(cells[3]).unwrap_or_else(|error| {
+            panic!(
+                "the checked-in baseline must record a usable wall time for `{}`: {error}",
+                cells[0]
+            )
+        });
+        assert!(
+            milliseconds.is_finite() && milliseconds >= 0.0,
+            "`{}` should record a real wall time, got {milliseconds}",
+            cells[0]
+        );
+        seen.push(cells[0]);
+    }
+
+    let mut expected = WORKLOAD_NAMES.to_vec();
+    expected.sort_unstable();
+    seen.sort_unstable();
+    assert_eq!(
+        seen, expected,
+        "every workload needs a recorded wall time in BENCH.md:\n{text}"
+    );
+}
+
+#[test]
+fn edge_malformed_recorded_wall_time_is_rejected() {
+    for malformed in ["", "1.0", "fast ms", "-1 ms", "NaN ms", "inf ms"] {
+        let error = bench::parse_wall_time_ms(malformed)
+            .expect_err("a malformed wall-time cell must be refused, not ignored");
+        assert!(
+            !error.is_empty(),
+            "the refusal for {malformed:?} should carry a message"
+        );
+    }
+
+    assert_eq!(
+        bench::parse_wall_time_ms("0 ms").expect("zero is a legal timing"),
+        0.0
+    );
+    assert!(
+        bench::parse_wall_time_ms("1.500 ms").expect("a positive timing is legal") > 0.0,
+        "a positive wall time should parse"
+    );
+}
+
+#[test]
+fn edge_baseline_parser_reads_every_recorded_row() {
+    let rows = bench::parse_baseline_markdown(
+        "# Redblue benchmarks\n\n\
+         | Workload | Size | Answer | Wall time |\n\
+         |---|---:|---:|---:|\n\
+         | fibonacci | 20 | 6765 | 1.250 ms |\n\
+         | primes | 1000 | 168 | 2.000 ms |\n",
+    )
+    .expect("a well-formed baseline parses");
+
+    assert_eq!(rows.len(), 2, "both data rows should be read");
+    assert_eq!(rows[0].workload, "fibonacci");
+    assert_eq!(rows[0].size, 20);
+    assert_eq!(rows[0].answer, "6765");
+    assert_eq!(rows[0].wall_time_ms, 1.25);
+}
+
+#[test]
+fn edge_baseline_parser_rejects_a_corrupted_known_row() {
+    let size_error = bench::parse_baseline_markdown("| fibonacci | many | 6765 | 1.250 ms |\n")
+        .expect_err("a corrupted size on a known workload must not be skipped");
+    assert!(
+        size_error.contains("fibonacci"),
+        "the refusal should name the workload: {size_error}"
+    );
+
+    let time_error = bench::parse_baseline_markdown("| primes | 1000 | 168 | slow ms |\n")
+        .expect_err("a corrupted wall time on a known workload must not be skipped");
+    assert!(
+        time_error.contains("primes"),
+        "the refusal should name the workload: {time_error}"
+    );
+}
+
+#[test]
+fn edge_comparison_is_advisory_and_handles_a_zero_baseline() {
+    let baseline = vec![
+        bench::BaselineRow {
+            workload: "fibonacci".to_string(),
+            size: 20,
+            answer: "6765".to_string(),
+            wall_time_ms: 1.0,
+        },
+        bench::BaselineRow {
+            workload: "primes".to_string(),
+            size: 1000,
+            answer: "168".to_string(),
+            wall_time_ms: 0.0,
+        },
+    ];
+    let current = vec![bench::Measurement {
+        workload: "fibonacci",
+        size: 20,
+        answer: Value::Number(6765.0),
+        elapsed: Duration::from_millis(2),
+    }];
+
+    let table = bench::render_comparison(&baseline, &current);
+    assert!(table.contains("fibonacci"), "{table}");
+    assert!(
+        table.contains("2.00x"),
+        "the ratio is advisory, not a gate: {table}"
+    );
+    assert!(table.contains("primes"), "{table}");
+    assert!(
+        table.contains("n/a"),
+        "a zero baseline must not become an infinite ratio: {table}"
+    );
+    assert!(
+        table.contains("not run"),
+        "a workload with no measurement should say so: {table}"
+    );
+}
+
+#[test]
+fn edge_render_markdown_records_each_measurement_wall_time() {
+    let rows = vec![
+        bench::Measurement {
+            workload: "fibonacci",
+            size: 20,
+            answer: Value::Number(6765.0),
+            elapsed: Duration::from_millis(1),
+        },
+        bench::Measurement {
+            workload: "primes",
+            size: 1000,
+            answer: Value::Number(168.0),
+            elapsed: Duration::from_millis(2),
+        },
+    ];
+    let markdown = bench::render_markdown(&rows, "CPU: test machine");
+
+    assert!(
+        markdown.contains("CPU: test machine"),
+        "the baseline should carry its hardware note:\n{markdown}"
+    );
+    for row in &rows {
+        let prefix = format!("| {} |", row.workload);
+        let line = markdown
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("missing {} row:\n{markdown}", row.workload));
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        assert_eq!(cells.len(), 4, "the row should carry a wall time:\n{line}");
+        assert_eq!(
+            cells[3],
+            format!("{:.3} ms", row.elapsed.as_secs_f64() * 1000.0),
+            "the recorded wall time should be the measured elapsed time:\n{line}"
         );
     }
 }

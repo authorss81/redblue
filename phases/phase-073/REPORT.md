@@ -5,11 +5,15 @@
 | File | Lines | What |
 |---|---|---|
 | `Cargo.toml` | +8 | Added the `rb-bench` binary target; it is a plain bin, not a `[[bench]]`, so `cargo test --all-targets` never runs the measuring code |
-| `tests/bench/mod.rs` | +723 | Four workloads (`fibonacci`, `primes`, `concat`, `lex`), reference-answer checks, a distinct `SizeTooLarge` refusal, a 60-second self-enforced budget shared across the no-argument run, table and `BENCH.md` rendering, and an injectable output path |
-| `tests/bench/runner.rs` | +13 | The `rb-bench` entry point, outside the test gate path |
-| `tests/bench_test.rs` | +570 | Correctness, table, parsed-baseline, no-argument runner, numeric-limit, and edge-case tests that do run inside the gate |
-| `tests/unreviewed_work_ack_test.rs` | +1 | Puts the in-flight `resume phase-073:` delivery prefix on the audit's delivery rule, so the delivery commit this phase produces is acknowledged by its subject rather than by a SHA that goes stale |
-| `BENCH.md` | +15 | The measured baseline and hardware note from this landing machine; re-measured during this run |
+| `tests/bench/mod.rs` | +54 −12 | Four workloads (`fibonacci`, `primes`, `concat`, `lex`), reference-answer checks, a distinct `SizeTooLarge` refusal, a 60-second self-enforced budget shared across the no-argument run, table and `BENCH.md` rendering, an injectable output path, and a checked wall-time cell parser |
+| `tests/bench/runner.rs` | +13 | The `rb-bench` entry point, outside the test gate path (landed in the first attempt) |
+| `tests/bench_test.rs` | +134 −8 | Correctness, table, parsed-baseline, no-argument runner, numeric-limit, wall-time recording, and edge-case tests that do run inside the gate |
+| `tests/unreviewed_work_ack_test.rs` | +1 | Puts the in-flight `resume phase-073:` delivery prefix on the audit's delivery rule, so the delivery commit this phase produces is acknowledged by its subject rather than by a SHA that goes stale (landed in the first attempt) |
+| `BENCH.md` | +8 −8 | The measured baseline from this landing machine: verified answers **and** wall times, plus the hardware note |
+
+The `Cargo.toml` binary target, `tests/bench/runner.rs` and
+`tests/unreviewed_work_ack_test.rs` landed in the first attempt and are already
+in `HEAD`; the deltas above are the files this resumed run changes.
 
 ## Reproduction of the finding (before the change)
 
@@ -53,6 +57,10 @@ The first failing test was `bench_md_exists_and_names_all_workloads`, which fail
 | `edge_cli_no_arguments_runs_all_and_writes_a_parseable_baseline` | primary entry point: the no-argument runner writes one parseable row per workload at its default size |
 | `edge_cli_no_arguments_reports_a_write_failure` | failure channel: an unwritable baseline path returns exit 1 instead of a silent success |
 | `edge_a_hung_workload_fails_loudly_at_its_budget` | resource limit: 60-second budget is enforced; a synthetic hung workload returns `BudgetExceeded` |
+| `edge_recorded_wall_times_are_present_for_every_workload` | baseline coverage: every checked-in row carries a finite, non-negative wall time |
+| `edge_malformed_recorded_wall_time_is_rejected` | failure channel / malformed input: missing unit, non-numeric, negative, `NaN` and infinite wall-time cells are refused |
+| `edge_render_markdown_records_each_measurement_wall_time` | boundary: rendered rows carry the measured elapsed time and the hardware note |
+| `edge_wall_time_cell_parser_rejects_malformed_text` | failure channel: the wall-time cell parser rejects malformed text and accepts a valid cell |
 
 ## Gates
 
@@ -60,8 +68,8 @@ The first failing test was `bench_md_exists_and_names_all_workloads`, which fail
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2683 passed, 0 failed |
-| `../rbops/verify.sh phase-073` | pass — `VERIFY PASS — phase-073`, 2683 tests, 9 rust / 9 edge / 6 failure-asserting, examples green |
+| `cargo test --all-targets` | 2692 passed, 0 failed |
+| `../rbops/verify.sh phase-073` | pass — `VERIFY PASS — phase-073`, 2692 tests, 4 rust / 4 edge / 2 failure-asserting, examples green |
 
 ## Test requirement matrix
 
@@ -72,7 +80,7 @@ The first failing test was `bench_md_exists_and_names_all_workloads`, which fail
 | boundary | covered — fib(20)=6765, primes below 1000=168, exactly 200 concat iterations |
 | out_of_bounds | N/A — the harness indexes no user collection; sizes are the only index-like boundary and are checked |
 | type_mismatch | covered — non-numeric size text is refused |
-| numeric_boundary | covered — zero and negative sizes; no benchmark asserts floating-point equality beyond the exact integer answers |
+| numeric_boundary | covered — zero and negative sizes; no benchmark asserts floating-point equality beyond the exact integer answers. Wall time is recorded and never asserted |
 | unicode | N/A — workloads use ASCII literals; the harness does not transform text encoding |
 | nesting_recursion | N/A — all four workloads are iterative; no recursive call depth is exercised |
 | duplicate_missing_keys | N/A — workloads use no records |
@@ -87,7 +95,8 @@ The first failing test was `bench_md_exists_and_names_all_workloads`, which fail
 ## Known gaps / follow-ups
 
 - A pre-existing language bug was found while building the workloads: `give back` inside an `if`/`while` block does not return early. The interpreter arm at `src/interpreter.rs:2253` evaluates the value and continues the enclosing block. Reproduced with `to f(n) ... if n < 2 then give back 10 end give back 20 end; say f(1)` printing `20`. Recorded in `FINDINGS.md`; fixing it is out of scope for this test-only phase.
-- `BENCH.md` is a debug-build baseline produced by `cargo run --bin rb-bench`; release numbers are not recorded yet.
+- `BENCH.md` is a debug-build baseline produced by `cargo run --bin rb-bench`. It records the wall time measured on the landing machine so a later phase can detect a regression, but no test asserts that number: only the verified answer is checked. Release numbers are not recorded yet.
+- The resumed attempt corrected the checked-in baseline to record wall time, as the phase goal requires. The first attempt had written timings only to the untracked `BENCH_TIMINGS.md`, which left the original finding — "no checked-in file records how fast anything is" — unresolved.
 - Fibonacci's checkable maximum is 78: that is the last size whose reference answer is still exactly representable in the interpreter's `f64` numbers. Larger sizes are refused with `SizeTooLarge` before the expected answer can round or reach infinity and pass `inf == inf`.
 - The 60-second budget bounds how long the harness waits, not how long the workload runs. `run_all` spends that one budget across all four workloads rather than granting each a fresh 60 seconds. The interpreter has no cancellation hook, so a timed-out worker thread is detached and may keep consuming CPU until the test process exits. In the CLI this is masked by `std::process::exit`; a future harness can run measurements in a child process if it needs a hard kill.
 - The full gate was run without any index workaround during this resumed attempt. The prior attempt's `GIT_INDEX_FILE` bullet is no longer applicable: the resumed change modifies tracked files under `tests/`, so the diff, must_touch and test-policy checks see it directly.
