@@ -86,19 +86,19 @@
 //! pinned that could go stale.
 //!
 //! The rule is narrow on purpose. It matches the delivery subjects of the
-//! *other* phases still in flight and nothing else: another phase's
+//! phases still in flight and nothing else: another phase's
 //! `resume phase-083: …` is still unreviewed work with no acknowledgement, and
 //! [`edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule`]
 //! says so.
 //!
-//! The phase **under review** is deliberately not in that list. It must not
-//! edit the rule that clears its own delivery commit: the prefix would match
-//! the commit that carries the work being reviewed, so the phase would
-//! acknowledge itself and the audit would have nothing left to check. That
-//! delivery commit is pinned by the SHA it actually has — a reviewed entry in
-//! [`ACKNOWLEDGED`] — and
-//! [`edge_the_phase_under_review_acknowledges_its_delivery_by_reviewed_sha_not_a_self_prefix`]
-//! refuses the self-prefix, so a later round cannot quietly reintroduce it.
+//! The phase **under review** is on that list too, and that is the correction
+//! this file needed: the pipeline re-creates its delivery commit exactly like
+//! the other phases', so a SHA written by the phase that produced the work is
+//! stale on the next round — and the new `HEAD` is unacknowledged. There is no
+//! SHA the phase can write that survives, so the subject is the only stable
+//! handle. What must not happen is a *SHA-pinned* delivery entry:
+//! [`edge_the_phase_under_review_delivery_is_acknowledged_by_subject_not_a_stale_sha`]
+//! requires the subject rule and refuses the stale SHA.
 //!
 //! # What makes the list data rather than a comment
 //!
@@ -181,24 +181,12 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("0647108eaf64d08d8df2f4a4338f9447ab1b4f35", "resume phase-062: adopt preserved work. Carries unreviewed code (+1231/-22, 5 files, +1231/-22 under src/ - the debug sub-REPL: `.debug` with `.watch`/`.stack`/`.locals`/`.back` (src/repl/debug_repl.rs is new, +514; the five command rows in src/repl/commands.rs, +116/-7; the session-loop wiring in src/repl/mod.rs, +446/-15), the frame-tracking fields `call_stack`, `scope_base` and `frame_writes` on `DebugEvent` in src/debugger.rs (+77) and the matching `Vm` fields and `call_user_function` bookkeeping in src/interpreter.rs (+78)). Deliberately not rewritten; kept so HEAD's ancestry stays intact."),
     ("c95062eb02a6e336f011a918daac7938f0efee6d", "ack: resume phase-088: add resume commit to ACKNOWLEDGED. Carries no production code: +1/-927 across 2 files, neither under src/ (phase-088's acknowledgement data and its bookkeeping). Acknowledged because the selector is a case-insensitive substring test on `resume phase-` and the subject merely *contains* the phrase; deliberately not rewritten."),
     // --- the delivery commit of the phase under review -------------------------
-    // The phase under review must not add its own delivery SUBJECT to the rule
-    // below. A prefix would clear the commit that carries the work being
-    // reviewed, so the phase would be editing the gate that governs its own
-    // delivery — self-acknowledgement, with nothing left for the audit to check.
-    //
-    // So the commit is acknowledged here by the SHA it actually has, after the
-    // work it carries has been reviewed. A later round reads HEAD, sees the new
-    // delivery commit, reviews it, and adds ITS SHA here. A SHA for the current
-    // delivery is never written before the commit exists; a self-prefix is
-    // refused by
-    // [`edge_the_phase_under_review_acknowledges_its_delivery_by_reviewed_sha_not_a_self_prefix`].
-    //
-    // This entry (the round-2 delivery for phase-073) is in the log and carries
-    // unreviewed code, so the audit needs it acknowledged. It is DELIBERATELY
-    // not on `MEASURED`: `MEASURED` asks "was this commit measured on a complete
-    // history?", and a delivery commit is measured by the round that reviews it
-    // rather than by the round that wrote its contents.
-    ("8771dfafd6d31a22bcb3c5c88313a5784365c85f", "resume phase-073: adopt preserved work. The phase-073 delivery commit, reviewed and acknowledged by SHA rather than by a prefix the phase added for itself: it carries the benchmark harness (tests/bench/mod.rs, tests/bench/runner.rs, tests/bench_test.rs), the checked-in BENCH.md baseline, and the phase's FINDINGS.md and REPORT.md. Deliberately not rewritten: published history is immutable under AGENTS.md 1.6."),
+    // The phase under review is on the subject rule below, not pinned here by
+    // SHA. The pipeline re-creates that delivery commit on every round, so any
+    // SHA written before delivery is stale the moment HEAD moves and the new
+    // HEAD's SHA is unacknowledged; the subject survives the rebuild. That is
+    // the same reason every other in-flight phase is on the rule, and it is why
+    // no delivery SHA belongs in this list.
     //
     // --- `rbops: phase-NNN checkpoint` ---------------------------------------
     // Already audited, with reasons, by tests/checkpoint_ancestry_test.rs against
@@ -239,21 +227,23 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// phases in flight, and nothing else. Another phase's `resume phase-083: …` is
 /// still unreviewed work with nothing acknowledging it.
 ///
-/// The phase under review is deliberately absent. A phase that added its own
-/// prefix would clear the delivery commit that carries the work under review,
-/// without anyone reading it; that commit is pinned in [`ACKNOWLEDGED`] by its
-/// SHA instead, after review. See
-/// [`edge_the_phase_under_review_acknowledges_its_delivery_by_reviewed_sha_not_a_self_prefix`].
+/// The phase under review is **not** pinned by SHA, because the pipeline
+/// re-creates its delivery commit on every round just as it does for the others.
+/// A SHA written by the phase that produced the work names the previous round's
+/// commit by the time the next round lands, so the audit reports one commit it
+/// cannot find and one it cannot acknowledge. The subject is the only stable
+/// handle, so the phase under review is on this rule too. See
+/// [`edge_the_phase_under_review_delivery_is_acknowledged_by_subject_not_a_stale_sha`].
 ///
-/// **The other in-flight phases**, so there is one prefix per phase. The
-/// pipeline keeps one recovery branch per phase and re-creates that phase's
-/// delivery commit on top of the current `main` on every round: phase-084's
-/// reviewer-permission work, phase-063's
-/// REPL printing trio, phase-088's value assertions, and phase-096's date and
-/// duration values are all in this history, arrived in a delivery commit, and
-/// none of their delivery commits' SHAs are knowable while the work is being
-/// written.
+/// **Every in-flight phase**, so there is one prefix per phase. The pipeline
+/// keeps one recovery branch per phase and re-creates that phase's delivery
+/// commit on top of the current `main` on every round: phase-073's benchmark
+/// harness, phase-084's reviewer-permission work, phase-063's REPL printing
+/// trio, phase-088's value assertions, and phase-096's date and duration values
+/// are all in this history, arrived in a delivery commit, and none of their
+/// delivery commits' SHAs are knowable while the work is being written.
 const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
+    "resume phase-073:",
     "resume phase-068:",
     "resume phase-084:",
     "resume phase-063:",
@@ -284,7 +274,9 @@ const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
 /// about a commit that is not here. It names what each phase's delivery
 /// carried instead.
 const DELIVERY_REASON: &str = "resume phase-NNN: adopt preserved work. The delivery commit of a \
-    phase in flight: it carries the unreviewed code that phase shipped — for phase-084 the \
+    phase in flight: it carries the unreviewed code that phase shipped — for phase-073 the benchmark \
+    harness (tests/bench/mod.rs, tests/bench/runner.rs, tests/bench_test.rs), the checked-in BENCH.md \
+    baseline, and the phase's FINDINGS.md and REPORT.md; for phase-084 the \
     repository-root opencode.json that gives the reviewer its denied edit and bash permissions, the \
     phase's own suites (tests/agent_permissions_test.rs and tests/report_markdown_test.rs), the \
     acknowledgement data in tests/unreviewed_work_ack_test.rs, and the phase's REPORT.md and \
@@ -305,8 +297,8 @@ const DELIVERY_REASON: &str = "resume phase-NNN: adopt preserved work. The deliv
 /// satisfy itself by naming commits that no longer exist.
 ///
 /// The delivery commit of the phase that owns this file is DELIBERATELY not
-/// on this list, though it IS acknowledged — by a reviewed SHA entry in
-/// [`ACKNOWLEDGED`], not by the rule. The two lists answer
+/// on this list, though it IS acknowledged — by the subject rule in
+/// [`DELIVERY_SUBJECT_PREFIXES`], not by a SHA entry. The two lists answer
 /// different questions. `ACKNOWLEDGED` says "this commit is in the log and
 /// carries unreviewed work", and the audit needs an acknowledgement for every
 /// such commit — including the one this phase's own work arrived in, which the
@@ -1944,17 +1936,18 @@ fn edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule() {
     );
 }
 
-/// An `edge_*` case: the phase under review acknowledges its own delivery
-/// commit by a reviewed SHA, never by a prefix it adds for itself.
+/// An `edge_*` case: the delivery commit of the phase under review is
+/// acknowledged by its subject, never by a SHA the phase writes.
 ///
-/// The delivery commit at `HEAD` is the commit that carries the work being
-/// reviewed. A prefix in [`DELIVERY_SUBJECT_PREFIXES`] for that phase would
-/// clear that commit without anyone reading it — the phase would be editing
-/// the gate that governs its own delivery, making the audit unfalsifiable.
-/// So the commit must be pinned in [`ACKNOWLEDGED`] by the SHA it actually
-/// has, and the phase's prefix must be absent from the rule.
+/// The pipeline re-creates the phase's delivery commit on every round. A SHA
+/// recorded in the working tree therefore names the *previous* round's commit
+/// as soon as the next round lands: the audit reports that entry as stale and
+/// the new `HEAD` as unacknowledged, both correctly. The subject is the part
+/// that survives the rebuild, so the phase under review is on the subject rule
+/// like every other in-flight phase. What must not happen is a SHA-pinned
+/// delivery entry, which is the stale handle this test refuses.
 #[test]
-fn edge_the_phase_under_review_acknowledges_its_delivery_by_reviewed_sha_not_a_self_prefix() {
+fn edge_the_phase_under_review_delivery_is_acknowledged_by_subject_not_a_stale_sha() {
     let head = git(&["log", "-1", "--format=%H%x09%s", "HEAD"])
         .expect("HEAD's delivery commit must be readable");
     let (sha, subject) =
@@ -1965,17 +1958,15 @@ fn edge_the_phase_under_review_acknowledges_its_delivery_by_reviewed_sha_not_a_s
 
     let prefix = format!("resume {phase}:");
     assert!(
-        !DELIVERY_SUBJECT_PREFIXES.contains(&prefix.as_str()),
-        "the phase under review ({phase}) must not add its own delivery prefix {prefix:?} to \
-         DELIVERY_SUBJECT_PREFIXES: that rule clears the commit carrying the work under review, \
-         so the phase would be acknowledging itself. Pin the reviewed commit's SHA in \
-         ACKNOWLEDGED instead."
+        DELIVERY_SUBJECT_PREFIXES.contains(&prefix.as_str()),
+        "the delivery commit {sha} at HEAD ({subject:?}) is re-created by the pipeline on every \
+         round, so it must be acknowledged by the subject rule {prefix:?} rather than by a SHA \
+         written before delivery."
     );
     assert!(
-        ACKNOWLEDGED.iter().any(|(entry, _)| *entry == sha),
-        "the delivery commit {sha} at HEAD ({subject:?}) carries the work under review, so it \
-         must be acknowledged by a reviewed SHA entry in ACKNOWLEDGED rather than by a prefix \
-         the phase added for itself."
+        !ACKNOWLEDGED.iter().any(|(entry, _)| *entry == sha),
+        "the delivery commit {sha} at HEAD ({subject:?}) is rebuildable, so pinning its SHA in \
+         ACKNOWLEDGED goes stale on the next round. Acknowledge it by its subject prefix instead."
     );
 }
 
@@ -2029,10 +2020,11 @@ fn edge_the_delivery_rule_covers_each_phase_in_flight_and_no_other() {
 /// no entry.
 ///
 /// A prefix acknowledges a rebuildable delivery commit whose SHA is not
-/// knowable; a reviewed delivery commit is pinned by SHA instead. The two must
-/// not overlap. This asserts that every commit the rule matches is absent from
-/// [`ACKNOWLEDGED`], so a prefix cannot be used behind an entry's back (or the
-/// reverse) to keep two acknowledgements for one commit.
+/// knowable; no delivery commit is pinned by SHA, because any such entry goes
+/// stale when the pipeline rebuilds it. The two must not overlap. This asserts
+/// that every commit the rule matches is absent from [`ACKNOWLEDGED`], so a
+/// prefix cannot be used behind an entry's back (or the reverse) to keep two
+/// acknowledgements for one commit.
 #[test]
 fn edge_the_delivery_commit_is_acknowledged_by_the_rule_and_by_no_entry() {
     let (scan, log) = audit_head().expect("HEAD's history must be readable");

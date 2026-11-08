@@ -19,6 +19,7 @@ use redblue::analyzer;
 use redblue::lexer::Lexer;
 use redblue::parser;
 use redblue::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// The budget every harness workload runs under.
 ///
@@ -881,29 +882,77 @@ pub fn default_size(name: &str) -> Result<i64, BenchError> {
 }
 
 /// One table for all workloads, with wall time in milliseconds.
+///
+/// Columns are padded by terminal display width rather than by character count,
+/// so a wide (CJK) answer occupies the same number of cells as any other and
+/// the columns stay aligned in a terminal.
 pub fn render_table(rows: &[Measurement]) -> String {
     let mut table = String::new();
     table.push_str(&format!(
-        "{:<12} {:>8} {:>20} {:>14}\n",
-        "workload", "size", "answer", "wall time"
+        "{} {} {} {}\n",
+        pad_right("workload", 12),
+        pad_left("size", 8),
+        pad_left("answer", 20),
+        pad_left("wall time", 14)
     ));
     for row in rows {
+        let answer = truncate(&row.answer.to_string(), 20);
+        let elapsed = format!("{:.3} ms", row.elapsed.as_secs_f64() * 1000.0);
         table.push_str(&format!(
-            "{:<12} {:>8} {:>20} {:>11.3} ms\n",
-            row.workload,
-            row.size,
-            truncate(&row.answer.to_string(), 20),
-            row.elapsed.as_secs_f64() * 1000.0
+            "{} {} {} {}\n",
+            pad_right(row.workload, 12),
+            pad_left(&row.size.to_string(), 8),
+            pad_left(&answer, 20),
+            pad_left(&elapsed, 14)
         ));
     }
     table
 }
 
+/// Pad `text` on the left with spaces until it occupies `width` terminal cells.
+fn pad_left(text: &str, width: usize) -> String {
+    let padding = width.saturating_sub(text.width());
+    let mut padded = String::with_capacity(text.len() + padding);
+    for _ in 0..padding {
+        padded.push(' ');
+    }
+    padded.push_str(text);
+    padded
+}
+
+/// Pad `text` on the right with spaces until it occupies `width` terminal cells.
+fn pad_right(text: &str, width: usize) -> String {
+    let padding = width.saturating_sub(text.width());
+    let mut padded = String::with_capacity(text.len() + padding);
+    padded.push_str(text);
+    for _ in 0..padding {
+        padded.push(' ');
+    }
+    padded
+}
+
+/// Shorten `text` to at most `width` terminal cells, ending in `...` when it
+/// does not fit.
+///
+/// The budget is counted in display cells, not Unicode scalar values, so a wide
+/// (CJK) answer is cut when the terminal column budget is exhausted rather than
+/// at a character count that would draw past the column. The ellipsis is part of
+/// the budget.
 fn truncate(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if text.width() <= width {
         return text.to_string();
     }
-    let mut short: String = text.chars().take(width.saturating_sub(3)).collect();
+    let budget = width.saturating_sub(3);
+    let mut short = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        let cells = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + cells > budget {
+            break;
+        }
+        short.push(character);
+        used += cells;
+    }
     short.push_str("...");
     short
 }
@@ -1358,94 +1407,111 @@ pub fn run_cli(arguments: &[String]) -> i32 {
     run_cli_with_path(arguments, &bench_md_path())
 }
 
-/// `run_cli` with an injectable output path, so the no-argument branch and the
-/// write-failure branch can be exercised without touching the checked-in
-/// `BENCH.md`.
-pub fn run_cli_with_path(arguments: &[String], output: &Path) -> i32 {
+/// The action a command line selects, resolved before anything is measured.
+///
+/// Exposed so a test can assert that a named workload without an explicit size
+/// resolves to its declared default size, rather than only asserting that the
+/// command exited zero. `run_cli_with_path` selects through this same function,
+/// so the assertion covers the shipped selection path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliSelection<'a> {
+    /// Measure one workload at an explicit or default size.
+    Measure { name: &'a str, size: i64 },
+    /// Print usage and succeed.
+    Help,
+    /// Compare against the recorded baseline at this path.
+    Compare(&'a str),
+    /// Measure every workload at its default size and write the baseline.
+    All,
+}
+
+/// Resolve the command line into the action it selects.
+pub fn select_cli(arguments: &[String]) -> Result<CliSelection<'_>, BenchError> {
     if arguments
         .first()
         .is_some_and(|argument| argument == "--compare")
     {
         return match arguments {
-            [_, baseline] => compare_with_baseline(Path::new(baseline)),
-            _ => {
-                eprintln!("--compare takes exactly one baseline path");
-                eprintln!("{}", usage());
-                2
-            }
+            [_, baseline] => Ok(CliSelection::Compare(baseline)),
+            _ => Err(BenchError::Usage(
+                "--compare takes exactly one baseline path".to_string(),
+            )),
         };
     }
 
-    if arguments.is_empty() {
-        let rows = match run_all(DEFAULT_BUDGET) {
-            Ok(rows) => rows,
-            Err(error) => {
-                eprintln!("{error}");
-                return 1;
-            }
-        };
-        print!("{}", render_table(&rows));
-        let hardware = hardware_note();
-        let timings = timings_path(output);
-        if let Err(error) = std::fs::write(&timings, render_timings(&rows, &hardware)) {
-            eprintln!("could not write {}: {error}", timings.display());
-            return 1;
-        }
-        let markdown = render_markdown(&rows, &hardware);
-        if let Err(error) = std::fs::write(output, markdown) {
-            eprintln!("could not write {}: {error}", output.display());
-            return 1;
-        }
-        println!("wrote {} and {}", output.display(), timings.display());
-        return 0;
-    }
-
-    let selected: (&str, i64) = match arguments {
-        [name] if name == "--help" || name == "-h" => {
-            println!("{}", usage());
-            return 0;
-        }
-        [name] => match default_size(name) {
-            Ok(size) => (name.as_str(), size),
-            Err(error) => {
-                eprintln!("{error}");
-                eprintln!("{}", usage());
-                return 2;
-            }
-        },
+    match arguments {
+        [] => Ok(CliSelection::All),
+        [name] if name == "--help" || name == "-h" => Ok(CliSelection::Help),
+        [name] => Ok(CliSelection::Measure {
+            name: name.as_str(),
+            size: default_size(name)?,
+        }),
         [name, size] => {
-            let size = match parse_size(size) {
-                Ok(size) => size,
-                Err(error) => {
-                    eprintln!("{error}");
-                    eprintln!("{}", usage());
-                    return 2;
-                }
-            };
-            match default_size(name) {
-                Ok(_) => (name.as_str(), size),
-                Err(error) => {
-                    eprintln!("{error}");
-                    eprintln!("{}", usage());
-                    return 2;
-                }
-            }
+            let size = parse_size(size)?;
+            default_size(name)?;
+            Ok(CliSelection::Measure {
+                name: name.as_str(),
+                size,
+            })
         }
-        _ => {
+        _ => Err(BenchError::Usage(
+            "too many arguments: expected a workload and an optional size".to_string(),
+        )),
+    }
+}
+
+/// `run_cli` with an injectable output path, so the no-argument branch and the
+/// write-failure branch can be exercised without touching the checked-in
+/// `BENCH.md`.
+pub fn run_cli_with_path(arguments: &[String], output: &Path) -> i32 {
+    let selection = match select_cli(arguments) {
+        Ok(selection) => selection,
+        Err(error) => {
+            eprintln!("{error}");
             eprintln!("{}", usage());
             return 2;
         }
     };
 
-    match run_workload(selected.0, selected.1, DEFAULT_BUDGET) {
-        Ok(row) => {
-            print!("{}", render_table(&[row]));
+    match selection {
+        CliSelection::Compare(baseline) => compare_with_baseline(Path::new(baseline)),
+        CliSelection::All => {
+            let rows = match run_all(DEFAULT_BUDGET) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 1;
+                }
+            };
+            print!("{}", render_table(&rows));
+            let hardware = hardware_note();
+            let timings = timings_path(output);
+            if let Err(error) = std::fs::write(&timings, render_timings(&rows, &hardware)) {
+                eprintln!("could not write {}: {error}", timings.display());
+                return 1;
+            }
+            let markdown = render_markdown(&rows, &hardware);
+            if let Err(error) = std::fs::write(output, markdown) {
+                eprintln!("could not write {}: {error}", output.display());
+                return 1;
+            }
+            println!("wrote {} and {}", output.display(), timings.display());
             0
         }
-        Err(error) => {
-            eprintln!("{error}");
-            1
+        CliSelection::Help => {
+            println!("{}", usage());
+            0
         }
+        CliSelection::Measure { name, size } => match run_workload(name, size, DEFAULT_BUDGET) {
+            Ok(row) => {
+                print!("{}", render_table(&[row]));
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        },
     }
 }
 

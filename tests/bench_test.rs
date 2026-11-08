@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bench::{BenchError, DEFAULT_BUDGET};
 use redblue::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const WORKLOAD_NAMES: &[&str] = &["fibonacci", "primes", "concat", "lex"];
 
@@ -1195,7 +1196,7 @@ fn edge_render_markdown_records_each_measurement_wall_time() {
 }
 
 #[test]
-fn edge_table_truncates_long_answers_by_characters() {
+fn edge_table_truncates_long_answers_by_display_width() {
     let long = "漢字".repeat(30);
     let row = bench::Measurement {
         workload: "concat",
@@ -1208,15 +1209,25 @@ fn edge_table_truncates_long_answers_by_characters() {
         .lines()
         .find(|line| line.starts_with("concat"))
         .unwrap_or_else(|| panic!("missing concat row:\n{table}"));
-    let expected = format!("{}...", long.chars().take(17).collect::<String>());
-    assert_eq!(
-        expected.chars().count(),
-        20,
-        "the truncated cell should be the full 20-character column width"
+    let mut kept = String::new();
+    let mut cells = 0;
+    for character in long.chars() {
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if cells + width > 17 {
+            break;
+        }
+        kept.push(character);
+        cells += width;
+    }
+    let expected = format!("{kept}...");
+    assert!(
+        UnicodeWidthStr::width(expected.as_str()) <= 20,
+        "the truncated cell should fit the 20-cell answer column, got {} cells:\n{line}",
+        UnicodeWidthStr::width(expected.as_str())
     );
     assert!(
         line.contains(&expected),
-        "the table should keep the first 17 characters and add `...`:\n{line}"
+        "the table should keep the leading characters that fit 17 cells and add `...`:\n{line}"
     );
     assert!(
         !line.contains(&long),
@@ -1404,4 +1415,111 @@ fn edge_timings_path_stays_beside_a_file_or_inside_a_directory() {
     );
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edge_cli_short_help_flag_is_success() {
+    assert_eq!(
+        bench::run_cli(&["-h".to_string()]),
+        0,
+        "the short help flag should print usage and succeed like --help"
+    );
+}
+
+#[test]
+fn edge_cli_named_workload_uses_its_default_size() {
+    let dir = unique_temp_dir("named-default-size");
+    let path = dir.join("BENCH.md");
+
+    for name in WORKLOAD_NAMES {
+        let expected = bench::default_size(name).expect("a listed workload has a default");
+        let arguments = [name.to_string()];
+        let selection = bench::select_cli(&arguments)
+            .expect("a named workload without a size is a valid selection");
+        let bench::CliSelection::Measure {
+            name: selected,
+            size,
+        } = selection
+        else {
+            panic!("`{name}` should resolve to a single workload measurement, got {selection:?}");
+        };
+        assert_eq!(selected, *name);
+        assert_eq!(
+            size, expected,
+            "`{name}` with no size should resolve to its default size {expected}, not {size}"
+        );
+
+        let row = bench::run_workload(selected, size, DEFAULT_BUDGET).unwrap_or_else(|error| {
+            panic!("`{name}` at its default size {expected} should run: {error}")
+        });
+        let table = bench::render_table(&[row]);
+        let line = table
+            .lines()
+            .find(|line| line.starts_with(name))
+            .unwrap_or_else(|| panic!("missing {name} row:\n{table}"));
+        let cells: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(
+            cells.get(1).and_then(|cell| cell.parse::<i64>().ok()),
+            Some(expected),
+            "the rendered `{name}` row should carry the default size {expected}:\n{line}"
+        );
+
+        assert_eq!(
+            bench::run_cli_with_path(&[name.to_string()], &path),
+            0,
+            "`{name}` with no size should run at its default size {expected}"
+        );
+        assert!(
+            !path.exists(),
+            "a single named workload must not write a baseline even at its default size"
+        );
+        assert!(
+            !bench::timings_path(&path).exists(),
+            "a single named workload must not write a timing artifact"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edge_baseline_parser_accepts_uppercase_header_and_colon_separator() {
+    let rows = bench::parse_baseline_markdown(
+        "| WORKLOAD | Size | Answer | Wall time |\n\
+         |:---|---:|---:|---:|\n\
+         | fibonacci | 20 | 6765 | 1.250 ms |\n",
+    )
+    .expect("a case-insensitive header and a colon-aligned separator should be ignored");
+
+    assert_eq!(rows.len(), 1, "the single data row should survive parsing");
+    assert_eq!(rows[0].workload, "fibonacci");
+    assert_eq!(rows[0].size, 20);
+    assert_eq!(rows[0].answer, "6765");
+    assert_eq!(rows[0].wall_time_ms, 1.25);
+}
+
+#[test]
+fn edge_a_wrong_answer_for_a_text_workload_is_refused() {
+    let error = bench::run_workload_with(
+        "concat",
+        3,
+        DEFAULT_BUDGET,
+        bench::Expected::Text("wrong".to_string()),
+    )
+    .expect_err("a text workload with the wrong reference answer must be refused");
+
+    match error {
+        BenchError::WrongAnswer {
+            workload,
+            size,
+            expected,
+            actual,
+        } => {
+            assert_eq!(workload, "concat");
+            assert_eq!(size, 3);
+            assert_eq!(expected, "wrong");
+            assert_eq!(actual, "ababab");
+        }
+        other => panic!("expected a wrong-answer error, got {other:?}"),
+    }
 }
