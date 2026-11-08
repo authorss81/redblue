@@ -45,11 +45,21 @@ constant NO_CONST to 4294967295
 constant STATEMENT_MARKER to 4294967294
 constant END_TRY_MARKER to 4294967295
 
+// The intern table's bucket count. A name is looked up in the bucket its hash
+// selects, so interning is proportional to the bucket and not to every name the
+// program has used. The count is a power of two so the modulo is cheap; 256
+// buckets keeps a self-compilation's thousand-odd names to a handful per bucket
+// while the table is still small enough to rebuild cheaply on an insertion.
+constant INTERN_BUCKETS to 256
+
 // The fifth is the code generator's last accumulator, the sixth and seventh are
 // the lexer's and the patcher's, and all seven are named for the same reason:
 // a Redblue binding is program-wide, and `append` grows the list a name holds.
 set G_POOL to []
 set G_INTERN to []
+set G_INTERN_COUNT to 0
+set G_INTERN_BUCKETS to []
+set G_INTERN_BUCKETS_NEXT to []
 set G_CODE to []
 set G_JUMPS to []
 set G_BLOCKS to []
@@ -71,7 +81,6 @@ to main()
     if length(main_args) is not 2 then
         refuse(0, "usage: rb run bootstrap/compiler.rb <input.rb> <output.rbc>")
     end
-
     set main_source to read_source(main_args[0])
     set main_tokens to lex(main_source)
     set main_program to parse_program(main_tokens)
@@ -2485,12 +2494,14 @@ end
 // So the five lists `ctx` carried are names here, and `append` grows them:
 //
 //   G_POOL     the constant pool, in order of first use
-//   G_INTERN   the intern table: every name once, with its pool index
+//   G_INTERN   the intern table's entries: every name once, with its pool index
+//   G_INTERN_BUCKETS  the hash buckets, each a list of G_INTERN indexes
 //   G_CODE     the instructions of the block being compiled
 //   G_JUMPS    the patches that block's jumps still need
 //   G_BLOCKS   the nested blocks that block has compiled
 //
-// `G_POOL` and `G_INTERN` belong to the whole program and are never saved. The
+// `G_POOL`, `G_INTERN` and `G_INTERN_BUCKETS` belong to the whole program and
+// are never saved. The
 // other three belong to the block being compiled, so `compile_block` saves them
 // and puts them back: a nested block is compiled *into* its parent's run while
 // it is being built, and its own instructions are what the block record keeps.
@@ -2641,14 +2652,23 @@ end
 
 // The intern table. A name used a hundred times is one entry, so the pool is
 // the same whichever way round the source used them.
+//
+// A lookup used to walk every entry, and a self-compilation walks the table for
+// every name it emits, so the cost was the number of names times the number of
+// entries. `intern_hash` names a bucket instead, and only that bucket's entries
+// are compared. The entries stay in `G_INTERN` in insertion order, so a new
+// name still takes the next pool index and the emitted bytes are unchanged.
 to intern(raw)
-    set intern_found to 0
-    set intern_i to 0
+    intern_init()
+    set intern_bucket to intern_hash(raw) mod INTERN_BUCKETS
+    set intern_chain to G_INTERN_BUCKETS[intern_bucket]
     set intern_found to -1
     set intern_i to 0
-    while intern_i < length(G_INTERN)
-        if G_INTERN[intern_i].k is raw then
-            set intern_found to intern_i
+    while intern_i < length(intern_chain)
+        if intern_found < 0 then
+            if G_INTERN[intern_chain[intern_i]].k is raw then
+                set intern_found to intern_chain[intern_i]
+            end
         end
         set intern_i to intern_i + 1
     end
@@ -2660,9 +2680,61 @@ to intern(raw)
         set intern_index to length(G_POOL)
         append("G_POOL", {t: 3, b: raw})
         append("G_INTERN", {k: raw, n: intern_index})
+        set G_INTERN_COUNT to G_INTERN_COUNT + 1
+        intern_bucket_add(intern_bucket, length(G_INTERN) - 1)
         set intern_result to intern_index
     end
     give back intern_result
+end
+
+// A polynomial rolling hash over the name's bytes, reduced so every
+// intermediate below the multiply is exact in an `f64`. The exact value does not matter; what matters
+// is that the same bytes give the same bucket on every run, in both the
+// tree-walker and the bytecode VM.
+to intern_hash(raw)
+    set intern_hash_value to 0
+    set intern_hash_i to 0
+    while intern_hash_i < length(raw)
+        set intern_hash_value to (intern_hash_value * 31 + raw[intern_hash_i]) mod 2147483647
+        set intern_hash_i to intern_hash_i + 1
+    end
+    give back intern_hash_value
+end
+
+// The bucket array, built on the first lookup. Every bucket starts empty.
+to intern_init()
+    if length(G_INTERN_BUCKETS) is 0 then
+        set intern_init_i to 0
+        while intern_init_i < INTERN_BUCKETS
+            append("G_INTERN_BUCKETS", [])
+            set intern_init_i to intern_init_i + 1
+        end
+    end
+end
+
+// The index is added to one bucket. The bucket is rebuilt rather than changed
+// in place because Redblue has no index assignment, and the table is rebuilt
+// with it because a bucket is held by value.
+//
+// This is the documented trade-off: insertion stays O(INTERN_BUCKETS) per new
+// name, while a lookup walks one bucket. At 256 the fixed cost is paid once per
+// distinct name and is dwarfed by the repeated lookups a compilation makes — a
+// name is emitted many times, which is the case this table exists to make
+// cheap. A future list index assignment would let the bucket be updated in
+// place, but the language has none today.
+to intern_bucket_add(bucket, entry_index)
+    set intern_bucket_add_chain to push(G_INTERN_BUCKETS[bucket], entry_index)
+    set G_INTERN_BUCKETS_NEXT to []
+    set intern_bucket_add_i to 0
+    while intern_bucket_add_i < length(G_INTERN_BUCKETS)
+        if intern_bucket_add_i is bucket then
+            append("G_INTERN_BUCKETS_NEXT", intern_bucket_add_chain)
+        else
+            append("G_INTERN_BUCKETS_NEXT", G_INTERN_BUCKETS[intern_bucket_add_i])
+        end
+        set intern_bucket_add_i to intern_bucket_add_i + 1
+    end
+    set G_INTERN_BUCKETS to G_INTERN_BUCKETS_NEXT
 end
 
 // `Compiler::text`: intern a name and use it as an operand.
