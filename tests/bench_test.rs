@@ -260,19 +260,39 @@ fn edge_a_hung_workload_fails_loudly_at_its_budget() {
 fn edge_a_hung_child_process_is_killed_at_its_budget() {
     let dir = unique_temp_dir("hung-child");
     let sentinel = dir.join("hang");
-    std::env::set_var(bench::HANG_SENTINEL_ENV, &sentinel);
+    let started_marker = sentinel.with_extension("started");
+    let finished_marker = sentinel.with_extension("finished");
 
-    let budget = Duration::from_millis(300);
-    let started = Instant::now();
-    let error = bench::run_workload(bench::HANG_WORKLOAD_NAME, 1_500, budget)
-        .expect_err("a child that outlives its budget must be killed");
-    let elapsed = started.elapsed();
-    std::env::remove_var(bench::HANG_SENTINEL_ENV);
+    let budget = Duration::from_millis(500);
+    let child_sleep = Duration::from_secs(10);
+    let sentinel_key = std::ffi::OsStr::new(bench::HANG_SENTINEL_ENV);
+    let env = [(sentinel_key, sentinel.as_os_str())];
 
+    let watcher_marker = started_marker.clone();
+    let watcher = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !watcher_marker.is_file() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        true
+    });
+
+    let error = bench::run_workload_with_env(
+        bench::HANG_WORKLOAD_NAME,
+        child_sleep.as_millis() as i64,
+        budget,
+        &env,
+        Some(&started_marker),
+    )
+    .expect_err("a child that outlives its budget must be killed");
     assert!(
-        elapsed < Duration::from_millis(1_200),
-        "the caller should return at the budget, not wait for the child's own sleep: {elapsed:?}"
+        watcher.join().expect("the marker watcher should not panic"),
+        "the hidden workload should have run in a child process"
     );
+
     match error {
         BenchError::BudgetExceeded {
             workload,
@@ -284,14 +304,11 @@ fn edge_a_hung_child_process_is_killed_at_its_budget() {
         other => panic!("expected the child's budget error, got {other:?}"),
     }
 
-    let started_marker = sentinel.with_extension("started");
-    let finished_marker = sentinel.with_extension("finished");
     assert!(
         started_marker.is_file(),
         "the hidden workload should have run in a child process and written {}",
         started_marker.display()
     );
-    thread::sleep(Duration::from_millis(1_400));
     assert!(
         !finished_marker.exists(),
         "the child survived its budget and wrote {}",
@@ -327,14 +344,26 @@ fn edge_exhausted_shared_budget_is_reported_as_exhausted() {
 
 #[test]
 fn edge_bench_md_path_is_the_working_directory() {
-    if std::env::var_os("RB_BENCH_OUTPUT").is_none() {
-        let cwd = std::env::current_dir().expect("the test process has a working directory");
-        assert_eq!(
-            bench::bench_md_path(),
-            cwd.join("BENCH.md"),
-            "the installed binary must write relative to where it was invoked"
-        );
-    }
+    let cwd = std::env::current_dir().expect("the test process has a working directory");
+    let override_path = std::env::var_os("RB_BENCH_OUTPUT");
+    let expected = bench::bench_md_path_from(override_path.as_deref(), &cwd);
+
+    assert_eq!(
+        bench::bench_md_path(),
+        expected,
+        "the installed binary must write relative to where it was invoked, or to an explicit override"
+    );
+    assert_eq!(
+        bench::bench_md_path_from(None, &cwd),
+        cwd.join("BENCH.md"),
+        "without an override the baseline belongs in the working directory"
+    );
+    let custom = std::ffi::OsStr::new("custom-bench.md");
+    assert_eq!(
+        bench::bench_md_path_from(Some(custom), &cwd),
+        std::path::PathBuf::from(custom),
+        "an explicit override wins over the working directory"
+    );
 }
 
 #[test]
@@ -406,11 +435,9 @@ fn edge_size_limit_boundary_is_exact_per_workload() {
             max >= bench::default_size(name).expect("a listed workload has a default"),
             "`{name}` must be able to check its default size"
         );
-        let row = bench::run_workload(name, max, DEFAULT_BUDGET).unwrap_or_else(|error| {
-            panic!("`{name}` at its maximum {max} should be measurable: {error}")
+        bench::check_size_supported(name, max).unwrap_or_else(|error| {
+            panic!("`{name}` at its maximum {max} should be supported: {error}")
         });
-        assert_eq!(row.workload, *name);
-        assert_eq!(row.size, max);
 
         let error = bench::check_size_supported(name, max + 1)
             .expect_err("one past the checkable maximum must be refused");
@@ -426,6 +453,11 @@ fn edge_size_limit_boundary_is_exact_per_workload() {
             }
             other => panic!("expected a size-too-large error for `{name}`, got {other:?}"),
         }
+
+        let row = bench::run_workload(name, 1, DEFAULT_BUDGET)
+            .unwrap_or_else(|error| panic!("`{name}` at size 1 should run: {error}"));
+        assert_eq!(row.workload, *name);
+        assert_eq!(row.size, 1);
     }
 }
 
@@ -1062,6 +1094,20 @@ fn edge_baseline_parser_rejects_unknown_duplicate_and_oversized_rows() {
         "the refusal should name the duplicated workload: {duplicate}"
     );
 
+    let duplicate_at_another_size = bench::parse_baseline_markdown(
+        "| fibonacci | 20 | 6765 | 1.250 ms |\n\
+         | fibonacci | 21 | 10946 | 1.250 ms |\n",
+    )
+    .expect_err("a second row for one workload must be refused even at another size");
+    assert!(
+        duplicate_at_another_size.contains("fibonacci"),
+        "the refusal should name the duplicated workload: {duplicate_at_another_size}"
+    );
+    assert!(
+        duplicate_at_another_size.contains("one row per workload"),
+        "the refusal should explain the one-row invariant: {duplicate_at_another_size}"
+    );
+
     let oversized = bench::parse_baseline_markdown("| fibonacci | 79 | 0 | 1.000 ms |\n")
         .expect_err("a row beyond the checkable maximum must be refused");
     assert!(
@@ -1238,6 +1284,107 @@ fn edge_check_size_supported_rejects_negative_and_unknown_names() {
             "the refusal should list `{name}`: {unknown}"
         );
     }
+}
+
+#[test]
+fn edge_a_size_past_the_maximum_is_refused_before_a_child_starts() {
+    let max = bench::max_size("fibonacci").expect("fibonacci has a maximum size");
+    let result = bench::run_workload("fibonacci", max + 1, Duration::from_millis(50));
+
+    assert!(
+        result.is_err(),
+        "a size past the checkable maximum must be refused rather than measured"
+    );
+    match result.expect_err("the refusal should be returned as an error") {
+        BenchError::SizeTooLarge {
+            workload,
+            size,
+            max: reported,
+        } => {
+            assert_eq!(workload, "fibonacci");
+            assert_eq!(size, max + 1);
+            assert_eq!(reported, max);
+        }
+        other => panic!("expected SizeTooLarge for the boundary, got {other:?}"),
+    }
+}
+
+#[test]
+fn edge_single_workload_measurement_does_not_write_the_baseline() {
+    let dir = unique_temp_dir("single-workload-no-write");
+    let path = dir.join("BENCH.md");
+    let default_path = bench::bench_md_path();
+    let default_timings = bench::timings_path(&default_path);
+    let default_before = fs::read(&default_path).ok();
+    let default_timings_before = fs::read(&default_timings).ok();
+    let arguments = vec!["fibonacci".to_string(), "0".to_string()];
+
+    assert_eq!(
+        bench::run_cli_with_path(&arguments, &path),
+        0,
+        "a single named workload should run and print one table"
+    );
+    assert!(
+        !path.exists(),
+        "measuring one workload must not rewrite the injected baseline path"
+    );
+    assert!(
+        !bench::timings_path(&path).exists(),
+        "measuring one workload must not write a timing artifact beside the injected path"
+    );
+    assert_eq!(
+        fs::read(&default_path).ok(),
+        default_before,
+        "measuring one workload must not rewrite the default baseline at {}",
+        default_path.display()
+    );
+    assert_eq!(
+        fs::read(&default_timings).ok(),
+        default_timings_before,
+        "measuring one workload must not write the default timing artifact at {}",
+        default_timings.display()
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn edge_usage_names_every_workload_and_the_compare_mode() {
+    let usage = bench::usage();
+
+    for name in WORKLOAD_NAMES {
+        assert!(
+            usage.contains(name),
+            "the usage text should name the `{name}` workload: {usage}"
+        );
+    }
+    for expected in ["--compare", "BENCH.md", "no arguments"] {
+        assert!(
+            usage.contains(expected),
+            "the usage text should mention `{expected}`: {usage}"
+        );
+    }
+}
+
+#[test]
+fn edge_correctness_gate_does_not_rewrite_the_checked_in_baseline() {
+    let path = bench::checked_in_baseline_path();
+    let before = fs::read(&path)
+        .unwrap_or_else(|error| panic!("{} should be readable: {error}", path.display()));
+
+    let rows = bench::run_all(DEFAULT_BUDGET).expect("every default-size workload should run");
+    assert_eq!(
+        rows.len(),
+        WORKLOAD_NAMES.len(),
+        "the correctness path should measure every workload"
+    );
+
+    let after = fs::read(&path)
+        .unwrap_or_else(|error| panic!("{} should still be readable: {error}", path.display()));
+    assert_eq!(
+        before, after,
+        "running the correctness checks must not rewrite the checked-in baseline"
+    );
 }
 
 #[test]

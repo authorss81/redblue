@@ -30,14 +30,20 @@ use redblue::Value;
 /// the no-argument runner is bounded by one budget rather than four.
 pub const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 
+/// How long the test-only start-marker handshake waits for a child to prove it
+/// started before the measurement budget begins. Production never asks for a
+/// start marker, so this never extends a real measurement.
+const WORKER_START_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The largest size each workload is allowed to run.
 ///
 /// A larger size is refused before the reference answer or the workload's source
 /// string is built, so the harness fails cleanly instead of allocating without
-/// bound or burning the shared budget. Every maximum here is a size the harness
-/// has actually measured inside [`DEFAULT_BUDGET`]; the boundary test runs each
-/// workload at its maximum, so the advertised limit is demonstrated rather than
-/// merely compared.
+/// bound or burning the shared budget. The boundary test compares against these
+/// maxima with [`check_size_supported`], which does not run the workload, so the
+/// correctness gate never pays for a maximum-size measurement on an arbitrary
+/// machine. The maxima are demonstrated by the measured baseline, not by a timed
+/// assertion inside the gate.
 ///
 /// Fibonacci is additionally capped where `f64` still represents every
 /// intermediate value exactly (fib(78) < 2^53). Beyond that the expected answer
@@ -198,18 +204,42 @@ pub const HANG_WORKLOAD_NAME: &str = "__hang";
 /// The environment variable naming the marker path for [`HANG_WORKLOAD_NAME`].
 pub const HANG_SENTINEL_ENV: &str = "RB_BENCH_HANG_SENTINEL";
 
+/// The longest the hidden `--worker __hang` mode may sleep.
+///
+/// `--worker` is an internal, undocumented path, but it is reachable through
+/// the shipped `rb-bench` binary. Without a cap, a caller could ask for a sleep
+/// of nearly three hundred million years and pin a process indefinitely. The
+/// child-timeout test sleeps ten seconds, so sixty is ample headroom and still
+/// bounded.
+pub const MAX_HANG_MILLIS: i64 = 60_000;
+
+/// The duration a hidden `__hang` worker should sleep for `size` milliseconds.
+///
+/// Refuses anything past [`MAX_HANG_MILLIS`] rather than clamping it, so a
+/// caller learns the request was rejected instead of silently getting a
+/// different sleep.
+fn hang_duration(size: i64) -> Result<Duration, BenchError> {
+    if size > MAX_HANG_MILLIS {
+        return Err(BenchError::Usage(format!(
+            "hang size {size} ms exceeds the maximum {MAX_HANG_MILLIS} ms"
+        )));
+    }
+    Ok(Duration::from_millis(size.max(0) as u64))
+}
+
 #[cfg(test)]
 static HANG_WORKLOAD: Workload = Workload {
     name: HANG_WORKLOAD_NAME,
     default_size: 0,
-    max_size: i64::MAX,
+    max_size: MAX_HANG_MILLIS,
     run: run_hang,
     expected: expected_hang,
 };
 
 #[cfg(test)]
 fn run_hang(size: i64) -> Result<Value, String> {
-    thread::sleep(Duration::from_millis(size.max(0) as u64));
+    let duration = hang_duration(size).map_err(|error| error.to_string())?;
+    thread::sleep(duration);
     Ok(Value::Number(1.0))
 }
 
@@ -353,20 +383,25 @@ fn measure_in_worker(
     size: i64,
     budget: Duration,
 ) -> Result<(Value, Duration), BenchError> {
+    measure_in_worker_with_env(workload, size, budget, &[], None)
+}
+
+fn measure_in_worker_with_env(
+    workload: &'static Workload,
+    size: i64,
+    budget: Duration,
+    env: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
+    start_marker: Option<&Path>,
+) -> Result<(Value, Duration), BenchError> {
     if let Some(binary) = worker_binary() {
-        return measure_in_child(&binary, workload, size, budget);
+        return measure_in_child(&binary, workload, size, budget, env, start_marker);
     }
-    #[cfg(test)]
-    {
-        run_with_budget(workload.name, budget, move || (workload.run)(size))
-    }
-    #[cfg(not(test))]
-    {
-        Err(BenchError::Load(format!(
-            "cannot locate the rb-bench worker binary to measure '{}'",
-            workload.name
-        )))
-    }
+    let _ = (env, start_marker);
+    Err(BenchError::Load(format!(
+        "cannot locate the rb-bench worker binary to measure '{}'; the child-process \
+         measurement path must not silently fall back to an in-process run",
+        workload.name
+    )))
 }
 
 fn worker_binary() -> Option<PathBuf> {
@@ -378,10 +413,13 @@ fn worker_binary() -> Option<PathBuf> {
     }
     let current = std::env::current_exe().ok()?;
     if current.file_stem().and_then(|stem| stem.to_str()) == Some("rb-bench") {
-        Some(current)
-    } else {
-        None
+        return Some(current);
     }
+    let sibling = current
+        .parent()
+        .and_then(Path::parent)
+        .map(|target| target.join(format!("rb-bench{}", std::env::consts::EXE_SUFFIX)))?;
+    sibling.is_file().then_some(sibling)
 }
 
 fn measure_in_child(
@@ -389,20 +427,25 @@ fn measure_in_child(
     workload: &'static Workload,
     size: i64,
     budget: Duration,
+    env: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
+    start_marker: Option<&Path>,
 ) -> Result<(Value, Duration), BenchError> {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .arg("--worker")
         .arg(workload.name)
         .arg(size.to_string())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            BenchError::Load(format!(
-                "could not start the '{}' worker: {error}",
-                workload.name
-            ))
-        })?;
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        BenchError::Load(format!(
+            "could not start the '{}' worker: {error}",
+            workload.name
+        ))
+    })?;
     let stdout = child
         .stdout
         .take()
@@ -415,6 +458,47 @@ fn measure_in_child(
         let _ = sender.send(result);
     });
 
+    if let Some(marker) = start_marker {
+        let deadline = Instant::now() + WORKER_START_TIMEOUT;
+        loop {
+            if marker.is_file() {
+                break;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let _ = reader.join();
+                    return Err(BenchError::Load(format!(
+                        "workload '{}' worker exited with {status} before writing its start marker {}",
+                        workload.name,
+                        marker.display()
+                    )));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Err(BenchError::Load(format!(
+                        "could not wait for the '{}' worker start marker: {error}",
+                        workload.name
+                    )));
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(BenchError::Load(format!(
+                    "workload '{}' worker did not write its start marker {} within {:?}",
+                    workload.name,
+                    marker.display(),
+                    WORKER_START_TIMEOUT
+                )));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     match receiver.recv_timeout(budget) {
         Ok(Ok(output)) => {
             let status = child.wait().map_err(|error| {
@@ -424,14 +508,18 @@ fn measure_in_child(
                 ))
             })?;
             let _ = reader.join();
+            let parsed = parse_worker_output(workload.name, size, &output);
             if !status.success() {
-                return Err(BenchError::Load(format!(
-                    "workload '{}' worker exited with {status}: {}",
-                    workload.name,
-                    output.trim()
-                )));
+                return match parsed {
+                    Err(error @ BenchError::WrongAnswer { .. }) => Err(error),
+                    _ => Err(BenchError::Load(format!(
+                        "workload '{}' worker exited with {status}: {}",
+                        workload.name,
+                        output.trim()
+                    ))),
+                };
             }
-            parse_worker_output(workload.name, &output)
+            parsed
         }
         Ok(Err(error)) => {
             let _ = child.kill();
@@ -489,13 +577,20 @@ pub fn run_worker(arguments: &[String]) -> i32 {
                 return 1;
             }
         };
+        let duration = match hang_duration(size) {
+            Ok(duration) => duration,
+            Err(error) => {
+                println!("ERR {error}");
+                return 1;
+            }
+        };
         if let Some(base) = std::env::var_os(HANG_SENTINEL_ENV) {
             let base = PathBuf::from(base);
             let _ = std::fs::write(base.with_extension("started"), b"started");
-            thread::sleep(Duration::from_millis(size as u64));
+            thread::sleep(duration);
             let _ = std::fs::write(base.with_extension("finished"), b"finished");
         } else {
-            thread::sleep(Duration::from_millis(size as u64));
+            thread::sleep(duration);
         }
         println!("OK 0 n {:016x}", 1.0f64.to_bits());
         return 0;
@@ -526,9 +621,22 @@ pub fn run_worker(arguments: &[String]) -> i32 {
             }
         },
         Err(error) => {
-            println!("ERR {error}");
+            println!("{}", encode_worker_error(&error));
             1
         }
+    }
+}
+
+fn encode_worker_error(error: &BenchError) -> String {
+    match error {
+        BenchError::WrongAnswer {
+            expected, actual, ..
+        } => format!(
+            "WRONG {} {}",
+            encode_hex(expected.as_bytes()),
+            encode_hex(actual.as_bytes())
+        ),
+        other => format!("ERR {other}"),
     }
 }
 
@@ -545,11 +653,49 @@ fn encode_worker_answer(measurement: &Measurement) -> Result<String, BenchError>
     }
 }
 
-fn parse_worker_output(workload: &str, output: &str) -> Result<(Value, Duration), BenchError> {
+fn parse_worker_output(
+    workload: &'static str,
+    size: i64,
+    output: &str,
+) -> Result<(Value, Duration), BenchError> {
     let line = output
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or_default();
+    if let Some(payload) = line.strip_prefix("WRONG ") {
+        let mut fields = payload.splitn(2, ' ');
+        let (Some(expected), Some(actual)) = (fields.next(), fields.next()) else {
+            return Err(BenchError::Load(format!(
+                "workload '{workload}' worker produced an unreadable wrong-answer line: {line:?}"
+            )));
+        };
+        let expected = String::from_utf8(decode_hex(expected).map_err(|error| {
+            BenchError::Load(format!(
+                "workload '{workload}' worker reported an unreadable expected answer: {error}"
+            ))
+        })?)
+        .map_err(|error| {
+            BenchError::Load(format!(
+                "workload '{workload}' worker reported a non-UTF-8 expected answer: {error}"
+            ))
+        })?;
+        let actual = String::from_utf8(decode_hex(actual).map_err(|error| {
+            BenchError::Load(format!(
+                "workload '{workload}' worker reported an unreadable actual answer: {error}"
+            ))
+        })?)
+        .map_err(|error| {
+            BenchError::Load(format!(
+                "workload '{workload}' worker reported a non-UTF-8 actual answer: {error}"
+            ))
+        })?;
+        return Err(BenchError::WrongAnswer {
+            workload,
+            size,
+            expected,
+            actual,
+        });
+    }
     if let Some(message) = line.strip_prefix("ERR ") {
         return Err(BenchError::Load(format!(
             "workload '{workload}' failed: {message}"
@@ -599,7 +745,6 @@ fn parse_worker_output(workload: &str, output: &str) -> Result<(Value, Duration)
     Ok((value, Duration::from_nanos(nanos)))
 }
 
-#[cfg(not(test))]
 fn encode_hex(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -702,6 +847,33 @@ pub fn run_workload_with(
     let workload = workload_named(name)?;
     ensure_workload_size_supported(workload, size)?;
     measure(workload, size, budget, expected)
+}
+
+/// Measures one named workload in a child with an explicit environment and an
+/// optional start-marker handshake.
+///
+/// Tests use this to drive the hidden sleeping worker without mutating the
+/// process-global environment that sibling tests share. The handshake lets the
+/// test start the budget only after the child has proved it is running, so a
+/// slow spawn cannot make a timeout test flaky.
+#[cfg(test)]
+pub fn run_workload_with_env(
+    name: &str,
+    size: i64,
+    budget: Duration,
+    env: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
+    start_marker: Option<&Path>,
+) -> Result<Measurement, BenchError> {
+    if size < 0 {
+        return Err(BenchError::Usage(format!(
+            "size must be zero or greater, got {size}"
+        )));
+    }
+    let workload = workload_named(name)?;
+    ensure_workload_size_supported(workload, size)?;
+    let (answer, elapsed) = measure_in_worker_with_env(workload, size, budget, env, start_marker)?;
+    let expected = (workload.expected)(size);
+    check_expected(workload, size, expected, answer, elapsed)
 }
 
 pub fn default_size(name: &str) -> Result<i64, BenchError> {
@@ -908,7 +1080,10 @@ pub fn bench_md_path() -> std::path::PathBuf {
     bench_md_path_from(std::env::var_os("RB_BENCH_OUTPUT").as_deref(), &cwd)
 }
 
-fn bench_md_path_from(override_path: Option<&std::ffi::OsStr>, cwd: &Path) -> std::path::PathBuf {
+pub fn bench_md_path_from(
+    override_path: Option<&std::ffi::OsStr>,
+    cwd: &Path,
+) -> std::path::PathBuf {
     match override_path {
         Some(path) => std::path::PathBuf::from(path),
         None => cwd.join("BENCH.md"),
@@ -974,8 +1149,10 @@ fn is_table_separator(cells: &[&str]) -> bool {
 /// unreadable wall time is an error rather than a silently skipped row, so a
 /// corrupted baseline cannot compare as if it had fewer workloads. Any other
 /// four-cell row is an error too, whether or not its size cell parses: a
-/// misspelled workload name must not silently shrink the baseline. A repeated
-/// `(workload, size)` row is refused.
+/// misspelled workload name must not silently shrink the baseline. A second
+/// row for a workload is refused, whatever its size: the baseline records one
+/// row per workload at its default size, and `--compare` re-runs each row, so
+/// two sizes would render two current rows for one workload.
 pub fn parse_baseline_markdown(text: &str) -> Result<Vec<BaselineRow>, String> {
     let mut rows: Vec<BaselineRow> = Vec::new();
     let known = workload_names();
@@ -1025,12 +1202,10 @@ pub fn parse_baseline_markdown(text: &str) -> Result<Vec<BaselineRow>, String> {
                 ));
             }
         }
-        if rows
-            .iter()
-            .any(|row| row.workload == cells[0] && row.size == size)
-        {
+        if rows.iter().any(|row| row.workload == cells[0]) {
             return Err(format!(
-                "baseline has more than one row for `{}` at size {size}",
+                "baseline has more than one row for `{}`; the baseline records one row per \
+                 workload at its default size",
                 cells[0]
             ));
         }
@@ -1429,6 +1604,40 @@ mod tests {
     }
 
     #[test]
+    fn edge_child_measurement_accepts_an_explicit_environment() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rb-bench-child-env-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("the temporary directory is creatable");
+        let sentinel = dir.join("sentinel");
+        let started_marker = sentinel.with_extension("started");
+        let finished_marker = sentinel.with_extension("finished");
+        let sentinel_key = std::ffi::OsStr::new(HANG_SENTINEL_ENV);
+        let env = [(sentinel_key, sentinel.as_os_str())];
+
+        let row = run_workload_with_env(HANG_WORKLOAD_NAME, 0, Duration::from_secs(5), &env, None)
+            .expect("an explicit environment should not change the measurement");
+        assert_eq!(row.answer, Value::Number(1.0));
+        assert!(
+            started_marker.is_file(),
+            "the child did not observe {HANG_SENTINEL_ENV}; it never wrote {}",
+            started_marker.display()
+        );
+        assert!(
+            finished_marker.is_file(),
+            "the child did not observe {HANG_SENTINEL_ENV}; it never wrote {}",
+            finished_marker.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn edge_the_size_limit_is_enforced_without_running_the_workload() {
         let max = max_size("fibonacci").expect("a listed workload has a maximum");
         assert!(check_size_supported("fibonacci", max).is_ok());
@@ -1496,21 +1705,41 @@ mod tests {
     }
 
     #[test]
+    fn edge_the_hidden_hang_size_is_capped() {
+        assert_eq!(
+            hang_duration(MAX_HANG_MILLIS).expect("the maximum is allowed"),
+            Duration::from_millis(MAX_HANG_MILLIS as u64)
+        );
+        let error = hang_duration(MAX_HANG_MILLIS + 1)
+            .expect_err("a hang past the maximum must be refused, not clamped");
+        assert!(matches!(error, BenchError::Usage(_)), "{error:?}");
+        assert!(
+            error.to_string().contains("exceeds the maximum"),
+            "the refusal should name the bound: {error}"
+        );
+        assert_eq!(
+            hang_duration(0).expect("zero is allowed"),
+            Duration::ZERO,
+            "zero must stay the trivial sleep"
+        );
+    }
+
+    #[test]
     fn edge_worker_output_parser_decodes_well_formed_lines() {
-        let (number, elapsed) = parse_worker_output("fibonacci", "OK 42 n 4008000000000000\n")
+        let (number, elapsed) = parse_worker_output("fibonacci", 20, "OK 42 n 4008000000000000\n")
             .expect("a well-formed number line parses");
         assert_eq!(elapsed, Duration::from_nanos(42));
         assert_eq!(number, Value::Number(3.0));
 
-        let (text, elapsed) =
-            parse_worker_output("concat", "OK 7 t 6869\n").expect("a well-formed text line parses");
+        let (text, elapsed) = parse_worker_output("concat", 200, "OK 7 t 6869\n")
+            .expect("a well-formed text line parses");
         assert_eq!(elapsed, Duration::from_nanos(7));
         assert_eq!(text, Value::Text("hi".to_string()));
     }
 
     #[test]
     fn edge_worker_output_parser_refuses_an_error_line() {
-        let error = parse_worker_output("fibonacci", "ERR the workload broke\n")
+        let error = parse_worker_output("fibonacci", 20, "ERR the workload broke\n")
             .expect_err("an ERR line must be a load error, never an answer");
         match error {
             BenchError::Load(message) => assert!(
@@ -1518,6 +1747,34 @@ mod tests {
                 "the load error should carry the worker message: {message}"
             ),
             other => panic!("expected a load error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edge_worker_output_parser_decodes_a_wrong_answer() {
+        let line = encode_worker_error(&BenchError::WrongAnswer {
+            workload: "fibonacci",
+            size: 20,
+            expected: "-1".to_string(),
+            actual: "6765".to_string(),
+        });
+        assert!(line.starts_with("WRONG "), "unexpected worker line: {line}");
+
+        let error = parse_worker_output("fibonacci", 20, &format!("{line}\n"))
+            .expect_err("a WRONG line must be a wrong-answer error, never an answer");
+        match error {
+            BenchError::WrongAnswer {
+                workload,
+                size,
+                expected,
+                actual,
+            } => {
+                assert_eq!(workload, "fibonacci");
+                assert_eq!(size, 20);
+                assert_eq!(expected, "-1");
+                assert_eq!(actual, "6765");
+            }
+            other => panic!("expected a wrong-answer error, got {other:?}"),
         }
     }
 
@@ -1532,7 +1789,7 @@ mod tests {
             ("OK 12 n nothex\n", "unreadable number"),
             ("OK 12 x 4008000000000000\n", "unknown answer tag"),
         ] {
-            let error = parse_worker_output("workload", line)
+            let error = parse_worker_output("workload", 1, line)
                 .expect_err("a malformed worker line must be a load error");
             match error {
                 BenchError::Load(message) => assert!(
@@ -1551,7 +1808,7 @@ mod tests {
             ("OK 12 t abc\n", "unreadable text"),
             ("OK 12 t zz\n", "unreadable text"),
         ] {
-            let error = parse_worker_output("workload", line)
+            let error = parse_worker_output("workload", 1, line)
                 .expect_err("a bad text payload must be a load error");
             match error {
                 BenchError::Load(message) => assert!(
