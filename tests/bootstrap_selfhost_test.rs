@@ -2283,6 +2283,49 @@ fn edge_engineered_collision_resolves_each_name_to_its_own_index() {
 }
 
 #[test]
+fn edge_intern_hash_spreads_many_names_across_buckets() {
+    let run = intern_selftest();
+    assert!(
+        run.succeeded,
+        "the intern self-test failed:\n{}",
+        run.stderr
+    );
+    assert_eq!(
+        intern_number(&run.stdout, "spread_growth"),
+        300,
+        "the probe did not intern 300 distinct spread names:\n{}",
+        run.stdout
+    );
+
+    // A constant hash would leave every name in one bucket and still satisfy
+    // the deduplication tests. These counts are what notice that the lookup is
+    // not walking the whole table: 300 names over 256 buckets should fill well
+    // over half the buckets and keep every chain short.
+    let distinct = intern_number(&run.stdout, "distinct_buckets");
+    assert!(
+        distinct >= 150,
+        "the hash left the 300 spread names in only {distinct} distinct buckets, so lookups would walk most of the table:\n{}",
+        run.stdout
+    );
+    let max_chain = intern_number(&run.stdout, "max_chain");
+    assert!(
+        max_chain <= 5,
+        "the longest bucket chain is {max_chain} entries, so a lookup can still walk far past its bucket:\n{}",
+        run.stdout
+    );
+
+    // Two ordinary names that were not engineered to collide must land in
+    // different buckets, which a hash that ignores its input cannot do.
+    let ordinary_a = intern_report(&run.stdout, "ordinary_a_bucket");
+    let ordinary_b = intern_report(&run.stdout, "ordinary_b_bucket");
+    assert_ne!(
+        ordinary_a, ordinary_b,
+        "two ordinary names chose the same bucket, so the hash does not discriminate:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
 fn edge_empty_and_ten_kilobyte_names_are_interned_exactly() {
     let run = intern_selftest();
     assert!(

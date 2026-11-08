@@ -4,8 +4,10 @@
 
 | File | Lines | What |
 |---|---|---|
-| `bootstrap/compiler.rb` | +191 −15 | Replaced the linear `G_INTERN` scan in `intern` with a 256-bucket chained hash table. Added `intern_hash` (a deterministic byte hash reduced so every intermediate is exact in `f64`), `intern_init` (lazy empty buckets), and `intern_bucket_add` (rebuilds the bucket array on a new name). Entries stay in `G_INTERN` in first-use order, so pool indexes and emitted bytes are unchanged. Added the hidden `--intern-selftest` and `--intern-selftest-type-error` modes used by the direct tests, routed before the normal two-path compile branch. |
-| `tests/bootstrap_selfhost_test.rs` | +224 −0 | Five new tests appended to the existing self-host test file: they drive the real `intern` through the hidden mode, then compile a name-heavy fixture with both stages, compare the files byte-for-byte, and decode the pool to prove each name is there exactly once. Adding them to an existing test file keeps them in the repository's test diff rather than leaving an untracked test file the policy gate cannot see. |
+| `bootstrap/compiler.rb` | +78 −8 | Replaced the linear `G_INTERN` scan in `intern` with a 256-bucket chained hash table. Added `intern_hash` (a deterministic byte hash reduced so every intermediate is exact in `f64`), `intern_init` (lazy empty buckets), and `intern_bucket_add` (rebuilds the bucket array on a new name). Entries stay in `G_INTERN` in first-use order, so pool indexes and emitted bytes are unchanged. The compiler's `main` and usage check are untouched, and it carries no test-only counter: the probe measures growth with `length(G_INTERN)`. |
+| `bootstrap/intern_selftest.rb` | +138 −0 | A fragment, not a program: the tests append it in place of the compiler's final `main()` call and invoke `intern_selftest()` / `intern_selftest_type_error()`. It runs the same `intern` and `intern_hash` the compile path runs, so the direct tests need no hidden mode in the shipped compiler and the self-compilation fixed point does not include test-only code. |
+| `tests/bootstrap_selfhost_test.rs` | +349 −0 | Six new tests appended to the existing self-host test file: they drive the real `intern` through the fragment, assert the hash spreads hundreds of names across buckets with short chains, then compile a name-heavy fixture with both stages, compare the files byte-for-byte, and decode the pool to prove each name is there exactly once. Adding them to an existing test file keeps them in the repository's test diff rather than leaving an untracked test file the policy gate cannot see. |
+| `tests/unreviewed_work_ack_test.rs` | +1 −0 | Adds `resume phase-074:` to the delivery-subject rule, so the pipeline's rebuildable delivery commit for this phase is acknowledged by its subject instead of a stale SHA. This is the same bookkeeping every in-flight phase uses; no assertion was weakened. |
 
 ## Reproduction of the finding (before the change)
 
@@ -64,13 +66,16 @@ one measured before it. The codegen drop is the number the finding is about.
 |---|---|
 | `edge_interning_the_same_name_1000_times_grows_the_table_once` | duplicate keys / boundary: 1000 repetitions of one name grow the table by exactly 1, a second distinct name grows it to exactly 2 |
 | `edge_engineered_collision_resolves_each_name_to_its_own_index` | collision: the self-test keeps a candidate and searches for a distinct name in the same bucket, then asserts both distinct indexes and both lookups after the collision |
+| `edge_intern_hash_spreads_many_names_across_buckets` | distribution: 300 distinct names fill at least 150 of the 256 buckets, the longest chain is at most 5, and two ordinary names land in different buckets, so a constant hash or a whole-table scan cannot pass |
 | `edge_empty_and_ten_kilobyte_names_are_interned_exactly` | empty / resource / boundary: `[]` is interned once; a 10KB name interns to one index and a 10KB name differing only in its last byte gets a different index, so the hash does not truncate |
 | `edge_intern_refuses_a_name_that_is_not_a_byte_list` | malformed input / type mismatch: `intern(42)` fails with a clean runtime error instead of being accepted as a name |
 | `edge_name_heavy_fixture_is_byte_identical_in_both_stages` | unicode / integration: 120 distinct names, one name repeated 30 times, and UTF-8 names `naïve`, `日本語`, `café`; stage 1 and stage 2 bytes are identical and the decoded pool holds each name exactly once |
 
 The standing test
 `edge_the_self_hosted_compiler_compiles_itself_byte_identically` passed
-unmodified (380.92 s in this run).
+unmodified. The whole `edge_*` sweep of the self-host suite, including that
+test and the three consecutive self-compilations, finished in 404.60 s in this
+run.
 
 ## Test requirement matrix
 
@@ -94,8 +99,8 @@ unmodified (380.92 s in this run).
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | pass — 2748 passed, 0 failed |
-| `../rbops/verify.sh phase-074` | **VERIFY PASS** — 2748 tests, 0 failed; test policy: 5 new Rust tests, 1 failure-asserting, 5 `edge_*` tests, 0 newly skipped |
+| `cargo test --all-targets` | pass — 2749 passed, 0 failed |
+| `../rbops/verify.sh phase-074` | **VERIFY PASS** — 2749 tests, 0 failed; test policy: 6 new Rust tests, 1 failure-asserting, 6 `edge_*` tests, 0 newly skipped |
 
 ## Invariants touched
 

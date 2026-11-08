@@ -57,7 +57,6 @@ constant INTERN_BUCKETS to 256
 // a Redblue binding is program-wide, and `append` grows the list a name holds.
 set G_POOL to []
 set G_INTERN to []
-set G_INTERN_COUNT to 0
 set G_INTERN_BUCKETS to []
 set G_INTERN_BUCKETS_NEXT to []
 set G_CODE to []
@@ -2680,7 +2679,6 @@ to intern(raw)
         set intern_index to length(G_POOL)
         append("G_POOL", {t: 3, b: raw})
         append("G_INTERN", {k: raw, n: intern_index})
-        set G_INTERN_COUNT to G_INTERN_COUNT + 1
         intern_bucket_add(intern_bucket, length(G_INTERN) - 1)
         set intern_result to intern_index
     end

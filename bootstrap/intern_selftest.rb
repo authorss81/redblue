@@ -8,7 +8,7 @@
 // path runs, without adding a hidden mode to the compiler's own `main`.
 
 to intern_selftest()
-    set intern_selftest_start to G_INTERN_COUNT
+    set intern_selftest_start to length(G_INTERN)
 
     // One name, a thousand times: the table grows by one, not by a thousand.
     set intern_selftest_repeated to bytes.from_text("repeated")
@@ -18,16 +18,16 @@ to intern_selftest()
         intern(intern_selftest_repeated)
         set intern_selftest_i to intern_selftest_i + 1
     end
-    say "repeat_growth " + to_text(G_INTERN_COUNT - intern_selftest_start)
+    say "repeat_growth " + to_text(length(G_INTERN) - intern_selftest_start)
     intern(bytes.from_text("other"))
-    say "other_growth " + to_text(G_INTERN_COUNT - intern_selftest_start)
+    say "other_growth " + to_text(length(G_INTERN) - intern_selftest_start)
 
     // The empty name is a name, not a missing one.
-    set intern_selftest_empty_start to G_INTERN_COUNT
+    set intern_selftest_empty_start to length(G_INTERN)
     set intern_selftest_empty_one to intern([])
     set intern_selftest_empty_two to intern([])
     say "empty_same " + intern_selftest_yes(intern_selftest_empty_one is intern_selftest_empty_two)
-    say "empty_growth " + to_text(G_INTERN_COUNT - intern_selftest_empty_start)
+    say "empty_growth " + to_text(length(G_INTERN) - intern_selftest_empty_start)
 
     // A name far longer than a bucket count, and a variant that differs only in
     // its last byte. A hash that truncated the name would give them one index.
@@ -40,13 +40,13 @@ to intern_selftest()
         set intern_selftest_i to intern_selftest_i + 1
     end
     append("intern_selftest_long_b", 121)
-    set intern_selftest_long_start to G_INTERN_COUNT
+    set intern_selftest_long_start to length(G_INTERN)
     set intern_selftest_long_one to intern(intern_selftest_long_a)
     set intern_selftest_long_two to intern(intern_selftest_long_a)
     set intern_selftest_long_three to intern(intern_selftest_long_b)
     say "long_same " + intern_selftest_yes(intern_selftest_long_one is intern_selftest_long_two)
     say "long_distinct " + intern_selftest_yes(intern_selftest_long_one is not intern_selftest_long_three)
-    say "long_growth " + to_text(G_INTERN_COUNT - intern_selftest_long_start)
+    say "long_growth " + to_text(length(G_INTERN) - intern_selftest_long_start)
 
     // Two distinct names engineered to select the same bucket: keep the first
     // candidate, then walk a sequence of distinct names until one hashes to its
@@ -83,13 +83,13 @@ to intern_selftest()
     // assertions above would still hold, because they only check deduplication.
     // Counting non-empty buckets and the longest chain is what notices a lookup
     // that is still a scan of every name.
-    set intern_selftest_spread_start to G_INTERN_COUNT
+    set intern_selftest_spread_start to length(G_INTERN)
     set intern_selftest_spread_i to 0
     while intern_selftest_spread_i < 300
         intern(bytes.from_text("spread-" + to_text(intern_selftest_spread_i)))
         set intern_selftest_spread_i to intern_selftest_spread_i + 1
     end
-    say "spread_growth " + to_text(G_INTERN_COUNT - intern_selftest_spread_start)
+    say "spread_growth " + to_text(length(G_INTERN) - intern_selftest_spread_start)
 
     set intern_selftest_nonempty to 0
     set intern_selftest_max_chain to 0
