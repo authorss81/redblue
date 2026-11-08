@@ -42,6 +42,28 @@ A comparison against [`authorss81/Ipp`](https://github.com/authorss81/Ipp) and [
 ### Phase 131: History Ghost Suggestions & Bracket Highlights
 - **Goal**: Faint inline auto-suggestions from command history as the user types (similar to `prompt_toolkit` in `Ipp`), with real-time matching bracket/parenthesis highlights.
 
+### Phase 132: Terminal UI Component Toolkit (`tui` Module)
+- **Goal**: Add a lightweight, zero-dependency terminal UI module (`tui`) for building interactive terminal dashboards, forms, and progress monitors directly in Redblue.
+- **Features**: Split frames (vertical/horizontal), progress gauges, selectable lists, and keypress event polling.
+
+### Phase 133: Interactive Debugger & Breakpoint Stepper (`rb debug`)
+- **Goal**: Provide an interactive CLI debugger supporting line breakpoints, single-stepping (`next`, `step in`), stack frame inspection, and expression evaluation at pause points.
+
+### Phase 134: Structured Doc-Comment Extractor & Markdown API Generator (`rb doc`)
+- **Goal**: Extract `///` docstrings from Redblue source files and generate clean GitHub-flavored Markdown API reference documentation for libraries and modules.
+
+### Phase 135: Hermetic Test Coverage & Branch Profiler (`rb test --coverage`)
+- **Goal**: Instrument AST evaluation to measure statement and branch test coverage, reporting uncovered lines in `rb test` summaries.
+
+### Phase 136: Compiler Diagnostic Enhancements & Suggestion Underlines
+- **Goal**: Upgrade parser and semantic analyzer diagnostics to display rustc-style source code context, colored underline carets (`^^^^`), and automated "Did you mean ...?" correction hints.
+
+### Phase 137: Bytecode Disassembler & Opcode Inspector (`rb disasm`)
+- **Goal**: Provide an official CLI tool to inspect bytecode chunks, constant pools, and jump targets for any compiled `.rb` or `.rbc` file.
+
+### Phase 138: Zero-Dependency Single-File Bundle Tool (`rb bundle`)
+- **Goal**: Package a multi-file Redblue project and its assets into a single self-contained, executable script or pre-compiled bytecode bundle.
+
 ---
 
 ## 3. Real-World Practical Apps (The `authorss81/rb-apps` Incubator Track)
@@ -131,14 +153,18 @@ The following VM and memory optimizations are queued to close the performance ga
   4. Formally re-scope `edge_time_from_unix_truncates_a_fractional_second_like_time_format` to `edge_time_from_unix_floors_negative_timestamps_posix_compliant` as an explicit, documented language upgrade.
   5. Add high-precision astronomical and pre-epoch epoch-boundary tests.
 
-### 4.3 Why Performance Optimizations Must Precede Full Bootstrapping (Self-Hosting S4)
+### 4.3 Why Precision Audits and Performance Passes Must Precede Full Bootstrapping (Self-Hosting S4)
 
 The project includes a 140 KB compiler written in pure Redblue (`bootstrap/compiler.rb`). The self-hosting milestones follow the ladder defined in `docs/BOOTSTRAP.md`:
 $$\text{Rust Compiler (S1)} \to \text{Self-Compiled Bytecode (S2)} \to \text{Fixed-Point Identity (S3: } \text{stage1.rbc} == \text{stage2.rbc}) \to \text{Shipped Release (S4)}$$
 
-#### Current Status vs S4 Target Milestone
+#### Current Status vs S4 Target Milestone (Phase 179)
 - **S0 through S3 are already achieved and verified**: `tests/bootstrap_selfhost_test.rs` already asserts that `stage1.rbc` and `stage2.rbc` are byte-identical across hundreds of test programs.
-- **S4 (The Shipped Compiler is cut by Redblue itself)** is scheduled to formally take over **directly after Phase 149** (the completion of VM optimizations and Perceus memory safety).
+- **S4 (The Shipped Compiler is cut by Redblue itself)** is scheduled to formally take over at **Phase 179** (directly following Phase 178).
+- **Why S4 Must Take Place at Phase 179 (Rather than Earlier)**:
+  1. **Precision & Semantic Integrity (Phases 159–167)**: Bootstrapping before completing the precision audit would bake shallow implementation flaws (such as combining Unicode emoji corruption, float rounding anomalies, or non-deterministic map ordering) directly into the self-hosting compiler's binary output.
+  2. **Core Language Grammar (Phases 168–172)**: Cutting S4 after Phase 172 allows `bootstrap/compiler.rb` to be written using modern, idiomatic Redblue (`using` deterministic cleanup, `when matches` pattern matching, and `needs/guarantees` contracts).
+  3. **Near-Native Execution Speed (Phases 173–178)**: With Hidden Classes, Escape Analysis, Monomorphic Unboxing, and Cranelift JIT compilation, `bootstrap/compiler.rb` compiles at **near-native C/Rust speed (< 150 ms)**. Without these passes, running self-hosting across 84 test suites would cause 10-minute CI build times and pipeline timeouts.
 
 #### Will Bootstrapping Make GitHub Actions Workflows Take Much Longer?
 **Without optimization: YES (Catastrophic slowdown). With the phased strategy: NO.**
@@ -150,6 +176,7 @@ $$\text{Rust Compiler (S1)} \to \text{Self-Compiled Bytecode (S2)} \to \text{Fix
 2. **How CI Workflow Velocity is Preserved**:
    - **Phase 074 Hash Interning**: Replaces the linear symbol table scan with $\mathcal{O}(1)$ hashing, slashing compiler codegen time by >25%–50%.
    - **Phases 139–143 (NaN-Boxing & Inline Caching)**: Accelerates the bytecode VM by $3\times\text{--}5\times$, dropping full self-compilation of `bootstrap/compiler.rb` from 6 seconds down to **under 500 ms**.
+   - **Phases 173–178 (Monomorphic Unboxing & Cranelift JIT)**: Compiles the self-hosted compiler into raw native machine code, dropping execution time to **under 150 ms** (matching native Rust).
    - **Artifact Caching in CI**: `stage1_of_the_compiler()` caches the compiled artifact in `target/` so it is compiled only **once per test run**, not re-compiled on every individual test function.
    - **Selective CI Execution**: Full 3-stage fixed-point verification (`cmp stage1 stage2`) is triggered only when files in `bootstrap/` or `src/bytecode/` are modified, while everyday stdlib/docs changes run ordinary fast unit tests.
 
@@ -291,12 +318,12 @@ However, adopting traditional package managers introduces catastrophic industry 
 
 ### 9.2 Redblue's Modern Dependency Architecture (Phases 150–152)
 
-#### Phase 150: Tiered Standard Library Model
+### Phase 150: Tiered Standard Library Model
 - **Tier 0 (Core Builtin Binary, ~15 MB)**: Primitive types, arithmetic, strings, files, time, JSON, CSV, TOML, basic HTTP, and matrix/decimal math. Ships inside the binary.
 - **Tier 1 (Official Pre-Compiled Modules)**: First-party maintained packages (e.g., `sqlite`, `crypto`, `image`, `httpd`). Distributed as single pre-compiled dynamic/static modules with zero transitive dependencies.
 - **Tier 2 (Ecosystem Community Packages)**: User-contributed libraries.
 
-#### Phase 151: Content-Addressed Hermetic Package Cache (Zero `venv` Hell)
+### Phase 151: Content-Addressed Hermetic Package Cache (Zero `venv` Hell)
 - Import packages directly by URL with mandatory cryptographic SHA-256 integrity pinning:
   ```redblue
   import "https://pkg.redblue.org/postgres@v2.1#sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" as pg
@@ -304,7 +331,7 @@ However, adopting traditional package managers introduces catastrophic industry 
 - **Global Immutable Cache**: Packages are stored once in `~/.rb/cache/<hash>` as immutable artifacts. Multiple projects on the same machine share the exact same package files without disk duplication or environment activation.
 - **Hermetic Lockfile (`rb.lock`)**: Guarantees bit-for-bit identical dependency trees across developers, CI/CD, and production servers.
 
-#### Phase 152: Capability-Based Security for Third-Party Packages
+### Phase 152: Capability-Based Security for Third-Party Packages
 - In Python or npm, installing a third-party string formatting package allows it to silently read `~/.ssh/id_rsa` or make network requests.
 - In Redblue, packages have **zero ambient authority**. A third-party package cannot touch `files`, `network`, or `process` unless the parent application explicitly grants those capabilities:
   ```redblue
@@ -361,22 +388,22 @@ Attempting to boot an operating system kernel on an engine without deterministic
 
 While Redblue solves major developer frustrations, **it also introduces real friction and limitations of its own**. Total engineering honesty requires acknowledging these weaknesses and planning their phased solutions.
 
-### Limitation 1: The Verbosity Tax for Experienced Developers
-- **The Pain Point**: Seasoned engineers who touch-type at 120 WPM find typing `give back`, `set ... to`, `repeat 10 times`, and `is greater than` physically fatiguing compared to `return`, `=`, and `>`.
-- **The Remediation (Phase 153: Terse Syntax Aliases & Dual-Style Formatter)**:
+### Phase 153: Terse Syntax Aliases & Dual-Style Formatter
+- **Pain Point Addressed (Limitation 1 - The Verbosity Tax)**: Seasoned engineers who touch-type at 120 WPM find typing `give back`, `set ... to`, `repeat 10 times`, and `is greater than` physically fatiguing compared to `return`, `=`, and `>`.
+- **Implementation**:
   - Add compact keyword aliases: `ret` for `give back`, `let` / `=` for `set ... to`.
   - The compiler treats them as exact synonyms.
   - The official formatter (`rb format`) provides `--style=english` (canonical) and `--style=compact` so teams can view code in their preferred visual density.
 
-### Limitation 2: The "Cold Start" Ecosystem Desert (No NumPy / React Equivalent)
-- **The Pain Point**: A developer cannot build modern AI pipelines or web UIs in Redblue today because there is no `pip install torch` or `npm install react`. Redblue starts with zero community packages.
-- **The Remediation (Phase 154: Polyglot FFI & WASM Component Model)**:
+### Phase 154: Polyglot FFI & WASM Component Model
+- **Pain Point Addressed (Limitation 2 - The Ecosystem Desert)**: A developer cannot build modern AI pipelines or web UIs in Redblue today because there is no `pip install torch` or `npm install react`. Redblue starts with zero community packages.
+- **Implementation**:
   - Implement a zero-boilerplate Foreign Function Interface (FFI) to call C and Rust shared libraries (`.so`, `.dll`).
   - Support the WebAssembly Component Model (`WASI 0.2`): allow Redblue programs to import and run pre-compiled Python, C, and Rust components hermetically inside the Redblue runtime.
 
-### Limitation 3: Fear of Refactoring Large Codebases (Dynamic Typing at Scale)
-- **The Pain Point**: At 500 lines, dynamic typing is delightful. At 50,000 lines, changing a function parameter or record field without static type checks is terrifying.
-- **The Remediation (Phase 155: Gradual Type Contracts & Refinement Types)**:
+### Phase 155: Gradual Type Contracts & Refinement Types
+- **Pain Point Addressed (Limitation 3 - Refactoring Fear at Scale)**: At 500 lines, dynamic typing is delightful. At 50,000 lines, changing a function parameter or record field without static type checks is terrifying.
+- **Implementation**:
   - Introduce optional type annotations in natural English syntax:
     ```redblue
     to transfer(amount: whole number, recipient: text) -> yes/no
@@ -385,20 +412,20 @@ While Redblue solves major developer frustrations, **it also introduces real fri
     ```
   - The static analyzer checks these contracts before execution, catching refactoring bugs ahead of runtime.
 
-### Limitation 4: Tooling Vacuum (Lack of IDE Autocomplete & Linting)
-- **The Pain Point**: Modern developers rely heavily on VS Code / Cursor / Neovim autocomplete, hover documentation, and instant red squigglies. Coding without them feels like using Notepad.
-- **The Remediation (Phase 156: Official Tree-Sitter & Language Server Protocol Daemon)**:
+### Phase 156: Official Tree-Sitter & Language Server Protocol Daemon
+- **Pain Point Addressed (Limitation 4 - Tooling Vacuum in IDEs)**: Modern developers rely heavily on VS Code / Cursor / Neovim autocomplete, hover documentation, and instant red squigglies. Coding without them feels like using Notepad.
+- **Implementation**:
   - Publish an official Tree-Sitter grammar for syntax highlighting on GitHub, Prism, and editors.
   - Deliver `rb-lsp` as a single binary delivering auto-completion, jump-to-definition, hover docs, and instant diagnostics to all major code editors.
 
-### Limitation 5: Lack of Raw Byte-Level Memory Control for Systems Programming
-- **The Pain Point**: Operating system drivers, network packet dissection, and binary file formats require raw byte manipulation, endianness conversion, and ring buffers. Currently, Redblue abstracts numbers as `f64` and arrays as high-level collections.
-- **The Remediation (Phase 157: Safe Raw Byte Buffers & Struct Packing)**:
+### Phase 157: Safe Raw Byte Buffers & Struct Packing
+- **Pain Point Addressed (Limitation 5 - Systems Programming Control)**: Operating system drivers, network packet dissection, and binary file formats require raw byte manipulation, endianness conversion, and ring buffers. Currently, Redblue abstracts numbers as `f64` and arrays as high-level collections.
+- **Implementation**:
   - Add native fixed-size byte buffers (`buffer.create(size)`), structured packing (`struct.pack("<HHI", ...)`), and explicit endianness reading (`buffer.read_u32_be(offset)`).
 
-### Limitation 6: Multi-Core Concurrency Scaling (Modern CPUs Sit Idle)
-- **The Pain Point**: If Redblue fibers run on a single operating system thread (like Node.js or Python's GIL), intensive computational workloads cannot utilize 16-core or 64-core processors.
-- **The Remediation (Phase 158: Work-Stealing Multi-Threaded Fiber Scheduler)**:
+### Phase 158: Work-Stealing Multi-Threaded Fiber Scheduler
+- **Pain Point Addressed (Limitation 6 - Modern Multi-Core CPUs Idle)**: If Redblue fibers run on a single operating system thread (like Node.js or Python's GIL), intensive computational workloads cannot utilize 16-core or 64-core processors.
+- **Implementation**:
   - Upgrade the fiber runtime to an $M:N$ work-stealing scheduler (modeled after Go's runtime and Rust's Tokio).
   - Fibers distribute automatically across all available CPU cores with thread-safe message channels, unlocking true parallel processing without shared mutable memory races.
 
@@ -624,4 +651,23 @@ While early VM phases (Phases 139–142) provide baseline efficiency (NaN-boxing
   - **Tier 1 (Method JIT / Cranelift SSA Backend)**: Hot functions (detected via execution counters $> 1,000$ iterations) are asynchronously compiled to optimized machine code using Cranelift.
   - **On-Stack Replacement (OSR)**: Long-running loops transition from Tier 0 to Tier 1 mid-execution without waiting for function return.
   - **Deoptimization Guards (Bailouts)**: If dynamic type assumptions are violated (e.g. passing a string into a previously purely numeric function), the runtime safely bails out to the interpreter at the exact instruction.
+
+---
+
+## 18. Full Self-Hosting Bootstrapping S4 (Phase 179)
+
+The culmination of the Redblue compiler roadmap is the transition from a Rust-hosted bootstrap compiler to an autonomous, self-hosting language ecosystem where **Redblue compiles Redblue for all future releases**:
+
+### Phase 179: Full Self-Hosting Bootstrap S4 (The Shipped Compiler Cut by Redblue)
+- **Goal**: Formally cut the official release binary (`rb`) using the self-hosted compiler `bootstrap/compiler.rb` running on the fully optimized JIT/unboxed Redblue engine.
+- **Why it is placed here**:
+  - The self-hosted compiler benefits from all standard library and runtime precision fixes (Phases 159–167), eliminating subtle compiler bugs.
+  - The compiler source can utilize expressive modern syntax (Phases 168–172: `using`, `matches`, `channel`, `needs/guarantees`).
+  - Powered by Escape Analysis, Monomorphic Unboxing, and Cranelift JIT compilation (Phases 173–178), the self-hosted compiler runs at **near-native C/Rust speed**, compiling itself in **< 150 ms**.
+- **Deliverables**:
+  1. **Fixed-Point Identity Verification**: Three-stage bootstrap cycle:
+     $$\text{Rust } rb \xrightarrow{\text{compiles}} \text{Stage 1 } rb \xrightarrow{\text{compiles}} \text{Stage 2 } rb \xrightarrow{\text{compiles}} \text{Stage 3 } rb$$
+     asserting that $\text{Stage 2 } rb$ and $\text{Stage 3 } rb$ are byte-for-byte identical.
+  2. **Full Toolchain Compilation**: The self-hosted compiler builds all tools (`rb-bench`, `rb format`, `rb lint`, `rb doc`, `rb debug`, `rb disasm`, `rb bundle`) directly from Redblue sources.
+  3. **Continuous Self-Hosting in CI**: Future pull requests compile the compiler with itself in < 150 ms, asserting full language sovereignty with zero reliance on `rustc` during downstream execution.
 
