@@ -1885,4 +1885,44 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn edge_hex_roundtrip_covers_empty_and_uppercase() {
+        assert_eq!(
+            decode_hex("").expect("empty hex is empty bytes"),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            decode_hex("4A6b").expect("both hex cases decode"),
+            b"Jk".to_vec()
+        );
+
+        let bytes = b"Hello \xE4\xB8\x96\xE7\x95\x8C";
+        assert_eq!(
+            decode_hex(&encode_hex(bytes)).expect("encoded bytes decode"),
+            bytes
+        );
+        assert_eq!(encode_hex(b""), "");
+
+        let error = decode_hex("4").expect_err("an odd-length payload must be refused");
+        assert!(error.contains("odd-length"), "{error}");
+    }
+
+    #[test]
+    fn edge_truncate_stays_within_small_widths_and_respects_wide_characters() {
+        assert_eq!(truncate("", 0), "");
+        assert_eq!(truncate("abc", 3), "abc");
+        assert_eq!(truncate("abcd", 3), "...");
+        assert_eq!(truncate("abcdef", 4), "a...");
+        assert_eq!(truncate("你好世界", 4), "...");
+
+        for (text, width) in [("abcdef", 5), ("你好世界", 5), ("你好世界", 8)] {
+            let shortened = truncate(text, width);
+            assert!(
+                UnicodeWidthStr::width(shortened.as_str()) <= width.max(3),
+                "{text:?} at width {width} became {shortened:?} ({} cells)",
+                UnicodeWidthStr::width(shortened.as_str())
+            );
+        }
+    }
 }

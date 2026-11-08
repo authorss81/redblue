@@ -1523,3 +1523,96 @@ fn edge_a_wrong_answer_for_a_text_workload_is_refused() {
         other => panic!("expected a wrong-answer error, got {other:?}"),
     }
 }
+
+#[test]
+fn edge_worker_mode_refuses_a_malformed_request() {
+    let binary = env!("CARGO_BIN_EXE_rb-bench");
+    for (arguments, expected_exit) in [
+        (Vec::<&str>::new(), 2),
+        (vec!["not-a-workload", "20"], 1),
+        (vec!["fibonacci", "-1"], 1),
+    ] {
+        let output = std::process::Command::new(binary)
+            .arg("--worker")
+            .args(&arguments)
+            .output()
+            .expect("the rb-bench worker binary should run");
+        assert_eq!(
+            output.status.code(),
+            Some(expected_exit),
+            "`--worker {arguments:?}` should exit {expected_exit}, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.trim_start().starts_with("ERR"),
+            "`--worker {arguments:?}` should report a clean ERR line, got {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn edge_baseline_parser_ignores_an_unshaped_unknown_row() {
+    let rows = bench::parse_baseline_markdown(
+        "| not-a-workload | 20 |\n\
+         | fibonacci | 20 | 6765 | 1.250 ms |\n",
+    )
+    .expect("a malformed row for an unrelated table must not abort the parse");
+
+    assert_eq!(rows.len(), 1, "only the real data row should survive");
+    assert_eq!(rows[0].workload, "fibonacci");
+    assert_eq!(rows[0].size, 20);
+}
+
+#[test]
+fn edge_comparison_matches_by_workload_and_size() {
+    let baseline = vec![bench::BaselineRow {
+        workload: "fibonacci".to_string(),
+        size: 20,
+        answer: "6765".to_string(),
+        wall_time_ms: 1.0,
+    }];
+    let current = vec![bench::Measurement {
+        workload: "fibonacci",
+        size: 21,
+        answer: Value::Number(10946.0),
+        elapsed: Duration::from_millis(2),
+    }];
+
+    let table = bench::render_comparison(&baseline, &current);
+    assert!(
+        table.contains("not run"),
+        "a measurement at another size is not the recorded row: {table}"
+    );
+    assert!(
+        table.contains("n/a"),
+        "a row without a matched measurement has no ratio: {table}"
+    );
+    assert!(
+        !table.contains("2.00x"),
+        "a same-workload measurement at a different size must not be compared: {table}"
+    );
+}
+
+#[test]
+fn edge_cli_measurement_past_the_maximum_is_a_run_error() {
+    let dir = unique_temp_dir("cli-oversized");
+    let output = dir.join("BENCH.md");
+    let max = bench::max_size("fibonacci").expect("a listed workload has a maximum");
+
+    let exit = bench::run_cli_with_path(&["fibonacci".to_string(), (max + 1).to_string()], &output);
+    assert_eq!(
+        exit, 1,
+        "a size past the maximum should be a clean run error, not a success"
+    );
+    assert!(
+        !output.exists(),
+        "a refused measurement must not write the checked-in baseline"
+    );
+    assert!(
+        !bench::timings_path(&output).exists(),
+        "a refused measurement must not write a timing artifact"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

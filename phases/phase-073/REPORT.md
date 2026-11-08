@@ -17,6 +17,8 @@
 | `tests/unreviewed_work_ack_test.rs` | +57 −65 | Removes the phase's own SHA-pinned delivery entry — the pipeline re-creates that commit every round, so the SHA goes stale — and acknowledges `resume phase-073:` by its subject on the delivery rule, with an edge test that requires the subject rule and refuses a stale SHA |
 | `BENCH.md` | +15 −0 | New file: the measured baseline from this landing machine — verified answers **and** wall times, plus the hardware note and the comparison contract |
 | `.gitignore` | +6 −1 | The timing-ignore prose now names `BENCH.md` as the checked-in landing-machine baseline instead of claiming only answers are tracked |
+| `tests/bench_test.rs` | +104 −0 | This final resume adds four edge tests: the hidden worker rejects a malformed request with a clean `ERR` line, the baseline parser ignores an unshaped row from an unrelated table, the advisory comparison matches rows by workload **and** size, and an over-maximum CLI measurement exits 1 without writing the baseline or its timing artifact |
+| `tests/bench/mod.rs` | +47 −0 | This final resume adds two unit tests: hex encode/decode round-trips empty, uppercase, multibyte, and odd-length payloads; `truncate` stays within small widths and counts wide CJK characters as two cells |
 
 The counts above are the full phase diff against the base commit, not per-attempt
 deltas. The `Cargo.toml` binary target, the original `tests/bench/mod.rs` and
@@ -103,6 +105,12 @@ The preserved harness already supplies `BENCH.md`, the four workloads, and the c
 | `edge_cli_named_workload_uses_its_default_size` | singleton/default path: every named workload resolves to its declared default, the rendered row carries that size, and the run writes neither the injected baseline nor its timing artifact |
 | `edge_baseline_parser_accepts_uppercase_header_and_colon_separator` | parsed input: a case-insensitive `WORKLOAD` header and a colon-aligned separator are ignored without dropping the data row |
 | `edge_a_wrong_answer_for_a_text_workload_is_refused` | failure channel: a text workload measured against a deliberately wrong literal returns `WrongAnswer` with exact expected/actual text |
+| `edge_worker_mode_refuses_a_malformed_request` | malformed input / failure channel: the shipped `rb-bench --worker` exits 2 with an `ERR` line when it gets no workload, and exits 1 with an `ERR` line for an unknown workload or a negative size |
+| `edge_baseline_parser_ignores_an_unshaped_unknown_row` | malformed input: a row with the wrong cell count whose first cell is not a workload is ignored instead of aborting the parse, so an unrelated table cannot poison `BENCH.md` parsing |
+| `edge_comparison_matches_by_workload_and_size` | boundary / duplicate keys: a measurement for the same workload at another size is reported as `not run` with no ratio, not silently compared against the baseline row |
+| `edge_cli_measurement_past_the_maximum_is_a_run_error` | out of bounds / resource limit: `max_size + 1` through the shipped CLI exits 1 and writes neither the baseline nor its timing artifact |
+| `edge_hex_roundtrip_covers_empty_and_uppercase` | empty / unicode / malformed input: hex encode/decode round-trips empty, uppercase, and multibyte payloads; an odd-length payload is refused |
+| `edge_truncate_stays_within_small_widths_and_respects_wide_characters` | empty / boundary / unicode: tiny width budgets stay bounded and a wide CJK character consumes two display cells, so the answer column never overflows |
 
 ## Gates
 
@@ -110,8 +118,8 @@ The preserved harness already supplies `BENCH.md`, the four workloads, and the c
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 2735 passed, 0 failed across 85 test binaries (this resumed run; `bench_test` alone has 66 passing tests) |
-| `../rbops/verify.sh phase-073` | pass — `VERIFY PASS — phase-073`, 2735 tests, 4 rust / 6 edge / 1 failure-asserting added by this diff, examples green |
+| `cargo test --all-targets` | 2743 passed, 0 failed across 85 test binaries (this final resume; `bench_test` alone has 72 passing tests) |
+| `../rbops/verify.sh phase-073` | pass — `VERIFY PASS — phase-073`, 2743 tests, 6 rust / 6 edge / 1 failure-asserting added by this diff, examples green |
 
 ## Test requirement matrix
 
@@ -120,7 +128,7 @@ The preserved harness already supplies `BENCH.md`, the four workloads, and the c
 | empty | covered — empty workload name, zero-sized workloads, empty concat text |
 | singleton | covered — fib(1), primes below 2, one concat iteration, one lex statement |
 | boundary | covered — fib(20)=6765, primes below 1000=168, exactly 200 concat iterations, and an answer of exactly the table column width (display cells) |
-| out_of_bounds | N/A — the harness indexes no user collection; sizes are the only index-like boundary and are checked |
+| out_of_bounds | covered — `max_size + 1` is refused through both `run_workload` and the shipped CLI, which exits 1 without writing the baseline or its timing artifact |
 | type_mismatch | covered — non-numeric size text is refused |
 | numeric_boundary | covered — zero and negative sizes; no benchmark asserts floating-point equality beyond the exact integer answers. Wall time is recorded and never asserted |
 | unicode | covered — a long CJK answer is truncated and padded by terminal display width, not by Unicode scalar count, so wide characters occupy two cells and the table cannot split a multi-byte character or break its columns |
