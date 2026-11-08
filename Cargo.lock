@@ -878,6 +878,7 @@ dependencies = [
  "rustyline",
  "serde_json",
  "sha2",
+ "unicode-width",
  "uuid",
 ]
 
