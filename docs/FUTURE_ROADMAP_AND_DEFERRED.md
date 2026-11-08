@@ -521,6 +521,43 @@ A major historical failure mode in autonomous coding pipelines is the **"Open-En
 
 ---
 
+### 14.2 The Dependency Invariant: Why Remediations Must Precede Optimization and Bootstrapping
+
+A critical architectural question is: **If the shallow implementation audits (Phases 159–161) discover new bugs, can remediation phases be scheduled after the speedup (Phases 173–178) or bootstrapping (Phase 186) passes?**
+
+**The Answer is Strictly NO. All remediations must precede optimization and bootstrapping.**
+
+```
+[Audits: Phases 159–161] ──> [Remediations: Phases 162–167 + new fixes]
+                                              │
+                                              ▼ (depends_on gate)
+                             [JIT Velocity Passes: Phases 173–178]
+                                              │
+                                              ▼ (depends_on gate)
+                             [Full S4 Bootstrapping: Phase 186]
+```
+
+#### Why Deferring Bug Fixes Until After Speedup or Bootstrapping Fails:
+1. **Never Optimize Broken Code**:
+   - The Cranelift JIT compiler and monomorphic unboxing passes (Phases 173–178) rely on deterministic semantic assumptions (e.g. integer ranges, IEEE float behavior, grapheme boundaries).
+   - Optimizing a shallow or flawed implementation bakes bugs directly into compiled machine code, causing hard crashes, deoptimization thrashing, or corrupted registers that are nearly impossible to debug.
+2. **Preventing Compiler Self-Infection (The Chicken-and-Egg Bug)**:
+   - If S4 bootstrapping (Phase 186) occurs *before* all shallow bugs are resolved, `bootstrap/compiler.rb` will be compiled into a binary carrying those exact runtime defects.
+   - Fixing a compiler bug *after* it has become self-hosting requires modifying a broken compiler that miscompiles itself.
+3. **The `depends_on` Policy for Newly Discovered Audit Defects**:
+   - When Phases 159–161 identify defects beyond the planned remediations (Phases 162–167), the new remediation phases are **inserted immediately before Phase 168** with explicit `depends_on` markers.
+   - Speedup passes (Phases 173–178) and S4 Bootstrapping (Phase 186) declare hard dependencies on all audit remediations, guaranteeing the pipeline never enters optimization or self-hosting until the language runtime is mathematically clean.
+
+---
+
+### 14.3 The Design Horizon & Stop Rule: No Unforced Speculative Phases
+
+- **The Stop Rule**: With Phases 001 through 186 fully mapped, **no further language phases should be added at this point**.
+- Designing further speculative phases on paper before real code is executed leads to language over-engineering.
+- The pipeline's active focus remains strictly on **completing the base 126 phases on `main`**. Further language additions, if any, will emerge organically from empirical dogfooding inside `authorss81/rb-apps` and kernel stresses inside `authorss81/rbos`.
+
+---
+
 ## 15. Modern Industry Pain Points (Where Rust, Go, Python, and TypeScript Struggle in 2025/2026)
 
 A survey of global developer pain points across popular language ecosystems reveals acute, unsolved problems that Redblue is architecturally positioned to solve:
