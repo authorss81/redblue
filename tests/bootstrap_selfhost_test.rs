@@ -2100,3 +2100,309 @@ fn edge_a_while_loop_nested_in_another_patches_its_own_jump() {
         assert_identical(name, source);
     }
 }
+
+// Phase 074: the compiler's intern table is internal to
+// `bootstrap/compiler.rb`, so the direct tests build the compiler's own source
+// with the fragment in `bootstrap/intern_selftest.rb` appended in place of its
+// final `main()` call. The probe runs the same `intern` and `intern_hash` the
+// normal compile path runs; it only gives a test a way to call them without a
+// source file that happens to use every shape needed. The probe stays out of
+// `bootstrap/compiler.rb` so the self-compilation fixed point does not include
+// test-only code, and the compiler keeps its unmodified usage check.
+//
+// The byte-equality test is the real gate: a hash table that answers a name
+// with the wrong index changes the constant pool, and the pool is part of the
+// bytes. `edge_name_heavy_fixture_is_byte_identical_in_both_stages` compiles a
+// program with many distinct names in both stages and requires the files to be
+// one file.
+
+struct InternOutput {
+    stdout: String,
+    stderr: String,
+    succeeded: bool,
+}
+
+/// The compiler source with its `main()` call replaced by `entry`, after the
+/// probe fragment. `compiler.rb` ends with `main()`, so cutting at the last one
+/// leaves every declaration and no call.
+fn intern_probe_source(entry: &str) -> String {
+    let source = compiler_contents();
+    let main_call = "\nmain()\n";
+    let cut = source.rfind(main_call).unwrap_or_else(|| {
+        panic!("bootstrap/compiler.rb no longer ends with a main() call:\n{source}")
+    });
+
+    let fixture = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bootstrap/intern_selftest.rb"),
+    )
+    .expect("the intern probe fragment is readable");
+
+    let mut combined = String::with_capacity(source.len() + fixture.len() + entry.len() + 16);
+    combined.push_str(&source[..cut]);
+    combined.push_str("\n\n");
+    combined.push_str(&fixture);
+    combined.push_str("\n\n");
+    combined.push_str(entry);
+    combined.push('\n');
+    combined
+}
+
+fn run_intern_probe(entry: &str, name: &str) -> InternOutput {
+    let path = scratch(name);
+    fs::write(&path, intern_probe_source(entry)).expect("write the compiler and probe");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("run")
+        .arg(&path)
+        .output()
+        .expect("the rb binary runs");
+    InternOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        succeeded: output.status.success(),
+    }
+}
+
+/// The probe is minutes of loops, and the assertions below read overlapping
+/// keys from it. It runs once per test process; the tests read the same output.
+fn intern_selftest() -> &'static InternOutput {
+    static RUN: std::sync::OnceLock<InternOutput> = std::sync::OnceLock::new();
+    RUN.get_or_init(|| {
+        let run = run_intern_probe("intern_selftest()", "intern_selftest.rb");
+        assert!(
+            run.succeeded,
+            "the intern self-test failed:\n{}",
+            run.stderr
+        );
+        run
+    })
+}
+
+/// The value printed for `key`, which the self-test prints as `key value`.
+fn intern_report<'a>(stdout: &'a str, key: &str) -> &'a str {
+    let prefix = format!("{key} ");
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("the self-test printed no '{key}' line:\n{stdout}"))
+}
+
+fn intern_number(stdout: &str, key: &str) -> i64 {
+    intern_report(stdout, key)
+        .parse::<i64>()
+        .unwrap_or_else(|error| panic!("'{key}' is not an integer: {error}\n{stdout}"))
+}
+
+fn intern_selftest_type_error() -> Result<(), String> {
+    let run = run_intern_probe(
+        "intern_selftest_type_error()",
+        "intern_selftest_type_error.rb",
+    );
+    if run.succeeded {
+        Ok(())
+    } else {
+        Err(run.stderr)
+    }
+}
+
+#[test]
+fn edge_interning_the_same_name_1000_times_grows_the_table_once() {
+    let run = intern_selftest();
+    assert!(
+        run.succeeded,
+        "the intern self-test failed:\n{}",
+        run.stderr
+    );
+    assert_eq!(
+        intern_number(&run.stdout, "repeat_growth"),
+        1,
+        "1000 repetitions of one name grew the table by more than the one distinct name:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_number(&run.stdout, "other_growth"),
+        2,
+        "a second distinct name did not grow the table to exactly two entries:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn edge_engineered_collision_resolves_each_name_to_its_own_index() {
+    let run = intern_selftest();
+    assert!(
+        run.succeeded,
+        "the intern self-test failed:\n{}",
+        run.stderr
+    );
+    assert_eq!(
+        intern_report(&run.stdout, "collision_found"),
+        "yes",
+        "the self-test failed to construct a collision:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_report(&run.stdout, "collision_distinct"),
+        "yes",
+        "two colliding names were given the same index:\n{}",
+        run.stdout
+    );
+
+    // Both names really are in the bucket the self-test engineered, rather than
+    // merely being distinct names that happened to take different buckets.
+    let bucket = intern_number(&run.stdout, "collision_bucket");
+    assert!(
+        (0..256).contains(&bucket),
+        "the self-test's collision bucket is not a bucket index:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_number(&run.stdout, "collision_a_bucket"),
+        bucket,
+        "the first colliding name is not in the reported bucket:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_number(&run.stdout, "collision_b_bucket"),
+        bucket,
+        "the second colliding name is not in the same bucket:\n{}",
+        run.stdout
+    );
+
+    // Each colliding name must still resolve to the index it was given, after
+    // the other one was added to the same bucket.
+    for name in ["collision_a", "collision_b"] {
+        let index = intern_number(&run.stdout, &format!("{name}_index"));
+        let lookup = intern_number(&run.stdout, &format!("{name}_lookup"));
+        assert_eq!(
+            lookup, index,
+            "{name} did not resolve to its own index after the collision:\n{}",
+            run.stdout
+        );
+    }
+}
+
+#[test]
+fn edge_empty_and_ten_kilobyte_names_are_interned_exactly() {
+    let run = intern_selftest();
+    assert!(
+        run.succeeded,
+        "the intern self-test failed:\n{}",
+        run.stderr
+    );
+    assert_eq!(
+        intern_report(&run.stdout, "empty_same"),
+        "yes",
+        "the empty name was not interned to one index:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_number(&run.stdout, "empty_growth"),
+        1,
+        "the empty name grew the table by more than one:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_report(&run.stdout, "long_same"),
+        "yes",
+        "the same 10KB name did not intern to one index:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_report(&run.stdout, "long_distinct"),
+        "yes",
+        "a 10KB name that differs only in its last byte reused the first index, so the name was truncated:\n{}",
+        run.stdout
+    );
+    assert_eq!(
+        intern_number(&run.stdout, "long_growth"),
+        2,
+        "the two 10KB names did not grow the table to exactly two entries:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn edge_intern_refuses_a_name_that_is_not_a_byte_list() {
+    let result = intern_selftest_type_error();
+    assert!(
+        result.is_err(),
+        "the compiler interned a number as if it were a name"
+    );
+    let stderr = result.unwrap_err();
+    assert!(
+        stderr.contains("length requires a list or text"),
+        "the failure was not the clean length error:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("usage:"),
+        "the run fell through to a usage error instead of reaching the intern table:\n{}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "the run panicked instead of reporting a runtime error:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn edge_name_heavy_fixture_is_byte_identical_in_both_stages() {
+    let mut source = String::new();
+    for index in 0..120 {
+        source.push_str(&format!("set name{index} to {index}\n"));
+    }
+    for index in 0..120 {
+        source.push_str(&format!("say name{index}\n"));
+    }
+    // One name emitted far more often than the others: the table must still
+    // hold it once and answer every occurrence with the same index. The
+    // statement count is kept well below the compiler's parser call-depth
+    // limit, since the contract here is byte equality rather than size.
+    for _ in 0..30 {
+        source.push_str("say name0\n");
+    }
+    // A name is bytes, so a non-ASCII name is one name and not one entry per
+    // byte. Both stages have to intern the same UTF-8 sequence.
+    for name in ["naïve", "日本語", "café"] {
+        source.push_str(&format!("set {name} to 1\nsay {name}\n"));
+    }
+
+    let expected = stage1("name-heavy", &source);
+    let actual = stage2("name-heavy", &source);
+    assert!(
+        actual.succeeded,
+        "stage 2 failed on the name-heavy fixture:\n{}",
+        actual.stderr
+    );
+    assert_eq!(
+        actual.bytes, expected,
+        "the name-heavy fixture is not byte-identical in both stages"
+    );
+
+    let decoded = redblue::Chunk::decode(&actual.bytes).expect("stage 2's file decodes");
+    let names: Vec<&str> = decoded
+        .constants
+        .iter()
+        .filter_map(|constant| match constant {
+            redblue::bytecode::Constant::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    for index in 0..120 {
+        let name = format!("name{index}");
+        assert_eq!(
+            names.iter().filter(|candidate| **candidate == name).count(),
+            1,
+            "'{name}' is not in the constant pool exactly once, so the intern table did not deduplicate it"
+        );
+    }
+    for name in ["naïve", "日本語", "café"] {
+        assert_eq!(
+            names.iter().filter(|candidate| **candidate == name).count(),
+            1,
+            "the UTF-8 name '{name}' is not in the constant pool exactly once"
+        );
+    }
+}
