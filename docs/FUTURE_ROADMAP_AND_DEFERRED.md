@@ -332,13 +332,21 @@ However, adopting traditional package managers introduces catastrophic industry 
 - **Global Immutable Cache**: Packages are stored once in `~/.rb/cache/<hash>` as immutable artifacts. Multiple projects on the same machine share the exact same package files without disk duplication or environment activation.
 - **Hermetic Lockfile (`rb.lock`)**: Guarantees bit-for-bit identical dependency trees across developers, CI/CD, and production servers.
 
-### Phase 152: Capability-Based Security for Third-Party Packages
-- In Python or npm, installing a third-party string formatting package allows it to silently read `~/.ssh/id_rsa` or make network requests.
-- In Redblue, packages have **zero ambient authority**. A third-party package cannot touch `files`, `network`, or `process` unless the parent application explicitly grants those capabilities:
-  ```redblue
-  import "https://pkg.redblue.org/markdown" with capabilities (none)
-  import "https://pkg.redblue.org/mailer" with capabilities (network)
-  ```
+### Phase 152: Capability-Based Security for Third-Party Packages (Solving "Permission Fatigue")
+- **The Problem**: In Python or npm, packages have unrestricted ambient authority: a Markdown parser can silently read `~/.ssh/id_rsa` or send environment variables over HTTP. Conversely, naive capability systems (like early Deno) require developers to type tedious CLI flags or manual permission clauses on every import, creating **"permission fatigue"** that drives developers to bypass security.
+- **The Redblue Solution**:
+  1. **Zero Ambient Authority**: Packages cannot access the network, filesystem, or processes without granted capabilities.
+  2. **No Per-Import Typing Friction (Manifest & Lockfile Declarations)**: Source code simply imports packages cleanly (`import markdown`, `import mailer`). Capabilities are defined once in the project lockfile (`rb.lock`) or package manifest, NOT repeated by hand across dozens of source files:
+     ```toml
+     # rb.lock (auto-generated & audited once)
+     [packages."https://pkg.redblue.org/markdown"]
+     capabilities = ["none"]
+
+     [packages."https://pkg.redblue.org/mailer"]
+     capabilities = ["network"]
+     ```
+  3. **Interactive First-Run Approval**: During local development, if a package attempts an undeclared operation, the CLI prompts once: `Package 'mailer' requests [network] access to 'api.sendgrid.com:443'. Allow? [y/n/always]`. Choosing `always` persists the permission rule to `rb.lock`.
+  4. **Pre-Audited Registry Defaults (`rb-pkg`)**: Curated packages in `authorss81/rb-pkg` come with cryptographically signed, least-privilege capability manifests. Installing a package pre-populates `rb.lock` with the minimal verified permissions, eliminating manual grant fatigue.
 
 ---
 
@@ -429,6 +437,18 @@ While Redblue solves major developer frustrations, **it also introduces real fri
 - **Implementation**:
   - Upgrade the fiber runtime to an $M:N$ work-stealing scheduler (modeled after Go's runtime and Rust's Tokio).
   - Fibers distribute automatically across all available CPU cores with thread-safe message channels, unlocking true parallel processing without shared mutable memory races.
+
+### Limitation 7: The "Permission Fatigue" Friction (Manual Capability Grants)
+- **The Pain Point**: Explicit capability security models (such as early Deno) force developers to grant permissions manually via endless CLI flags or per-file imports. This friction causes developers to bypass security entirely with `--allow-all`.
+- **The Remediation (Integrated into Phase 152)**: Capabilities are declared once in the project lockfile (`rb.lock`) or registry manifest, supported by interactive one-click terminal grants during local development. Developers never type capability clauses repeatedly in source code.
+
+### Limitation 8: Fallible Chained Operation Boilerplate
+- **The Pain Point**: In chained I/O operations (reading a file, parsing JSON, fetching an authentication token), nested `try ... catch` blocks create pyramids of error handling.
+- **The Remediation (Phases 168–169)**: Modern `might fail ... otherwise <fallback>` expressions and declarative pattern matching (`when matches`) allow clean, one-line error unwrapping without losing error context.
+
+### Limitation 9: Deeply Nested Record Mutation Friction
+- **The Pain Point**: In pure functional immutable languages, updating a nested field (`user.company.address.city`) requires tedious manual copying at each nesting level.
+- **The Remediation (Phase 147 & Phase 160)**: Perceus Functional-But-In-Place (FBIP) analysis allows direct path mutation syntax (`set user.company.address.city to "Tokyo"`). When the reference count is 1, the engine mutates the nested memory in-place with zero allocation and native C speed.
 
 ---
 
