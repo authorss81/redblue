@@ -153,18 +153,19 @@ The following VM and memory optimizations are queued to close the performance ga
   4. Formally re-scope `edge_time_from_unix_truncates_a_fractional_second_like_time_format` to `edge_time_from_unix_floors_negative_timestamps_posix_compliant` as an explicit, documented language upgrade.
   5. Add high-precision astronomical and pre-epoch epoch-boundary tests.
 
-### 4.3 Why Precision Audits and Performance Passes Must Precede Full Bootstrapping (Self-Hosting S4)
+### 4.3 Why Precision Audits, Performance Passes, and World-Class Features Must Precede Full Bootstrapping (Self-Hosting S4)
 
 The project includes a 140 KB compiler written in pure Redblue (`bootstrap/compiler.rb`). The self-hosting milestones follow the ladder defined in `docs/BOOTSTRAP.md`:
 $$\text{Rust Compiler (S1)} \to \text{Self-Compiled Bytecode (S2)} \to \text{Fixed-Point Identity (S3: } \text{stage1.rbc} == \text{stage2.rbc}) \to \text{Shipped Release (S4)}$$
 
-#### Current Status vs S4 Target Milestone (Phase 179)
+#### Current Status vs S4 Target Milestone (Phase 186)
 - **S0 through S3 are already achieved and verified**: `tests/bootstrap_selfhost_test.rs` already asserts that `stage1.rbc` and `stage2.rbc` are byte-identical across hundreds of test programs.
-- **S4 (The Shipped Compiler is cut by Redblue itself)** is scheduled to formally take over at **Phase 179** (directly following Phase 178).
-- **Why S4 Must Take Place at Phase 179 (Rather than Earlier)**:
+- **S4 (The Shipped Compiler is cut by Redblue itself)** is scheduled to formally take over at **Phase 186** (following the completion of the precision audits, core grammar extensions, JIT velocity passes, and world-class capabilities through Phase 185).
+- **Why S4 Must Take Place at Phase 186 (Rather than Earlier)**:
   1. **Precision & Semantic Integrity (Phases 159–167)**: Bootstrapping before completing the precision audit would bake shallow implementation flaws (such as combining Unicode emoji corruption, float rounding anomalies, or non-deterministic map ordering) directly into the self-hosting compiler's binary output.
   2. **Core Language Grammar (Phases 168–172)**: Cutting S4 after Phase 172 allows `bootstrap/compiler.rb` to be written using modern, idiomatic Redblue (`using` deterministic cleanup, `when matches` pattern matching, and `needs/guarantees` contracts).
   3. **Near-Native Execution Speed (Phases 173–178)**: With Hidden Classes, Escape Analysis, Monomorphic Unboxing, and Cranelift JIT compilation, `bootstrap/compiler.rb` compiles at **near-native C/Rust speed (< 150 ms)**. Without these passes, running self-hosting across 84 test suites would cause 10-minute CI build times and pipeline timeouts.
+  4. **World-Class Compiler Features (Phases 179–185)**: Completing module encapsulation (`public`/`private`), generics, zero-config cross-compilation (`--target`), and the 10,000-case conformance suite before S4 ensures `bootstrap/compiler.rb` is clean, type-safe, cross-compiles to all platforms out of the box, and is mathematically proven against the Rust reference compiler before Rust is retired.
 
 #### Will Bootstrapping Make GitHub Actions Workflows Take Much Longer?
 **Without optimization: YES (Catastrophic slowdown). With the phased strategy: NO.**
@@ -654,67 +655,80 @@ While early VM phases (Phases 139–142) provide baseline efficiency (NaN-boxing
 
 ---
 
-## 18. Full Self-Hosting Bootstrapping S4 (Phase 179)
+## 18. World-Class Language Capabilities (Phases 179–185)
+
+To stand shoulder-to-shoulder with mature industry titans (Rust, Go, TypeScript, Swift) before taking the self-hosting leap, Redblue establishes seven dedicated compiler and tooling phases:
+
+### Phase 179: Formal Module Encapsulation & Information Hiding (`public` vs `private`)
+- **Goal**: Introduce strict lexical visibility controls in natural English, ensuring internal implementation details cannot be accessed from outside.
+- **Syntax**:
+  ```redblue
+  module PaymentProcessor
+      private set secret_key to "sk_test_..."
+      public to process_payment(amount)
+          // ...
+      end
+  end
+  ```
+- **Why Before Bootstrapping**: `bootstrap/compiler.rb` is an extensive program consisting of thousands of lines across lexer, parser, analyzer, and codegen. Building encapsulation before bootstrapping allows the self-hosted compiler to be written with clean, modular boundaries.
+
+### Phase 180: Parametric Polymorphism & Lightweight Generics (`type Stack of item`)
+- **Goal**: Reusable generic data structures (`Stack of item`, `Result of value or error`, `Tree of node`) that compile to specialized, unboxed machine code variants with zero runtime overhead.
+- **Syntax**:
+  ```redblue
+  type Stack of item
+      has elements: list of item
+  end
+  to push(s: Stack of item, value: item)
+      set s.elements to s.elements.append(value)
+  end
+  ```
+- **Why Before Bootstrapping**: Compilers are fundamentally generic AST and symbol-table transformers. Having generics in place before S4 allows `bootstrap/compiler.rb` to be written type-safely without manual dynamic type-casts.
+
+### Phase 181: Built-In Production Observability, Profiling & Flamegraphs (`rb profile`)
+- **Goal**: Built-in statistical sampling CPU and memory allocation profiling. Emits standard `pprof` protocol buffers and interactive SVG flamegraphs directly from the CLI without external agents.
+- **Usage**: `rb profile script.rb` or `rb test --profile`.
+- **Why Before Bootstrapping**: Provides the exact profiling tool needed to profile `bootstrap/compiler.rb` during the S4 self-compilation benchmark runs to eliminate any remaining CPU bottlenecks.
+
+### Phase 182: Zero-Configuration Cross-Compilation & Target Triples (`rb build --target <arch>`)
+- **Goal**: Compile standalone, statically linked binaries for Linux, macOS, Windows, and ARM from any host platform with a single flag.
+- **Implementation**: Embed Cranelift multi-architecture backends and a minimal musl/libc stub inside the `rb` binary (`rb build --target=linux-arm64`, `rb build --target=windows-x64`).
+- **Why Before Bootstrapping**: When S4 cuts the first independent, sovereign release of the Redblue compiler, it must be capable of cross-compiling for every developer platform on Earth without requiring host C toolchains.
+
+### Phase 183: Multilingual Natural Syntax Dialects & Lossless Translation (`rb format --to=...`)
+- **Goal**: Canonical Dialect Keyword Mappings. The AST is language-agnostic; code written in Spanish, French, Chinese, Japanese, or Hindi compiles to identical bytecode.
+- **Dialects**:
+  - **English**: `if count is greater than 10 then say "Hello"`
+  - **Spanish**: `si cuenta es mayor que 10 entonces decir "Hola"`
+  - **Chinese**: `如果 计数 大于 10 那么 打印 "你好"`
+- **Tooling**: `rb format --to=english` provides lossless translation for global open-source pull request reviews.
+
+### Phase 184: Self-Hosted Interactive Doc Server & WebAssembly Playground (`rb doc --serve`)
+- **Goal**: A zero-dependency local web server with full-text search, module docstring rendering, and an embedded Redblue WebAssembly runtime that executes code examples live in the browser.
+- **Why Before Bootstrapping**: Delivers the complete developer experience for the sovereign v1.0 release toolchain.
+
+### Phase 185: Formal Language Specification & 10,000-Case ISO Conformance Suite
+- **Goal**: A formal operational semantics specification paired with a 10,000-case conformance test suite verifying every grammar rule, AST node, arithmetic edge, and error condition.
+- **Why Before Bootstrapping**: This is the ultimate verification gate. The reference Rust compiler (`rb`) and the self-hosted Redblue compiler (`bootstrap/compiler.rb`) must both achieve 100% byte-for-byte pass rates across all 10,000 tests before the Rust compiler is formally retired.
+
+---
+
+## 19. Full Self-Hosting Bootstrapping S4 (Phase 186)
 
 The culmination of the Redblue compiler roadmap is the transition from a Rust-hosted bootstrap compiler to an autonomous, self-hosting language ecosystem where **Redblue compiles Redblue for all future releases**:
 
-### Phase 179: Full Self-Hosting Bootstrap S4 (The Shipped Compiler Cut by Redblue)
+### Phase 186: Full Self-Hosting Bootstrap S4 (The Shipped Compiler Cut by Redblue)
 - **Goal**: Formally cut the official release binary (`rb`) using the self-hosted compiler `bootstrap/compiler.rb` running on the fully optimized JIT/unboxed Redblue engine.
 - **Why it is placed here**:
-  - The self-hosted compiler benefits from all standard library and runtime precision fixes (Phases 159–167), eliminating subtle compiler bugs.
-  - The compiler source can utilize expressive modern syntax (Phases 168–172: `using`, `matches`, `channel`, `needs/guarantees`).
-  - Powered by Escape Analysis, Monomorphic Unboxing, and Cranelift JIT compilation (Phases 173–178), the self-hosted compiler runs at **near-native C/Rust speed**, compiling itself in **< 150 ms**.
+  - The self-hosted compiler benefits from all standard library precision fixes (Phases 159–167), modern expressive grammar (Phases 168–172), and near-native Cranelift JIT velocity (Phases 173–178, <150 ms build times).
+  - The compiler source code is structured with formal module encapsulation (Phase 179) and type-safe generics (Phase 180).
+  - The resulting binary can cross-compile to all platforms (Phase 182) and has passed the 10,000-case ISO conformance suite (Phase 185).
 - **Deliverables**:
   1. **Fixed-Point Identity Verification**: Three-stage bootstrap cycle:
      $$\text{Rust } rb \xrightarrow{\text{compiles}} \text{Stage 1 } rb \xrightarrow{\text{compiles}} \text{Stage 2 } rb \xrightarrow{\text{compiles}} \text{Stage 3 } rb$$
      asserting that $\text{Stage 2 } rb$ and $\text{Stage 3 } rb$ are byte-for-byte identical.
-  2. **Full Toolchain Compilation**: The self-hosted compiler builds all tools (`rb-bench`, `rb format`, `rb lint`, `rb doc`, `rb debug`, `rb disasm`, `rb bundle`) directly from Redblue sources.
+  2. **Full Toolchain Compilation**: The self-hosted compiler builds all tools (`rb-bench`, `rb format`, `rb lint`, `rb doc`, `rb debug`, `rb disasm`, `rb bundle`, `rb profile`) directly from Redblue sources.
   3. **Continuous Self-Hosting in CI**: Future pull requests compile the compiler with itself in < 150 ms, asserting full language sovereignty with zero reliance on `rustc` during downstream execution.
-
----
-
-## 19. What Redblue Still Lacks to Become a Tier-1 World-Class Language (Beyond S4 Bootstrapping)
-
-To compete directly with mature industry titans (Rust, Go, TypeScript, Swift), Redblue must evolve beyond basic self-hosting by addressing the following major compiler and runtime capabilities:
-
-### 19.1 Zero-Configuration Cross-Compilation (`rb build --target <arch>`)
-- **The Gap**: Languages like Go and Zig allow a developer on macOS or Windows to emit a standalone, statically linked Linux ARM64 binary with a single flag (`rb build --target=linux-arm64`). Today, Redblue relies on host-toolchain compilation.
-- **The Solution**: Embed Cranelift multi-architecture backends and a minimal musl/libc stub directly inside the `rb` executable, enabling zero-dependency cross-compilation across x86_64, aarch64, and RISC-V.
-
-### 19.2 Formal Module Encapsulation & Information Hiding (`public` vs `private`)
-- **The Gap**: Currently, module record exports are dynamic and permissive. In 100,000-line enterprise codebases, developers accidentally couple to internal helper functions.
-- **The Solution**: Introduce strict lexical visibility controls in natural English:
-  ```redblue
-  module PaymentProcessor
-      private set secret_key to "sk_test_..."
-      public to process_payment(amount) ...
-  end
-  ```
-  Unexported bindings are invisible outside the module and are completely inlined or eliminated by dead-code elimination.
-
-### 19.3 Parametric Polymorphism & Lightweight Generics (`list of T`)
-- **The Gap**: Reusable data structures (`Stack of item`, `Result of value or error`, `Tree of node`) currently rely on dynamic `Value` boxing.
-- **The Solution**: High-level, human-readable generic declarations (`type Stack of item`) that the compiler monomorphizes into specialized, unboxed machine code variants with zero runtime overhead.
-
-### 19.4 Built-In Production Observability, Profiling & Flamegraphs (`rb profile`)
-- **The Gap**: Diagnosing memory leaks and CPU bottlenecks in production currently requires external tools.
-- **The Solution**: Built-in statistical sampling CPU and allocation profiling (`rb profile script.rb`). Automatically emits standard `pprof` protocol buffers and interactive SVG flamegraphs without third-party dependencies.
-
-### 19.5 Multilingual Natural Syntax Dialects (Human-Language i18n)
-- **The Gap**: Redblue is designed to read like plain English, but 80% of the world's population speaks other native languages.
-- **The Solution**: Canonical Dialect Keyword Mappings. The AST is language-agnostic; code written in Spanish, French, Chinese, Japanese, or Hindi compiles to identical bytecode:
-  - **English**: `if count is greater than 10 then say "Hello"`
-  - **Spanish**: `si cuenta es mayor que 10 entonces decir "Hola"`
-  - **Chinese**: `如果 计数 大于 10 那么 打印 "你好"`
-  The formatter supports lossless translation: `rb format --to=english` transforms Spanish code into canonical English for global pull request reviews.
-
-### 19.6 Self-Hosted Interactive Doc Server & WASM Playground (`rb doc --serve`)
-- **The Gap**: Developers expect searchable API documentation with live, editable code examples (similar to Go's `pkg.go.dev` or Rust's `docs.rs`).
-- **The Solution**: `rb doc --serve` spins up an instant local web server with full-text search and an embedded Redblue WebAssembly playground allowing readers to run code snippets directly in their browser.
-
-### 19.7 Formal Language Specification & ISO Conformance Suite
-- **The Gap**: Edge cases across dialects and implementations need mathematical verification.
-- **The Solution**: A machine-executable operational semantics specification paired with a 10,000-case conformance test suite verifying every grammar rule and arithmetic edge.
 
 ---
 
