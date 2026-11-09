@@ -325,9 +325,25 @@ impl SourceMap {
     fn new(source: &str) -> Self {
         let chars: Vec<char> = source.chars().collect();
         let mut line_starts = vec![0];
-        for (index, c) in chars.iter().enumerate() {
-            if *c == '\n' {
-                line_starts.push(index + 1);
+        let mut index = 0;
+        while index < chars.len() {
+            match chars[index] {
+                '\n' => {
+                    line_starts.push(index + 1);
+                    index += 1;
+                }
+                '\r' => {
+                    // A CRLF pair is one line break; a lone CR is the classic-Mac
+                    // one. Both put the next line after the break, not at the CR.
+                    let width = if chars.get(index + 1) == Some(&'\n') {
+                        2
+                    } else {
+                        1
+                    };
+                    line_starts.push(index + width);
+                    index += width;
+                }
+                _ => index += 1,
             }
         }
         Self { chars, line_starts }
@@ -358,7 +374,7 @@ impl SourceMap {
 
         let start = self.line_starts[line - 1];
         let mut end = start;
-        while end < self.chars.len() && self.chars[end] != '\n' {
+        while end < self.chars.len() && self.chars[end] != '\n' && self.chars[end] != '\r' {
             end += 1;
         }
         if column > end - start + 1 {
@@ -433,6 +449,12 @@ struct Analysis {
     /// For every token, the binding it declares or resolves to. `None` is an
     /// unresolved name (a builtin, an import member, or an unknown word).
     token_binding: Vec<Option<usize>>,
+    /// Identifiers that name an object field through a `.`, not a lexical
+    /// binding.
+    member_names: HashSet<usize>,
+    /// Identifiers inside a type annotation, which name a type rather than the
+    /// variable of the same spelling.
+    type_names: HashSet<usize>,
     /// The names visible where analysis stopped, for completion.
     visible: Vec<String>,
 }
@@ -609,6 +631,12 @@ fn ends_expression(kind: &TokenKind) -> bool {
     )
 }
 
+/// Whether a token before `to` makes that `to` an operator — a range or an
+/// assignment — rather than the start of a one-line function literal.
+fn to_is_operator(previous: &TokenKind) -> bool {
+    ends_expression(previous) || matches!(previous, TokenKind::Set | TokenKind::Constant)
+}
+
 /// Push a fresh lexical scope, remembering the scope that encloses it.
 fn push_scope(
     scopes: &mut Vec<HashMap<String, usize>>,
@@ -706,7 +734,10 @@ fn is_builtin_name(name: &str) -> bool {
 /// spans. When `stop` is given, analysis stops before the token at that source
 /// offset and records the names visible there.
 fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
-    let tokens = Lexer::tokenize(source).map_err(|error| error.message().to_string())?;
+    let tokens = Lexer::tokenize(source).map_err(|error| match error.span() {
+        Some(span) => format!("{}: {}", span, error.message()),
+        None => error.message().to_string(),
+    })?;
     let map = SourceMap::new(source);
     let mut bindings: Vec<Binding> = Vec::new();
     let mut token_binding: Vec<Option<usize>> = vec![None; tokens.len()];
@@ -720,6 +751,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     let mut type_names: HashSet<usize> = HashSet::new();
     let mut member_names: HashSet<usize> = HashSet::new();
     let mut object_fields: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    let mut this_objects: HashMap<usize, usize> = HashMap::new();
     let mut frames: Vec<Frame> = Vec::new();
     let mut visible = None;
     let mut last_significant_line: Option<usize> = None;
@@ -765,7 +797,15 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     frames.push(Frame::block(FrameKind::If));
                 }
             }
-            TokenKind::Unless => frames.push(Frame::block(FrameKind::Unless)),
+            TokenKind::Unless => {
+                frames.push(Frame::scoped(FrameKind::Unless));
+                push_scope(
+                    &mut scopes,
+                    &mut scope_ids,
+                    &mut scope_parents,
+                    &mut next_scope_id,
+                );
+            }
             TokenKind::While => {
                 frames.push(Frame::scoped(FrameKind::While));
                 push_scope(
@@ -948,12 +988,14 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         &mut bindings,
                         &mut binding_scopes,
                         *scope_ids.last().expect("the root scope always exists"),
-                        &mut token_binding,
-                        &mut declarations,
-                        &mut type_names,
+                        &mut DeclarationSink {
+                            token_binding: &mut token_binding,
+                            declarations: &mut declarations,
+                            type_names: &mut type_names,
+                        },
                     );
                 } else if !last_significant
-                    .is_some_and(|previous| ends_expression(&tokens[previous].kind))
+                    .is_some_and(|previous| to_is_operator(&tokens[previous].kind))
                 {
                     let mut frame = Frame::scoped(FrameKind::Literal);
                     push_scope(
@@ -974,9 +1016,11 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             &mut bindings,
                             &mut binding_scopes,
                             *scope_ids.last().expect("the root scope always exists"),
-                            &mut token_binding,
-                            &mut declarations,
-                            &mut type_names,
+                            &mut DeclarationSink {
+                                token_binding: &mut token_binding,
+                                declarations: &mut declarations,
+                                type_names: &mut type_names,
+                            },
                         ) + 1;
                     }
                     if let Some(next) = tokens.get(body) {
@@ -1079,8 +1123,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         tokens.get(cursor).map(|token| &token.kind),
                         Some(TokenKind::Colon)
                     ) {
-                        cursor =
-                            skip_type_expression(&tokens, cursor + 1, true, &mut type_names);
+                        cursor = skip_type_expression(&tokens, cursor + 1, true, &mut type_names);
                     }
 
                     match tokens.get(cursor).map(|token| &token.kind) {
@@ -1117,6 +1160,11 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     }
                 }
             }
+            TokenKind::This => {
+                if let Some(object) = frames.iter().rev().find_map(|frame| frame.object) {
+                    this_objects.insert(index, object);
+                }
+            }
             TokenKind::Identifier(name) if !declarations.contains(&index) => {
                 if type_names.contains(&index) {
                     // A type annotation names a type, not the variable of the
@@ -1127,9 +1175,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         .checked_sub(2)
                         .and_then(|receiver| tokens.get(receiver))
                         .and_then(|token| match token.kind {
-                            TokenKind::This => {
-                                frames.iter().rev().find_map(|frame| frame.object)
-                            }
+                            TokenKind::This => frames.iter().rev().find_map(|frame| frame.object),
                             _ => token_binding[index - 2],
                         });
                     if let Some(binding) =
@@ -1160,8 +1206,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // enclosing scope ended up with, so navigation sees the declaration the
     // program will have when that code runs.
     if stop.is_none() {
-        let mut scope_decls: Vec<HashMap<String, usize>> =
-            vec![HashMap::new(); next_scope_id];
+        let mut scope_decls: Vec<HashMap<String, usize>> = vec![HashMap::new(); next_scope_id];
         for (binding, scope) in binding_scopes.iter().enumerate() {
             scope_decls[*scope].insert(bindings[binding].name.clone(), binding);
         }
@@ -1191,6 +1236,34 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 scope = scope_parents.get(scope_id).copied().flatten();
             }
         }
+
+        // An object field used through a receiver declared below it could not
+        // resolve during the walk. Now that every receiver name has a binding,
+        // resolve member accesses too, in source order so a chain like
+        // `a.b.c` resolves its receiver before the access that uses it.
+        let mut members: Vec<usize> = member_names.iter().copied().collect();
+        members.sort_unstable();
+        for index in members {
+            if token_binding[index].is_some() {
+                continue;
+            }
+            let Some(receiver) = index.checked_sub(2) else {
+                continue;
+            };
+            let Some(name) = name_of(&tokens[index]) else {
+                continue;
+            };
+            let receiver_binding = match &tokens[receiver].kind {
+                TokenKind::This => this_objects.get(&receiver).copied(),
+                _ => token_binding[receiver],
+            };
+            if let Some(field) = receiver_binding
+                .and_then(|receiver| object_fields.get(&receiver))
+                .and_then(|fields| fields.get(name))
+            {
+                token_binding[index] = Some(*field);
+            }
+        }
     }
 
     if visible.is_none() {
@@ -1201,8 +1274,17 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
         tokens,
         bindings,
         token_binding,
+        member_names,
+        type_names,
         visible: visible.unwrap_or_default(),
     })
+}
+
+/// The mutable bookkeeping a declaration updates while scopes are walked.
+struct DeclarationSink<'a> {
+    token_binding: &'a mut [Option<usize>],
+    declarations: &'a mut HashSet<usize>,
+    type_names: &'a mut HashSet<usize>,
 }
 
 /// Declares every identifier in the parameter list starting at `start`, and
@@ -1214,9 +1296,7 @@ fn declare_params(
     bindings: &mut Vec<Binding>,
     binding_scopes: &mut Vec<usize>,
     scope_id: usize,
-    token_binding: &mut [Option<usize>],
-    declarations: &mut HashSet<usize>,
-    type_names: &mut HashSet<usize>,
+    sink: &mut DeclarationSink<'_>,
 ) -> usize {
     if !matches!(
         tokens.get(start).map(|token| &token.kind),
@@ -1241,7 +1321,7 @@ fn declare_params(
                     location,
                     DefinitionKind::Parameter,
                 );
-                mark_declaration(token_binding, declarations, cursor, binding);
+                mark_declaration(sink.token_binding, sink.declarations, cursor, binding);
                 cursor += 1;
 
                 let has_type = match tokens.get(cursor).map(|token| &token.kind) {
@@ -1250,7 +1330,7 @@ fn declare_params(
                     _ => false,
                 };
                 if has_type {
-                    cursor = skip_type_expression(tokens, cursor + 1, false, type_names);
+                    cursor = skip_type_expression(tokens, cursor + 1, false, sink.type_names);
                 }
             }
             _ => cursor += 1,
@@ -1296,7 +1376,7 @@ pub fn goto_definition(
     }
 
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
-    if is_builtin_name(name) {
+    if is_builtin_name(name) && !analysis.member_names.contains(&index) {
         Ok(Some(Definition::builtin(name)))
     } else {
         Ok(None)
@@ -1336,7 +1416,11 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
         }
         let matches = match target {
             Some(binding) => analysis.token_binding[candidate] == Some(binding),
-            None => analysis.token_binding[candidate].is_none(),
+            None => {
+                analysis.token_binding[candidate].is_none()
+                    && !analysis.member_names.contains(&candidate)
+                    && !analysis.type_names.contains(&candidate)
+            }
         };
         if matches {
             found.push(Location::of_name(token, name));
@@ -1408,11 +1492,11 @@ fn inside_text(tokens: &[Token], map: &SourceMap, offset: usize) -> bool {
         while cursor < map.chars.len() {
             match map.chars[cursor] {
                 '\\' => cursor += 2,
-                '"' => return offset > start && offset <= cursor,
+                '"' => return offset >= start && offset <= cursor,
                 _ => cursor += 1,
             }
         }
-        offset > start
+        offset >= start
     })
 }
 
@@ -1427,7 +1511,7 @@ fn inside_comment(map: &SourceMap, offset: usize) -> bool {
     let mut index = 0;
     let mut in_text = false;
 
-    while index < chars.len() && index < offset {
+    while index < chars.len() && index <= offset {
         let c = chars[index];
         if in_text {
             if c == '\\' {
@@ -1443,7 +1527,7 @@ fn inside_comment(map: &SourceMap, offset: usize) -> bool {
             index += 1;
         } else if c == '/' && chars.get(index + 1) == Some(&'/') {
             let mut end = index;
-            while end < chars.len() && chars[end] != '\n' {
+            while end < chars.len() && chars[end] != '\n' && chars[end] != '\r' {
                 end += 1;
             }
             if offset >= index && offset <= end {

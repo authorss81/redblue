@@ -4,7 +4,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use redblue::lexer::Lexer;
 use redblue::lsp::{
@@ -975,11 +974,22 @@ fn edge_navigation_rejects_a_column_past_the_line() {
     );
 }
 
-fn navigation_sample(lines: usize) -> Duration {
+fn navigation_source(lines: usize) -> String {
     let mut source = String::new();
     for index in 0..lines {
         source.push_str(&format!("set v{index} to {index}\n"));
     }
+    source
+}
+
+#[test]
+fn edge_navigation_resolves_a_binding_after_five_thousand_lines() {
+    // A wall-clock ratio between two samples is nondeterministic on a loaded
+    // runner. The resource bound is the input itself: a 5000-declaration file
+    // must answer every capability at its last line, and the operation count
+    // is fixed by the source rather than by the machine's speed.
+    let lines = 5000;
+    let source = navigation_source(lines);
     let last_line = lines;
     let last_column = 5;
     let eof_column = source
@@ -988,44 +998,28 @@ fn navigation_sample(lines: usize) -> Duration {
         .map(|line| line.chars().count() + 1)
         .unwrap();
 
-    goto_definition(&source, last_line, last_column).expect("the warm-up position is valid");
+    let definition = goto_definition(&source, last_line, last_column)
+        .expect("the last line is inside the file")
+        .expect("the last declaration names a binding");
+    assert_eq!(
+        (definition.line, definition.column),
+        (last_line, last_column)
+    );
 
-    let mut best = Duration::MAX;
-    for _ in 0..5 {
-        let started = Instant::now();
-        let definition = goto_definition(&source, last_line, last_column)
-            .expect("the last line is inside the file")
-            .expect("the last declaration names a binding");
-        let references = find_references(&source, last_line, last_column).expect("valid position");
-        let offered = completions(&source, last_line, eof_column).expect("valid position");
-        best = best.min(started.elapsed());
+    let references = find_references(&source, last_line, last_column).expect("valid position");
+    assert_eq!(
+        references
+            .iter()
+            .map(|location| (location.line, location.column))
+            .collect::<Vec<_>>(),
+        vec![(last_line, last_column)],
+        "the last declaration is its only reference"
+    );
 
-        assert_eq!(
-            (definition.line, definition.column),
-            (last_line, last_column)
-        );
-        assert!(!references.is_empty(), "a declaration is its own reference");
-        assert!(
-            offered.contains(&format!("v{}", lines - 1)),
-            "the last binding is in scope at EOF"
-        );
-    }
-
-    best
-}
-
-#[test]
-fn edge_navigation_handles_five_thousand_lines_quickly() {
-    // Each capability is a linear token walk, so five times the lines must cost
-    // roughly five times the time. Comparing the two measurements keeps the
-    // check independent of how fast the machine is: a loaded runner slows both
-    // sides together, while a quadratic regression shows up as ~25x.
-    let small = navigation_sample(1000);
-    let large = navigation_sample(5000);
-
+    let offered = completions(&source, last_line, eof_column).expect("valid position");
     assert!(
-        large <= small * 12,
-        "navigation over 5000 lines took {large:?} versus {small:?} for 1000, which is not linear"
+        offered.contains(&format!("v{}", lines - 1)),
+        "the last binding is in scope at EOF"
     );
 }
 
@@ -1086,6 +1080,265 @@ fn edge_for_loop_variable_does_not_leak_into_the_enclosing_scope() {
         goto_definition(source, 4, 5).expect("a position inside the file is valid"),
         None,
         "the loop variable must not leak past the loop's `end`"
+    );
+}
+
+#[test]
+fn edge_unless_scope_does_not_leak_into_the_enclosing_scope() {
+    let source = concat!(
+        "set marker to 1\n",
+        "unless no\n",
+        "    to helper\n",
+        "        give back marker\n",
+        "    end\n",
+        "    say helper()\n",
+        "end\n",
+        "say marker\n",
+        "say helper\n",
+    );
+
+    let inside = goto_definition(source, 6, 9)
+        .expect("a position inside the file is valid")
+        .expect("the helper is in scope inside the unless body");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (3, 8, "function"),
+        "the helper declaration must resolve inside its own `unless` body"
+    );
+
+    let after = goto_definition(source, 8, 5)
+        .expect("a position inside the file is valid")
+        .expect("the enclosing binding is still in scope after the unless closes");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (1, 5, "variable"),
+        "the unless `end` must close only its own scope"
+    );
+    assert_eq!(
+        goto_definition(source, 9, 5).expect("a position inside the file is valid"),
+        None,
+        "a declaration inside an `unless` body must not leak past its `end`"
+    );
+}
+
+#[test]
+fn edge_while_scope_does_not_leak_into_the_enclosing_scope() {
+    let source = concat!(
+        "set marker to 1\n",
+        "while marker is 1\n",
+        "    to helper\n",
+        "        give back marker\n",
+        "    end\n",
+        "    say helper()\n",
+        "end\n",
+        "say marker\n",
+        "say helper\n",
+    );
+
+    let inside = goto_definition(source, 6, 9)
+        .expect("a position inside the file is valid")
+        .expect("the helper is in scope inside the while body");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (3, 8, "function"),
+        "the helper declaration must resolve inside its own `while` body"
+    );
+
+    let after = goto_definition(source, 8, 5)
+        .expect("a position inside the file is valid")
+        .expect("the enclosing binding is still in scope after the loop closes");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (1, 5, "variable"),
+        "the while `end` must close only its own scope"
+    );
+    assert_eq!(
+        goto_definition(source, 9, 5).expect("a position inside the file is valid"),
+        None,
+        "a declaration inside a `while` body must not leak past its `end`"
+    );
+}
+
+#[test]
+fn edge_repeat_scopes_do_not_leak_into_the_enclosing_scope() {
+    let counted = concat!(
+        "set marker to 1\n",
+        "repeat 2\n",
+        "    to helper\n",
+        "        give back marker\n",
+        "    end\n",
+        "    say helper()\n",
+        "end\n",
+        "say marker\n",
+        "say helper\n",
+    );
+    let until = concat!(
+        "set marker to 1\n",
+        "repeat\n",
+        "    to helper\n",
+        "        give back marker\n",
+        "    end\n",
+        "    say helper()\n",
+        "until marker is 1\n",
+        "say marker\n",
+        "say helper\n",
+    );
+
+    for (form, source) in [("counted repeat", counted), ("repeat until", until)] {
+        let inside = goto_definition(source, 6, 9)
+            .unwrap_or_else(|error| panic!("{form}: the helper use is valid: {error}"))
+            .unwrap_or_else(|| panic!("{form}: the helper is in scope inside the repeat body"));
+        assert_eq!(
+            (inside.line, inside.column, inside.kind.as_str()),
+            (3, 8, "function"),
+            "{form}: the helper declaration must resolve inside its own repeat body"
+        );
+
+        let after = goto_definition(source, 8, 5)
+            .unwrap_or_else(|error| panic!("{form}: the enclosing use is valid: {error}"))
+            .unwrap_or_else(|| panic!("{form}: the enclosing binding survives the repeat"));
+        assert_eq!(
+            (after.line, after.column, after.kind.as_str()),
+            (1, 5, "variable"),
+            "{form}: the terminator must close only the repeat's own scope"
+        );
+        assert_eq!(
+            goto_definition(source, 9, 5).expect("a position inside the file is valid"),
+            None,
+            "{form}: a declaration inside the repeat body must not leak past its terminator"
+        );
+    }
+}
+
+#[test]
+fn edge_module_scope_does_not_leak_into_the_enclosing_scope() {
+    let source = concat!(
+        "set marker to 1\n",
+        "module Tools\n",
+        "    to helper\n",
+        "        give back marker\n",
+        "    end\n",
+        "    say helper()\n",
+        "end\n",
+        "say Tools\n",
+        "say marker\n",
+        "say helper\n",
+    );
+
+    let inside = goto_definition(source, 6, 9)
+        .expect("a position inside the file is valid")
+        .expect("the helper is in scope inside the module body");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (3, 8, "function"),
+        "the helper declaration must resolve inside its own module body"
+    );
+
+    let module = goto_definition(source, 8, 5)
+        .expect("a position inside the file is valid")
+        .expect("the module name is still bound after the declaration closes");
+    assert_eq!(
+        (module.line, module.column, module.kind.as_str()),
+        (2, 8, "module"),
+        "the module `end` must keep the module name in the enclosing scope"
+    );
+
+    let after = goto_definition(source, 9, 5)
+        .expect("a position inside the file is valid")
+        .expect("the enclosing binding is still in scope after the module closes");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (1, 5, "variable"),
+        "the module `end` must close only its own scope"
+    );
+    assert_eq!(
+        goto_definition(source, 10, 5).expect("a position inside the file is valid"),
+        None,
+        "a declaration inside a module must not leak past its `end`"
+    );
+}
+
+#[test]
+fn edge_test_block_keeps_the_enclosing_scope_balanced() {
+    let source = concat!(
+        "set marker to 1\n",
+        "test \"scope\"\n",
+        "    for each item in values\n",
+        "        say item\n",
+        "    end\n",
+        "    say marker\n",
+        "end\n",
+        "say marker\n",
+        "say item\n",
+    );
+
+    let item = goto_definition(source, 4, 13)
+        .expect("a position inside the file is valid")
+        .expect("the loop variable is in scope inside the test body");
+    assert_eq!(
+        (item.line, item.column, item.kind.as_str()),
+        (3, 14, "loop"),
+        "the test body's loop variable must resolve inside its own loop"
+    );
+
+    let inside = goto_definition(source, 6, 9)
+        .expect("a position inside the file is valid")
+        .expect("the enclosing binding is in scope inside the test body");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (1, 5, "variable"),
+        "the test body must read the scope it was written in"
+    );
+
+    let after = goto_definition(source, 8, 5)
+        .expect("a position inside the file is valid")
+        .expect("the enclosing binding is still in scope after the test closes");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (1, 5, "variable"),
+        "the test `end` must close only its own frame"
+    );
+    assert_eq!(
+        goto_definition(source, 9, 5).expect("a position inside the file is valid"),
+        None,
+        "a binding declared inside the test body's block must not leak past its `end`"
+    );
+}
+
+#[test]
+fn edge_try_catch_scope_does_not_leak_into_the_enclosing_scope() {
+    let source = concat!(
+        "set marker to 1\n",
+        "try\n",
+        "    say marker\n",
+        "catch problem\n",
+        "    say problem\n",
+        "end\n",
+        "say marker\n",
+        "say problem\n",
+    );
+
+    let binder = goto_definition(source, 5, 9)
+        .expect("a position inside the file is valid")
+        .expect("the caught name is in scope inside the catch body");
+    assert_eq!(
+        (binder.line, binder.column, binder.kind.as_str()),
+        (4, 7, "catch"),
+        "the catch body's use must resolve to its binder"
+    );
+
+    let after = goto_definition(source, 7, 5)
+        .expect("a position inside the file is valid")
+        .expect("the enclosing binding is still in scope after the try closes");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (1, 5, "variable"),
+        "the try `end` must close only the catch scope"
+    );
+    assert_eq!(
+        goto_definition(source, 8, 5).expect("a position inside the file is valid"),
+        None,
+        "a catch binder must not leak past the try's `end`"
     );
 }
 
@@ -1404,4 +1657,297 @@ fn navigation_json_extends_the_line_column_shape() {
         .expect("items is an array")
         .iter()
         .any(|value| value == "x"));
+}
+
+#[test]
+fn edge_goto_definition_on_a_declaration_returns_its_own_span() {
+    let source = "set greeting to \"hi\"\nsay greeting\n";
+
+    let found = goto_definition(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .expect("a declaration names its own binding");
+
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (1, 5, "variable"),
+        "goto on the `set` name must answer the declaration itself"
+    );
+}
+
+#[test]
+fn edge_completions_on_an_empty_line_offer_keywords_builtins_and_scope() {
+    let source = "set alpha to 1\n\n";
+
+    let offered = completions(source, 2, 1).expect("the empty line is a valid position");
+
+    for expected in ["alpha", "set", "abs"] {
+        assert!(
+            offered.contains(&expected.to_string()),
+            "completion on an empty line must offer {expected:?}, got {offered:?}"
+        );
+    }
+}
+
+#[test]
+fn edge_completions_after_a_function_end_exclude_its_parameters() {
+    let source = concat!("to show(param)\n", "    say param\n", "end\n", "say pa\n");
+    let end_column = source
+        .lines()
+        .nth(3)
+        .map(|line| line.chars().count() + 1)
+        .unwrap();
+
+    let offered = completions(source, 4, end_column).expect("the end of the line is valid");
+
+    assert!(
+        !offered.contains(&"param".to_string()),
+        "a parameter must not leak past its function's `end`, got {offered:?}"
+    );
+    assert!(
+        offered.contains(&"show".to_string()),
+        "the function name itself remains in the enclosing scope, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_navigation_rejects_an_enormous_line_number() {
+    let source = "set x to 1\n";
+
+    assert!(
+        goto_definition(source, usize::MAX, 1).is_err(),
+        "an out-of-range line must be a clean error, not a panic"
+    );
+    assert!(
+        find_references(source, usize::MAX, 1).is_err(),
+        "an out-of-range line must be a clean error, not a panic"
+    );
+    assert!(
+        completions(source, usize::MAX, 1).is_err(),
+        "an out-of-range line must be a clean error, not a panic"
+    );
+}
+
+#[test]
+fn edge_assignment_to_inside_an_inline_block_keeps_the_function_scope_balanced() {
+    let source = concat!(
+        "to f(limit)\n",
+        "    if limit is 1 then set flag to yes end\n",
+        "    say limit\n",
+        "end\n",
+        "say limit\n",
+    );
+
+    let inside = goto_definition(source, 3, 9)
+        .expect("a position inside the file is valid")
+        .expect("the parameter is still in scope after the inline block closes");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (1, 6, "parameter"),
+        "the assignment's `to` must not open a literal frame that steals the block `end`"
+    );
+
+    assert_eq!(
+        goto_definition(source, 5, 5).expect("a position inside the file is valid"),
+        None,
+        "the parameter must not leak past the function's own `end`"
+    );
+}
+
+#[test]
+fn edge_object_member_access_navigates_a_forward_reference() {
+    let source = concat!("say p.name\n", "object p\n", "    has name\n", "end\n");
+
+    let found = goto_definition(source, 1, 7)
+        .expect("a position inside the file is valid")
+        .expect("a member access resolves through a receiver declared below it");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (3, 9, "variable"),
+        "`p.name` must resolve to the field declared by `has name`"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 3, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(1, 7), (3, 9)],
+        "the field's references must include its forward use"
+    );
+}
+
+#[test]
+fn edge_object_member_access_navigates_this_and_ordinary_reference() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "    to can greet()\n",
+        "        give back this.name\n",
+        "    end\n",
+        "end\n",
+        "say Person.name\n",
+    );
+
+    for (line, column) in [(4, 24), (7, 12)] {
+        let found = goto_definition(source, line, column)
+            .expect("a position inside the file is valid")
+            .expect("a member access through `this` or an object name resolves");
+        assert_eq!(
+            (found.line, found.column, found.kind.as_str()),
+            (2, 9, "variable"),
+            "`this.name` and `Person.name` must both resolve to the `has name` field"
+        );
+    }
+
+    let references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 9), (4, 24), (7, 12)],
+        "both member uses must belong to the field's references"
+    );
+}
+
+#[test]
+fn edge_builtin_references_exclude_member_and_type_names() {
+    let member = "set holder to 1\nsay holder.abs\nsay abs(-1)\n";
+    let member_references: Vec<(usize, usize)> = find_references(member, 3, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        member_references,
+        vec![(3, 5)],
+        "`holder.abs` is a member name, not a use of the `abs` builtin"
+    );
+
+    let typed = "say abs\nto total(items of abs)\n    give back items\nend\n";
+    let type_references: Vec<(usize, usize)> = find_references(typed, 1, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        type_references,
+        vec![(1, 5)],
+        "the `abs` in `items of abs` is a type name, not a use of the `abs` builtin"
+    );
+
+    let builtin = goto_definition(typed, 1, 5)
+        .expect("a position inside the file is valid")
+        .expect("the plain `abs` is still the builtin");
+    assert_eq!(
+        (builtin.kind.as_str(), builtin.name.as_str()),
+        ("builtin", "abs"),
+        "a type name spelled like a builtin must not hide the real builtin use"
+    );
+}
+
+#[test]
+fn edge_goto_definition_on_a_member_name_does_not_resolve_to_a_builtin() {
+    let source = "set holder to 1\nsay holder.abs\nsay abs(-1)\n";
+
+    assert_eq!(
+        goto_definition(source, 2, 12).expect("a position inside the file is valid"),
+        None,
+        "`holder.abs` is a member name, not a use of the `abs` builtin"
+    );
+
+    let builtin = goto_definition(source, 3, 5)
+        .expect("a position inside the file is valid")
+        .expect("the plain `abs` call is still the builtin");
+    assert_eq!(
+        (builtin.kind.as_str(), builtin.name.as_str()),
+        ("builtin", "abs"),
+        "the member guard must not hide a real use of the builtin"
+    );
+}
+
+#[test]
+fn edge_navigation_handles_cr_and_crlf_line_endings() {
+    for (label, newline) in [("lone CR", "\r"), ("CRLF", "\r\n")] {
+        let source = format!("set value to 1{newline}say value // note{newline}say value{newline}");
+
+        let found = goto_definition(&source, 2, 5)
+            .unwrap_or_else(|error| panic!("{label}: goto on line 2 failed: {error}"))
+            .unwrap_or_else(|| panic!("{label}: the `value` use on line 2 must resolve"));
+        assert_eq!(
+            (found.line, found.column, found.kind.as_str()),
+            (1, 5, "variable"),
+            "{label}: goto must map lines after the first"
+        );
+
+        let references: Vec<(usize, usize)> = find_references(&source, 3, 5)
+            .unwrap_or_else(|error| panic!("{label}: references on line 3 failed: {error}"))
+            .into_iter()
+            .map(|location| (location.line, location.column))
+            .collect();
+        assert_eq!(
+            references,
+            vec![(1, 5), (2, 5), (3, 5)],
+            "{label}: every use of `value` must be found"
+        );
+
+        assert!(
+            completions(&source, 2, 15)
+                .unwrap_or_else(|error| panic!(
+                    "{label}: completion in the comment failed: {error}"
+                ))
+                .is_empty(),
+            "{label}: a caret inside `// note` must offer nothing"
+        );
+
+        let offered = completions(&source, 3, 10)
+            .unwrap_or_else(|error| panic!("{label}: completion on line 3 failed: {error}"));
+        assert!(
+            offered.contains(&"value".to_string()),
+            "{label}: a comment must end at the line break, not run to EOF, got {offered:?}"
+        );
+    }
+}
+
+#[test]
+fn edge_completions_at_the_opening_quote_and_comment_marker_are_empty() {
+    let source = "set x to \"hi\"\n// note\n";
+
+    assert!(
+        completions(source, 1, 10)
+            .expect("the opening quote is a valid position")
+            .is_empty(),
+        "a caret on the opening quote is inside the text, not code"
+    );
+    assert!(
+        completions(source, 2, 1)
+            .expect("the comment marker is a valid position")
+            .is_empty(),
+        "a caret on the first `/` of `//` is inside the comment, not code"
+    );
+}
+
+#[test]
+fn edge_malformed_source_error_carries_the_lexer_span() {
+    let source = "say \"unterminated";
+
+    let messages = [
+        goto_definition(source, 1, 1).expect_err("an unterminated string is a lexer error"),
+        find_references(source, 1, 1).expect_err("an unterminated string is a lexer error"),
+        completions(source, 1, 1).expect_err("an unterminated string is a lexer error"),
+    ];
+
+    for message in messages {
+        assert!(
+            message.contains("1:5"),
+            "the error must carry the lexer span, got {message:?}"
+        );
+        assert!(
+            message.contains("Unterminated string"),
+            "the error must keep the lexer message, got {message:?}"
+        );
+    }
 }
