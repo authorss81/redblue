@@ -396,7 +396,13 @@ struct Frame {
     kind: FrameKind,
     opens_scope: bool,
     catch_scope: bool,
-    closes_at_newline: Option<usize>,
+    /// The object binding whose body this frame encloses, when a `has`
+    /// declaration's fields are in scope inside it.
+    object: Option<usize>,
+    /// For a one-line function literal, the token index where the parsed body
+    /// ends. The scope closes just before that token, so a trailing argument on
+    /// the same line resolves outside the literal.
+    closes_at_token: Option<usize>,
 }
 
 impl Frame {
@@ -405,7 +411,8 @@ impl Frame {
             kind,
             opens_scope: false,
             catch_scope: false,
-            closes_at_newline: None,
+            object: None,
+            closes_at_token: None,
         }
     }
 
@@ -414,7 +421,8 @@ impl Frame {
             kind,
             opens_scope: true,
             catch_scope: false,
-            closes_at_newline: None,
+            object: None,
+            closes_at_token: None,
         }
     }
 }
@@ -440,6 +448,8 @@ fn visible_names(scopes: &[HashMap<String, usize>]) -> Vec<String> {
 fn declare(
     scopes: &mut [HashMap<String, usize>],
     bindings: &mut Vec<Binding>,
+    binding_scopes: &mut Vec<usize>,
+    scope_id: usize,
     name: &str,
     location: Location,
     kind: DefinitionKind,
@@ -455,6 +465,7 @@ fn declare(
         location,
         kind,
     });
+    binding_scopes.push(scope_id);
     scope.insert(name.to_string(), id);
     id
 }
@@ -478,11 +489,19 @@ fn name_of(token: &Token) -> Option<&str> {
     }
 }
 
-fn skip_type_expression(tokens: &[Token], start: usize, stop_at_to: bool) -> usize {
+fn skip_type_expression(
+    tokens: &[Token],
+    start: usize,
+    stop_at_to: bool,
+    type_names: &mut HashSet<usize>,
+) -> usize {
     let mut cursor = start;
     let mut depth = 0usize;
 
     while cursor < tokens.len() {
+        if matches!(tokens[cursor].kind, TokenKind::Identifier(_)) {
+            type_names.insert(cursor);
+        }
         match &tokens[cursor].kind {
             TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => depth += 1,
             TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
@@ -537,7 +556,7 @@ fn catch_binder_index(tokens: &[Token], catch_index: usize) -> Option<usize> {
     }
 }
 
-fn closes_lru_cache_decorator(tokens: &[Token], close: usize) -> bool {
+fn lru_cache_decorator_start(tokens: &[Token], close: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut cursor = close;
 
@@ -545,23 +564,134 @@ fn closes_lru_cache_decorator(tokens: &[Token], close: usize) -> bool {
         match &tokens[cursor].kind {
             TokenKind::RightParen => depth += 1,
             TokenKind::LeftParen => {
+                if depth == 0 {
+                    return None;
+                }
                 depth -= 1;
                 if depth == 0 {
-                    return cursor > 0
-                        && matches!(
-                            &tokens[cursor - 1].kind,
-                            TokenKind::Identifier(word) if word == "lru_cache"
-                        );
+                    let start = cursor.checked_sub(1)?;
+                    return matches!(
+                        &tokens[start].kind,
+                        TokenKind::Identifier(word) if word == "lru_cache"
+                    )
+                    .then_some(start);
                 }
             }
             _ => {}
         }
 
         if cursor == 0 {
-            return false;
+            return None;
         }
         cursor -= 1;
     }
+}
+
+/// Whether `index` is the first token on its source line.
+fn first_significant_on_line(tokens: &[Token], index: usize) -> bool {
+    index == 0 || tokens[index - 1].line != tokens[index].line
+}
+
+/// Whether a token can end an expression, so a following `to` is a range's
+/// operator rather than the start of a function literal.
+fn ends_expression(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier(_)
+            | TokenKind::Number(_)
+            | TokenKind::Text(_)
+            | TokenKind::YesNo(_)
+            | TokenKind::Nothing
+            | TokenKind::This
+            | TokenKind::RightParen
+            | TokenKind::RightBracket
+            | TokenKind::RightBrace
+    )
+}
+
+/// Push a fresh lexical scope, remembering the scope that encloses it.
+fn push_scope(
+    scopes: &mut Vec<HashMap<String, usize>>,
+    scope_ids: &mut Vec<usize>,
+    scope_parents: &mut Vec<Option<usize>>,
+    next_scope_id: &mut usize,
+) {
+    let parent = scope_ids.last().copied();
+    let id = *next_scope_id;
+    *next_scope_id += 1;
+    scopes.push(HashMap::new());
+    scope_ids.push(id);
+    scope_parents.push(parent);
+}
+
+/// Pop the innermost lexical scope, keeping the root scope in place.
+fn pop_scope(scopes: &mut Vec<HashMap<String, usize>>, scope_ids: &mut Vec<usize>) {
+    if scopes.len() > 1 {
+        scopes.pop();
+        scope_ids.pop();
+    }
+}
+
+/// Closes every one-line literal whose parsed body ends at `index`, before the
+/// token there is processed. The token is the `,`/closing bracket that stopped
+/// the parser's one-line body, or the newline/EOF that ended the line, so it
+/// belongs to the enclosing scope rather than the literal.
+fn close_due_frames(
+    frames: &mut Vec<Frame>,
+    scopes: &mut Vec<HashMap<String, usize>>,
+    scope_ids: &mut Vec<usize>,
+    index: usize,
+) {
+    while matches!(
+        frames.last(),
+        Some(frame) if frame.closes_at_token == Some(index)
+    ) {
+        let frame = frames.pop().expect("checked by matches!");
+        if frame.opens_scope {
+            pop_scope(scopes, scope_ids);
+        }
+    }
+}
+
+/// Whether the name at `index` follows a `.` and therefore names a field of
+/// its receiver rather than a lexical binding.
+fn is_member_access(tokens: &[Token], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .and_then(|dot| tokens.get(dot))
+        .is_some_and(|token| matches!(token.kind, TokenKind::Dot))
+}
+
+/// The token index where a one-line literal body starting at `start` ends.
+///
+/// The parser's one-line body keeps reading statements while the next token can
+/// begin one, so it stops at a `,`, `)`, `]` or `}` that closes the enclosing
+/// expression, or at the newline/EOF that ends the line. Nested brackets are
+/// skipped so a delimiter inside the body's own expression is not mistaken for
+/// the literal's end.
+fn literal_body_end(tokens: &[Token], start: usize, open_line: usize) -> usize {
+    let mut depth = 0usize;
+    let mut cursor = start;
+
+    while let Some(token) = tokens.get(cursor) {
+        if token.line != open_line || matches!(token.kind, TokenKind::Newline | TokenKind::Eof) {
+            return cursor;
+        }
+        match token.kind {
+            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace => depth += 1,
+            TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace => {
+                if depth == 0 {
+                    return cursor;
+                }
+                depth -= 1;
+            }
+            TokenKind::Comma if depth == 0 => return cursor,
+            _ => {}
+        }
+        cursor += 1;
+    }
+
+    cursor
 }
 
 fn is_builtin_name(name: &str) -> bool {
@@ -582,6 +712,14 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     let mut token_binding: Vec<Option<usize>> = vec![None; tokens.len()];
     let mut declarations: HashSet<usize> = HashSet::new();
     let mut scopes: Vec<HashMap<String, usize>> = vec![HashMap::new()];
+    let mut scope_ids: Vec<usize> = vec![0];
+    let mut scope_parents: Vec<Option<usize>> = vec![None];
+    let mut next_scope_id = 1usize;
+    let mut binding_scopes: Vec<usize> = Vec::new();
+    let mut token_scope: Vec<usize> = vec![0; tokens.len()];
+    let mut type_names: HashSet<usize> = HashSet::new();
+    let mut member_names: HashSet<usize> = HashSet::new();
+    let mut object_fields: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     let mut frames: Vec<Frame> = Vec::new();
     let mut visible = None;
     let mut last_significant_line: Option<usize> = None;
@@ -589,6 +727,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     let mut index = 0;
 
     while index < tokens.len() {
+        close_due_frames(&mut frames, &mut scopes, &mut scope_ids, index);
+        token_scope[index] = scope_ids.last().copied().unwrap_or(0);
+
         if let Some(stop) = stop {
             let token = &tokens[index];
             if map.offset(token.line, token.column) >= stop {
@@ -599,29 +740,19 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
 
         let token = tokens[index].clone();
         match &token.kind {
-            TokenKind::Newline => {
-                while matches!(
-                    frames.last(),
-                    Some(frame) if frame.closes_at_newline == Some(token.line)
-                ) {
-                    let frame = frames.pop().expect("checked by matches!");
-                    if frame.opens_scope && scopes.len() > 1 {
-                        scopes.pop();
-                    }
-                }
-            }
+            TokenKind::Newline | TokenKind::Eof => {}
             TokenKind::End => {
                 if let Some(frame) = frames.pop() {
-                    if (frame.opens_scope || frame.catch_scope) && scopes.len() > 1 {
-                        scopes.pop();
+                    if frame.opens_scope || frame.catch_scope {
+                        pop_scope(&mut scopes, &mut scope_ids);
                     }
                 }
             }
             TokenKind::Until => {
                 if matches!(frames.last(), Some(frame) if frame.kind == FrameKind::Repeat) {
                     let frame = frames.pop().expect("checked by matches!");
-                    if frame.opens_scope && scopes.len() > 1 {
-                        scopes.pop();
+                    if frame.opens_scope {
+                        pop_scope(&mut scopes, &mut scope_ids);
                     }
                 }
             }
@@ -637,15 +768,30 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             TokenKind::Unless => frames.push(Frame::block(FrameKind::Unless)),
             TokenKind::While => {
                 frames.push(Frame::scoped(FrameKind::While));
-                scopes.push(HashMap::new());
+                push_scope(
+                    &mut scopes,
+                    &mut scope_ids,
+                    &mut scope_parents,
+                    &mut next_scope_id,
+                );
             }
             TokenKind::Repeat => {
                 frames.push(Frame::scoped(FrameKind::Repeat));
-                scopes.push(HashMap::new());
+                push_scope(
+                    &mut scopes,
+                    &mut scope_ids,
+                    &mut scope_parents,
+                    &mut next_scope_id,
+                );
             }
             TokenKind::For => {
                 frames.push(Frame::scoped(FrameKind::For));
-                scopes.push(HashMap::new());
+                push_scope(
+                    &mut scopes,
+                    &mut scope_ids,
+                    &mut scope_parents,
+                    &mut next_scope_id,
+                );
                 let mut cursor = index + 1;
                 if matches!(
                     tokens.get(cursor).map(|token| &token.kind),
@@ -658,6 +804,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     let binding = declare(
                         &mut scopes,
                         &mut bindings,
+                        &mut binding_scopes,
+                        *scope_ids.last().expect("the root scope always exists"),
                         name,
                         location,
                         DefinitionKind::LoopVariable,
@@ -666,19 +814,30 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 }
             }
             TokenKind::Object => {
+                let mut object = None;
                 if let Some(name) = tokens.get(index + 1).and_then(name_of) {
                     let location = Location::of_name(&tokens[index + 1], name);
                     let binding = declare(
                         &mut scopes,
                         &mut bindings,
+                        &mut binding_scopes,
+                        *scope_ids.last().expect("the root scope always exists"),
                         name,
                         location,
                         DefinitionKind::Object,
                     );
                     mark_declaration(&mut token_binding, &mut declarations, index + 1, binding);
+                    object = Some(binding);
                 }
-                frames.push(Frame::scoped(FrameKind::Object));
-                scopes.push(HashMap::new());
+                let mut frame = Frame::scoped(FrameKind::Object);
+                frame.object = object;
+                frames.push(frame);
+                push_scope(
+                    &mut scopes,
+                    &mut scope_ids,
+                    &mut scope_parents,
+                    &mut next_scope_id,
+                );
             }
             TokenKind::Module => {
                 if let Some(name) = tokens.get(index + 1).and_then(name_of) {
@@ -686,6 +845,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     let binding = declare(
                         &mut scopes,
                         &mut bindings,
+                        &mut binding_scopes,
+                        *scope_ids.last().expect("the root scope always exists"),
                         name,
                         location,
                         DefinitionKind::Module,
@@ -693,7 +854,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     mark_declaration(&mut token_binding, &mut declarations, index + 1, binding);
                 }
                 frames.push(Frame::scoped(FrameKind::Module));
-                scopes.push(HashMap::new());
+                push_scope(
+                    &mut scopes,
+                    &mut scope_ids,
+                    &mut scope_parents,
+                    &mut next_scope_id,
+                );
             }
             TokenKind::Test => frames.push(Frame::block(FrameKind::Test)),
             TokenKind::Try => frames.push(Frame::block(FrameKind::Try)),
@@ -706,7 +872,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     _ => false,
                 };
                 if opens_scope {
-                    scopes.push(HashMap::new());
+                    push_scope(
+                        &mut scopes,
+                        &mut scope_ids,
+                        &mut scope_parents,
+                        &mut next_scope_id,
+                    );
                 }
                 if let Some(binder) = catch_binder_index(&tokens, index) {
                     let name = name_of(&tokens[binder]).expect("the binder is a name");
@@ -714,6 +885,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     let binding = declare(
                         &mut scopes,
                         &mut bindings,
+                        &mut binding_scopes,
+                        *scope_ids.last().expect("the root scope always exists"),
                         name,
                         location,
                         DefinitionKind::Catch,
@@ -731,12 +904,17 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     cursor += 1;
                 }
 
-                let decorated =
-                    last_significant.is_some_and(|previous| match &tokens[previous].kind {
-                        TokenKind::Identifier(word) => word == "lru_cache",
-                        TokenKind::RightParen => closes_lru_cache_decorator(&tokens, previous),
-                        _ => false,
-                    });
+                let decorated = last_significant.is_some_and(|previous| {
+                    let start = match &tokens[previous].kind {
+                        TokenKind::Identifier(word) if word == "lru_cache" => Some(previous),
+                        TokenKind::RightParen => lru_cache_decorator_start(&tokens, previous),
+                        _ => None,
+                    };
+                    start.is_some_and(|start| {
+                        tokens[start].line == token.line
+                            && first_significant_on_line(&tokens, start)
+                    })
+                });
                 let is_declaration =
                     tokens.get(cursor).and_then(name_of).is_some() && (first_on_line || decorated);
 
@@ -749,44 +927,67 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     let binding = declare(
                         &mut scopes,
                         &mut bindings,
+                        &mut binding_scopes,
+                        *scope_ids.last().expect("the root scope always exists"),
                         &name,
                         location,
                         DefinitionKind::Function,
                     );
                     mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
                     frames.push(Frame::scoped(FrameKind::To));
-                    scopes.push(HashMap::new());
+                    push_scope(
+                        &mut scopes,
+                        &mut scope_ids,
+                        &mut scope_parents,
+                        &mut next_scope_id,
+                    );
                     declare_params(
                         &tokens,
                         cursor + 1,
                         &mut scopes,
                         &mut bindings,
+                        &mut binding_scopes,
+                        *scope_ids.last().expect("the root scope always exists"),
                         &mut token_binding,
                         &mut declarations,
+                        &mut type_names,
                     );
-                } else if matches!(
-                    tokens.get(index + 1).map(|token| &token.kind),
-                    Some(TokenKind::LeftParen)
-                ) {
+                } else if !last_significant
+                    .is_some_and(|previous| ends_expression(&tokens[previous].kind))
+                {
                     let mut frame = Frame::scoped(FrameKind::Literal);
-                    frames.push(frame);
-                    scopes.push(HashMap::new());
-                    let close = declare_params(
-                        &tokens,
-                        index + 1,
+                    push_scope(
                         &mut scopes,
-                        &mut bindings,
-                        &mut token_binding,
-                        &mut declarations,
+                        &mut scope_ids,
+                        &mut scope_parents,
+                        &mut next_scope_id,
                     );
-                    if let Some(next) = tokens.get(close + 1) {
+                    let mut body = index + 1;
+                    if matches!(
+                        tokens.get(body).map(|token| &token.kind),
+                        Some(TokenKind::LeftParen)
+                    ) {
+                        body = declare_params(
+                            &tokens,
+                            body,
+                            &mut scopes,
+                            &mut bindings,
+                            &mut binding_scopes,
+                            *scope_ids.last().expect("the root scope always exists"),
+                            &mut token_binding,
+                            &mut declarations,
+                            &mut type_names,
+                        ) + 1;
+                    }
+                    if let Some(next) = tokens.get(body) {
                         if next.line == token.line
                             && !matches!(next.kind, TokenKind::Newline | TokenKind::Eof)
                         {
-                            frame.closes_at_newline = Some(token.line);
-                            *frames.last_mut().expect("just pushed") = frame;
+                            frame.closes_at_token =
+                                Some(literal_body_end(&tokens, body, token.line));
                         }
                     }
+                    frames.push(frame);
                 }
             }
             TokenKind::Import => {
@@ -799,6 +1000,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             let binding = declare(
                                 &mut scopes[..1],
                                 &mut bindings,
+                                &mut binding_scopes,
+                                0,
                                 &name,
                                 location,
                                 DefinitionKind::Import,
@@ -818,6 +1021,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                 let binding = declare(
                                     &mut scopes[..1],
                                     &mut bindings,
+                                    &mut binding_scopes,
+                                    0,
                                     name,
                                     location,
                                     DefinitionKind::Import,
@@ -845,16 +1050,37 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 };
                 let mut cursor = index + 1;
                 while let Some(name) = tokens.get(cursor).and_then(name_of) {
-                    let location = Location::of_name(&tokens[cursor], name);
-                    let binding = declare(&mut scopes, &mut bindings, name, location, kind);
-                    mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
+                    // `set` writes through to an enclosing binding when one
+                    // exists (the interpreter's `set_var` does the same), so
+                    // reuse it instead of declaring a fresh inner name. Only a
+                    // name no scope binds is a new declaration.
+                    let existing = scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name).copied());
+                    if let Some(binding) = existing {
+                        token_binding[cursor] = Some(binding);
+                    } else {
+                        let location = Location::of_name(&tokens[cursor], name);
+                        let binding = declare(
+                            &mut scopes,
+                            &mut bindings,
+                            &mut binding_scopes,
+                            *scope_ids.last().expect("the root scope always exists"),
+                            name,
+                            location,
+                            kind,
+                        );
+                        mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
+                    }
                     cursor += 1;
 
                     if matches!(
                         tokens.get(cursor).map(|token| &token.kind),
                         Some(TokenKind::Colon)
                     ) {
-                        cursor = skip_type_expression(&tokens, cursor + 1, true);
+                        cursor =
+                            skip_type_expression(&tokens, cursor + 1, true, &mut type_names);
                     }
 
                     match tokens.get(cursor).map(|token| &token.kind) {
@@ -875,19 +1101,48 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         let binding = declare(
                             &mut scopes,
                             &mut bindings,
+                            &mut binding_scopes,
+                            *scope_ids.last().expect("the root scope always exists"),
                             name,
                             location,
                             DefinitionKind::Variable,
                         );
                         mark_declaration(&mut token_binding, &mut declarations, index + 1, binding);
+                        if let Some(owner) = frames.last().and_then(|frame| frame.object) {
+                            object_fields
+                                .entry(owner)
+                                .or_default()
+                                .insert(name.to_string(), binding);
+                        }
                     }
                 }
             }
             TokenKind::Identifier(name) if !declarations.contains(&index) => {
-                token_binding[index] = scopes
-                    .iter()
-                    .rev()
-                    .find_map(|scope| scope.get(name).copied());
+                if type_names.contains(&index) {
+                    // A type annotation names a type, not the variable of the
+                    // same spelling that happens to be in scope.
+                } else if is_member_access(&tokens, index) {
+                    member_names.insert(index);
+                    let receiver = index
+                        .checked_sub(2)
+                        .and_then(|receiver| tokens.get(receiver))
+                        .and_then(|token| match token.kind {
+                            TokenKind::This => {
+                                frames.iter().rev().find_map(|frame| frame.object)
+                            }
+                            _ => token_binding[index - 2],
+                        });
+                    if let Some(binding) =
+                        receiver.and_then(|receiver| object_fields.get(&receiver))
+                    {
+                        token_binding[index] = binding.get(name).copied();
+                    }
+                } else {
+                    token_binding[index] = scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name).copied());
+                }
             }
             _ => {}
         }
@@ -897,6 +1152,45 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             last_significant = Some(index);
         }
         index += 1;
+    }
+
+    // A name written before its declaration, such as a body that calls a
+    // function declared below it, has no earlier scope entry to resolve
+    // against. Resolve those remaining names against the declarations each
+    // enclosing scope ended up with, so navigation sees the declaration the
+    // program will have when that code runs.
+    if stop.is_none() {
+        let mut scope_decls: Vec<HashMap<String, usize>> =
+            vec![HashMap::new(); next_scope_id];
+        for (binding, scope) in binding_scopes.iter().enumerate() {
+            scope_decls[*scope].insert(bindings[binding].name.clone(), binding);
+        }
+
+        for index in 0..tokens.len() {
+            let Some(name) = name_of(&tokens[index]) else {
+                continue;
+            };
+            if token_binding[index].is_some()
+                || declarations.contains(&index)
+                || type_names.contains(&index)
+                || member_names.contains(&index)
+            {
+                continue;
+            }
+
+            let mut scope = Some(token_scope[index]);
+            while let Some(scope_id) = scope {
+                if let Some(binding) = scope_decls
+                    .get(scope_id)
+                    .and_then(|scope| scope.get(name))
+                    .copied()
+                {
+                    token_binding[index] = Some(binding);
+                    break;
+                }
+                scope = scope_parents.get(scope_id).copied().flatten();
+            }
+        }
     }
 
     if visible.is_none() {
@@ -918,8 +1212,11 @@ fn declare_params(
     start: usize,
     scopes: &mut [HashMap<String, usize>],
     bindings: &mut Vec<Binding>,
+    binding_scopes: &mut Vec<usize>,
+    scope_id: usize,
     token_binding: &mut [Option<usize>],
     declarations: &mut HashSet<usize>,
+    type_names: &mut HashSet<usize>,
 ) -> usize {
     if !matches!(
         tokens.get(start).map(|token| &token.kind),
@@ -935,7 +1232,15 @@ fn declare_params(
             TokenKind::Comma => cursor += 1,
             TokenKind::Identifier(name) => {
                 let location = Location::of_name(&tokens[cursor], name);
-                let binding = declare(scopes, bindings, name, location, DefinitionKind::Parameter);
+                let binding = declare(
+                    scopes,
+                    bindings,
+                    binding_scopes,
+                    scope_id,
+                    name,
+                    location,
+                    DefinitionKind::Parameter,
+                );
                 mark_declaration(token_binding, declarations, cursor, binding);
                 cursor += 1;
 
@@ -945,7 +1250,7 @@ fn declare_params(
                     _ => false,
                 };
                 if has_type {
-                    cursor = skip_type_expression(tokens, cursor + 1, false);
+                    cursor = skip_type_expression(tokens, cursor + 1, false, type_names);
                 }
             }
             _ => cursor += 1,
@@ -1062,7 +1367,7 @@ pub fn completions(source: &str, line: usize, column: usize) -> Result<Vec<Strin
     let offset = map.validate(line, column)?;
     let analysis = analyze(source, Some(offset))?;
 
-    if inside_text(&analysis.tokens, &map, offset) {
+    if inside_text(&analysis.tokens, &map, offset) || inside_comment(&map, offset) {
         return Ok(Vec::new());
     }
 
@@ -1109,6 +1414,48 @@ fn inside_text(tokens: &[Token], map: &SourceMap, offset: usize) -> bool {
         }
         offset > start
     })
+}
+
+/// Whether `offset` falls inside a `//` comment's source text.
+///
+/// The lexer drops comments before they become tokens, so the scan runs over the
+/// source characters. It tracks string literals (and their escapes) so a `//`
+/// inside text is not mistaken for a comment, and comments never cross a
+/// newline, so the first line break ends one.
+fn inside_comment(map: &SourceMap, offset: usize) -> bool {
+    let chars = &map.chars;
+    let mut index = 0;
+    let mut in_text = false;
+
+    while index < chars.len() && index < offset {
+        let c = chars[index];
+        if in_text {
+            if c == '\\' {
+                index += 2;
+                continue;
+            }
+            if c == '"' {
+                in_text = false;
+            }
+            index += 1;
+        } else if c == '"' {
+            in_text = true;
+            index += 1;
+        } else if c == '/' && chars.get(index + 1) == Some(&'/') {
+            let mut end = index;
+            while end < chars.len() && chars[end] != '\n' {
+                end += 1;
+            }
+            if offset >= index && offset <= end {
+                return true;
+            }
+            index = end.max(index + 1);
+        } else {
+            index += 1;
+        }
+    }
+
+    false
 }
 
 /// The word-boundary alternation that matches every keyword, as a regex source

@@ -811,6 +811,63 @@ fn edge_completions_at_eof_without_trailing_newline_include_keywords_builtins_an
 }
 
 #[test]
+fn edge_completions_at_eof_after_a_one_line_literal_exclude_its_parameters() {
+    let source = "set f to to (literal_param) give back literal_param";
+    let eof_column = source.chars().count() + 1;
+
+    let offered = completions(source, 1, eof_column).expect("the end-of-file position is valid");
+
+    assert!(
+        !offered.contains(&"literal_param".to_string()),
+        "a single-line literal ends at the final line, so its parameters must not still be in \
+         scope at EOF, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_reference_after_a_one_line_literal_resolves_to_the_outer_binding() {
+    let source = concat!(
+        "set x to 100\n",
+        "to f(p)\n",
+        "    give back p\n",
+        "end\n",
+        "say f(to (x) give back x, x)\n",
+    );
+
+    let trailing = goto_definition(source, 5, 27)
+        .expect("the trailing argument is inside the file")
+        .expect("the trailing `x` names the outer binding");
+
+    assert_eq!(
+        (trailing.line, trailing.column, trailing.kind.as_str()),
+        (1, 5, "variable"),
+        "the literal's parameter must not capture an argument written after the literal"
+    );
+
+    let outer: Vec<(usize, usize)> = find_references(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    let inner: Vec<(usize, usize)> = find_references(source, 5, 11)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+
+    assert_eq!(
+        outer,
+        vec![(1, 5), (5, 27)],
+        "the outer binding must include the trailing argument, not the literal's parameter"
+    );
+    assert_eq!(
+        inner,
+        vec![(5, 11), (5, 24)],
+        "the literal's parameter must own only its body, not the trailing argument"
+    );
+}
+
+#[test]
 fn edge_completions_inside_string_literal_are_empty() {
     let source = "say \"hello\"\n";
 
@@ -823,12 +880,107 @@ fn edge_completions_inside_string_literal_are_empty() {
 }
 
 #[test]
-fn edge_navigation_handles_five_thousand_lines_quickly() {
+fn edge_completions_inside_line_comment_are_empty() {
+    let source = "set value to 1\nsay value // a note here\n";
+
+    let offered = completions(source, 2, 19).expect("the position is inside the file");
+
+    assert!(
+        offered.is_empty(),
+        "a comment is not code: completion inside it must offer nothing, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_at_the_end_of_a_line_comment_are_empty() {
+    let source = "set value to 1\nsay value // a note here\n";
+    let end_column = source
+        .lines()
+        .nth(1)
+        .map(|line| line.chars().count() + 1)
+        .unwrap();
+
+    let offered = completions(source, 2, end_column).expect("the end of the comment is valid");
+
+    assert!(
+        offered.is_empty(),
+        "the terminating newline is still part of the comment line: completion must offer \
+         nothing, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_at_eof_inside_an_unterminated_comment_are_empty() {
+    let source = "set value to 1\nsay value // a note here";
+    let end_column = source
+        .lines()
+        .nth(1)
+        .map(|line| line.chars().count() + 1)
+        .unwrap();
+
+    let offered = completions(source, 2, end_column).expect("the end of the file is valid");
+
+    assert!(
+        offered.is_empty(),
+        "an unterminated comment runs to EOF, so completion at EOF must offer nothing, got \
+         {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_a_line_comment_still_offer_scope() {
+    let source = "set value to 1 // a note\nsay val\n";
+
+    let offered = completions(source, 2, 8).expect("the end of the second line is valid");
+
+    assert!(
+        offered.contains(&"value".to_string()),
+        "a comment on the previous line must not close the scope, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_do_not_treat_slashes_inside_text_as_a_comment() {
+    let source = "set value to 1\nsay \"http://x\" then value\n";
+
+    let offered = completions(source, 2, 22).expect("the position is inside the file");
+
+    assert!(
+        offered.contains(&"value".to_string()),
+        "`//` inside a text literal is text, not a comment: it must not suppress completion, \
+         got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_navigation_rejects_a_column_past_the_line() {
+    let source = "set x to 1\n";
+    let past = source
+        .lines()
+        .next()
+        .map(|line| line.chars().count() + 2)
+        .unwrap();
+
+    assert!(
+        goto_definition(source, 1, past).is_err(),
+        "a column past the line must be a clean error"
+    );
+    assert!(
+        find_references(source, 1, past).is_err(),
+        "a column past the line must be a clean error"
+    );
+    assert!(
+        completions(source, 1, past).is_err(),
+        "a column past the line must be a clean error"
+    );
+}
+
+fn navigation_sample(lines: usize) -> Duration {
     let mut source = String::new();
-    for index in 0..5000 {
+    for index in 0..lines {
         source.push_str(&format!("set v{index} to {index}\n"));
     }
-    let last_line = 5000;
+    let last_line = lines;
     let last_column = 5;
     let eof_column = source
         .lines()
@@ -836,26 +988,44 @@ fn edge_navigation_handles_five_thousand_lines_quickly() {
         .map(|line| line.chars().count() + 1)
         .unwrap();
 
-    let started = Instant::now();
-    let definition = goto_definition(&source, last_line, last_column)
-        .expect("the last line is inside the file")
-        .expect("the last declaration names a binding");
-    let references = find_references(&source, last_line, last_column).expect("valid position");
-    let offered = completions(&source, last_line, eof_column).expect("valid position");
-    let elapsed = started.elapsed();
+    goto_definition(&source, last_line, last_column).expect("the warm-up position is valid");
 
-    assert_eq!(
-        (definition.line, definition.column),
-        (last_line, last_column)
-    );
-    assert!(!references.is_empty(), "a declaration is its own reference");
+    let mut best = Duration::MAX;
+    for _ in 0..5 {
+        let started = Instant::now();
+        let definition = goto_definition(&source, last_line, last_column)
+            .expect("the last line is inside the file")
+            .expect("the last declaration names a binding");
+        let references = find_references(&source, last_line, last_column).expect("valid position");
+        let offered = completions(&source, last_line, eof_column).expect("valid position");
+        best = best.min(started.elapsed());
+
+        assert_eq!(
+            (definition.line, definition.column),
+            (last_line, last_column)
+        );
+        assert!(!references.is_empty(), "a declaration is its own reference");
+        assert!(
+            offered.contains(&format!("v{}", lines - 1)),
+            "the last binding is in scope at EOF"
+        );
+    }
+
+    best
+}
+
+#[test]
+fn edge_navigation_handles_five_thousand_lines_quickly() {
+    // Each capability is a linear token walk, so five times the lines must cost
+    // roughly five times the time. Comparing the two measurements keeps the
+    // check independent of how fast the machine is: a loaded runner slows both
+    // sides together, while a quadratic regression shows up as ~25x.
+    let small = navigation_sample(1000);
+    let large = navigation_sample(5000);
+
     assert!(
-        offered.contains(&"v4999".to_string()),
-        "the last binding is in scope at EOF"
-    );
-    assert!(
-        elapsed < Duration::from_secs(30),
-        "navigation over 5000 lines must answer promptly, took {elapsed:?}"
+        large <= small * 12,
+        "navigation over 5000 lines took {large:?} versus {small:?} for 1000, which is not linear"
     );
 }
 
@@ -1113,6 +1283,59 @@ fn edge_range_with_a_call_lower_bound_does_not_push_a_function_frame() {
         goto_definition(source, 8, 5).expect("a position inside the file is valid"),
         None,
         "the loop variable must not leak past the range loop's `end`"
+    );
+}
+
+#[test]
+fn edge_range_with_an_lru_cache_lower_bound_does_not_push_a_function_frame() {
+    let source = concat!(
+        "set lru_cache to 3\n",
+        "set limit to 10\n",
+        "for each i from lru_cache to limit\n",
+        "    say i\n",
+        "end\n",
+        "say i\n",
+    );
+
+    let inside = goto_definition(source, 4, 9)
+        .expect("a position inside the file is valid")
+        .expect("the loop variable is in scope inside the range loop");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (3, 10, "loop"),
+        "an ordinary `lru_cache` variable before a range's `to` is not a decorator"
+    );
+
+    assert_eq!(
+        goto_definition(source, 6, 5).expect("a position inside the file is valid"),
+        None,
+        "the loop variable must not leak past the range loop's `end`"
+    );
+}
+
+#[test]
+fn edge_parameterless_function_literal_end_keeps_the_enclosing_scope() {
+    let source = concat!(
+        "to outer(limit)\n",
+        "    set f to to give back limit end\n",
+        "    say limit\n",
+        "end\n",
+        "say limit\n",
+    );
+
+    let inside = goto_definition(source, 3, 9)
+        .expect("a position inside the file is valid")
+        .expect("the parameter is still in scope after the literal's `end`");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (1, 10, "parameter"),
+        "a parameterless literal's `end` must close the literal, not the function around it"
+    );
+
+    assert_eq!(
+        goto_definition(source, 5, 5).expect("a position inside the file is valid"),
+        None,
+        "the parameter must not leak past the outer function's own `end`"
     );
 }
 
