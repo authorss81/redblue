@@ -1267,8 +1267,11 @@ fn edge_test_block_keeps_the_enclosing_scope_balanced() {
         "        say item\n",
         "    end\n",
         "    say marker\n",
+        "    set local to 2\n",
+        "    say local\n",
         "end\n",
         "say marker\n",
+        "say local\n",
         "say item\n",
     );
 
@@ -1290,7 +1293,16 @@ fn edge_test_block_keeps_the_enclosing_scope_balanced() {
         "the test body must read the scope it was written in"
     );
 
-    let after = goto_definition(source, 8, 5)
+    let local = goto_definition(source, 8, 9)
+        .expect("a position inside the file is valid")
+        .expect("a declaration in the test body is in scope there");
+    assert_eq!(
+        (local.line, local.column, local.kind.as_str()),
+        (7, 9, "variable"),
+        "the test body must read the binding it declares"
+    );
+
+    let after = goto_definition(source, 10, 5)
         .expect("a position inside the file is valid")
         .expect("the enclosing binding is still in scope after the test closes");
     assert_eq!(
@@ -1299,7 +1311,12 @@ fn edge_test_block_keeps_the_enclosing_scope_balanced() {
         "the test `end` must close only its own frame"
     );
     assert_eq!(
-        goto_definition(source, 9, 5).expect("a position inside the file is valid"),
+        goto_definition(source, 11, 5).expect("a position inside the file is valid"),
+        None,
+        "a declaration written directly in the test body must not leak past its `end`"
+    );
+    assert_eq!(
+        goto_definition(source, 12, 5).expect("a position inside the file is valid"),
         None,
         "a binding declared inside the test body's block must not leak past its `end`"
     );
@@ -1420,13 +1437,10 @@ fn edge_typed_and_of_parameters_do_not_declare_their_type_names() {
         (1, 10, "parameter")
     );
 
-    let list = goto_definition(source, 1, 19)
-        .expect("a position inside the file is valid")
-        .expect("`list` is a module name, not a parameter");
     assert_eq!(
-        (list.kind.as_str(), list.name.as_str()),
-        ("builtin", "list"),
-        "the `of list` type must not declare `list`"
+        goto_definition(source, 1, 19).expect("a position inside the file is valid"),
+        None,
+        "the `of list` type must not declare `list` or resolve it to the module builtin"
     );
 
     assert_eq!(
@@ -1826,6 +1840,12 @@ fn edge_builtin_references_exclude_member_and_type_names() {
         vec![(3, 5)],
         "`holder.abs` is a member name, not a use of the `abs` builtin"
     );
+    assert!(
+        find_references(member, 2, 12)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "querying the member name itself must not answer with the plain `abs` use"
+    );
 
     let typed = "say abs\nto total(items of abs)\n    give back items\nend\n";
     let type_references: Vec<(usize, usize)> = find_references(typed, 1, 5)
@@ -1837,6 +1857,17 @@ fn edge_builtin_references_exclude_member_and_type_names() {
         type_references,
         vec![(1, 5)],
         "the `abs` in `items of abs` is a type name, not a use of the `abs` builtin"
+    );
+    assert!(
+        find_references(typed, 2, 19)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "querying the type name itself must not answer with the plain `abs` use"
+    );
+    assert_eq!(
+        goto_definition(typed, 2, 19).expect("a position inside the file is valid"),
+        None,
+        "a type name spelled like a builtin must not resolve to the builtin registry"
     );
 
     let builtin = goto_definition(typed, 1, 5)
@@ -1950,4 +1981,238 @@ fn edge_malformed_source_error_carries_the_lexer_span() {
             "the error must keep the lexer message, got {message:?}"
         );
     }
+}
+
+#[test]
+fn edge_goto_definition_on_object_method_call_resolves_to_the_method_declaration() {
+    let source = concat!(
+        "object Greeter\n",
+        "    has name default \"world\"\n",
+        "    to can greet(greeting)\n",
+        "        give back greeting + this.name\n",
+        "    end\n",
+        "end\n",
+        "say Greeter.greet(\"hi\")\n",
+    );
+
+    let found = goto_definition(source, 7, 13)
+        .expect("a position inside the file is valid")
+        .expect("an object method call must resolve to its declaration");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (3, 12, "function"),
+        "`Greeter.greet` must resolve to the `to can greet` declaration"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 3, 12)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(3, 12), (7, 13)],
+        "the method's references must include its call site"
+    );
+}
+
+#[test]
+fn edge_goto_definition_on_a_this_method_call_resolves_to_the_method_declaration() {
+    let source = concat!(
+        "object Greeter\n",
+        "    to can greet()\n",
+        "        give back this.greet()\n",
+        "    end\n",
+        "end\n",
+    );
+
+    let found = goto_definition(source, 3, 24)
+        .expect("a position inside the file is valid")
+        .expect("a method call through `this` must resolve to its declaration");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (2, 12, "function"),
+        "`this.greet()` must resolve to the `to can greet` declaration"
+    );
+}
+
+#[test]
+fn edge_object_method_and_field_of_the_same_name_stay_distinct() {
+    let source = concat!(
+        "object Row\n",
+        "    has name default \"field\"\n",
+        "    to can name()\n",
+        "        give back \"method\"\n",
+        "    end\n",
+        "end\n",
+        "say Row.name\n",
+        "say Row.name()\n",
+    );
+
+    let field = goto_definition(source, 7, 9)
+        .expect("a position inside the file is valid")
+        .expect("a bare member access resolves to the field");
+    assert_eq!(
+        (field.line, field.column, field.kind.as_str()),
+        (2, 9, "variable"),
+        "`Row.name` must resolve to `has name`, not the method of the same name"
+    );
+
+    let method = goto_definition(source, 8, 9)
+        .expect("a position inside the file is valid")
+        .expect("a member call resolves to the method");
+    assert_eq!(
+        (method.line, method.column, method.kind.as_str()),
+        (3, 12, "function"),
+        "`Row.name()` must resolve to `to can name`, not the field of the same name"
+    );
+
+    let field_references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        field_references,
+        vec![(2, 9), (7, 9)],
+        "the field's references must not include the method call"
+    );
+
+    let method_references: Vec<(usize, usize)> = find_references(source, 3, 12)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        method_references,
+        vec![(3, 12), (8, 9)],
+        "the method's references must not include the field access"
+    );
+}
+
+#[test]
+fn edge_object_field_declared_after_its_method_still_wins_a_bare_read() {
+    let source = concat!(
+        "object Row\n",
+        "    to can name()\n",
+        "        give back name\n",
+        "    end\n",
+        "    has name default \"field\"\n",
+        "end\n",
+        "say Row.name\n",
+        "say Row.name()\n",
+    );
+
+    let bare = goto_definition(source, 3, 19)
+        .expect("a position inside the file is valid")
+        .expect("a bare field read resolves to the field declared below it");
+    assert_eq!(
+        (bare.line, bare.column, bare.kind.as_str()),
+        (5, 9, "variable"),
+        "a bare `name` read must prefer the field even when the method is declared first"
+    );
+
+    let field = goto_definition(source, 7, 9)
+        .expect("a position inside the file is valid")
+        .expect("a bare member access resolves to the field");
+    assert_eq!(
+        (field.line, field.column, field.kind.as_str()),
+        (5, 9, "variable"),
+        "`Row.name` must resolve to `has name`, not the method of the same name"
+    );
+
+    let method = goto_definition(source, 8, 9)
+        .expect("a position inside the file is valid")
+        .expect("a member call resolves to the method");
+    assert_eq!(
+        (method.line, method.column, method.kind.as_str()),
+        (2, 12, "function"),
+        "`Row.name()` must resolve to `to can name`, not the field of the same name"
+    );
+
+    let field_references: Vec<(usize, usize)> = find_references(source, 5, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        field_references,
+        vec![(3, 19), (5, 9), (7, 9)],
+        "the field's references must include the bare read and the bare member access"
+    );
+
+    let method_references: Vec<(usize, usize)> = find_references(source, 2, 12)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        method_references,
+        vec![(2, 12), (8, 9)],
+        "the method's references must not include the field's bare read"
+    );
+}
+
+#[test]
+fn edge_bare_method_call_prefers_the_method_over_a_same_named_field() {
+    let source = concat!(
+        "object Row\n",
+        "    has b default 1\n",
+        "    to can b()\n",
+        "        give back 2\n",
+        "    end\n",
+        "    to can a()\n",
+        "        give back b()\n",
+        "    end\n",
+        "end\n",
+    );
+
+    let method = goto_definition(source, 7, 19)
+        .expect("a position inside the file is valid")
+        .expect("a bare call must resolve to the method, not the field");
+    assert_eq!(
+        (method.line, method.column, method.kind.as_str()),
+        (3, 12, "function"),
+        "`b()` must resolve to `to can b`, not the field of the same name"
+    );
+
+    let method_references: Vec<(usize, usize)> = find_references(source, 3, 12)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        method_references,
+        vec![(3, 12), (7, 19)],
+        "the method's references must include the bare call"
+    );
+
+    let field_references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        field_references,
+        vec![(2, 9)],
+        "the field's references must not include the method call"
+    );
+}
+
+#[test]
+fn edge_navigation_rejects_a_position_past_the_file() {
+    let source = "set x to 1\n";
+
+    assert!(
+        goto_definition(source, 99, 1).is_err(),
+        "a line past the file must be a clean goto error"
+    );
+    assert!(
+        find_references(source, 99, 1).is_err(),
+        "a line past the file must be a clean references error"
+    );
+    assert!(
+        completions(source, 99, 1).is_err(),
+        "a line past the file must be a clean completion error"
+    );
 }

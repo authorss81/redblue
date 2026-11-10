@@ -492,6 +492,31 @@ fn declare(
     id
 }
 
+/// Declare a name that must stay distinct from a same-named binding of another
+/// kind in the same scope — an object's field and its method share a spelling
+/// but not an entry, so `has name` and `to can name()` get separate bindings.
+/// The scope keeps the first binding of the name for plain uses.
+fn declare_fresh(
+    scopes: &mut [HashMap<String, usize>],
+    bindings: &mut Vec<Binding>,
+    binding_scopes: &mut Vec<usize>,
+    scope_id: usize,
+    name: &str,
+    location: Location,
+    kind: DefinitionKind,
+) -> usize {
+    let id = bindings.len();
+    bindings.push(Binding {
+        name: name.to_string(),
+        location,
+        kind,
+    });
+    binding_scopes.push(scope_id);
+    let scope = scopes.last_mut().expect("the root scope always exists");
+    scope.entry(name.to_string()).or_insert(id);
+    id
+}
+
 fn mark_declaration(
     token_binding: &mut [Option<usize>],
     declarations: &mut HashSet<usize>,
@@ -690,6 +715,96 @@ fn is_member_access(tokens: &[Token], index: usize) -> bool {
         .is_some_and(|token| matches!(token.kind, TokenKind::Dot))
 }
 
+/// The binding a member name resolves to through `receiver`.
+///
+/// A member followed by `(` is a method call, so the object's methods answer
+/// before its fields; a bare member is a field access. Falling back to the
+/// other keeps a method name readable as a value and a callable field callable.
+fn member_binding(
+    tokens: &[Token],
+    index: usize,
+    receiver: usize,
+    object_fields: &HashMap<usize, HashMap<String, usize>>,
+    object_methods: &HashMap<usize, HashMap<String, usize>>,
+    name: &str,
+) -> Option<usize> {
+    let field = object_fields
+        .get(&receiver)
+        .and_then(|fields| fields.get(name))
+        .copied();
+    let method = object_methods
+        .get(&receiver)
+        .and_then(|methods| methods.get(name))
+        .copied();
+    let is_call = call_follows(tokens, index);
+
+    if is_call {
+        method.or(field)
+    } else {
+        field.or(method)
+    }
+}
+
+/// Whether the name at `index` is followed by `(`, so it is a call rather than
+/// a bare read of the same spelling.
+fn call_follows(tokens: &[Token], index: usize) -> bool {
+    matches!(
+        tokens.get(index + 1).map(|token| &token.kind),
+        Some(TokenKind::LeftParen)
+    )
+}
+
+/// The function binding a called name resolves to in `scope_id`, if the scope
+/// holds one alongside the plain name. A method and a field can share a
+/// spelling; the scope's plain entry keeps the first declaration, so a call has
+/// to look for the method explicitly, mirroring [`member_binding`].
+fn scope_function_binding(
+    name: &str,
+    first: usize,
+    scope_id: usize,
+    bindings: &[Binding],
+    binding_scopes: &[usize],
+) -> Option<usize> {
+    if bindings[first].kind == DefinitionKind::Function {
+        return Some(first);
+    }
+    binding_scopes
+        .iter()
+        .enumerate()
+        .find(|(id, scope)| {
+            **scope == scope_id
+                && bindings[*id].name == name
+                && bindings[*id].kind == DefinitionKind::Function
+        })
+        .map(|(id, _)| id)
+}
+
+/// The field binding a bare name resolves to in `scope_id`, if the scope holds
+/// one alongside a method of the same spelling. A bare name reads the field, so
+/// the lookup prefers a non-function entry regardless of which declaration came
+/// first, mirroring [`member_binding`].
+fn scope_plain_binding(
+    name: &str,
+    first: usize,
+    scope_id: usize,
+    bindings: &[Binding],
+    binding_scopes: &[usize],
+) -> Option<usize> {
+    if bindings[first].kind != DefinitionKind::Function {
+        return Some(first);
+    }
+    binding_scopes
+        .iter()
+        .enumerate()
+        .find(|(id, scope)| {
+            **scope == scope_id
+                && bindings[*id].name == name
+                && bindings[*id].kind != DefinitionKind::Function
+        })
+        .map(|(id, _)| id)
+        .or(Some(first))
+}
+
 /// The token index where a one-line literal body starting at `start` ends.
 ///
 /// The parser's one-line body keeps reading statements while the next token can
@@ -751,6 +866,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     let mut type_names: HashSet<usize> = HashSet::new();
     let mut member_names: HashSet<usize> = HashSet::new();
     let mut object_fields: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    let mut object_methods: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     let mut this_objects: HashMap<usize, usize> = HashMap::new();
     let mut frames: Vec<Frame> = Vec::new();
     let mut visible = None;
@@ -901,7 +1017,15 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     &mut next_scope_id,
                 );
             }
-            TokenKind::Test => frames.push(Frame::block(FrameKind::Test)),
+            TokenKind::Test => {
+                frames.push(Frame::scoped(FrameKind::Test));
+                push_scope(
+                    &mut scopes,
+                    &mut scope_ids,
+                    &mut scope_parents,
+                    &mut next_scope_id,
+                );
+            }
             TokenKind::Try => frames.push(Frame::block(FrameKind::Try)),
             TokenKind::Catch => {
                 let opens_scope = match frames.last_mut() {
@@ -964,16 +1088,36 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         _ => unreachable!("checked by name_of"),
                     };
                     let location = Location::of_name(&tokens[cursor], &name);
-                    let binding = declare(
-                        &mut scopes,
-                        &mut bindings,
-                        &mut binding_scopes,
-                        *scope_ids.last().expect("the root scope always exists"),
-                        &name,
-                        location,
-                        DefinitionKind::Function,
-                    );
+                    let method_owner = frames.last().and_then(|frame| frame.object);
+                    let scope_id = *scope_ids.last().expect("the root scope always exists");
+                    let binding = if method_owner.is_some() {
+                        declare_fresh(
+                            &mut scopes,
+                            &mut bindings,
+                            &mut binding_scopes,
+                            scope_id,
+                            &name,
+                            location,
+                            DefinitionKind::Function,
+                        )
+                    } else {
+                        declare(
+                            &mut scopes,
+                            &mut bindings,
+                            &mut binding_scopes,
+                            scope_id,
+                            &name,
+                            location,
+                            DefinitionKind::Function,
+                        )
+                    };
                     mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
+                    if let Some(owner) = method_owner {
+                        object_methods
+                            .entry(owner)
+                            .or_default()
+                            .insert(name.clone(), binding);
+                    }
                     frames.push(Frame::scoped(FrameKind::To));
                     push_scope(
                         &mut scopes,
@@ -1141,7 +1285,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 if first_on_line && in_object {
                     if let Some(name) = tokens.get(index + 1).and_then(name_of) {
                         let location = Location::of_name(&tokens[index + 1], name);
-                        let binding = declare(
+                        let binding = declare_fresh(
                             &mut scopes,
                             &mut bindings,
                             &mut binding_scopes,
@@ -1178,16 +1322,35 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             TokenKind::This => frames.iter().rev().find_map(|frame| frame.object),
                             _ => token_binding[index - 2],
                         });
-                    if let Some(binding) =
-                        receiver.and_then(|receiver| object_fields.get(&receiver))
-                    {
-                        token_binding[index] = binding.get(name).copied();
+                    if let Some(receiver) = receiver {
+                        token_binding[index] = member_binding(
+                            &tokens,
+                            index,
+                            receiver,
+                            &object_fields,
+                            &object_methods,
+                            name,
+                        );
                     }
                 } else {
-                    token_binding[index] = scopes
-                        .iter()
-                        .rev()
-                        .find_map(|scope| scope.get(name).copied());
+                    let is_call = call_follows(&tokens, index);
+                    for (scope, scope_id) in scopes.iter().zip(scope_ids.iter()).rev() {
+                        let Some(&first) = scope.get(name) else {
+                            continue;
+                        };
+                        token_binding[index] = if is_call {
+                            scope_function_binding(
+                                name,
+                                first,
+                                *scope_id,
+                                &bindings,
+                                &binding_scopes,
+                            )
+                        } else {
+                            scope_plain_binding(name, first, *scope_id, &bindings, &binding_scopes)
+                        };
+                        break;
+                    }
                 }
             }
             _ => {}
@@ -1208,21 +1371,26 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     if stop.is_none() {
         let mut scope_decls: Vec<HashMap<String, usize>> = vec![HashMap::new(); next_scope_id];
         for (binding, scope) in binding_scopes.iter().enumerate() {
-            scope_decls[*scope].insert(bindings[binding].name.clone(), binding);
+            scope_decls[*scope]
+                .entry(bindings[binding].name.clone())
+                .or_insert(binding);
         }
 
         for index in 0..tokens.len() {
             let Some(name) = name_of(&tokens[index]) else {
                 continue;
             };
-            if token_binding[index].is_some()
-                || declarations.contains(&index)
+            if declarations.contains(&index)
                 || type_names.contains(&index)
                 || member_names.contains(&index)
             {
                 continue;
             }
 
+            let is_call = call_follows(&tokens, index);
+            if token_binding[index].is_some() && is_call {
+                continue;
+            }
             let mut scope = Some(token_scope[index]);
             while let Some(scope_id) = scope {
                 if let Some(binding) = scope_decls
@@ -1230,7 +1398,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     .and_then(|scope| scope.get(name))
                     .copied()
                 {
-                    token_binding[index] = Some(binding);
+                    token_binding[index] = if is_call {
+                        scope_function_binding(name, binding, scope_id, &bindings, &binding_scopes)
+                            .or(Some(binding))
+                    } else {
+                        scope_plain_binding(name, binding, scope_id, &bindings, &binding_scopes)
+                    };
                     break;
                 }
                 scope = scope_parents.get(scope_id).copied().flatten();
@@ -1257,11 +1430,15 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 TokenKind::This => this_objects.get(&receiver).copied(),
                 _ => token_binding[receiver],
             };
-            if let Some(field) = receiver_binding
-                .and_then(|receiver| object_fields.get(&receiver))
-                .and_then(|fields| fields.get(name))
-            {
-                token_binding[index] = Some(*field);
+            if let Some(receiver) = receiver_binding {
+                token_binding[index] = member_binding(
+                    &tokens,
+                    index,
+                    receiver,
+                    &object_fields,
+                    &object_methods,
+                    name,
+                );
             }
         }
     }
@@ -1376,7 +1553,10 @@ pub fn goto_definition(
     }
 
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
-    if is_builtin_name(name) && !analysis.member_names.contains(&index) {
+    if is_builtin_name(name)
+        && !analysis.member_names.contains(&index)
+        && !analysis.type_names.contains(&index)
+    {
         Ok(Some(Definition::builtin(name)))
     } else {
         Ok(None)
@@ -1408,6 +1588,12 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
     };
     let target = analysis.token_binding[index];
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
+
+    if target.is_none()
+        && (analysis.member_names.contains(&index) || analysis.type_names.contains(&index))
+    {
+        return Ok(Vec::new());
+    }
 
     let mut found = Vec::new();
     for (candidate, token) in analysis.tokens.iter().enumerate() {
