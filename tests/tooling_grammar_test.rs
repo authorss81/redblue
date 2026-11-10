@@ -2665,3 +2665,114 @@ fn edge_find_references_rejects_a_zero_column() {
         "column 0 is not a source position and must be a clean error"
     );
 }
+
+#[test]
+fn edge_references_in_sibling_functions_do_not_cross() {
+    let source = concat!(
+        "to first(x)\n",
+        "    say x\n",
+        "end\n",
+        "to second(x)\n",
+        "    say x\n",
+        "end\n",
+    );
+
+    let first: Vec<(usize, usize)> = find_references(source, 1, 10)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        first,
+        vec![(1, 10), (2, 9)],
+        "the first function's parameter must not pick up the sibling's use"
+    );
+
+    let second: Vec<(usize, usize)> = find_references(source, 4, 11)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        second,
+        vec![(4, 11), (5, 9)],
+        "the second function's parameter must not pick up the sibling's use"
+    );
+}
+
+#[test]
+fn edge_completion_before_a_later_declaration_does_not_offer_it() {
+    let source = "say later\nset later to 1\n";
+
+    let offered = completions(source, 1, 1).expect("a position inside the file is valid");
+    assert!(
+        !offered.iter().any(|name| name == "later"),
+        "a name declared below the caret is not in scope yet, got {offered:?}"
+    );
+    assert!(
+        offered.iter().any(|name| name == "say"),
+        "the keyword set is still offered at the top of the file"
+    );
+}
+
+#[test]
+fn edge_goto_definition_on_whitespace_and_text_returns_none() {
+    let source = "say x\nsay \"x\"\n";
+
+    assert_eq!(
+        goto_definition(source, 1, 4).expect("a position inside the file is valid"),
+        None,
+        "whitespace names no binding"
+    );
+    assert_eq!(
+        goto_definition(source, 2, 6).expect("a position inside the file is valid"),
+        None,
+        "the body of a text literal names no binding"
+    );
+}
+
+#[test]
+fn edge_navigation_rejects_line_zero_for_every_capability() {
+    let source = "set x to 1\n";
+
+    assert!(
+        goto_definition(source, 0, 1).is_err(),
+        "line 0 is not a source position for goto-definition"
+    );
+    assert!(
+        find_references(source, 0, 1).is_err(),
+        "line 0 is not a source position for find-references"
+    );
+    assert!(
+        completions(source, 0, 1).is_err(),
+        "line 0 is not a source position for completion"
+    );
+}
+
+#[test]
+fn edge_syntax_names_do_not_answer_as_builtin_references() {
+    let source = "try\n    say 1\ncatch error of map\n    say 1\nend\nsay map([1, 2])\n";
+
+    assert_eq!(
+        goto_definition(source, 3, 14).expect("a position inside the file is valid"),
+        None,
+        "a catch failure kind spelled like a builtin is syntax, not the builtin"
+    );
+    assert!(
+        find_references(source, 3, 14)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a catch failure kind must not answer with the plain builtin's references"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 6, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(6, 5)],
+        "the plain builtin use must not pick up the contextual catch kind"
+    );
+}

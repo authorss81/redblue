@@ -18,6 +18,10 @@
 | tests/tooling_grammar_test.rs | +34 −0 | three tests: an unknown word has no references; an unknown word beside a real binding leaves that binding's references intact; a zero-column reference query is a clean error. |
 | src/lsp.rs | +66 −2 | round-2 review: a `constant` declares its own program-scope binding instead of reusing an earlier `set` of the same spelling, and the deferred pass keeps a name already resolved in source order while still repairing the field/method distinction. |
 | tests/tooling_grammar_test.rs | +120 −0 | two tests: `set x` followed by `constant x` keeps the variable and the constant in separate reference sets, and `import MathUtils as M` keeps both spellings as import bindings with separate references. |
+| src/lsp.rs | +2 −1 | resumed run: restore the two pieces the preserved tree was missing. The first-`set` program-scope choice tested `DefinitionKind::Set` (a variant that does not exist) instead of `TokenKind::Set`, so a `set` inside a module or `test` was placed in the wrong program scope; and the `Analysis` initializer dropped the `syntax_names` set, so contextual words such as a catch handler or a field `default` could answer as a lexical binding. Both now match the surrounding walk. |
+| tests/tooling_grammar_test.rs | +83 −0 | four resumed-run tests: sibling functions with the same parameter name keep separate references; completion before a later declaration does not offer that name; goto on whitespace and on text-literal contents answers `None`; and line 0 is a clean error from all three capabilities. |
+| src/lsp.rs | +2 −0 | review: `find_references` also excludes `syntax_names` from both the unresolved-name guard and the candidate match, mirroring `goto_definition`, so a catch failure kind or a field `default` spelled like a builtin no longer answers as that builtin. |
+| tests/tooling_grammar_test.rs | +23 −0 | one review test: a catch failure kind spelled `map` neither goes to nor joins the references of the `map` builtin, while the plain builtin use keeps its own reference set. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -141,6 +145,11 @@ changed for that finding.
 | edge_find_references_rejects_a_zero_column | out of bounds: column 0 is a clean `Err` |
 | edge_constant_after_a_same_named_set_is_its_own_binding | duplicate names: a `constant` after a same-named `set` is a distinct binding, so the variable's references stop at the constant and the constant's references do not join the `set` |
 | edge_import_alias_keeps_the_modules_own_name_a_binding | import alias: `import MathUtils as M` binds both `MathUtils` and `M`, each navigating to the import with separate references |
+| edge_references_in_sibling_functions_do_not_cross | nesting / duplicate names: two functions with a parameter of the same spelling keep separate reference sets |
+| edge_completion_before_a_later_declaration_does_not_offer_it | boundary: a declaration below the caret is not in scope yet, while keywords are still offered |
+| edge_goto_definition_on_whitespace_and_text_returns_none | boundary: whitespace and a text literal's body name no binding |
+| edge_navigation_rejects_line_zero_for_every_capability | out of bounds / malformed position: line 0 is a clean `Err` from goto, references and completion |
+| edge_syntax_names_do_not_answer_as_builtin_references | context awareness: a catch failure kind spelled like the `map` builtin is syntax, so goto answers `None` and references stay with the plain builtin use |
 
 ### Mandatory edge-case matrix
 
@@ -164,11 +173,13 @@ changed for that finding.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2817 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2822 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets -- --list` reports the same 2817 tests, so the count
-in this report is the count the suite actually contains.
+`cargo test --all-targets -- --list` reports the same 2822 tests, so the count
+in this report is the count the suite actually contains. The pipeline copy at
+`$RBOPS_ROOT/phases/phase-075/REPORT.md` is kept byte-identical to this one, so
+the gate's report-honesty step measures the same count this report records.
 
 ## Invariants touched
 

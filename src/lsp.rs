@@ -1412,7 +1412,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         // A constant is a global whatever block declares it, so
                         // only an isolated `test` moves its program scope. A
                         // first `set` follows the innermost module or test body.
-                        let program_position = if kind == DefinitionKind::Set {
+                        let program_position = if matches!(token.kind, TokenKind::Set) {
                             test_scopes
                                 .last()
                                 .copied()
@@ -1659,6 +1659,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
         token_binding,
         member_names,
         type_names,
+        syntax_names,
         visible: visible.unwrap_or_default(),
     })
 }
@@ -1799,6 +1800,7 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
     if target.is_none()
         && (analysis.member_names.contains(&index)
             || analysis.type_names.contains(&index)
+            || analysis.syntax_names.contains(&index)
             || !is_builtin_name(name))
     {
         // A word with no binding is not a reference target. Only a builtin
@@ -1819,6 +1821,7 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
                 analysis.token_binding[candidate].is_none()
                     && !analysis.member_names.contains(&candidate)
                     && !analysis.type_names.contains(&candidate)
+                    && !analysis.syntax_names.contains(&candidate)
             }
         };
         if matches {
