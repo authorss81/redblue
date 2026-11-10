@@ -390,6 +390,11 @@ struct Binding {
     name: String,
     location: Location,
     kind: DefinitionKind,
+    /// Whether the name participates in lexical lookup. An object field is a
+    /// member reached through `this` or the object's name, not a variable the
+    /// analyzer binds in the object body, so it keeps a declaration and a
+    /// member table entry without entering a scope.
+    lexical: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,16 +496,17 @@ fn declare(
         name: name.to_string(),
         location,
         kind,
+        lexical: true,
     });
     binding_scopes.push(scope_id);
     scope.insert(name.to_string(), id);
     id
 }
 
-/// Declare a name that must stay distinct from a same-named binding of another
-/// kind in the same scope — an object's field and its method share a spelling
-/// but not an entry, so `has name` and `to can name()` get separate bindings.
-/// The scope keeps the first binding of the name for plain uses.
+/// Declare a name that must stay distinct from a same-named lexical binding of
+/// another kind in the same scope — an object's method and a plain name can
+/// share a spelling but not an entry. The scope keeps the first binding of the
+/// name for plain uses.
 fn declare_fresh(
     scopes: &mut [HashMap<String, usize>],
     bindings: &mut Vec<Binding>,
@@ -515,10 +521,36 @@ fn declare_fresh(
         name: name.to_string(),
         location,
         kind,
+        lexical: true,
     });
     binding_scopes.push(scope_id);
     let scope = scopes.last_mut().expect("the root scope always exists");
     scope.entry(name.to_string()).or_insert(id);
+    id
+}
+
+/// Declare an object field as a member rather than a lexical name.
+///
+/// The analyzer does not bind a `has` field as a variable in the object's body:
+/// a bare `name` there is an unknown variable, and the field is read through
+/// `this.name` or `<object>.name`. The field still needs a binding for its own
+/// declaration span and for member access, so it is recorded in the member
+/// table without entering a scope.
+fn declare_member(
+    bindings: &mut Vec<Binding>,
+    binding_scopes: &mut Vec<usize>,
+    scope_id: usize,
+    name: &str,
+    location: Location,
+) -> usize {
+    let id = bindings.len();
+    bindings.push(Binding {
+        name: name.to_string(),
+        location,
+        kind: DefinitionKind::Variable,
+        lexical: false,
+    });
+    binding_scopes.push(scope_id);
     id
 }
 
@@ -549,6 +581,7 @@ fn declare_constant_binding(
         name: name.to_string(),
         location,
         kind: DefinitionKind::Constant,
+        lexical: true,
     });
     binding_scopes.push(scope_id);
     let scope = scopes.last_mut().expect("the root scope always exists");
@@ -841,7 +874,7 @@ fn scope_function_binding(
     bindings: &[Binding],
     binding_scopes: &[usize],
 ) -> Option<usize> {
-    if bindings[first].kind == DefinitionKind::Function {
+    if bindings[first].lexical && bindings[first].kind == DefinitionKind::Function {
         return Some(first);
     }
     binding_scopes
@@ -849,16 +882,17 @@ fn scope_function_binding(
         .enumerate()
         .find(|(id, scope)| {
             **scope == scope_id
+                && bindings[*id].lexical
                 && bindings[*id].name == name
                 && bindings[*id].kind == DefinitionKind::Function
         })
         .map(|(id, _)| id)
 }
 
-/// The field binding a bare name resolves to in `scope_id`, if the scope holds
-/// one alongside a method of the same spelling. A bare name reads the field, so
-/// the lookup prefers a non-function entry regardless of which declaration came
-/// first, mirroring [`member_binding`].
+/// The lexical binding a bare name resolves to in `scope_id`. A method and a
+/// plain name can share a spelling; the scope's entry keeps the first
+/// declaration, so a read prefers a non-function entry regardless of which
+/// declaration came first.
 fn scope_plain_binding(
     name: &str,
     first: usize,
@@ -866,7 +900,7 @@ fn scope_plain_binding(
     bindings: &[Binding],
     binding_scopes: &[usize],
 ) -> Option<usize> {
-    if bindings[first].kind != DefinitionKind::Function {
+    if bindings[first].lexical && bindings[first].kind != DefinitionKind::Function {
         return Some(first);
     }
     binding_scopes
@@ -874,11 +908,12 @@ fn scope_plain_binding(
         .enumerate()
         .find(|(id, scope)| {
             **scope == scope_id
+                && bindings[*id].lexical
                 && bindings[*id].name == name
                 && bindings[*id].kind != DefinitionKind::Function
         })
         .map(|(id, _)| id)
-        .or(Some(first))
+        .or_else(|| bindings[first].lexical.then_some(first))
 }
 
 /// The token index where a one-line literal body starting at `start` ends.
@@ -915,6 +950,21 @@ fn literal_body_end(tokens: &[Token], start: usize, open_line: usize) -> usize {
 
 fn is_builtin_name(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name) || MODULES.contains(&name) || name == "PI" || name == "E"
+}
+
+/// Whether a name written before its declaration may resolve to `declaration`.
+///
+/// A builtin answers until the program claims its name. A declaration earlier
+/// in the file has already done so, and a `constant` or `import` claims the
+/// name wherever it is written. A later first `set`, loop variable or function
+/// does not pre-claim it, so leaving the use unbound lets the builtin fallback
+/// answer exactly as the analyzer does.
+fn deferred_builtin_binds_to(declaration: &Binding, token: &Token) -> bool {
+    (declaration.location.line, declaration.location.column) <= (token.line, token.column)
+        || matches!(
+            declaration.kind,
+            DefinitionKind::Constant | DefinitionKind::Import
+        )
 }
 
 /// Walks the token stream once, at token level, building lexical scopes.
@@ -1471,14 +1521,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 if first_on_line && in_object {
                     if let Some(name) = tokens.get(index + 1).and_then(name_of) {
                         let location = Location::of_name(&tokens[index + 1], name);
-                        let binding = declare_fresh(
-                            &mut scopes,
+                        let binding = declare_member(
                             &mut bindings,
                             &mut binding_scopes,
                             *scope_ids.last().expect("the root scope always exists"),
                             name,
                             location,
-                            DefinitionKind::Variable,
                         );
                         mark_declaration(&mut token_binding, &mut declarations, index + 1, binding);
                         if let Some(owner) = frames.last().and_then(|frame| frame.object) {
@@ -1561,6 +1609,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     if stop.is_none() {
         let mut scope_decls: Vec<HashMap<String, usize>> = vec![HashMap::new(); next_scope_id];
         for (binding, scope) in binding_scopes.iter().enumerate() {
+            if !bindings[binding].lexical {
+                continue;
+            }
             scope_decls[*scope]
                 .entry(bindings[binding].name.clone())
                 .or_insert(binding);
@@ -1604,6 +1655,11 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     .and_then(|scope| scope.get(name))
                     .copied()
                 {
+                    if is_builtin_name(name)
+                        && !deferred_builtin_binds_to(&bindings[binding], &tokens[index])
+                    {
+                        break;
+                    }
                     token_binding[index] = if is_call {
                         scope_function_binding(name, binding, scope_id, &bindings, &binding_scopes)
                             .or(Some(binding))
@@ -1617,15 +1673,14 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
         }
 
         // An object field used through a receiver declared below it could not
-        // resolve during the walk. Now that every receiver name has a binding,
-        // resolve member accesses too, in source order so a chain like
-        // `a.b.c` resolves its receiver before the access that uses it.
+        // resolve during the walk, and a member read written before a later
+        // field declaration could only see the same-named method. Now that
+        // both member tables are complete, resolve every member access again
+        // in source order so a chain like `a.b.c` resolves its receiver before
+        // the access that uses it.
         let mut members: Vec<usize> = member_names.iter().copied().collect();
         members.sort_unstable();
         for index in members {
-            if token_binding[index].is_some() {
-                continue;
-            }
             let Some(receiver) = index.checked_sub(2) else {
                 continue;
             };
@@ -1637,14 +1692,16 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 _ => token_binding[receiver],
             };
             if let Some(receiver) = receiver_binding {
-                token_binding[index] = member_binding(
+                if let Some(binding) = member_binding(
                     &tokens,
                     index,
                     receiver,
                     &object_fields,
                     &object_methods,
                     name,
-                );
+                ) {
+                    token_binding[index] = Some(binding);
+                }
             }
         }
     }

@@ -2307,6 +2307,73 @@ fn edge_goto_definition_on_a_member_name_does_not_resolve_to_a_builtin() {
 }
 
 #[test]
+fn edge_builtin_use_before_a_later_set_stays_the_builtin() {
+    let source = "say abs\nset abs to 1\nsay abs\n";
+
+    let first = goto_definition(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .expect("the use before the later `set` is still the builtin");
+    assert_eq!(
+        (first.kind.as_str(), first.name.as_str()),
+        ("builtin", "abs"),
+        "a later first `set` must not rebind an earlier builtin use"
+    );
+
+    let first_references: Vec<(usize, usize)> = find_references(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        first_references,
+        vec![(1, 5)],
+        "the builtin reference set must not include the later variable or its uses"
+    );
+
+    let declaration = goto_definition(source, 2, 5)
+        .expect("a position inside the file is valid")
+        .expect("the `set` declares its own binding");
+    assert_eq!(
+        (
+            declaration.line,
+            declaration.column,
+            declaration.kind.as_str()
+        ),
+        (2, 5, "variable"),
+        "the later `set abs` still declares a variable"
+    );
+
+    let variable_references: Vec<(usize, usize)> = find_references(source, 2, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        variable_references,
+        vec![(2, 5), (3, 5)],
+        "the variable's references start at its declaration, not at the earlier builtin use"
+    );
+}
+
+#[test]
+fn edge_navigation_rejects_a_position_past_a_builtin_before_a_later_set() {
+    let source = "say abs\nset abs to 1\n";
+
+    assert!(
+        goto_definition(source, 1, 99).is_err(),
+        "goto past the line is a clean error"
+    );
+    assert!(
+        find_references(source, 1, 99).is_err(),
+        "references past the line is a clean error"
+    );
+    assert!(
+        completions(source, 1, 99).is_err(),
+        "completion past the line is a clean error"
+    );
+}
+
+#[test]
 fn edge_navigation_handles_cr_and_crlf_line_endings() {
     for (label, newline) in [("lone CR", "\r"), ("CRLF", "\r\n")] {
         let source = format!("set value to 1{newline}say value // note{newline}say value{newline}");
@@ -2497,11 +2564,11 @@ fn edge_object_method_and_field_of_the_same_name_stay_distinct() {
 }
 
 #[test]
-fn edge_object_field_declared_after_its_method_still_wins_a_bare_read() {
+fn edge_object_field_declared_after_its_method_still_wins_a_member_read() {
     let source = concat!(
         "object Row\n",
         "    to can name()\n",
-        "        give back name\n",
+        "        give back this.name\n",
         "    end\n",
         "    has name default \"field\"\n",
         "end\n",
@@ -2509,13 +2576,13 @@ fn edge_object_field_declared_after_its_method_still_wins_a_bare_read() {
         "say Row.name()\n",
     );
 
-    let bare = goto_definition(source, 3, 19)
+    let member = goto_definition(source, 3, 24)
         .expect("a position inside the file is valid")
-        .expect("a bare field read resolves to the field declared below it");
+        .expect("a member read resolves to the field declared below it");
     assert_eq!(
-        (bare.line, bare.column, bare.kind.as_str()),
+        (member.line, member.column, member.kind.as_str()),
         (5, 9, "variable"),
-        "a bare `name` read must prefer the field even when the method is declared first"
+        "`this.name` must prefer the field even when the method is declared first"
     );
 
     let field = goto_definition(source, 7, 9)
@@ -2543,8 +2610,8 @@ fn edge_object_field_declared_after_its_method_still_wins_a_bare_read() {
         .collect();
     assert_eq!(
         field_references,
-        vec![(3, 19), (5, 9), (7, 9)],
-        "the field's references must include the bare read and the bare member access"
+        vec![(3, 24), (5, 9), (7, 9)],
+        "the field's references must include the `this` read and the object member access"
     );
 
     let method_references: Vec<(usize, usize)> = find_references(source, 2, 12)
@@ -2555,7 +2622,31 @@ fn edge_object_field_declared_after_its_method_still_wins_a_bare_read() {
     assert_eq!(
         method_references,
         vec![(2, 12), (8, 9)],
-        "the method's references must not include the field's bare read"
+        "the method's references must not include the field's `this` read"
+    );
+}
+
+#[test]
+fn edge_object_field_is_not_a_bare_lexical_name() {
+    let source = concat!(
+        "object Row\n",
+        "    has name default \"field\"\n",
+        "    to can label()\n",
+        "        give back name\n",
+        "    end\n",
+        "end\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 4, 19).expect("a position inside the file is valid"),
+        None,
+        "the analyzer rejects a bare field read, so navigation must not bind it"
+    );
+    assert!(
+        find_references(source, 4, 19)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a bare field read has no binding, so it has no references"
     );
 }
 

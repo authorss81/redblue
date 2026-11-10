@@ -10,7 +10,7 @@
 | src/lib.rs | +3 −2 | re-export the new navigation surface |
 | tests/tooling_grammar_test.rs | +583 −37 | 66 navigation tests (62 `edge_*`) including shadowing, builtins, imports, Unicode, CR/CRLF endings, comments, malformed source and positions, nested `unless`/loop/repeat/module/test/try-catch/object scopes, `else if`, multi-assignment, typed parameters, catch binders, membership `has`, object member access (forward, `this`, ordinary), range bounds, function literals and deterministic navigation over 5000 declarations |
 | tests/unreviewed_work_ack_test.rs | +1 −0 | add `resume phase-075:` to the delivery-subject rule so this phase's rebuildable delivery commit is acknowledged by subject, not by a stale SHA |
-| src/lsp.rs | +175 −26 | resumed run: navigate object methods. `to can name(...)` declarations are tracked per object, a member followed by `(` resolves to the method while a bare member resolves to the field, and `has`/method declarations get distinct bindings so `has name` and `to can name()` no longer collapse into one entry. Review fixes: a plain-name call prefers a same-scope function over a same-named field. Round-2 fixes: a member or type query answers only its own binding, goto on a type name no longer falls through to a builtin, and a bare field read wins even when its method is declared first. |
+| src/lsp.rs | +175 −26 | resumed run: navigate object methods. `to can name(...)` declarations are tracked per object, a member followed by `(` resolves to the method while a bare member resolves to the field, and `has`/method declarations get distinct bindings so `has name` and `to can name()` no longer collapse into one entry. Review fixes: a plain-name call prefers a same-scope function over a same-named field. Round-2 fixes: a member or type query answers only its own binding, goto on a type name no longer falls through to a builtin, and an object field is a member read through `this`/the object name rather than a lexical name. |
 | tests/tooling_grammar_test.rs | +190 −2 | six new navigation tests: object method calls, `this.method()` calls, field/method same-name separation in both declaration orders, a bare method call over a same-named field, and a malformed-position failure test. |
 | src/lsp.rs | +36 −14 | resumed run: model `if`/`unless` branch bodies as their own scope, as the analyzer does. A `set` inside the body writes through to an enclosing binding (or the program scope when the name is new), so it survives `end`, while a function, object or import declared there does not leak. Round-3 review fixes: a `test` body gets its own scope because the harness parses each body separately and runs it in an isolated VM, a `constant` always binds in the program scope (the test body's scope inside a `test`) instead of reusing an enclosing `set`, and the catch scope closes at `finally` so the cleanup body is analyzed in the enclosing scope without the catch binder. |
 | tests/tooling_grammar_test.rs | +207 −5 | restored the test-body isolation fixture, corrected the completion test to assert that one test's names do not reach the next, and added navigation tests for an `unless` body whose `set` survives `end` while a declared function does not leak, for a first `set` inside a function or loop being a program binding, for an inner `constant` being a program binding that outlives its loop, and for a `finally` body leaving the catch scope while its own declaration reaches the code after `end`. |
@@ -22,6 +22,8 @@
 | tests/tooling_grammar_test.rs | +83 −0 | four resumed-run tests: sibling functions with the same parameter name keep separate references; completion before a later declaration does not offer that name; goto on whitespace and on text-literal contents answers `None`; and line 0 is a clean error from all three capabilities. |
 | src/lsp.rs | +2 −0 | review: `find_references` also excludes `syntax_names` from both the unresolved-name guard and the candidate match, mirroring `goto_definition`, so a catch failure kind or a field `default` spelled like a builtin no longer answers as that builtin. |
 | tests/tooling_grammar_test.rs | +23 −0 | one review test: a catch failure kind spelled `map` neither goes to nor joins the references of the `map` builtin, while the plain builtin use keeps its own reference set. |
+| src/lsp.rs | +47 −15 | round-2 review: a builtin use written before a later first `set` or function stays unbound so the builtin fallback answers, while a preceding declaration or a `constant`/`import` still claims the name; object fields no longer enter lexical scopes, matching the analyzer, and member accesses re-resolve after both member tables are complete so `this.name` still prefers a field declared after its method. |
+| tests/tooling_grammar_test.rs | +116 −15 | round-2 review tests: a builtin before a later `set abs` keeps the builtin definition and reference set while the variable keeps its own; a bare field read inside a method body has no binding while `this.name` resolves; a position past a line with a builtin and a later `set` is a clean error from all three capabilities; and the field-declared-after-its-method fixture now reads `this.name` and asserts the field's references include that member read. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -61,6 +63,23 @@ is also a constant, and the deferred pass no longer overwrites a name the walk
 already resolved; it still repairs the field/method shape. The new fixture
 asserts that the variable's references stop at the constant and the constant's
 references do not join the `set`.
+
+The round-2 review also found that the deferred pass rebound an earlier builtin
+use to a later first `set`. The fixture `say abs` followed by `set abs to 1` now
+keeps the first `abs` on the builtin registry: the deferred pass only binds a
+builtin name to a declaration that precedes the use or is a `constant`/`import`,
+which is exactly the analyzer's "a builtin answers until the program claims the
+name" rule. The same review questioned the bare field read fixture; running the
+analyzer on `object Row` / `has name default "field"` / `to can name()` /
+`give back name` reports `Unknown variable 'name'`, so object fields no longer
+enter lexical scopes. The fixture now uses `this.name`, and member accesses are
+re-resolved once both member tables are complete so a field declared after its
+method still answers the member read. A dedicated fixture also pins that a bare
+field read has no binding or references, while `this.name` resolves. The new
+builtin fixture pins both directions: the builtin reference set contains only
+its own use, while the `set` declaration and its later use form a separate
+variable binding. A malformed-position fixture covers the same source shape so
+an out-of-bounds column stays a clean error from all three capabilities.
 
 The review's import finding did not reproduce. The analyzer explicitly
 declares both `item.name` and `item.alias` (`src/analyzer.rs:548-556`), and the
@@ -137,8 +156,11 @@ changed for that finding.
 | edge_goto_definition_on_object_method_call_resolves_to_the_method_declaration | object navigation: `Greeter.greet()` resolves to `to can greet`, and its references include the call |
 | edge_goto_definition_on_a_this_method_call_resolves_to_the_method_declaration | object navigation: `this.greet()` resolves to the method declaration |
 | edge_object_method_and_field_of_the_same_name_stay_distinct | duplicate names: `Row.name` is the field while `Row.name()` is the method, and their references stay separate |
-| edge_object_field_declared_after_its_method_still_wins_a_bare_read | duplicate names: a bare `name` read resolves to `has name` even when `to can name()` is declared first, while the call still resolves to the method |
+| edge_object_field_declared_after_its_method_still_wins_a_member_read | duplicate names: a `this.name` read resolves to `has name` even when `to can name()` is declared first, while the call still resolves to the method |
 | edge_bare_method_call_prefers_the_method_over_a_same_named_field | duplicate names: a bare `b()` call resolves to the method while the field's references stay separate |
+| edge_builtin_use_before_a_later_set_stays_the_builtin | duplicate names / deferred declaration: a builtin use before a later `set` stays the builtin, its references stop at the variable declaration, and the variable keeps its later uses |
+| edge_navigation_rejects_a_position_past_a_builtin_before_a_later_set | out of bounds: a column past the line is a clean `Err` from goto, references and completion beside a builtin and a later `set` |
+| edge_object_field_is_not_a_bare_lexical_name | analyzer modeling: a bare field read inside a method body has no binding or references, matching the analyzer's `Unknown variable` for `give back name` |
 | edge_navigation_rejects_a_position_past_the_file | out of bounds: line `99` in a one-line file is a clean `Err` from all three, never a panic |
 | edge_find_references_on_an_unknown_name_returns_no_binding | missing binding: an unknown word has no definition and no references |
 | edge_find_references_on_an_unknown_name_beside_a_real_binding_still_answers_the_binding | missing binding beside a real binding: the unknown word does not join the binding's references |
@@ -173,10 +195,10 @@ changed for that finding.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2822 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2825 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets -- --list` reports the same 2822 tests, so the count
+`cargo test --all-targets -- --list` reports the same 2825 tests, so the count
 in this report is the count the suite actually contains. The pipeline copy at
 `$RBOPS_ROOT/phases/phase-075/REPORT.md` is kept byte-identical to this one, so
 the gate's report-honesty step measures the same count this report records.
