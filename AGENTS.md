@@ -202,6 +202,20 @@ contains("text", sub), starts_with("text", prefix)
 replace("text", from, to)
 ```
 
+## Performance & Optimization Protocol
+
+Whenever a phase implements a compiler optimization, VM enhancement, or execution speedup:
+1. **Back-to-Back Same-Machine Control**: Measure wall-clock execution before and after the change on the exact same machine to eliminate runner hardware variance.
+2. **Bytecode / Mathematical Fixed Point**: Verify that compiler optimizations produce byte-identical bytecode (`cmp stage1.rbc stage2.rbc == identical`) and runtime optimizations preserve exact mathematical answers.
+3. **Mandatory Documentation**: Append the verified numbers, hardware profile, and speedup multiplier to [`docs/PERFORMANCE_HISTORY.md`](docs/PERFORMANCE_HISTORY.md).
+
+## Out-of-Scope Findings & Defect Protocol
+
+Whenever an agent identifies an engine bug or spec-drift defect outside its assigned phase scope:
+1. **Never Hack Unprompted Fixes**: Do not attempt an out-of-scope fix that violates the phase's single responsibility.
+2. **Phase Report**: Document the finding with an executable reproduction snippet in `phases/phase-XXX/FINDINGS.md`.
+3. **Master Ledger**: Append the finding to [`docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md`](docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md) with status `[OPEN]` so it is automatically queued for remediation in Section 14 (Phases 159–167).
+
 ## Resources
 
 - [Library policy](LIBRARIES.md) — **read this before adding a stdlib module**:

@@ -519,9 +519,12 @@ A major historical failure mode in autonomous coding pipelines is the **"Open-En
 - **Goal**: Upgrade string operations (`split`, `slice`, `length`, `at`) from naive UTF-8 byte or code unit indexing to **Unicode Extended Grapheme Clusters**.
 - **Why**: Prevents corrupting multi-byte emoji sequences (👨‍👩‍👧‍👦), accented characters (é formed by `e` + combining acute), and non-Latin scripts.
 
-### Phase 163: Lexical Scope & Loop Variable Binding Isolation
-- **Goal**: Enforce per-iteration lexical binding for all loop variables (`for each x in ...`, `repeat n times`).
-- **Why**: Eliminates the infamous Go/Python late-binding bug where closures created inside a loop mistakenly share a single mutating loop variable.
+### Phase 163: Control Flow Unwinding Integrity, Early Return & Parser Depth Remediation
+- **Goal**: Implement complete call-frame unwinding for `give back` / `return` across `if`, `while`, `for`, `repeat`, and `try/finally` blocks in the tree-walking interpreter ([`src/interpreter.rs`](file:///c:/Users/USER/3D%20Objects/wsl/redblue/src/interpreter.rs)), enforce per-iteration loop variable lexical binding isolation, and make `bootstrap/compiler.rb`'s `parse_statements` iterative.
+- **Why (Verified Findings)**:
+  - **Phase 006 Findings §5 & Phase 073 Findings §1**: `give back` inside an `if` block or loop yields a statement value but does not leave the enclosing block; execution falls through to whatever follows. The tree-walker must propagate an unwinding signal (`return_value: Option<Value>`) across statement blocks, halting iterations immediately while preserving `finally` execution.
+  - **Eliminating Go/Python Late-Binding**: Loop variables in `for each` and `repeat` are re-bound per iteration so closures do not mistakenly capture a single mutating pointer.
+  - **Phase 074 Findings §1 (1,000+ Stmt Scale)**: Compiling a flat program with $\ge 1,000$ sequential statements fails with `RuntimeError: Maximum call depth of 1000 reached while calling 'token_kind'`. Iterative parsing ensures large generated sources compile cleanly without requiring an arbitrary increase in the runtime recursion limit.
 
 ### Phase 164: Streaming Large-File I/O & Zero-Copy Iterators
 - **Goal**: Introduce memory-mapped and streaming line iterators (`files.stream_lines`, `files.stream_bytes`) alongside the existing `files.read`.
