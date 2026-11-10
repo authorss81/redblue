@@ -241,6 +241,11 @@ impl Lexer {
         if c == Some('\n') {
             self.line += 1;
             self.column = 1;
+        } else if c == Some('\r') && self.source.get(self.pos) != Some(&'\n') {
+            // A lone CR ends a line; the LF of a CRLF pair is the one that
+            // counts, so a CR followed by an LF leaves the counter alone.
+            self.line += 1;
+            self.column = 1;
         } else {
             self.column += 1;
         }
@@ -264,7 +269,7 @@ impl Lexer {
 
     fn skip_comment(&mut self) {
         while let Some(c) = self.current() {
-            if c == '\n' {
+            if c == '\n' || c == '\r' {
                 break;
             }
             self.advance();
