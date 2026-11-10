@@ -869,6 +869,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     let mut object_methods: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     let mut this_objects: HashMap<usize, usize> = HashMap::new();
     let mut frames: Vec<Frame> = Vec::new();
+    // Stack positions of the live `test` body scopes. A `test` runs in an
+    // isolated VM, so a name its first `set` creates belongs to that VM's
+    // program scope — the test body — rather than to the file's root scope.
+    let mut test_scopes: Vec<usize> = Vec::new();
     let mut visible = None;
     let mut last_significant_line: Option<usize> = None;
     let mut last_significant: Option<usize> = None;
@@ -894,6 +898,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     if frame.opens_scope || frame.catch_scope {
                         pop_scope(&mut scopes, &mut scope_ids);
                     }
+                    if frame.kind == FrameKind::Test {
+                        test_scopes.pop();
+                    }
                 }
             }
             TokenKind::Until => {
@@ -910,9 +917,36 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         && matches!(tokens[previous].kind, TokenKind::Else)
                 });
                 if !continues_else {
-                    frames.push(Frame::block(FrameKind::If));
+                    frames.push(Frame::scoped(FrameKind::If));
+                    push_scope(
+                        &mut scopes,
+                        &mut scope_ids,
+                        &mut scope_parents,
+                        &mut next_scope_id,
+                    );
                 }
             }
+            // A branch gets a scope of its own, matching the analyzer, which
+            // pushes and pops one around each branch. `else if` keeps the
+            // frame the `if` opened: the `else` below closes the then branch's
+            // scope and opens the one the rest of the chain shares.
+            TokenKind::Else => {
+                if let Some(frame) = frames.last_mut() {
+                    if frame.kind == FrameKind::If && frame.opens_scope {
+                        pop_scope(&mut scopes, &mut scope_ids);
+                        push_scope(
+                            &mut scopes,
+                            &mut scope_ids,
+                            &mut scope_parents,
+                            &mut next_scope_id,
+                        );
+                    }
+                }
+            }
+            // The analyzer pushes and pops a scope around an `unless` body, so
+            // a function, object or import declared there does not outlive the
+            // body. Navigation opens the same scope; a `set` still writes
+            // through to the program scope it lands in at runtime.
             TokenKind::Unless => {
                 frames.push(Frame::scoped(FrameKind::Unless));
                 push_scope(
@@ -1017,6 +1051,11 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     &mut next_scope_id,
                 );
             }
+            // The test harness parses each `test "..."` body on its own and
+            // runs it in an isolated VM, so two tests never share a binding.
+            // A test body gets its own scope here for the same reason; it can
+            // still read the enclosing scope, but a declaration it writes does
+            // not reach the next test or the file after `end`.
             TokenKind::Test => {
                 frames.push(Frame::scoped(FrameKind::Test));
                 push_scope(
@@ -1025,8 +1064,22 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     &mut scope_parents,
                     &mut next_scope_id,
                 );
+                test_scopes.push(scopes.len() - 1);
             }
             TokenKind::Try => frames.push(Frame::block(FrameKind::Try)),
+            // A `catch` body runs through `run_catch_body`, which pushes a
+            // scope for its binder. The `finally` body does not: it runs
+            // through `run_finally_body`/`run_block`, so it belongs to the
+            // enclosing scope and must not see the catch binder. Close the
+            // catch scope as soon as `finally` starts.
+            TokenKind::Finally => {
+                if let Some(frame) = frames.last_mut() {
+                    if frame.kind == FrameKind::Try && frame.catch_scope {
+                        frame.catch_scope = false;
+                        pop_scope(&mut scopes, &mut scope_ids);
+                    }
+                }
+            }
             TokenKind::Catch => {
                 let opens_scope = match frames.last_mut() {
                     Some(frame) if frame.kind == FrameKind::Try && !frame.catch_scope => {
@@ -1186,10 +1239,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         TokenKind::Identifier(name) => {
                             let location = Location::of_name(&tokens[cursor], &name);
                             let binding = declare(
-                                &mut scopes[..1],
+                                &mut scopes,
                                 &mut bindings,
                                 &mut binding_scopes,
-                                0,
+                                *scope_ids.last().expect("the root scope always exists"),
                                 &name,
                                 location,
                                 DefinitionKind::Import,
@@ -1207,10 +1260,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             if let Some(name) = tokens.get(cursor).and_then(name_of) {
                                 let location = Location::of_name(&tokens[cursor], name);
                                 let binding = declare(
-                                    &mut scopes[..1],
+                                    &mut scopes,
                                     &mut bindings,
                                     &mut binding_scopes,
-                                    0,
+                                    *scope_ids.last().expect("the root scope always exists"),
                                     name,
                                     location,
                                     DefinitionKind::Import,
@@ -1240,21 +1293,42 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 while let Some(name) = tokens.get(cursor).and_then(name_of) {
                     // `set` writes through to an enclosing binding when one
                     // exists (the interpreter's `set_var` does the same), so
-                    // reuse it instead of declaring a fresh inner name. Only a
-                    // name no scope binds is a new declaration.
-                    let existing = scopes
-                        .iter()
-                        .rev()
-                        .find_map(|scope| scope.get(name).copied());
+                    // reuse it instead of declaring a fresh inner name. A name
+                    // no scope binds is the program's own, because that is
+                    // where the VM writes the first assignment — inside a
+                    // function or a loop it still outlives the block, exactly
+                    // as `Analyzer::declare_assigned` models it.
+                    //
+                    // A `constant` always lands in the program scope too: the
+                    // VM binds it to a global whatever block declares it, and
+                    // the analyzer does the same.
+                    //
+                    // Inside a `test`, that program scope is the test body's
+                    // own scope: the harness runs each body in an isolated VM,
+                    // so a name it creates must not reach the next test or the
+                    // file after `end`.
+                    let existing = if matches!(token.kind, TokenKind::Set) {
+                        scopes
+                            .iter()
+                            .rev()
+                            .find_map(|scope| scope.get(name).copied())
+                    } else {
+                        None
+                    };
                     if let Some(binding) = existing {
                         token_binding[cursor] = Some(binding);
                     } else {
                         let location = Location::of_name(&tokens[cursor], name);
+                        let (program_scopes, program_id): (&mut [HashMap<String, usize>], usize) =
+                            match test_scopes.last().copied() {
+                                Some(position) => (&mut scopes[..=position], scope_ids[position]),
+                                None => (&mut scopes[..1], 0),
+                            };
                         let binding = declare(
-                            &mut scopes,
+                            program_scopes,
                             &mut bindings,
                             &mut binding_scopes,
-                            *scope_ids.last().expect("the root scope always exists"),
+                            program_id,
                             name,
                             location,
                             kind,

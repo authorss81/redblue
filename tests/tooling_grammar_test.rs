@@ -751,6 +751,32 @@ fn edge_find_references_on_imported_module_spans_the_import() {
 }
 
 #[test]
+fn edge_nested_import_stays_in_its_block() {
+    let source = concat!(
+        "to load()\n",
+        "    import MathUtils\n",
+        "    say MathUtils\n",
+        "end\n",
+        "say MathUtils\n",
+    );
+
+    let inside = goto_definition(source, 3, 9)
+        .expect("a position inside the file is valid")
+        .expect("the import binds its module inside the function body");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (2, 12, "import"),
+        "the body's use resolves to the import written in the same scope"
+    );
+
+    assert_eq!(
+        goto_definition(source, 5, 5).expect("a position inside the file is valid"),
+        None,
+        "an import declared in a function body must not leak past the function's `end`"
+    );
+}
+
+#[test]
 fn edge_empty_source_answers_without_failing() {
     let source = "";
 
@@ -1084,41 +1110,77 @@ fn edge_for_loop_variable_does_not_leak_into_the_enclosing_scope() {
 }
 
 #[test]
-fn edge_unless_scope_does_not_leak_into_the_enclosing_scope() {
+fn edge_unless_body_set_survives_the_end_like_the_interpreter() {
+    // A `set` inside an `unless` body writes to the program scope, so it is
+    // readable after `end`; a function or import declared there belongs to the
+    // body's own scope. Navigation models both, because that is what the
+    // analyzer accepts and the VM runs.
     let source = concat!(
         "set marker to 1\n",
-        "unless no\n",
-        "    to helper\n",
-        "        give back marker\n",
-        "    end\n",
-        "    say helper()\n",
+        "unless no then\n",
+        "    set local to 2\n",
+        "    say local\n",
         "end\n",
         "say marker\n",
-        "say helper\n",
+        "say local\n",
     );
 
-    let inside = goto_definition(source, 6, 9)
+    let inside = goto_definition(source, 4, 9)
         .expect("a position inside the file is valid")
-        .expect("the helper is in scope inside the unless body");
+        .expect("the set is in scope inside the unless body");
     assert_eq!(
         (inside.line, inside.column, inside.kind.as_str()),
-        (3, 8, "function"),
-        "the helper declaration must resolve inside its own `unless` body"
+        (3, 9, "variable"),
+        "the body's use must resolve to the `set` it reads"
     );
 
-    let after = goto_definition(source, 8, 5)
+    let after = goto_definition(source, 6, 5)
         .expect("a position inside the file is valid")
         .expect("the enclosing binding is still in scope after the unless closes");
     assert_eq!(
         (after.line, after.column, after.kind.as_str()),
         (1, 5, "variable"),
-        "the unless `end` must close only its own scope"
+        "the enclosing binding must survive the unless `end`"
     );
+
+    let local = goto_definition(source, 7, 5)
+        .expect("a position inside the file is valid")
+        .expect("a first assignment inside the body is a program binding");
     assert_eq!(
-        goto_definition(source, 9, 5).expect("a position inside the file is valid"),
-        None,
-        "a declaration inside an `unless` body must not leak past its `end`"
+        (local.line, local.column, local.kind.as_str()),
+        (3, 9, "variable"),
+        "the VM writes the body's first assignment to the program scope, so it outlives `end`"
     );
+}
+
+#[test]
+fn edge_function_declared_in_a_branch_body_does_not_leak_past_end() {
+    // The analyzer pushes and pops a scope around an `if` or `unless` body, so
+    // a function declared there is not a name of the program after `end`.
+    for source in [
+        concat!(
+            "unless no then\n",
+            "    to helper\n",
+            "        give back 1\n",
+            "    end\n",
+            "end\n",
+            "say helper\n",
+        ),
+        concat!(
+            "if yes then\n",
+            "    to helper\n",
+            "        give back 1\n",
+            "    end\n",
+            "end\n",
+            "say helper\n",
+        ),
+    ] {
+        assert_eq!(
+            goto_definition(source, 6, 5).expect("a position inside the file is valid"),
+            None,
+            "a branch body is its own scope, so the function does not leak past `end`"
+        );
+    }
 }
 
 #[test]
@@ -1319,6 +1381,243 @@ fn edge_test_block_keeps_the_enclosing_scope_balanced() {
         goto_definition(source, 12, 5).expect("a position inside the file is valid"),
         None,
         "a binding declared inside the test body's block must not leak past its `end`"
+    );
+}
+
+#[test]
+fn edge_unless_body_binding_joins_the_enclosing_bindings_references() {
+    let source = concat!(
+        "set marker to 1\n",
+        "unless no then\n",
+        "    set local to 2\n",
+        "    say local\n",
+        "end\n",
+        "say local\n",
+    );
+
+    let declared = goto_definition(source, 6, 5)
+        .expect("a position inside the file is valid")
+        .expect("the unless body's declaration outlives its `end`");
+    assert_eq!(
+        (declared.line, declared.column, declared.kind.as_str()),
+        (3, 9, "variable"),
+        "goto after an `unless` must answer the declaration the interpreter still has bound"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 6, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(3, 9), (4, 9), (6, 5)],
+        "the declaration and both uses are the same binding"
+    );
+}
+
+#[test]
+fn edge_test_body_declaration_is_not_offered_by_completion_after_end() {
+    // The test harness parses each body separately and runs it in an isolated
+    // VM, so nothing a test declares survives its `end`, and one test cannot
+    // see another's names.
+    let source = concat!(
+        "test \"scope\"\n",
+        "    for each item in values\n",
+        "        set inner to 1\n",
+        "    end\n",
+        "    set local to 2\n",
+        "end\n",
+        "test \"other\"\n",
+        "    say local\n",
+        "end\n",
+    );
+
+    let offered = completions(source, 7, 1).expect("the blank line after the test is valid");
+
+    assert!(
+        !offered.contains(&"local".to_string()),
+        "a test body's own declaration must not reach the next test, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"item".to_string()),
+        "a loop variable inside the test body closes with its loop, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"inner".to_string()),
+        "the loop body's declaration also closes with its loop, got {offered:?}"
+    );
+    assert_eq!(
+        goto_definition(source, 8, 9).expect("a position inside the file is valid"),
+        None,
+        "a name declared in one test must not resolve in a later test"
+    );
+}
+
+#[test]
+fn edge_constant_in_an_inner_scope_is_a_program_binding() {
+    // The VM binds a constant to a global whatever block declares it, and the
+    // analyzer declares it in the program scope. Navigation must not model it
+    // as a local that dies at the loop's `end`.
+    let source = concat!(
+        "set marker to 1\n",
+        "while marker is less than 2\n",
+        "    constant limit to 2\n",
+        "    say limit\n",
+        "end\n",
+        "say limit\n",
+    );
+
+    let inside = goto_definition(source, 4, 9)
+        .expect("a position inside the file is valid")
+        .expect("the inner use resolves to the constant declared in the loop");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (3, 14, "constant"),
+        "the loop body's use resolves to the constant it declares"
+    );
+
+    let after = goto_definition(source, 6, 5)
+        .expect("a position inside the file is valid")
+        .expect("a constant declared in a loop is a program binding");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (3, 14, "constant"),
+        "the constant outlives the loop's `end`, as it does in the analyzer and the VM"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 4, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(3, 14), (4, 9), (6, 5)],
+        "the declaration and both uses are the one program binding"
+    );
+}
+
+#[test]
+fn edge_finally_body_leaves_the_catch_scope() {
+    let source = concat!(
+        "try\n",
+        "    set marker to 1\n",
+        "catch problem\n",
+        "    say problem\n",
+        "finally\n",
+        "    say problem\n",
+        "    set cleaned to 2\n",
+        "end\n",
+        "say cleaned\n",
+        "say problem\n",
+    );
+
+    let caught = goto_definition(source, 4, 9)
+        .expect("a position inside the file is valid")
+        .expect("the catch body still resolves its own binder");
+    assert_eq!(
+        (caught.line, caught.column, caught.kind.as_str()),
+        (3, 7, "catch"),
+        "the catch body's use must resolve to its binder"
+    );
+
+    assert_eq!(
+        goto_definition(source, 6, 9).expect("a position inside the file is valid"),
+        None,
+        "the catch binder must not be visible in the `finally` body"
+    );
+
+    let cleaned = goto_definition(source, 9, 5)
+        .expect("a position inside the file is valid")
+        .expect("a `finally` declaration lands in the enclosing scope");
+    assert_eq!(
+        (cleaned.line, cleaned.column, cleaned.kind.as_str()),
+        (7, 9, "variable"),
+        "the `finally` body must not be analyzed inside the catch scope"
+    );
+
+    assert_eq!(
+        goto_definition(source, 10, 5).expect("a position inside the file is valid"),
+        None,
+        "the catch binder must not leak past the try's `end`"
+    );
+}
+
+#[test]
+fn edge_first_set_inside_a_function_is_a_program_binding() {
+    let source = concat!(
+        "to show()\n",
+        "    unless no\n",
+        "        set local to 1\n",
+        "    end\n",
+        "    say local\n",
+        "end\n",
+        "say local\n",
+    );
+
+    let inside = goto_definition(source, 5, 9)
+        .expect("a position inside the file is valid")
+        .expect("the function body resolves the name its unless body set");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (3, 13, "variable"),
+        "the body's use resolves to the first assignment written in the unless"
+    );
+
+    let after = goto_definition(source, 7, 5)
+        .expect("a position inside the file is valid")
+        .expect("a first assignment in a function is a program binding");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (3, 13, "variable"),
+        "the VM writes the first assignment to the program scope, so the function's `end` keeps it"
+    );
+}
+
+#[test]
+fn edge_first_set_inside_a_loop_is_a_program_binding() {
+    let source = concat!(
+        "for each item in items\n",
+        "    set total to item\n",
+        "end\n",
+        "say total\n",
+    );
+
+    let inside = goto_definition(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .expect("the loop body resolves the name it sets");
+    assert_eq!(
+        (inside.line, inside.column, inside.kind.as_str()),
+        (2, 9, "variable"),
+        "the declaration is the loop body's first assignment"
+    );
+
+    let after = goto_definition(source, 4, 5)
+        .expect("a position inside the file is valid")
+        .expect("a first assignment in a loop is a program binding");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (2, 9, "variable"),
+        "the loop's `end` must not hide the program binding the assignment created"
+    );
+}
+
+#[test]
+fn edge_navigation_rejects_a_position_past_an_unless_body() {
+    let source = "unless no then\n    set local to 1\nend\n";
+
+    assert!(
+        goto_definition(source, 99, 1).is_err(),
+        "a line past the unless body is a clean error"
+    );
+    assert!(
+        find_references(source, 99, 1).is_err(),
+        "a line past the unless body is a clean error"
+    );
+    assert!(
+        completions(source, 99, 1).is_err(),
+        "a line past the unless body is a clean error"
     );
 }
 
