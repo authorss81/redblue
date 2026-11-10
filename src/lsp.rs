@@ -455,6 +455,11 @@ struct Analysis {
     /// Identifiers inside a type annotation, which name a type rather than the
     /// variable of the same spelling.
     type_names: HashSet<usize>,
+    /// Identifiers that are contextual syntax rather than a name: the handler
+    /// word, `of` and the failure kind of a typed catch, and `default` in a
+    /// field declaration. A variable of the same spelling must not answer for
+    /// them.
+    syntax_names: HashSet<usize>,
     /// The names visible where analysis stopped, for completion.
     visible: Vec<String>,
 }
@@ -514,6 +519,40 @@ fn declare_fresh(
     binding_scopes.push(scope_id);
     let scope = scopes.last_mut().expect("the root scope always exists");
     scope.entry(name.to_string()).or_insert(id);
+    id
+}
+
+/// Declare a `constant` in the program scope.
+///
+/// A constant binds the name in the same global slot a `set` writes, so it
+/// shadows an earlier `set` of that name rather than joining its binding: the
+/// declaration token and every later use name the constant, while the earlier
+/// variable keeps its own declaration and uses. A second `constant` of the same
+/// name reuses the one binding, because the runtime refuses the redeclaration
+/// and there is only ever one constant of a spelling.
+fn declare_constant_binding(
+    scopes: &mut [HashMap<String, usize>],
+    bindings: &mut Vec<Binding>,
+    binding_scopes: &mut Vec<usize>,
+    scope_id: usize,
+    name: &str,
+    location: Location,
+) -> usize {
+    if let Some(existing) = scopes.last().and_then(|scope| scope.get(name).copied()) {
+        if bindings[existing].kind == DefinitionKind::Constant {
+            return existing;
+        }
+    }
+
+    let id = bindings.len();
+    bindings.push(Binding {
+        name: name.to_string(),
+        location,
+        kind: DefinitionKind::Constant,
+    });
+    binding_scopes.push(scope_id);
+    let scope = scopes.last_mut().expect("the root scope always exists");
+    scope.insert(name.to_string(), id);
     id
 }
 
@@ -601,6 +640,43 @@ fn catch_binder_index(tokens: &[Token], catch_index: usize) -> Option<usize> {
     } else {
         Some(first_index)
     }
+}
+
+/// The tokens in a catch header that name its syntax rather than a binding.
+///
+/// `catch error of <Kind> <name>` binds only `<name>` (or `error` when the
+/// kind is written without a name after it). The handler word, `of` and the
+/// failure kind are contextual words, so a variable of the same spelling must
+/// not answer for them.
+fn catch_syntax_indices(tokens: &[Token], catch_index: usize, binder: usize) -> Vec<usize> {
+    let mut syntax = Vec::new();
+    let handler_index = catch_index + 1;
+    let Some(handler) = tokens.get(handler_index) else {
+        return syntax;
+    };
+    if name_of(handler) != Some("error") {
+        return syntax;
+    }
+    if handler_index != binder {
+        syntax.push(handler_index);
+    }
+
+    let of_index = handler_index + 1;
+    let Some(of) = tokens.get(of_index) else {
+        return syntax;
+    };
+    if of.line != handler.line || name_of(of) != Some("of") {
+        return syntax;
+    }
+    if of_index != binder {
+        syntax.push(of_index);
+    }
+
+    let kind_index = of_index + 1;
+    if tokens.get(kind_index).and_then(name_of).is_some() && kind_index != binder {
+        syntax.push(kind_index);
+    }
+    syntax
 }
 
 fn lru_cache_decorator_start(tokens: &[Token], close: usize) -> Option<usize> {
@@ -864,6 +940,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     let mut binding_scopes: Vec<usize> = Vec::new();
     let mut token_scope: Vec<usize> = vec![0; tokens.len()];
     let mut type_names: HashSet<usize> = HashSet::new();
+    let mut syntax_names: HashSet<usize> = HashSet::new();
     let mut member_names: HashSet<usize> = HashSet::new();
     let mut object_fields: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     let mut object_methods: HashMap<usize, HashMap<String, usize>> = HashMap::new();
@@ -873,6 +950,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // isolated VM, so a name its first `set` creates belongs to that VM's
     // program scope — the test body — rather than to the file's root scope.
     let mut test_scopes: Vec<usize> = Vec::new();
+    // Stack positions of the live `module` body scopes. The VM binds a first
+    // `set` inside a module to the module's own scope rather than to a global,
+    // so navigation must put that binding there too.
+    let mut module_scopes: Vec<usize> = Vec::new();
     let mut visible = None;
     let mut last_significant_line: Option<usize> = None;
     let mut last_significant: Option<usize> = None;
@@ -900,6 +981,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     }
                     if frame.kind == FrameKind::Test {
                         test_scopes.pop();
+                    }
+                    if frame.kind == FrameKind::Module {
+                        module_scopes.pop();
                     }
                 }
             }
@@ -1050,6 +1134,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     &mut scope_parents,
                     &mut next_scope_id,
                 );
+                module_scopes.push(scopes.len() - 1);
             }
             // The test harness parses each `test "..."` body on its own and
             // runs it in an isolated VM, so two tests never share a binding.
@@ -1097,6 +1182,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     );
                 }
                 if let Some(binder) = catch_binder_index(&tokens, index) {
+                    for syntax in catch_syntax_indices(&tokens, index, binder) {
+                        syntax_names.insert(syntax);
+                    }
                     let name = name_of(&tokens[binder]).expect("the binder is a name");
                     let location = Location::of_name(&tokens[binder], name);
                     let binding = declare(
@@ -1306,7 +1394,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     // Inside a `test`, that program scope is the test body's
                     // own scope: the harness runs each body in an isolated VM,
                     // so a name it creates must not reach the next test or the
-                    // file after `end`.
+                    // file after `end`. Inside a `module`, it is the module
+                    // body's own scope: the VM binds a first assignment there
+                    // rather than in the importing file's globals.
                     let existing = if matches!(token.kind, TokenKind::Set) {
                         scopes
                             .iter()
@@ -1319,20 +1409,42 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         token_binding[cursor] = Some(binding);
                     } else {
                         let location = Location::of_name(&tokens[cursor], name);
+                        // A constant is a global whatever block declares it, so
+                        // only an isolated `test` moves its program scope. A
+                        // first `set` follows the innermost module or test body.
+                        let program_position = if kind == DefinitionKind::Set {
+                            test_scopes
+                                .last()
+                                .copied()
+                                .max(module_scopes.last().copied())
+                        } else {
+                            test_scopes.last().copied()
+                        };
                         let (program_scopes, program_id): (&mut [HashMap<String, usize>], usize) =
-                            match test_scopes.last().copied() {
+                            match program_position {
                                 Some(position) => (&mut scopes[..=position], scope_ids[position]),
                                 None => (&mut scopes[..1], 0),
                             };
-                        let binding = declare(
-                            program_scopes,
-                            &mut bindings,
-                            &mut binding_scopes,
-                            program_id,
-                            name,
-                            location,
-                            kind,
-                        );
+                        let binding = if kind == DefinitionKind::Constant {
+                            declare_constant_binding(
+                                program_scopes,
+                                &mut bindings,
+                                &mut binding_scopes,
+                                program_id,
+                                name,
+                                location,
+                            )
+                        } else {
+                            declare(
+                                program_scopes,
+                                &mut bindings,
+                                &mut binding_scopes,
+                                program_id,
+                                name,
+                                location,
+                                kind,
+                            )
+                        };
                         mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
                     }
                     cursor += 1;
@@ -1375,6 +1487,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                 .or_default()
                                 .insert(name.to_string(), binding);
                         }
+                        if tokens.get(index + 2).and_then(name_of) == Some("default") {
+                            syntax_names.insert(index + 2);
+                        }
                     }
                 }
             }
@@ -1384,9 +1499,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 }
             }
             TokenKind::Identifier(name) if !declarations.contains(&index) => {
-                if type_names.contains(&index) {
-                    // A type annotation names a type, not the variable of the
-                    // same spelling that happens to be in scope.
+                if type_names.contains(&index) || syntax_names.contains(&index) {
+                    // A type annotation or a contextual word names something
+                    // other than the variable of the same spelling that
+                    // happens to be in scope.
                 } else if is_member_access(&tokens, index) {
                     member_names.insert(index);
                     let receiver = index
@@ -1456,14 +1572,30 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             };
             if declarations.contains(&index)
                 || type_names.contains(&index)
+                || syntax_names.contains(&index)
                 || member_names.contains(&index)
             {
                 continue;
             }
 
             let is_call = call_follows(&tokens, index);
-            if token_binding[index].is_some() && is_call {
-                continue;
+            if let Some(current) = token_binding[index] {
+                // A name resolved during the walk keeps that binding. This
+                // pass exists for names written before their declaration;
+                // re-resolving every name would replace an earlier binding
+                // with a later same-spelling declaration (`set x` followed by
+                // `constant x`). The one correction still made here is the
+                // field/method distinction: a bare read prefers the
+                // non-function and a call prefers the function, whichever was
+                // declared first.
+                let matches_shape = if is_call {
+                    bindings[current].kind == DefinitionKind::Function
+                } else {
+                    bindings[current].kind != DefinitionKind::Function
+                };
+                if matches_shape {
+                    continue;
+                }
             }
             let mut scope = Some(token_scope[index]);
             while let Some(scope_id) = scope {
@@ -1630,6 +1762,7 @@ pub fn goto_definition(
     if is_builtin_name(name)
         && !analysis.member_names.contains(&index)
         && !analysis.type_names.contains(&index)
+        && !analysis.syntax_names.contains(&index)
     {
         Ok(Some(Definition::builtin(name)))
     } else {
@@ -1664,8 +1797,14 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
 
     if target.is_none()
-        && (analysis.member_names.contains(&index) || analysis.type_names.contains(&index))
+        && (analysis.member_names.contains(&index)
+            || analysis.type_names.contains(&index)
+            || !is_builtin_name(name))
     {
+        // A word with no binding is not a reference target. Only a builtin
+        // resolves from the registry rather than from a declaration in the
+        // file, so only a builtin name can have file references without a
+        // binding.
         return Ok(Vec::new());
     }
 

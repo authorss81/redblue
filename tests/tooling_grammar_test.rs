@@ -777,6 +777,52 @@ fn edge_nested_import_stays_in_its_block() {
 }
 
 #[test]
+fn edge_import_alias_keeps_the_modules_own_name_a_binding() {
+    // `import MathUtils as M` binds both spellings: the runtime and analyzer
+    // leave the module's own name readable (`import json as J` then
+    // `json.stringify(..)` still works), so navigation must offer both and
+    // keep their references apart.
+    let source = concat!(
+        "import MathUtils as M\n",
+        "say MathUtils.circle_area(2)\n",
+        "say M.circle_area(2)\n",
+    );
+
+    for (line, column, expected_column) in [(2, 5, 8), (3, 5, 21)] {
+        let definition = goto_definition(source, line, column)
+            .expect("a position inside the file is valid")
+            .expect("both the module name and its alias name the import");
+        assert_eq!(
+            (definition.line, definition.column, definition.kind.as_str()),
+            (1, expected_column, "import"),
+            "line {line} resolves to its own import binding"
+        );
+    }
+
+    let module_references: Vec<(usize, usize)> = find_references(source, 2, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        module_references,
+        vec![(1, 8), (2, 5)],
+        "the module's own name has only its import declaration and uses"
+    );
+
+    let alias_references: Vec<(usize, usize)> = find_references(source, 3, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        alias_references,
+        vec![(1, 21), (3, 5)],
+        "the alias has only its import declaration and uses"
+    );
+}
+
+#[test]
 fn edge_empty_source_answers_without_failing() {
     let source = "";
 
@@ -1495,6 +1541,67 @@ fn edge_constant_in_an_inner_scope_is_a_program_binding() {
         references,
         vec![(3, 14), (4, 9), (6, 5)],
         "the declaration and both uses are the one program binding"
+    );
+}
+
+#[test]
+fn edge_constant_after_a_same_named_set_is_its_own_binding() {
+    // A constant and an earlier `set` share the program's global slot, but the
+    // constant shadows the variable for every use after it. Reusing the
+    // variable's binding would make the `constant x` declaration navigate to
+    // `set x`, and would join two bindings the runtime keeps apart.
+    let source = concat!(
+        "set x to 1\n",
+        "say x\n",
+        "while x is less than 2\n",
+        "    constant x to 2\n",
+        "    say x\n",
+        "end\n",
+        "say x\n",
+    );
+
+    for (line, column, expected) in [(1, 5, "variable"), (2, 5, "variable"), (3, 7, "variable")] {
+        let definition = goto_definition(source, line, column)
+            .expect("a position inside the file is valid")
+            .expect("the variable use resolves to its declaration");
+        assert_eq!(
+            (definition.line, definition.column, definition.kind.as_str()),
+            (1, 5, expected),
+            "line {line} is before the constant, so it names the variable"
+        );
+    }
+
+    for (line, column) in [(4, 14), (5, 9), (7, 5)] {
+        let definition = goto_definition(source, line, column)
+            .expect("a position inside the file is valid")
+            .expect("the constant declaration and its uses resolve to the constant");
+        assert_eq!(
+            (definition.line, definition.column, definition.kind.as_str()),
+            (4, 14, "constant"),
+            "line {line} names the constant, not the earlier variable"
+        );
+    }
+
+    let variable_references: Vec<(usize, usize)> = find_references(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        variable_references,
+        vec![(1, 5), (2, 5), (3, 7)],
+        "the variable's references stop at the constant declaration"
+    );
+
+    let constant_references: Vec<(usize, usize)> = find_references(source, 4, 14)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        constant_references,
+        vec![(4, 14), (5, 9), (7, 5)],
+        "the constant's references do not join the earlier `set`"
     );
 }
 
@@ -2513,5 +2620,48 @@ fn edge_navigation_rejects_a_position_past_the_file() {
     assert!(
         completions(source, 99, 1).is_err(),
         "a line past the file must be a clean completion error"
+    );
+}
+
+#[test]
+fn edge_find_references_on_an_unknown_name_returns_no_binding() {
+    let source = "say frobnicate\nsay frobnicate\n";
+
+    assert_eq!(
+        goto_definition(source, 1, 5).expect("a position inside the file is valid"),
+        None,
+        "an unknown word has no definition to jump to"
+    );
+
+    let references = find_references(source, 1, 5).expect("a position inside the file is valid");
+    assert!(
+        references.is_empty(),
+        "an unknown word is not a binding, so it has no references, got {references:?}"
+    );
+}
+
+#[test]
+fn edge_find_references_on_an_unknown_name_beside_a_real_binding_still_answers_the_binding() {
+    let source = "set value to 1\nsay frobnicate\nsay value\n";
+
+    let references: Vec<(usize, usize)> = find_references(source, 3, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(1, 5), (3, 5)],
+        "an unknown word must not join a real binding's references"
+    );
+}
+
+#[test]
+fn edge_find_references_rejects_a_zero_column() {
+    let source = "set value to 1\n";
+
+    assert!(
+        find_references(source, 1, 0).is_err(),
+        "column 0 is not a source position and must be a clean error"
     );
 }
