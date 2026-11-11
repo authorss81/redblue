@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::Error;
 use crate::lexer::{Lexer, Token, TokenKind, KEYWORDS};
-use crate::stdlib::{BUILTIN_NAMES, MODULES};
+use crate::stdlib::{is_module, BUILTIN_NAMES, MODULES, MODULE_MEMBERS};
 
 /// Where the generated grammar is checked in. Nothing has to be built to make
 /// the grammar valid: the file is plain JSON, and this constant names it.
@@ -425,6 +425,9 @@ struct Frame {
     /// The object binding whose body this frame encloses, when a `has`
     /// declaration's fields are in scope inside it.
     object: Option<usize>,
+    /// The module binding whose body this frame encloses, when a `module …
+    /// end` declaration's top-level names are being collected as its members.
+    module: Option<usize>,
     /// For a one-line function literal, the token index where the parsed body
     /// ends. The scope closes just before that token, so a trailing argument on
     /// the same line resolves outside the literal.
@@ -438,6 +441,7 @@ impl Frame {
             opens_scope: false,
             catch_scope: false,
             object: None,
+            module: None,
             closes_at_token: None,
         }
     }
@@ -448,6 +452,7 @@ impl Frame {
             opens_scope: true,
             catch_scope: false,
             object: None,
+            module: None,
             closes_at_token: None,
         }
     }
@@ -472,6 +477,24 @@ struct Analysis {
     syntax_names: HashSet<usize>,
     /// The names visible where analysis stopped, for completion.
     visible: Vec<String>,
+    /// An object's fields and methods, keyed by the object's binding. Kept for
+    /// completion inside a `receiver.member` slot; goto-definition uses the
+    /// same tables while it walks.
+    object_fields: HashMap<usize, HashMap<String, usize>>,
+    object_methods: HashMap<usize, HashMap<String, usize>>,
+    /// A child object binding to the parent it extends.
+    object_parents: HashMap<usize, usize>,
+    /// A `this` token to the object whose body encloses it.
+    this_objects: HashMap<usize, usize>,
+    /// An import name or alias to the module it names, mirroring the runtime's
+    /// `module_aliases`. A standard module is in the table under its own name
+    /// even when it is imported unaliased.
+    module_aliases: HashMap<String, String>,
+    /// The names a program's own `module … end` declaration publishes, keyed by
+    /// the module's name. A declared module is a namespace the program built,
+    /// so its members are read from its `export` rather than from the stdlib's
+    /// [`MODULE_MEMBERS`] table.
+    declared_module_members: HashMap<String, Vec<String>>,
 }
 
 fn visible_names(scopes: &[HashMap<String, usize>]) -> Vec<String> {
@@ -1224,6 +1247,13 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // pass so the `extends` name has the binding the walk gave it.
     let mut object_parents: HashMap<usize, usize> = HashMap::new();
     let mut this_objects: HashMap<usize, usize> = HashMap::new();
+    let mut module_aliases: HashMap<String, String> = HashMap::new();
+    // The top-level names each live `module … end` body declares, and the last
+    // `export` it writes. Both are keyed by the module's binding; the names are
+    // filtered by the export when the module closes.
+    let mut module_declared: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut module_exports: HashMap<usize, (Vec<String>, bool)> = HashMap::new();
+    let mut declared_module_members: HashMap<String, Vec<String>> = HashMap::new();
     let mut frames: Vec<Frame> = Vec::new();
     // Stack positions of the live `test` body scopes. A `test` runs in an
     // isolated VM, so a name its first `set` creates belongs to that VM's
@@ -1278,6 +1308,28 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     }
                     if frame.kind == FrameKind::Module {
                         module_scopes.pop();
+                        if let Some(module) = frame.module {
+                            let declared = module_declared.remove(&module).unwrap_or_default();
+                            let members = match module_exports.remove(&module) {
+                                // No `export` publishes nothing, exactly as the
+                                // runtime's `declare_module` reads it.
+                                None => Vec::new(),
+                                Some((_, true)) => declared,
+                                Some((names, false)) => {
+                                    let declared: HashSet<&str> =
+                                        declared.iter().map(String::as_str).collect();
+                                    names
+                                        .into_iter()
+                                        .filter(|name| declared.contains(name.as_str()))
+                                        .collect()
+                                }
+                            };
+                            let mut members = members;
+                            members.sort();
+                            members.dedup();
+                            let name = bindings[module].name.clone();
+                            declared_module_members.insert(name, members);
+                        }
                     }
                     if pushes_runtime_scope(frame.kind) {
                         runtime_scopes.pop();
@@ -1411,6 +1463,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 );
             }
             TokenKind::Module => {
+                let mut module = None;
                 if let Some(name) = tokens.get(index + 1).and_then(name_of) {
                     let location = Location::of_name(&tokens[index + 1], name);
                     let binding = declare(
@@ -1423,8 +1476,11 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         DefinitionKind::Module,
                     );
                     mark_declaration(&mut token_binding, &mut declarations, index + 1, binding);
+                    module = Some(binding);
                 }
-                frames.push(Frame::scoped(FrameKind::Module));
+                let mut frame = Frame::scoped(FrameKind::Module);
+                frame.module = module;
+                frames.push(frame);
                 push_scope(
                     &mut scopes,
                     &mut scope_ids,
@@ -1529,6 +1585,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     };
                     let location = Location::of_name(&tokens[cursor], &name);
                     let method_owner = frames.last().and_then(|frame| frame.object);
+                    let module_owner = frames.last().and_then(|frame| frame.module);
                     let scope_id = *scope_ids.last().expect("the root scope always exists");
                     let binding = if method_owner.is_some() {
                         declare_fresh(
@@ -1556,6 +1613,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             .entry(owner)
                             .or_default()
                             .insert(name.clone(), binding);
+                    }
+                    if let Some(owner) = module_owner {
+                        module_declared.entry(owner).or_default().push(name.clone());
                     }
                     frames.push(Frame::scoped(FrameKind::To));
                     push_scope(
@@ -1621,9 +1681,14 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             }
             TokenKind::Import => {
                 let mut cursor = index + 1;
+                let mut module: Option<String> = None;
                 while cursor < tokens.len() {
                     match tokens[cursor].kind.clone() {
                         TokenKind::Newline | TokenKind::Eof => break,
+                        TokenKind::Comma => {
+                            module = None;
+                            cursor += 1;
+                        }
                         TokenKind::Identifier(name) => {
                             let location = Location::of_name(&tokens[cursor], &name);
                             let binding = declare(
@@ -1641,6 +1706,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                 cursor,
                                 binding,
                             );
+                            module_aliases
+                                .entry(name.clone())
+                                .or_insert_with(|| name.clone());
+                            module = Some(name);
                             cursor += 1;
                         }
                         TokenKind::As | TokenKind::To => {
@@ -1662,6 +1731,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                     cursor,
                                     binding,
                                 );
+                                if let Some(source) = module.take() {
+                                    module_aliases.insert(name.to_string(), source);
+                                }
                                 cursor += 1;
                             }
                         }
@@ -1679,6 +1751,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 };
                 let mut cursor = index + 1;
                 while let Some(name) = tokens.get(cursor).and_then(name_of) {
+                    if let Some(owner) = frames.last().and_then(|frame| frame.module) {
+                        module_declared
+                            .entry(owner)
+                            .or_default()
+                            .push(name.to_string());
+                    }
                     // `set` writes through to an enclosing binding when one
                     // exists (the interpreter's `set_var` does the same), so
                     // reuse it instead of declaring a fresh inner name. A name
@@ -1782,6 +1860,33 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         Some(TokenKind::Comma) => cursor += 1,
                         _ => break,
                     }
+                }
+            }
+            // A module's last `export` decides which of its top-level names it
+            // publishes, exactly as `parser::module_exports` and the runtime's
+            // `declare_module` read it. Outside a module declaration an
+            // `export` publishes nothing and is ignored.
+            TokenKind::Export => {
+                if let Some(owner) = frames.last().and_then(|frame| frame.module) {
+                    let mut names = Vec::new();
+                    let mut all = false;
+                    let mut cursor = index + 1;
+                    while cursor < tokens.len() {
+                        match &tokens[cursor].kind {
+                            TokenKind::Newline | TokenKind::Eof | TokenKind::End => break,
+                            TokenKind::Identifier(word) if word == "all" => {
+                                all = true;
+                                cursor += 1;
+                            }
+                            TokenKind::Identifier(word) => {
+                                names.push(word.clone());
+                                cursor += 1;
+                            }
+                            TokenKind::Comma => cursor += 1,
+                            _ => cursor += 1,
+                        }
+                    }
+                    module_exports.insert(owner, (names, all));
                 }
             }
             TokenKind::Has => {
@@ -2066,6 +2171,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
         type_names,
         syntax_names,
         visible: visible.unwrap_or_default(),
+        object_fields,
+        object_methods,
+        object_parents,
+        this_objects,
+        module_aliases,
+        declared_module_members,
     })
 }
 
@@ -2262,6 +2373,15 @@ pub fn completions(source: &str, line: usize, column: usize) -> Result<Vec<Strin
         return Ok(Vec::new());
     }
 
+    if member_slot(&analysis, &map, offset).is_some() {
+        // A member list is order-independent, so answer from a complete walk
+        // rather than the prefix of the file that is in lexical scope. The
+        // prefix walk stops before the caret, so it cannot bind a receiver
+        // declared below it; the complete walk can.
+        let full = analyze(source, None)?;
+        return Ok(member_completions(&full, &map, offset).unwrap_or_default());
+    }
+
     let mut names: Vec<String> = analysis.visible;
     names.extend(KEYWORDS.iter().map(|(word, _)| (*word).to_string()));
     names.extend(BUILTIN_NAMES.iter().map(|name| (*name).to_string()));
@@ -2272,6 +2392,136 @@ pub fn completions(source: &str, line: usize, column: usize) -> Result<Vec<Strin
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+/// The syntactic `receiver.` slot at `offset`, before resolving the receiver.
+struct MemberSlot {
+    receiver: usize,
+    prefix: String,
+}
+
+/// Whether `offset` sits in a `receiver.member` slot, and the partial member
+/// already written after the dot.
+///
+/// The answer depends only on the tokens and the source text, not on whether
+/// the receiver has a binding yet: completion must recognise a member slot
+/// above an object declared later in the file.
+fn member_slot(analysis: &Analysis, map: &SourceMap, offset: usize) -> Option<MemberSlot> {
+    let dot = analysis.tokens.iter().rposition(|token| {
+        matches!(token.kind, TokenKind::Dot) && map.offset(token.line, token.column) < offset
+    })?;
+    let dot_start = map.offset(analysis.tokens[dot].line, analysis.tokens[dot].column);
+    let after_dot = dot_start + 1;
+    if offset < after_dot || offset > map.chars.len() {
+        return None;
+    }
+
+    let prefix: String = map.chars[after_dot..offset]
+        .iter()
+        .take_while(|c| c.is_alphanumeric() || **c == '_')
+        .collect();
+    if prefix.chars().count() != offset - after_dot {
+        // Whitespace or another dot sits between the receiver and the caret:
+        // the caret is not naming a member.
+        return None;
+    }
+
+    let receiver = (0..dot)
+        .rev()
+        .find(|&index| !matches!(analysis.tokens[index].kind, TokenKind::Newline))?;
+    Some(MemberSlot { receiver, prefix })
+}
+
+/// Completion for the `receiver.member` slot at `offset`.
+///
+/// An object offers its own fields and methods, including the ones it inherits
+/// through `extends`; a module the program declared offers the names its
+/// `export` publishes; a standard module offers the members in
+/// [`MODULE_MEMBERS`]. A member name already written is a prefix, so only the
+/// names that can still continue it are offered. `None` means the receiver is
+/// not an object or a module namespace, so there is nothing member-specific to
+/// offer.
+fn member_completions(analysis: &Analysis, map: &SourceMap, offset: usize) -> Option<Vec<String>> {
+    let MemberSlot { receiver, prefix } = member_slot(analysis, map, offset)?;
+    let receiver_token = &analysis.tokens[receiver];
+    let receiver_object = if matches!(receiver_token.kind, TokenKind::This) {
+        analysis.this_objects.get(&receiver).copied()
+    } else {
+        analysis.token_binding[receiver]
+            .filter(|binding| analysis.bindings[*binding].kind == DefinitionKind::Object)
+    };
+
+    if let Some(object) = receiver_object {
+        let mut names = Vec::new();
+        let mut current = Some(object);
+        let mut seen = HashSet::new();
+        while let Some(object) = current {
+            if !seen.insert(object) {
+                break;
+            }
+            if let Some(fields) = analysis.object_fields.get(&object) {
+                names.extend(fields.keys().cloned());
+            }
+            if let Some(methods) = analysis.object_methods.get(&object) {
+                names.extend(methods.keys().cloned());
+            }
+            current = analysis.object_parents.get(&object).copied();
+        }
+        names.sort();
+        names.dedup();
+        names.retain(|name| name.starts_with(&prefix));
+        return Some(names);
+    }
+
+    let name = name_of(receiver_token)?;
+    let binding_kind =
+        analysis.token_binding[receiver].map(|binding| analysis.bindings[binding].kind);
+
+    // The alias table is flat, so only a binding that is actually in scope may
+    // make an alias resolve. An import written inside a function or a branch
+    // leaves its alias behind after `end`; that out-of-scope name has no
+    // binding, so it must not reach the alias table. An unbound name is still a
+    // standard module name, because the runtime lets a program write
+    // `files.read(..)` without importing `files`.
+    let (module, namespace) = match binding_kind {
+        Some(DefinitionKind::Import) => {
+            let module = analysis
+                .module_aliases
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or(name);
+            let known = is_module(module) || analysis.declared_module_members.contains_key(module);
+            (module, known)
+        }
+        Some(DefinitionKind::Module) => (
+            name,
+            analysis.declared_module_members.contains_key(name) || is_module(name),
+        ),
+        None => (name, is_module(name)),
+        _ => return None,
+    };
+    if !namespace {
+        return None;
+    }
+
+    let members: Vec<&str> = if let Some(declared) = analysis.declared_module_members.get(module) {
+        declared.iter().map(String::as_str).collect()
+    } else {
+        MODULE_MEMBERS
+            .iter()
+            .find(|(listed, _)| *listed == module)
+            .map(|(_, members)| *members)
+            .unwrap_or(&[])
+            .to_vec()
+    };
+    let mut names: Vec<String> = members
+        .into_iter()
+        .filter(|member| member.starts_with(&prefix))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    Some(names)
 }
 
 /// Completion as a JSON object carrying the requested position and the items.

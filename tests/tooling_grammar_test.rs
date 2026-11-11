@@ -3634,3 +3634,284 @@ fn edge_call_after_a_set_does_not_reach_a_later_function() {
         "the later function declaration still resolves to itself"
     );
 }
+
+#[test]
+fn edge_completions_after_an_object_dot_offer_its_fields_and_methods() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "    to can greet()\n",
+        "        say this.name\n",
+        "    end\n",
+        "end\n",
+        "Person.\n",
+    );
+
+    let offered = completions(source, 7, 8).expect("the member slot is a valid position");
+    assert!(
+        offered.contains(&"name".to_string()),
+        "a field follows the dot, got {offered:?}"
+    );
+    assert!(
+        offered.contains(&"greet".to_string()),
+        "a method follows the dot, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"set".to_string()),
+        "a member slot must not fall back to the language keywords, got {offered:?}"
+    );
+
+    let partial = concat!(
+        "object Person\n",
+        "    has name\n",
+        "    to can greet()\n",
+        "        say this.name\n",
+        "    end\n",
+        "end\n",
+        "Person.na\n",
+    );
+    let prefixed = completions(partial, 7, 10).expect("the partial member is a valid position");
+    assert!(
+        prefixed.contains(&"name".to_string()),
+        "a partial member keeps the names it can continue, got {prefixed:?}"
+    );
+    assert!(
+        !prefixed.contains(&"greet".to_string()),
+        "a partial member excludes a name it cannot continue, got {prefixed:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_this_dot_offer_the_objects_members() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "    to can greet()\n",
+        "        say this.\n",
+        "    end\n",
+        "end\n",
+    );
+
+    let offered = completions(source, 4, 18).expect("the member slot is a valid position");
+    assert!(
+        offered.contains(&"name".to_string()),
+        "`this.` names the enclosing object's field, got {offered:?}"
+    );
+    assert!(
+        offered.contains(&"greet".to_string()),
+        "`this.` names the enclosing object's method, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_a_child_object_dot_include_inherited_members() {
+    let source = concat!(
+        "object Parent\n",
+        "    has age\n",
+        "end\n",
+        "object Child extends Parent\n",
+        "    has name\n",
+        "end\n",
+        "Child.\n",
+    );
+
+    let offered = completions(source, 7, 7).expect("the member slot is a valid position");
+    for expected in ["age", "name"] {
+        assert!(
+            offered.contains(&expected.to_string()),
+            "an inherited member completes after the dot: missing {expected:?} in {offered:?}"
+        );
+    }
+    assert!(
+        !offered.contains(&"abs".to_string()),
+        "an object member slot must not offer the builtin registry, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_a_module_dot_offer_its_published_members() {
+    let source = "import files\nfiles.\n";
+
+    let offered = completions(source, 2, 7).expect("the member slot is a valid position");
+    for expected in ["read", "write", "exists"] {
+        assert!(
+            offered.contains(&expected.to_string()),
+            "a module offers its published member {expected:?}, got {offered:?}"
+        );
+    }
+    assert!(
+        !offered.contains(&"files_read".to_string()),
+        "a module member is offered by its dotted spelling, not its registry encoding, got \
+         {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"set".to_string()),
+        "a module member slot must not fall back to the language keywords, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_an_aliased_module_dot_offer_its_published_members() {
+    let source = "import files as f\nf.\n";
+
+    let offered = completions(source, 2, 3).expect("the member slot is a valid position");
+    for expected in ["read", "write", "exists"] {
+        assert!(
+            offered.contains(&expected.to_string()),
+            "an aliased module offers its published member {expected:?}, got {offered:?}"
+        );
+    }
+    assert!(
+        !offered.contains(&"set".to_string()),
+        "an aliased module member slot must not fall back to the language keywords, got \
+         {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_a_declared_module_dot_offer_its_published_members() {
+    let source = concat!(
+        "module text\n",
+        "    to greet(who)\n",
+        "        give back \"hi \" + who\n",
+        "    end\n",
+        "    set punctuation to \"!\"\n",
+        "    export all\n",
+        "end\n",
+        "text.\n",
+    );
+
+    let offered = completions(source, 8, 6).expect("the member slot is a valid position");
+    for expected in ["greet", "punctuation"] {
+        assert!(
+            offered.contains(&expected.to_string()),
+            "a declared module offers its published member {expected:?}, got {offered:?}"
+        );
+    }
+    assert!(
+        !offered.contains(&"uppercase".to_string()),
+        "a program-declared module owns its name rather than offering the stdlib module's \
+         members, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"set".to_string()),
+        "a declared module member slot must not fall back to the language keywords, got \
+         {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_a_declared_module_only_offer_exported_names() {
+    let source = concat!(
+        "module MathUtils\n",
+        "    to circle_area(r)\n",
+        "        give back r * r\n",
+        "    end\n",
+        "    to hidden()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export circle_area\n",
+        "end\n",
+        "MathUtils.\n",
+    );
+
+    let offered = completions(source, 10, 11).expect("the member slot is a valid position");
+    assert!(
+        offered.contains(&"circle_area".to_string()),
+        "an exported member of a declared module completes, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"hidden".to_string()),
+        "a declared module must not offer a name its export leaves out, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_importing_a_declared_module_alias_offer_its_members() {
+    let source = concat!(
+        "module MathUtils\n",
+        "    to circle_area(r)\n",
+        "        give back r * r\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "import MathUtils as M\n",
+        "M.\n",
+        "MathUtils.\n",
+    );
+
+    for (line, column) in [(8, 3), (9, 11)] {
+        let offered =
+            completions(source, line, column).expect("the member slot is a valid position");
+        assert!(
+            offered.contains(&"circle_area".to_string()),
+            "an import of a declared module offers its members at {line}:{column}, got {offered:?}"
+        );
+        assert!(
+            !offered.contains(&"set".to_string()),
+            "an imported declared module member slot must not fall back to the language \
+             keywords at {line}:{column}, got {offered:?}"
+        );
+    }
+}
+
+#[test]
+fn edge_completions_after_a_block_do_not_use_its_import_alias() {
+    let in_a_function = concat!(
+        "to load()\n",
+        "    import files as g\n",
+        "    say g\n",
+        "end\n",
+        "g.\n",
+    );
+    let offered = completions(in_a_function, 5, 3).expect("the member slot is a valid position");
+    assert!(
+        offered.is_empty(),
+        "an import alias that left a function must not offer module members, got {offered:?}"
+    );
+
+    let in_a_branch = concat!("if yes then\n", "    import files as g\n", "end\n", "g.\n",);
+    let offered = completions(in_a_branch, 4, 3).expect("the member slot is a valid position");
+    assert!(
+        offered.is_empty(),
+        "an import alias that left a branch must not offer module members, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_an_object_dot_declared_below_offer_its_members() {
+    let source = concat!(
+        "Person.\n",
+        "object Person\n",
+        "    has name\n",
+        "    to can greet()\n",
+        "        say this.name\n",
+        "    end\n",
+        "end\n",
+    );
+
+    let offered = completions(source, 1, 8).expect("the member slot is a valid position");
+    assert!(
+        offered.contains(&"name".to_string()),
+        "a forward object offers its field, got {offered:?}"
+    );
+    assert!(
+        offered.contains(&"greet".to_string()),
+        "a forward object offers its method, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"set".to_string()),
+        "a forward object member slot must not fall back to the language keywords, got \
+         {offered:?}"
+    );
+}
+
+#[test]
+fn edge_member_completion_rejects_a_position_past_the_line() {
+    let source = concat!("object Person\n", "    has name\n", "end\n", "Person.\n",);
+
+    assert!(
+        completions(source, 4, 99).is_err(),
+        "a column past the line must be a clean error even in a member slot"
+    );
+}

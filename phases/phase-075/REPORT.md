@@ -32,6 +32,12 @@
 | tests/tooling_grammar_test.rs | +371 −0 | three review tests: `constant` followed by `set` keeps the two declarations in separate reference sets, a call after a `set` that shadows a function resolves to `None` with no references, and a bare method name inside its own body has no binding or references. |
 | src/lsp.rs | +18 −4 | round-2 review fixes: a replacing `set` also points the current block scope at its new variable, so a function declared and then shadowed in the same branch body cannot answer from the stale block entry; and a called name only reaches a function declared before the use, so a call after a shadowing `set` does not jump forward to a later `to`. |
 | tests/tooling_grammar_test.rs | +85 −0 | two round-2 review tests: a `set` shadows a function declared in the same `if` body while the earlier call keeps the function's references, and a call between a shadowing `set` and a later `to` does not reach the later function. |
+| src/lsp.rs | +108 −1 | resumed run: member completion. The analysis keeps its object field/method/parent tables and the `this`-to-object map, and `member_completions` answers a `receiver.member` slot with the object's own and inherited members or a standard module's published members, filtered by the partial member name. The ordinary lexical answer still runs for every position that is not a member slot. |
+| tests/tooling_grammar_test.rs | +125 −0 | five tests: object fields and methods after `Name.` with prefix filtering; `this.` inside a method; inherited members under `extends`; module members by their dotted spelling rather than the `files_read` registry encoding; and a clean out-of-bounds error in a member slot. |
+| src/lsp.rs | +65 −32 | round-1 review fixes for member completion: the analysis records an import name or alias to the module it names, mirroring the runtime's `module_aliases`, so `import files as f` followed by `f.` looks up `MODULE_MEMBERS` for `files`; and completion recognises a syntactic member slot before resolving the receiver, then answers from the complete walk, so `Person.` above `object Person` offers the object's members instead of falling back to keywords. A member slot whose receiver is neither an object nor a standard module now answers empty rather than offering the lexical registry. |
+| tests/tooling_grammar_test.rs | +63 −0 | two round-1 review tests: an aliased module member slot offers its published members and no keywords, and an object member slot above the object's declaration offers its field and method and no keywords. |
+| src/lsp.rs | +102 −2 | round-2 review: the analysis records each `module … end` body's top-level `to`, `set` and `constant` names and its last `export`, keyed by the module binding, and filters them into a declared-module member table when the module closes. `member_completions` consults that table before `MODULE_MEMBERS`, so a program-declared module (and an import of it) offers what it publishes even when its name is also a stdlib module's. The flat alias table is now consulted only for a receiver that has an in-scope `Import` binding, so an alias written inside a function or branch cannot answer after its `end`. |
+| tests/tooling_grammar_test.rs | +106 −0 | four round-2 review tests: `module text … end` offers its exported members rather than the stdlib `text` members; an explicit `export` filters a declared module's names; an import alias of a declared module offers its members; and an import alias used after its function or branch block offers nothing. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -168,7 +174,7 @@ and raises `Unknown function 'f'`; the fallback is now bounded by source
 position, and the deferred pass still resolves a genuine call written before a
 later declaration. The two new fixtures pin both orders. The gate count below
 was re-run and re-harvested: the previous table's `2843` did not match the
-suite, so the final number is the 2845 this run actually reported.
+suite, so the final number is the 2852 the round-1 review run actually reported.
 
 ## Tests added
 
@@ -267,6 +273,15 @@ suite, so the final number is the 2845 this run actually reported.
 | edge_method_name_is_not_a_bare_lexical_name | analyzer modeling: a bare method name inside its own body has no binding or references, matching the analyzer's `Unknown variable` for `give back name` |
 | edge_set_shadows_a_function_declared_in_the_same_branch | duplicate names / nesting: a function declared in an `if` body and then `set` in the same body gives the read after the `set` to the variable, while the earlier call keeps the function's references |
 | edge_call_after_a_set_does_not_reach_a_later_function | duplicate names / declaration order: a call between a shadowing `set` and a later `to` resolves to nothing and joins neither declaration's references |
+| edge_completions_after_an_object_dot_offer_its_fields_and_methods | boundary / context awareness: `Name.` offers only the object's fields and methods, and a partial member keeps the names it can continue |
+| edge_completions_after_this_dot_offer_the_objects_members | context awareness: `this.` inside a method names the enclosing object's members |
+| edge_completions_after_a_child_object_dot_include_inherited_members | nesting / inheritance: a child's member slot includes the parent's members and offers no builtins |
+| edge_completions_after_a_module_dot_offer_its_published_members | context awareness: a module offers its dotted members, not the registry encoding or language keywords |
+| edge_completions_after_a_declared_module_dot_offer_its_published_members | context awareness: `module text … end` offers its own exported members, not the stdlib module of the same name or language keywords |
+| edge_completions_after_a_declared_module_only_offer_exported_names | context awareness: a declared module offers only the names its `export` publishes |
+| edge_completions_after_importing_a_declared_module_alias_offer_its_members | context awareness: an import alias of a program-declared module offers its published members |
+| edge_completions_after_a_block_do_not_use_its_import_alias | nesting / scope: an alias declared in a function or branch does not answer after its enclosing block closes |
+| edge_member_completion_rejects_a_position_past_the_line | out of bounds / failure: a column past the line in a member slot is a clean `Err` |
 
 ### Mandatory edge-case matrix
 
@@ -290,14 +305,13 @@ suite, so the final number is the 2845 this run actually reported.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2845 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2856 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets` ran 85 test binaries and reported 2845 passed, 0
-failed and 0 ignored. This is the actual count from the final round-2 gate run,
-including the ten tests added since the committed revision (the eight round-1
-fixtures and the two round-2 fixtures); the earlier `2843` table value was not
-what the suite reported.
+`cargo test --all-targets` ran 85 test binaries and reported 2856 passed, 0
+failed and 0 ignored. This is the actual count from the round-2 review run's
+gate, including the four declared-module and import-alias fixtures added for
+the two round-2 findings.
 
 ## Invariants touched
 
@@ -308,3 +322,5 @@ what the suite reported.
 ## Known gaps / follow-ups
 
 - The functions implement capabilities only; the LSP transport/server loop remains phase-017 scaffolding by design.
+- Completion recognises an object or standard-module member slot, but goto-definition and find-references still do not look inside a `{…}` string interpolation, because those names are part of one text token rather than identifiers in the main token stream. Completion inside an interpolation also remains empty. This is recorded here rather than widened into this phase.
+- Completion enumerates a program-declared module (and an `import` of it) because its `module … end` body is in the source text the navigation functions receive. A module loaded from a separate file has no declarations in that text, so these pure-source functions cannot enumerate its members; `Vm::module_member_values` can do so once the runtime has loaded the file. Reading module files here would make completion depend on the working directory rather than only on the source, so it is recorded as a follow-up instead.
