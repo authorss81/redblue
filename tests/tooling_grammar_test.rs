@@ -1606,6 +1606,67 @@ fn edge_constant_after_a_same_named_set_is_its_own_binding() {
 }
 
 #[test]
+fn edge_set_after_a_same_named_constant_is_its_own_binding() {
+    // A `set` cannot write through a constant, so it starts a new variable
+    // binding in the runtime frame. Reusing the constant would make the `set`
+    // declaration navigate to `constant x`, joining an immutable declaration
+    // with the attempted assignment.
+    let source = concat!(
+        "constant x to 1\n",
+        "say x\n",
+        "while x is less than 2\n",
+        "    set x to 2\n",
+        "    say x\n",
+        "end\n",
+        "say x\n",
+    );
+
+    for (line, column) in [(1, 10), (2, 5), (3, 7)] {
+        let definition = goto_definition(source, line, column)
+            .expect("a position inside the file is valid")
+            .expect("the use before the set resolves to the constant");
+        assert_eq!(
+            (definition.line, definition.column, definition.kind.as_str()),
+            (1, 10, "constant"),
+            "line {line} is before the set, so it names the constant"
+        );
+    }
+
+    for (line, column) in [(4, 9), (5, 9), (7, 5)] {
+        let definition = goto_definition(source, line, column)
+            .expect("a position inside the file is valid")
+            .expect("the set declaration and its uses resolve to the variable");
+        assert_eq!(
+            (definition.line, definition.column, definition.kind.as_str()),
+            (4, 9, "variable"),
+            "line {line} names the variable the set declares, not the earlier constant"
+        );
+    }
+
+    let constant_references: Vec<(usize, usize)> = find_references(source, 1, 10)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        constant_references,
+        vec![(1, 10), (2, 5), (3, 7)],
+        "the constant's references stop at the set declaration"
+    );
+
+    let variable_references: Vec<(usize, usize)> = find_references(source, 4, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        variable_references,
+        vec![(4, 9), (5, 9), (7, 5)],
+        "the variable's references do not join the earlier constant"
+    );
+}
+
+#[test]
 fn edge_finally_body_leaves_the_catch_scope() {
     let source = concat!(
         "try\n",
@@ -2651,6 +2712,29 @@ fn edge_object_field_is_not_a_bare_lexical_name() {
 }
 
 #[test]
+fn edge_method_name_is_not_a_bare_lexical_name() {
+    let source = concat!(
+        "object Row\n",
+        "    to can name()\n",
+        "        give back name\n",
+        "    end\n",
+        "end\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 3, 19).expect("a position inside the file is valid"),
+        None,
+        "the analyzer rejects a bare method read, so navigation must not bind it"
+    );
+    assert!(
+        find_references(source, 3, 19)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a bare method read has no binding, so it has no references"
+    );
+}
+
+#[test]
 fn edge_bare_method_call_prefers_the_method_over_a_same_named_field() {
     let source = concat!(
         "object Row\n",
@@ -3176,5 +3260,377 @@ fn edge_this_read_does_not_claim_a_field_a_child_overrides() {
             .expect("a position inside the file is valid")
             .is_empty(),
         "a read whose binding depends on the runtime receiver claims no single declaration"
+    );
+}
+
+#[test]
+fn edge_function_declaration_shadows_an_earlier_variable() {
+    let source = concat!(
+        "set f to 1\n",
+        "say f\n",
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "say f\n",
+        "say f()\n",
+    );
+
+    let declaration = goto_definition(source, 3, 4)
+        .expect("a position inside the file is valid")
+        .expect("the `to` declares a function");
+    assert_eq!(
+        (
+            declaration.line,
+            declaration.column,
+            declaration.kind.as_str()
+        ),
+        (3, 4, "function"),
+        "a later function must not reuse the earlier variable's binding"
+    );
+
+    let after = goto_definition(source, 6, 5)
+        .expect("a position inside the file is valid")
+        .expect("the function is in scope after its `end`");
+    assert_eq!(
+        (after.line, after.column, after.kind.as_str()),
+        (3, 4, "function"),
+        "a bare read after the function declaration names the function"
+    );
+
+    let variable_references: Vec<(usize, usize)> = find_references(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        variable_references,
+        vec![(1, 5), (2, 5)],
+        "the variable's references must stop at the function declaration"
+    );
+
+    let function_references: Vec<(usize, usize)> = find_references(source, 3, 4)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        function_references,
+        vec![(3, 4), (6, 5), (7, 5)],
+        "the function's references must not join the earlier variable"
+    );
+}
+
+#[test]
+fn edge_later_set_shadows_an_earlier_function() {
+    let source = concat!(
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "say f\n",
+        "set f to 1\n",
+        "say f\n",
+    );
+
+    let declaration = goto_definition(source, 5, 5)
+        .expect("a position inside the file is valid")
+        .expect("the `set` declares its own binding");
+    assert_eq!(
+        (
+            declaration.line,
+            declaration.column,
+            declaration.kind.as_str()
+        ),
+        (5, 5, "variable"),
+        "a later variable must not reuse the earlier function's binding"
+    );
+
+    let later = goto_definition(source, 6, 5)
+        .expect("a position inside the file is valid")
+        .expect("the variable is in scope after the `set`");
+    assert_eq!(
+        (later.line, later.column, later.kind.as_str()),
+        (5, 5, "variable"),
+        "a bare read after the `set` names the variable"
+    );
+
+    let function_references: Vec<(usize, usize)> = find_references(source, 1, 4)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        function_references,
+        vec![(1, 4), (4, 5)],
+        "the function's earlier uses must not join the later variable"
+    );
+
+    let variable_references: Vec<(usize, usize)> = find_references(source, 5, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        variable_references,
+        vec![(5, 5), (6, 5)],
+        "the variable's references start at its own declaration"
+    );
+}
+
+#[test]
+fn edge_call_after_a_set_shadowing_a_function_does_not_resolve() {
+    // The runtime raises `Unknown function 'f'` for a call after `set f`, so
+    // navigation must not fall back to the function the `set` shadowed.
+    let source = concat!(
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "say f\n",
+        "set f to 1\n",
+        "say f\n",
+        "say f()\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 7, 5).expect("a position inside the file is valid"),
+        None,
+        "a call after the shadowing `set` has no function to resolve"
+    );
+
+    assert!(
+        find_references(source, 7, 5)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "the shadowed call is not a use of the earlier function"
+    );
+
+    let function_references: Vec<(usize, usize)> = find_references(source, 1, 4)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        function_references,
+        vec![(1, 4), (4, 5)],
+        "the function keeps only its earlier uses"
+    );
+
+    let variable_references: Vec<(usize, usize)> = find_references(source, 5, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        variable_references,
+        vec![(5, 5), (6, 5)],
+        "the variable owns the later bare reads but not the call"
+    );
+}
+
+#[test]
+fn edge_set_inside_a_function_shadows_an_outer_function_locally() {
+    let source = concat!(
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "to g()\n",
+        "    set f to 1\n",
+        "    say f\n",
+        "end\n",
+        "say f\n",
+    );
+
+    let local = goto_definition(source, 6, 9)
+        .expect("a position inside the file is valid")
+        .expect("the local variable is in scope inside `g`");
+    assert_eq!(
+        (local.line, local.column, local.kind.as_str()),
+        (5, 9, "variable"),
+        "a `set` inside a function shadows the outer function in that scope"
+    );
+
+    let outer = goto_definition(source, 8, 5)
+        .expect("a position inside the file is valid")
+        .expect("the outer function survives the local variable");
+    assert_eq!(
+        (outer.line, outer.column, outer.kind.as_str()),
+        (1, 4, "function"),
+        "the local variable must not leak past its function's `end`"
+    );
+
+    assert_eq!(
+        find_references(source, 5, 9)
+            .expect("a position inside the file is valid")
+            .into_iter()
+            .map(|location| (location.line, location.column))
+            .collect::<Vec<_>>(),
+        vec![(5, 9), (6, 9)],
+        "the local binding's references stay inside `g`"
+    );
+}
+
+#[test]
+fn edge_function_variable_shadowing_rejects_a_position_past_the_line() {
+    let source = concat!("set f to 1\n", "to f()\n", "    give back 2\n", "end\n",);
+
+    assert!(
+        goto_definition(source, 1, 99).is_err(),
+        "a column past the line is a clean error from goto-definition"
+    );
+    assert!(
+        find_references(source, 1, 99).is_err(),
+        "a column past the line is a clean error from find-references"
+    );
+    assert!(
+        completions(source, 1, 99).is_err(),
+        "a column past the line is a clean error from completion"
+    );
+}
+
+#[test]
+fn edge_set_inside_a_branch_shadows_a_function_in_the_runtime_frame() {
+    let source = concat!(
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "if yes then\n",
+        "    set f to 1\n",
+        "    say f\n",
+        "end\n",
+        "say f\n",
+    );
+
+    let variable = goto_definition(source, 8, 5)
+        .expect("a position inside the file is valid")
+        .expect("the branch's `set` replaces the global function for later reads");
+    assert_eq!(
+        (variable.line, variable.column, variable.kind.as_str()),
+        (5, 9, "variable"),
+        "a block scope writes a `set` through to the program frame"
+    );
+
+    assert_eq!(
+        find_references(source, 5, 9)
+            .expect("a position inside the file is valid")
+            .into_iter()
+            .map(|location| (location.line, location.column))
+            .collect::<Vec<_>>(),
+        vec![(5, 9), (6, 9), (8, 5)],
+        "the variable owns the branch read and the read after `end`"
+    );
+
+    let nested = concat!(
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "to g()\n",
+        "    if yes then\n",
+        "        set f to 1\n",
+        "    end\n",
+        "    say f\n",
+        "end\n",
+        "say f\n",
+    );
+
+    let local = goto_definition(nested, 8, 9)
+        .expect("a position inside the file is valid")
+        .expect("the branch's `set` lands in `g`'s frame");
+    assert_eq!(
+        (local.line, local.column, local.kind.as_str()),
+        (6, 13, "variable"),
+        "a branch inside a function writes to that function's frame"
+    );
+
+    let outer = goto_definition(nested, 10, 5)
+        .expect("a position inside the file is valid")
+        .expect("the function survives because the local variable did not leak");
+    assert_eq!(
+        (outer.line, outer.column, outer.kind.as_str()),
+        (1, 4, "function"),
+        "the local variable must not escape `g`"
+    );
+}
+
+#[test]
+fn edge_set_shadows_a_function_declared_in_the_same_branch() {
+    // A function declared inside an `if` body lives in that body's scope. A
+    // later `set` in the same body replaces the function's runtime slot, so
+    // the read after it must answer the variable rather than the stale
+    // function entry the block still holds.
+    let source = concat!(
+        "if yes then\n",
+        "    to f()\n",
+        "        give back 2\n",
+        "    end\n",
+        "    say f()\n",
+        "    set f to 1\n",
+        "    say f\n",
+        "end\n",
+    );
+
+    let variable = goto_definition(source, 7, 9)
+        .expect("a position inside the file is valid")
+        .expect("the `set` replaces the branch's function");
+    assert_eq!(
+        (variable.line, variable.column, variable.kind.as_str()),
+        (6, 9, "variable"),
+        "a read after the branch's `set` names the replacing variable"
+    );
+
+    assert_eq!(
+        find_references(source, 6, 9)
+            .expect("a position inside the file is valid")
+            .into_iter()
+            .map(|location| (location.line, location.column))
+            .collect::<Vec<_>>(),
+        vec![(6, 9), (7, 9)],
+        "the variable owns the read after the `set`"
+    );
+
+    assert_eq!(
+        find_references(source, 2, 8)
+            .expect("a position inside the file is valid")
+            .into_iter()
+            .map(|location| (location.line, location.column))
+            .collect::<Vec<_>>(),
+        vec![(2, 8), (5, 9)],
+        "the function keeps its own declaration and the call before the `set`"
+    );
+}
+
+#[test]
+fn edge_call_after_a_set_does_not_reach_a_later_function() {
+    // The runtime holds the `set`'s value in the shared slot, so a call before
+    // a later `to f()` raises `Unknown function 'f'`. Navigation must not jump
+    // forward past the shadowing variable to the later declaration.
+    let source = concat!(
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "set f to 1\n",
+        "say f()\n",
+        "to f()\n",
+        "    give back 3\n",
+        "end\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 5, 5).expect("a position inside the file is valid"),
+        None,
+        "a call after the `set` must not reach the later function"
+    );
+    assert!(
+        find_references(source, 5, 5)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "the unresolved call is not a use of either function declaration"
+    );
+
+    let later = goto_definition(source, 6, 4)
+        .expect("a position inside the file is valid")
+        .expect("the later `to` declares its own function");
+    assert_eq!(
+        (later.line, later.column, later.kind.as_str()),
+        (6, 4, "function"),
+        "the later function declaration still resolves to itself"
     );
 }

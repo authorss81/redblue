@@ -395,6 +395,11 @@ struct Binding {
     /// analyzer binds in the object body, so it keeps a declaration and a
     /// member table entry without entering a scope.
     lexical: bool,
+    /// Whether the name answers only a call, never a bare read. An object's
+    /// method is reached as `name()` or through a receiver; the analyzer does
+    /// not bind it as a lexical variable, so `give back name` inside the method
+    /// body names an unknown variable rather than the method itself.
+    call_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +502,7 @@ fn declare(
         location,
         kind,
         lexical: true,
+        call_only: false,
     });
     binding_scopes.push(scope_id);
     scope.insert(name.to_string(), id);
@@ -522,6 +528,7 @@ fn declare_fresh(
         location,
         kind,
         lexical: true,
+        call_only: kind == DefinitionKind::Function,
     });
     binding_scopes.push(scope_id);
     let scope = scopes.last_mut().expect("the root scope always exists");
@@ -549,6 +556,7 @@ fn declare_member(
         location,
         kind: DefinitionKind::Variable,
         lexical: false,
+        call_only: false,
     });
     binding_scopes.push(scope_id);
     id
@@ -582,11 +590,107 @@ fn declare_constant_binding(
         location,
         kind: DefinitionKind::Constant,
         lexical: true,
+        call_only: false,
     });
     binding_scopes.push(scope_id);
     let scope = scopes.last_mut().expect("the root scope always exists");
     scope.insert(name.to_string(), id);
     id
+}
+
+/// Declare a function in the current scope.
+///
+/// A function and a variable of the same spelling share one slot in the
+/// runtime: a later `to` replaces an earlier `set`, and every later use names
+/// the function. A repeated `to` reuses the function binding, because there is
+/// only ever one function of a spelling in a scope. A method keeps a distinct
+/// binding through [`declare_fresh`] so it can coexist with a same-named field.
+fn declare_function_binding(
+    scopes: &mut [HashMap<String, usize>],
+    bindings: &mut Vec<Binding>,
+    binding_scopes: &mut Vec<usize>,
+    scope_id: usize,
+    name: &str,
+    location: Location,
+) -> usize {
+    let scope = scopes.last_mut().expect("the root scope always exists");
+    if let Some(existing) = scope.get(name).copied() {
+        if bindings[existing].kind == DefinitionKind::Function {
+            return existing;
+        }
+    }
+
+    let id = bindings.len();
+    bindings.push(Binding {
+        name: name.to_string(),
+        location,
+        kind: DefinitionKind::Function,
+        lexical: true,
+        call_only: false,
+    });
+    binding_scopes.push(scope_id);
+    scope.insert(name.to_string(), id);
+    id
+}
+
+/// Declare a variable that replaces another same-named declaration in the
+/// runtime scope at `scope_position`.
+///
+/// A `set` writes through to a variable-like slot but replaces a declaration of
+/// another kind: a function, constant, import, object or module is a different
+/// binding, and the later `set` owns the following uses while the earlier
+/// declaration keeps its own. `scope_position` is the innermost function,
+/// module, test or program frame: block scopes are analyzer constructs, not
+/// places where the VM's `set` creates a variable.
+fn declare_replacing_binding(
+    scopes: &mut [HashMap<String, usize>],
+    bindings: &mut Vec<Binding>,
+    binding_scopes: &mut Vec<usize>,
+    scope_id: usize,
+    scope_position: usize,
+    name: &str,
+    location: Location,
+) -> usize {
+    let id = bindings.len();
+    bindings.push(Binding {
+        name: name.to_string(),
+        location,
+        kind: DefinitionKind::Variable,
+        lexical: true,
+        call_only: false,
+    });
+    binding_scopes.push(scope_id);
+    scopes[scope_position].insert(name.to_string(), id);
+    // When the runtime frame is an outer function, module, test or program and
+    // the `set` appears in a block scope, the block may still hold the
+    // declaration the `set` just replaced. Lookup walks the innermost scope
+    // first, so leaving a stale function there would answer the shadowed
+    // declaration. Point the current block at the new variable too; the block
+    // is popped at its `end`, while the binding itself lives in the runtime
+    // frame.
+    if scope_position + 1 != scopes.len() {
+        scopes
+            .last_mut()
+            .expect("the root scope always exists")
+            .insert(name.to_string(), id);
+    }
+    id
+}
+
+/// Whether a `set` reuses an existing binding rather than replacing it.
+///
+/// A variable, parameter, loop variable and catch binder hold an assignable
+/// runtime value, so a later `set` writes through to that slot. A function,
+/// constant, import, object or module is a different declaration, and the
+/// latest `set` starts a new variable binding instead.
+fn set_reuses_binding(kind: DefinitionKind) -> bool {
+    matches!(
+        kind,
+        DefinitionKind::Variable
+            | DefinitionKind::Parameter
+            | DefinitionKind::LoopVariable
+            | DefinitionKind::Catch
+    )
 }
 
 fn mark_declaration(
@@ -802,6 +906,7 @@ fn close_due_frames(
     frames: &mut Vec<Frame>,
     scopes: &mut Vec<HashMap<String, usize>>,
     scope_ids: &mut Vec<usize>,
+    runtime_scopes: &mut Vec<usize>,
     index: usize,
 ) {
     while matches!(
@@ -812,7 +917,23 @@ fn close_due_frames(
         if frame.opens_scope {
             pop_scope(scopes, scope_ids);
         }
+        if pushes_runtime_scope(frame.kind) {
+            runtime_scopes.pop();
+        }
     }
+}
+
+/// Whether a frame is a place where the VM's `set` creates a variable.
+///
+/// A function call, a function literal, a module and a test body each run in
+/// their own variable frame. `if`/`unless` branches, loops, `try`/`catch` and
+/// object bodies are analyzer scopes only, so a `set` there writes to the
+/// enclosing runtime frame.
+fn pushes_runtime_scope(kind: FrameKind) -> bool {
+    matches!(
+        kind,
+        FrameKind::To | FrameKind::Literal | FrameKind::Module | FrameKind::Test
+    )
 }
 
 /// Whether the name at `index` follows a `.` and therefore names a field of
@@ -953,10 +1074,18 @@ fn call_follows(tokens: &[Token], index: usize) -> bool {
 /// holds one alongside the plain name. A method and a field can share a
 /// spelling; the scope's plain entry keeps the first declaration, so a call has
 /// to look for the method explicitly, mirroring [`member_binding`].
+///
+/// Only a function declared after the scope's current entry and before the use
+/// can win. A later `set` replaces an earlier function in the same runtime
+/// slot, so a call after that `set` must not fall back to the shadowed
+/// function, nor may it jump forward to a function written after the call. A
+/// method declared after a plain variable is still later and earlier than the
+/// use, so `name()` keeps resolving to it.
 fn scope_function_binding(
     name: &str,
     first: usize,
     scope_id: usize,
+    use_location: Location,
     bindings: &[Binding],
     binding_scopes: &[usize],
 ) -> Option<usize> {
@@ -967,18 +1096,30 @@ fn scope_function_binding(
         .iter()
         .enumerate()
         .find(|(id, scope)| {
-            **scope == scope_id
+            *id > first
+                && **scope == scope_id
                 && bindings[*id].lexical
                 && bindings[*id].name == name
                 && bindings[*id].kind == DefinitionKind::Function
+                && precedes(bindings[*id].location, use_location)
         })
         .map(|(id, _)| id)
 }
 
-/// The lexical binding a bare name resolves to in `scope_id`. A method and a
-/// plain name can share a spelling; the scope's entry keeps the first
-/// declaration, so a read prefers a non-function entry regardless of which
-/// declaration came first.
+/// Whether `declaration` is written before `use` in source order.
+fn precedes(declaration: Location, use_location: Location) -> bool {
+    (declaration.line, declaration.column) < (use_location.line, use_location.column)
+}
+
+/// The lexical binding a bare name resolves to in `scope_id`.
+///
+/// The scope's entry is the latest declaration of the spelling, because a
+/// `set`, `constant` or `to` replaces a same-named binding of another kind.
+/// That is exactly what the runtime's slot holds when the read executes, so a
+/// bare read answers the entry rather than preferring a function or a variable
+/// by kind. A method is call-only: it leaves an earlier plain binding in place,
+/// and when no earlier binding exists the entry answers no bare read at all,
+/// matching the analyzer's `Unknown variable` for a bare method name.
 fn scope_plain_binding(
     name: &str,
     first: usize,
@@ -986,7 +1127,7 @@ fn scope_plain_binding(
     bindings: &[Binding],
     binding_scopes: &[usize],
 ) -> Option<usize> {
-    if bindings[first].lexical && bindings[first].kind != DefinitionKind::Function {
+    if bindings[first].lexical && !bindings[first].call_only {
         return Some(first);
     }
     binding_scopes
@@ -995,11 +1136,10 @@ fn scope_plain_binding(
         .find(|(id, scope)| {
             **scope == scope_id
                 && bindings[*id].lexical
+                && !bindings[*id].call_only
                 && bindings[*id].name == name
-                && bindings[*id].kind != DefinitionKind::Function
         })
         .map(|(id, _)| id)
-        .or_else(|| bindings[first].lexical.then_some(first))
 }
 
 /// The token index where a one-line literal body starting at `start` ends.
@@ -1093,13 +1233,28 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // `set` inside a module to the module's own scope rather than to a global,
     // so navigation must put that binding there too.
     let mut module_scopes: Vec<usize> = Vec::new();
+    // Stack positions of the live frames where the VM's `set` creates a
+    // variable: the program, a function call, a function literal, a module and
+    // a test body. Block scopes are analyzer-only, so a `set` there writes to
+    // the innermost entry of this stack.
+    let mut runtime_scopes: Vec<usize> = vec![0];
     let mut visible = None;
     let mut last_significant_line: Option<usize> = None;
     let mut last_significant: Option<usize> = None;
+    // Names the walk already looked up in a live scope, even when the answer
+    // was `None` because a later declaration shadows the only function. The
+    // deferred pass must not resurrect such a shadowed binding.
+    let mut looked_up: HashSet<usize> = HashSet::new();
     let mut index = 0;
 
     while index < tokens.len() {
-        close_due_frames(&mut frames, &mut scopes, &mut scope_ids, index);
+        close_due_frames(
+            &mut frames,
+            &mut scopes,
+            &mut scope_ids,
+            &mut runtime_scopes,
+            index,
+        );
         token_scope[index] = scope_ids.last().copied().unwrap_or(0);
 
         if let Some(stop) = stop {
@@ -1123,6 +1278,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     }
                     if frame.kind == FrameKind::Module {
                         module_scopes.pop();
+                    }
+                    if pushes_runtime_scope(frame.kind) {
+                        runtime_scopes.pop();
                     }
                 }
             }
@@ -1274,6 +1432,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     &mut next_scope_id,
                 );
                 module_scopes.push(scopes.len() - 1);
+                runtime_scopes.push(scopes.len() - 1);
             }
             // The test harness parses each `test "..."` body on its own and
             // runs it in an isolated VM, so two tests never share a binding.
@@ -1289,6 +1448,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     &mut next_scope_id,
                 );
                 test_scopes.push(scopes.len() - 1);
+                runtime_scopes.push(scopes.len() - 1);
             }
             TokenKind::Try => frames.push(Frame::block(FrameKind::Try)),
             // A `catch` body runs through `run_catch_body`, which pushes a
@@ -1381,14 +1541,13 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             DefinitionKind::Function,
                         )
                     } else {
-                        declare(
+                        declare_function_binding(
                             &mut scopes,
                             &mut bindings,
                             &mut binding_scopes,
                             scope_id,
                             &name,
                             location,
-                            DefinitionKind::Function,
                         )
                     };
                     mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
@@ -1405,6 +1564,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         &mut scope_parents,
                         &mut next_scope_id,
                     );
+                    runtime_scopes.push(scopes.len() - 1);
                     declare_params(
                         &tokens,
                         cursor + 1,
@@ -1428,6 +1588,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         &mut scope_parents,
                         &mut next_scope_id,
                     );
+                    runtime_scopes.push(scopes.len() - 1);
                     let mut body = index + 1;
                     if matches!(
                         tokens.get(body).map(|token| &token.kind),
@@ -1544,8 +1705,30 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     } else {
                         None
                     };
-                    if let Some(binding) = existing {
+                    if let Some(binding) =
+                        existing.filter(|&binding| set_reuses_binding(bindings[binding].kind))
+                    {
                         token_binding[cursor] = Some(binding);
+                    } else if existing.is_some() {
+                        // The name currently resolves to a declaration a `set`
+                        // cannot write through — a function, constant, import,
+                        // object or module. The runtime's `set` shadows it with
+                        // a variable in the innermost frame that creates
+                        // variables (a block scope writes through to its
+                        // function or the program). The earlier declaration
+                        // keeps its uses; this one starts a new reference set.
+                        let position = runtime_scopes.last().copied().unwrap_or(0);
+                        let location = Location::of_name(&tokens[cursor], name);
+                        let binding = declare_replacing_binding(
+                            &mut scopes,
+                            &mut bindings,
+                            &mut binding_scopes,
+                            scope_ids[position],
+                            position,
+                            name,
+                            location,
+                        );
+                        mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
                     } else {
                         let location = Location::of_name(&tokens[cursor], name);
                         // A constant is a global whatever block declares it, so
@@ -1678,12 +1861,14 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                 name,
                                 first,
                                 *scope_id,
+                                Location::of_name(&tokens[index], name),
                                 &bindings,
                                 &binding_scopes,
                             )
                         } else {
                             scope_plain_binding(name, first, *scope_id, &bindings, &binding_scopes)
                         };
+                        looked_up.insert(index);
                         break;
                     }
                 }
@@ -1727,23 +1912,15 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             }
 
             let is_call = call_follows(&tokens, index);
-            if let Some(current) = token_binding[index] {
-                // A name resolved during the walk keeps that binding. This
-                // pass exists for names written before their declaration;
-                // re-resolving every name would replace an earlier binding
-                // with a later same-spelling declaration (`set x` followed by
-                // `constant x`). The one correction still made here is the
-                // field/method distinction: a bare read prefers the
-                // non-function and a call prefers the function, whichever was
-                // declared first.
-                let matches_shape = if is_call {
-                    bindings[current].kind == DefinitionKind::Function
-                } else {
-                    bindings[current].kind != DefinitionKind::Function
-                };
-                if matches_shape {
-                    continue;
-                }
+            if token_binding[index].is_some() || looked_up.contains(&index) {
+                // A name resolved during the walk keeps that binding, including
+                // a shadowed call that resolved to nothing. This pass exists
+                // for names written before their declaration; re-resolving
+                // every name would replace an earlier binding with a later
+                // same-spelling declaration (`set x` followed by `constant x`,
+                // or a `to` after a `set`). Member names never reach this loop:
+                // they are repaired once both member tables are complete below.
+                continue;
             }
             let mut scope = Some(token_scope[index]);
             while let Some(scope_id) = scope {
@@ -1758,8 +1935,15 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         break;
                     }
                     token_binding[index] = if is_call {
-                        scope_function_binding(name, binding, scope_id, &bindings, &binding_scopes)
-                            .or(Some(binding))
+                        scope_function_binding(
+                            name,
+                            binding,
+                            scope_id,
+                            Location::of_name(&tokens[index], name),
+                            &bindings,
+                            &binding_scopes,
+                        )
+                        .or(Some(binding))
                     } else {
                         scope_plain_binding(name, binding, scope_id, &bindings, &binding_scopes)
                     };

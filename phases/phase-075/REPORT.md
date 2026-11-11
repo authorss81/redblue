@@ -26,6 +26,12 @@
 | tests/tooling_grammar_test.rs | +116 −15 | round-2 review tests: a builtin before a later `set abs` keeps the builtin definition and reference set while the variable keeps its own; a bare field read inside a method body has no binding while `this.name` resolves; a position past a line with a builtin and a later `set` is a clean error from all three capabilities; and the field-declared-after-its-method fixture now reads `this.name` and asserts the field's references include that member read. |
 | src/lsp.rs | +78 −10 | resumed run: member navigation follows `object Child extends Parent`. The parent name is attached only when it names an object already declared at the child's `object` token, because the interpreter refuses an undeclared parent at declaration time; `member_binding` walks the chain nearest-first, and the lookup guard stops at the first repeated object. A child declaration shadows the same-named ancestor, and `this.member` reads inherited fields. |
 | tests/tooling_grammar_test.rs | +228 −22 | seven navigation tests: inherited field goto/references, inherited method references, child-field shadowing with separate parent references, `this` reading an inherited field, a two-level `Child` → `Parent` → `GrandParent` field, a forward `extends` that does not bind because the runtime refuses it, and a malformed-position failure for all three capabilities. |
+| src/lsp.rs | +138 −27 | resumed run: a function and a variable of the same spelling share one runtime slot, so navigation now models declaration order. A `to` after a `set` replaces the function binding, a `set` after a `to` starts a variable binding, a `set` inside a block writes to the innermost function/module/test/program frame, and a name resolved during the walk keeps its binding in the deferred pass. `scope_plain_binding` answers the scope's latest entry, and member field/method repair stays in its own post-pass. |
+| tests/tooling_grammar_test.rs | +237 −0 | five navigation tests: function-after-variable shadowing with split reference sets, variable-after-function shadowing, a local `set` shadowing an outer function without leaking, a branch `set` writing to the program or enclosing function frame, and a clean out-of-bounds error from goto, references and completion on the shadowing fixture. |
+| src/lsp.rs | +183 −29 | round-1 review fixes: a `set` reuses only variable-like slots (variable, parameter, loop variable, catch), so a later `set` after a constant, function, import, object or module starts a fresh variable binding; a called name only falls back to a function declared after the scope's current entry, so a call after a shadowing `set` resolves to nothing; and a method is call-only, so a bare method name answers no lexical binding while `name()` still resolves the method. |
+| tests/tooling_grammar_test.rs | +371 −0 | three review tests: `constant` followed by `set` keeps the two declarations in separate reference sets, a call after a `set` that shadows a function resolves to `None` with no references, and a bare method name inside its own body has no binding or references. |
+| src/lsp.rs | +18 −4 | round-2 review fixes: a replacing `set` also points the current block scope at its new variable, so a function declared and then shadowed in the same branch body cannot answer from the stale block entry; and a called name only reaches a function declared before the use, so a call after a shadowing `set` does not jump forward to a later `to`. |
+| tests/tooling_grammar_test.rs | +85 −0 | two round-2 review tests: a `set` shadows a function declared in the same `if` body while the earlier call keeps the function's references, and a call between a shadowing `set` and a later `to` does not reach the later function. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -111,6 +117,58 @@ navigation either, and a self-reference is not an edge. The seven new fixtures
 pin each half, including `this.age` inside a child method, the grandparent
 field, the forward-parent refusal, and a clean out-of-bounds error from all
 three capabilities.
+
+The final resumed run reproduced a shadowing defect against the interpreter.
+For `set f to 1` / `to f()` / `give back 2` / `end` / `say f`, `rb run` prints
+`<function f>`, but `goto_definition` on the function declaration answered the
+variable at `1:5` and its references merged both declarations. The reverse
+order (`to f()` first, then `set f to 1`) prints `1` for a later `say f` and
+raises `RuntimeError: Unknown function 'f'` for a later `say f()`, while
+navigation answered the function at `1:4` for the `set`. A third check,
+`set f` inside a function that only has an outer `f` function, prints the
+function again after the function returns: the assignment created a local
+variable, not a write through the function slot. A fourth check puts the `set`
+inside an `if` branch: at top level it replaces the global function, while
+inside a function it creates that function call's local variable, so a block
+scope writes to the innermost runtime frame rather than to the branch's
+analyzer scope. A function and a variable of one spelling therefore share a
+single runtime slot that the latest declaration replaces. Navigation now gives
+the later declaration its own binding, keeps earlier uses on the earlier
+binding, and writes a local `set` into the innermost function, module, test or
+program frame. The deferred pass no longer rewrites a name the walk already
+resolved; member field/method repair remains in its separate post-pass.
+
+The round-1 review found three more declaration-order gaps. A `set` after a
+`constant` reused the constant's binding because the reuse filter excluded only
+functions; a `set` now reuses only a variable, parameter, loop variable or catch
+binder and starts a fresh variable binding after any other kind, so the
+constant's references stop at the `set` and the variable's references start
+there. A call after `set f` still fell back to the earlier shadowed function
+through the same-scope search, even though the runtime raises
+`RuntimeError: Unknown function 'f'`; the search now only accepts a function
+declared after the scope's current entry (and, after round 2, before the use),
+and the deferred pass does not resurrect a name the walk already resolved to
+nothing. Finally, a method with
+no same-named plain declaration became the scope's entry, so a bare `name`
+inside its own body resolved to the method while the analyzer reports
+`Unknown variable 'name'`; methods are now call-only, so `name()` resolves the
+method and a bare method name answers no binding. The three new fixtures pin
+each shape.
+
+The round-2 review found the same-slot model still leaking through a block
+scope. For `if yes then` / `to f()` / `set f to 1` / `say f` / `end`, the
+function lands in the branch's analyzer scope while the `set` writes to the
+program's runtime frame; the lookup then met the branch's stale function entry
+before the replacing variable. A replacing `set` now also points the current
+block scope at its new variable, so the read after it answers the variable
+while the earlier call keeps the function. The review also found that the
+same-scope function fallback could jump forward past a shadowing `set` to a
+`to` written after the call, even though the runtime holds the variable there
+and raises `Unknown function 'f'`; the fallback is now bounded by source
+position, and the deferred pass still resolves a genuine call written before a
+later declaration. The two new fixtures pin both orders. The gate count below
+was re-run and re-harvested: the previous table's `2843` did not match the
+suite, so the final number is the 2845 this run actually reported.
 
 ## Tests added
 
@@ -199,6 +257,16 @@ three capabilities.
 | edge_goto_definition_resolves_a_grandparent_field | inheritance: a two-level `Child` → `Parent` → `GrandParent` chain resolves the field on the grandparent and joins its references |
 | edge_extends_does_not_bind_a_parent_declared_after_the_child | malformed input: a forward `extends` matches the interpreter's refusal and answers `None` with no references |
 | edge_inherited_member_navigation_rejects_a_column_past_the_line | out of bounds: a column past the line is a clean `Err` from all three capabilities on an inheritance fixture |
+| edge_function_declaration_shadows_an_earlier_variable | duplicate names: a later `to` replaces an earlier `set` in the shared runtime slot; references split at the declaration |
+| edge_later_set_shadows_an_earlier_function | duplicate names: a later `set` replaces an earlier `to`; the function's earlier use keeps its own reference set |
+| edge_set_inside_a_function_shadows_an_outer_function_locally | nesting: a local `set` shadows an outer function inside its scope and does not leak past `end` |
+| edge_set_inside_a_branch_shadows_a_function_in_the_runtime_frame | nesting: a branch `set` writes through to the program frame at top level and to the enclosing function's frame inside a function |
+| edge_function_variable_shadowing_rejects_a_position_past_the_line | out of bounds / failure: a column past the line is a clean `Err` from goto, references and completion on the shadowing fixture |
+| edge_set_after_a_same_named_constant_is_its_own_binding | duplicate names: a `set` after a same-named `constant` is a distinct variable binding, so the constant's references stop at the `set` and the variable's references do not join the constant |
+| edge_call_after_a_set_shadowing_a_function_does_not_resolve | duplicate names: a call after `set f` does not resolve to the shadowed function, matching the runtime's `Unknown function 'f'`, while the earlier function keeps only its earlier uses |
+| edge_method_name_is_not_a_bare_lexical_name | analyzer modeling: a bare method name inside its own body has no binding or references, matching the analyzer's `Unknown variable` for `give back name` |
+| edge_set_shadows_a_function_declared_in_the_same_branch | duplicate names / nesting: a function declared in an `if` body and then `set` in the same body gives the read after the `set` to the variable, while the earlier call keeps the function's references |
+| edge_call_after_a_set_does_not_reach_a_later_function | duplicate names / declaration order: a call between a shadowing `set` and a later `to` resolves to nothing and joins neither declaration's references |
 
 ### Mandatory edge-case matrix
 
@@ -212,7 +280,7 @@ three capabilities.
 | numeric_boundary | N/A: no arithmetic or numeric values are evaluated |
 | unicode | covered by `edge_goto_definition_counts_unicode_names_as_characters` (span is four characters, not five bytes) |
 | nesting_recursion | covered by the shadowing test (function scope nested in top-level scope), by the loop/object-in-function tests, and by dedicated `unless`, `while`, counted/until `repeat`, `module`, `test` and `try`/`catch`/`finally` fixtures. `if`/`unless` branch bodies open their own scope, matching the analyzer: a `set` inside writes through to the enclosing/program binding and survives `end`, while a function, object or import declared there does not leak. A `test` body gets its own scope because the harness runs each body in isolation; loops, functions, modules, objects, test bodies and catch binders open their own scope, a `constant` is always a program binding (the test body's scope inside a `test`), the catch scope closes at `finally`, and a nested `unless` inside a function stays inside that function |
-| duplicate_missing_keys | N/A: no records/maps are navigated; repeated `set` reuses its binding, including the enclosing binding it writes through to |
+| duplicate_missing_keys | records/maps are N/A because navigation never reads values; same-spelling declarations are covered: a repeated `set` reuses its binding, while a later `set`, `constant` or `to` replaces a binding of another kind and keeps the earlier uses distinct (`edge_function_declaration_shadows_an_earlier_variable`, `edge_later_set_shadows_an_earlier_function`, `edge_constant_after_a_same_named_set_is_its_own_binding`) |
 | malformed_input | covered by `edge_malformed_source_returns_errors_not_panics` (unterminated string surfaces `Err` from all three) and by `malformed_positions_are_clean_errors_not_panics`; comment/string context checks cover `//` inside text |
 | resource_limit | covered by `edge_navigation_resolves_a_binding_after_five_thousand_lines`: a deterministic, fixed 5000-line source answers goto/references/completion at its last declaration; no wall-clock ratio is asserted |
 
@@ -222,19 +290,20 @@ three capabilities.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2832 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2845 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets -- --list` reports the same 2832 tests, so the count
-in this report is the count the suite actually contains. The gate reads its own
-harvested copy under `$RBOPS_ROOT/phases/phase-075/REPORT.md`; that copy was
-re-harvested from this report before the run, so the honesty step measured the
-2832 count this report records and reported a match.
+`cargo test --all-targets` ran 85 test binaries and reported 2845 passed, 0
+failed and 0 ignored. This is the actual count from the final round-2 gate run,
+including the ten tests added since the committed revision (the eight round-1
+fixtures and the two round-2 fixtures); the earlier `2843` table value was not
+what the suite reported.
 
 ## Invariants touched
 
 - None to the public `Value`, `Error`, grammar or `.rb` extension. The only public additions are new `redblue::lsp` items re-exported from `redblue`.
-- Scope modeling now follows the analyzer and the runtime together: an `if`/`unless` branch body is its own scope, but a `set` inside it writes through to an enclosing binding (or the program scope when the name is new), so it survives `end` while a function, object or import declared there does not. Each `test` body is scoped on its own because the harness runs it in an isolated VM; the previous attempt modeled both as shared, so a name could leak from one test to the next, and the restored isolation fixture pins that distinction. A `constant` always binds in the program scope (the test body's scope inside a `test`), and the catch scope closes when `finally` starts. No test from `main` was deleted or weakened.
+- Scope modeling now follows the analyzer and the runtime together: an `if`/`unless` branch body is its own scope, but a `set` inside it writes through to an enclosing binding (or the program scope when the name is new), so it survives `end` while a function, object or import declared there does not. Each `test` body is scoped on its own because the harness runs it in an isolated VM; the previous attempt modeled both as shared, so a name could leak from one test to the next, and the restored isolation fixture pins that distinction. A `constant` always binds in the program scope (the test body's scope inside a `test`), and the catch scope closes when `finally` starts.
+- A function and a variable of the same spelling share one slot in the runtime, so a later `set`, `constant` or `to` replaces a binding of another kind. Navigation now models that declaration order: the later declaration owns the following uses, while the earlier declaration keeps its own uses. An inner `set` over an outer function creates a local variable rather than writing through the function. No test from `main` was deleted or weakened.
 
 ## Known gaps / follow-ups
 
