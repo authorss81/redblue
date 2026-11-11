@@ -824,34 +824,120 @@ fn is_member_access(tokens: &[Token], index: usize) -> bool {
         .is_some_and(|token| matches!(token.kind, TokenKind::Dot))
 }
 
+/// The member tables a lookup searches, with the parent edges between objects.
+struct MemberTables<'a> {
+    fields: &'a HashMap<usize, HashMap<String, usize>>,
+    methods: &'a HashMap<usize, HashMap<String, usize>>,
+    parents: &'a HashMap<usize, usize>,
+}
+
+impl MemberTables<'_> {
+    /// Whether an object declares `name` in either of its own tables.
+    fn declares(&self, object: usize, name: &str) -> bool {
+        self.fields
+            .get(&object)
+            .is_some_and(|fields| fields.contains_key(name))
+            || self
+                .methods
+                .get(&object)
+                .is_some_and(|methods| methods.contains_key(name))
+    }
+
+    /// Whether a child that inherits from `object` declares `name` on itself.
+    ///
+    /// A method's body is written inside its own object, but the runtime
+    /// receiver can be a child that inherited the method, and the child's
+    /// copied table keeps its own entries ahead of every inherited one. When a
+    /// descendant declares `name`, the read's answer depends on which object
+    /// the method runs against, so navigation must not claim the lexical
+    /// object's declaration. Every child of `object` is checked along its own
+    /// chain, so a grandchild that overrides through an intermediate object
+    /// counts too.
+    fn descendant_overrides(&self, object: usize, name: &str) -> bool {
+        self.parents.keys().any(|child| {
+            let mut current = Some(*child);
+            let mut seen = HashSet::new();
+            while let Some(current_object) = current {
+                if current_object == object || !seen.insert(current_object) {
+                    break;
+                }
+                if self.declares(current_object, name) {
+                    return true;
+                }
+                current = self.parents.get(&current_object).copied();
+            }
+            false
+        })
+    }
+
+    /// The nearest entry for `name` in one table, walking the object's parent
+    /// chain.
+    ///
+    /// The runtime copies a parent's fields and methods into the child's own
+    /// tables, nearest declaration first, so a child member shadows the
+    /// same-named member of every ancestor. Navigation walks the chain instead
+    /// of copying it, which keeps the declaration span on the object that
+    /// actually wrote it. A malformed `extends` cycle stops at the first
+    /// object it revisits rather than looping forever.
+    fn nearest_in(
+        &self,
+        table: &HashMap<usize, HashMap<String, usize>>,
+        receiver: usize,
+        name: &str,
+    ) -> Option<usize> {
+        let mut current = Some(receiver);
+        let mut seen = HashSet::new();
+        while let Some(object) = current {
+            if !seen.insert(object) {
+                return None;
+            }
+            if let Some(binding) = table.get(&object).and_then(|members| members.get(name)) {
+                return Some(*binding);
+            }
+            current = self.parents.get(&object).copied();
+        }
+        None
+    }
+
+    /// The nearest entry for `name` over both tables, one table at a time. A
+    /// call searches the methods first and a read the fields, so the other
+    /// table only answers for objects that do not declare the name in the
+    /// preferred one.
+    fn nearest(&self, receiver: usize, name: &str, prefer_methods: bool) -> Option<usize> {
+        let (first, second) = if prefer_methods {
+            (self.methods, self.fields)
+        } else {
+            (self.fields, self.methods)
+        };
+        self.nearest_in(first, receiver, name)
+            .or_else(|| self.nearest_in(second, receiver, name))
+    }
+}
+
 /// The binding a member name resolves to through `receiver`.
 ///
 /// A member followed by `(` is a method call, so the object's methods answer
 /// before its fields; a bare member is a field access. Falling back to the
 /// other keeps a method name readable as a value and a callable field callable.
+/// Both searches walk the `extends` chain, because the runtime's object tables
+/// already contain the inherited members.
+///
+/// When the receiver is `this`, the runtime receiver is whichever object the
+/// method actually runs against, and a descendant that overrides `name`
+/// shadows the lexical object's answer — so a `this` read that could land on
+/// an override answers nothing rather than the ancestor's declaration.
 fn member_binding(
     tokens: &[Token],
     index: usize,
     receiver: usize,
-    object_fields: &HashMap<usize, HashMap<String, usize>>,
-    object_methods: &HashMap<usize, HashMap<String, usize>>,
+    receiver_is_this: bool,
+    tables: &MemberTables<'_>,
     name: &str,
 ) -> Option<usize> {
-    let field = object_fields
-        .get(&receiver)
-        .and_then(|fields| fields.get(name))
-        .copied();
-    let method = object_methods
-        .get(&receiver)
-        .and_then(|methods| methods.get(name))
-        .copied();
-    let is_call = call_follows(tokens, index);
-
-    if is_call {
-        method.or(field)
-    } else {
-        field.or(method)
+    if receiver_is_this && tables.descendant_overrides(receiver, name) {
+        return None;
     }
+    tables.nearest(receiver, name, call_follows(tokens, index))
 }
 
 /// Whether the name at `index` is followed by `(`, so it is a call rather than
@@ -994,6 +1080,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     let mut member_names: HashSet<usize> = HashSet::new();
     let mut object_fields: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     let mut object_methods: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    // A child binding to its parent binding, filled after the deferred name
+    // pass so the `extends` name has the binding the walk gave it.
+    let mut object_parents: HashMap<usize, usize> = HashMap::new();
     let mut this_objects: HashMap<usize, usize> = HashMap::new();
     let mut frames: Vec<Frame> = Vec::new();
     // Stack positions of the live `test` body scopes. A `test` runs in an
@@ -1560,13 +1649,21 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             TokenKind::This => frames.iter().rev().find_map(|frame| frame.object),
                             _ => token_binding[index - 2],
                         });
+                    let receiver_is_this = index
+                        .checked_sub(2)
+                        .and_then(|receiver| tokens.get(receiver))
+                        .is_some_and(|token| matches!(token.kind, TokenKind::This));
                     if let Some(receiver) = receiver {
                         token_binding[index] = member_binding(
                             &tokens,
                             index,
                             receiver,
-                            &object_fields,
-                            &object_methods,
+                            receiver_is_this,
+                            &MemberTables {
+                                fields: &object_fields,
+                                methods: &object_methods,
+                                parents: &object_parents,
+                            },
                             name,
                         );
                     }
@@ -1672,6 +1769,63 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             }
         }
 
+        // Attach each child to the binding its `extends` name resolved to, but
+        // only when the parent was already declared at the child's `object`
+        // token. The interpreter resolves the chain at declaration time against
+        // the objects the run has declared so far (`declare_object` refuses
+        // `Object 'x' extends 'y', which is not declared`), so the parent must
+        // be visible in the scopes enclosing the child: a parent written below
+        // its child is not an edge, and neither is one buried in a scope the
+        // child cannot see, such as an uncalled function body or an untaken
+        // `if`/`unless` branch — that object never reaches `context.objects`
+        // before the child's statement runs. An unknown parent has no entry and
+        // member lookup stops there.
+        for index in 0..tokens.len() {
+            if !matches!(
+                tokens.get(index).map(|token| &token.kind),
+                Some(TokenKind::Object)
+            ) || !matches!(
+                tokens.get(index + 2).map(|token| &token.kind),
+                Some(TokenKind::Extends)
+            ) {
+                continue;
+            }
+            let (Some(child), Some(parent)) = (
+                token_binding.get(index + 1).copied().flatten(),
+                token_binding.get(index + 3).copied().flatten(),
+            ) else {
+                continue;
+            };
+            if parent == child || bindings[parent].kind != DefinitionKind::Object {
+                continue;
+            }
+            if (
+                bindings[parent].location.line,
+                bindings[parent].location.column,
+            ) >= (
+                bindings[child].location.line,
+                bindings[child].location.column,
+            ) {
+                continue;
+            }
+            let visible = {
+                let mut scope = Some(binding_scopes[child]);
+                let mut found = false;
+                while let Some(scope_id) = scope {
+                    if binding_scopes[parent] == scope_id {
+                        found = true;
+                        break;
+                    }
+                    scope = scope_parents.get(scope_id).copied().flatten();
+                }
+                found
+            };
+            if !visible {
+                continue;
+            }
+            object_parents.insert(child, parent);
+        }
+
         // An object field used through a receiver declared below it could not
         // resolve during the walk, and a member read written before a later
         // field declaration could only see the same-named method. Now that
@@ -1687,22 +1841,32 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             let Some(name) = name_of(&tokens[index]) else {
                 continue;
             };
-            let receiver_binding = match &tokens[receiver].kind {
-                TokenKind::This => this_objects.get(&receiver).copied(),
-                _ => token_binding[receiver],
+            let receiver_is_this = matches!(&tokens[receiver].kind, TokenKind::This);
+            // A `this` receiver resolves through the object frame the method
+            // body sits in, not through the token's own binding.
+            let Some(receiver_object) = (if receiver_is_this {
+                this_objects.get(&receiver).copied()
+            } else {
+                token_binding[receiver]
+            }) else {
+                continue;
             };
-            if let Some(receiver) = receiver_binding {
-                if let Some(binding) = member_binding(
-                    &tokens,
-                    index,
-                    receiver,
-                    &object_fields,
-                    &object_methods,
-                    name,
-                ) {
-                    token_binding[index] = Some(binding);
-                }
-            }
+            // With both member tables and every parent edge complete the
+            // answer is definitive, so it replaces the walk's provisional
+            // one — including clearing it when a `this` read could land on
+            // a descendant override.
+            token_binding[index] = member_binding(
+                &tokens,
+                index,
+                receiver_object,
+                receiver_is_this,
+                &MemberTables {
+                    fields: &object_fields,
+                    methods: &object_methods,
+                    parents: &object_parents,
+                },
+                name,
+            );
         }
     }
 

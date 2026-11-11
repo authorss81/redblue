@@ -24,6 +24,8 @@
 | tests/tooling_grammar_test.rs | +23 −0 | one review test: a catch failure kind spelled `map` neither goes to nor joins the references of the `map` builtin, while the plain builtin use keeps its own reference set. |
 | src/lsp.rs | +47 −15 | round-2 review: a builtin use written before a later first `set` or function stays unbound so the builtin fallback answers, while a preceding declaration or a `constant`/`import` still claims the name; object fields no longer enter lexical scopes, matching the analyzer, and member accesses re-resolve after both member tables are complete so `this.name` still prefers a field declared after its method. |
 | tests/tooling_grammar_test.rs | +116 −15 | round-2 review tests: a builtin before a later `set abs` keeps the builtin definition and reference set while the variable keeps its own; a bare field read inside a method body has no binding while `this.name` resolves; a position past a line with a builtin and a later `set` is a clean error from all three capabilities; and the field-declared-after-its-method fixture now reads `this.name` and asserts the field's references include that member read. |
+| src/lsp.rs | +78 −10 | resumed run: member navigation follows `object Child extends Parent`. The parent name is attached only when it names an object already declared at the child's `object` token, because the interpreter refuses an undeclared parent at declaration time; `member_binding` walks the chain nearest-first, and the lookup guard stops at the first repeated object. A child declaration shadows the same-named ancestor, and `this.member` reads inherited fields. |
+| tests/tooling_grammar_test.rs | +228 −22 | seven navigation tests: inherited field goto/references, inherited method references, child-field shadowing with separate parent references, `this` reading an inherited field, a two-level `Child` → `Parent` → `GrandParent` field, a forward `extends` that does not bind because the runtime refuses it, and a malformed-position failure for all three capabilities. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -91,6 +93,24 @@ unknown name. Two existing runtime tests pin this contract
 declaring both is correct. The new navigation fixture asserts both spellings
 resolve to the import and keep separate references; no production code was
 changed for that finding.
+
+The resumed run reproduced the remaining navigation gap against the runtime:
+for
+`object Person` / `has age default 1` / `end` /
+`object Employee extends Person` / `end` / `say Employee.age`, the interpreter
+prints `1` because `declare_object` copies the parent's fields into the child,
+while `goto_definition` on `age` answered `None`. The same held for an
+inherited method. Member lookup now walks the `extends` chain nearest-first, so
+the declaration span stays on the ancestor that wrote it, a child field shadows
+the ancestor, and a two-level chain resolves a field declared on the
+grandparent. The parent edge is attached only when the parent object was
+already declared at the child's `object` token: `declare_object` resolves the
+chain at declaration time and rejects an undeclared parent
+(`src/interpreter.rs:3002-3006`), so a forward `extends` is not a parent in
+navigation either, and a self-reference is not an edge. The seven new fixtures
+pin each half, including `this.age` inside a child method, the grandparent
+field, the forward-parent refusal, and a clean out-of-bounds error from all
+three capabilities.
 
 ## Tests added
 
@@ -172,6 +192,13 @@ changed for that finding.
 | edge_goto_definition_on_whitespace_and_text_returns_none | boundary: whitespace and a text literal's body name no binding |
 | edge_navigation_rejects_line_zero_for_every_capability | out of bounds / malformed position: line 0 is a clean `Err` from goto, references and completion |
 | edge_syntax_names_do_not_answer_as_builtin_references | context awareness: a catch failure kind spelled like the `map` builtin is syntax, so goto answers `None` and references stay with the plain builtin use |
+| edge_goto_definition_resolves_an_inherited_field | inheritance: `Employee.age` resolves to `Person`'s `has age`, and both uses join one reference set |
+| edge_find_references_on_an_inherited_method_spans_the_parent_declaration | inheritance: `Employee.greet()` joins `Person`'s `to can greet` declaration |
+| edge_inherited_member_shadowing_prefers_the_child_declaration | duplicate names / inheritance: the child field shadows the parent field, and the parent keeps its own references |
+| edge_this_member_resolves_through_the_parent_chain | inheritance: `this.age` inside a child method resolves the ancestor's field |
+| edge_goto_definition_resolves_a_grandparent_field | inheritance: a two-level `Child` → `Parent` → `GrandParent` chain resolves the field on the grandparent and joins its references |
+| edge_extends_does_not_bind_a_parent_declared_after_the_child | malformed input: a forward `extends` matches the interpreter's refusal and answers `None` with no references |
+| edge_inherited_member_navigation_rejects_a_column_past_the_line | out of bounds: a column past the line is a clean `Err` from all three capabilities on an inheritance fixture |
 
 ### Mandatory edge-case matrix
 
@@ -195,13 +222,14 @@ changed for that finding.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2825 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2832 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets -- --list` reports the same 2825 tests, so the count
-in this report is the count the suite actually contains. The pipeline copy at
-`$RBOPS_ROOT/phases/phase-075/REPORT.md` is kept byte-identical to this one, so
-the gate's report-honesty step measures the same count this report records.
+`cargo test --all-targets -- --list` reports the same 2832 tests, so the count
+in this report is the count the suite actually contains. The gate reads its own
+harvested copy under `$RBOPS_ROOT/phases/phase-075/REPORT.md`; that copy was
+re-harvested from this report before the run, so the honesty step measured the
+2832 count this report records and reported a match.
 
 ## Invariants touched
 

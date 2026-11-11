@@ -2867,3 +2867,314 @@ fn edge_syntax_names_do_not_answer_as_builtin_references() {
         "the plain builtin use must not pick up the contextual catch kind"
     );
 }
+
+#[test]
+fn edge_goto_definition_resolves_an_inherited_field() {
+    let source = concat!(
+        "object Person\n",
+        "    has age default 1\n",
+        "end\n",
+        "object Employee extends Person\n",
+        "end\n",
+        "say Employee.age\n",
+    );
+
+    let found = goto_definition(source, 6, 14)
+        .expect("a position inside the file is valid")
+        .expect("an inherited field resolves through the parent object");
+
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (2, 9, "variable"),
+        "the field is declared on Person, not copied onto Employee"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 6, 14)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 9), (6, 14)],
+        "the declaration and the inherited read are one binding"
+    );
+}
+
+#[test]
+fn edge_find_references_on_an_inherited_method_spans_the_parent_declaration() {
+    let source = concat!(
+        "object Person\n",
+        "    to can greet(name)\n",
+        "        give back name\n",
+        "    end\n",
+        "end\n",
+        "object Employee extends Person\n",
+        "end\n",
+        "say Employee.greet(\"Ada\")\n",
+    );
+
+    let found = goto_definition(source, 8, 14)
+        .expect("a position inside the file is valid")
+        .expect("an inherited method resolves through the parent object");
+
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (2, 12, "function"),
+        "the method declaration stays on Person"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 8, 14)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 12), (8, 14)],
+        "the inherited call joins the method declaration"
+    );
+}
+
+#[test]
+fn edge_inherited_member_shadowing_prefers_the_child_declaration() {
+    let source = concat!(
+        "object Person\n",
+        "    has name default \"parent\"\n",
+        "end\n",
+        "object Employee extends Person\n",
+        "    has name default \"child\"\n",
+        "end\n",
+        "say Employee.name\n",
+    );
+
+    let child = goto_definition(source, 7, 14)
+        .expect("a position inside the file is valid")
+        .expect("the child field shadows the parent field");
+    assert_eq!(
+        (child.line, child.column),
+        (5, 9),
+        "the nearest declaration wins, as the runtime's copied table does"
+    );
+
+    let child_references: Vec<(usize, usize)> = find_references(source, 7, 14)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        child_references,
+        vec![(5, 9), (7, 14)],
+        "the shadowed child field keeps its own reference set"
+    );
+
+    let parent_references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        parent_references,
+        vec![(2, 9)],
+        "the parent field must not absorb the child's declaration or read"
+    );
+}
+
+#[test]
+fn edge_this_member_resolves_through_the_parent_chain() {
+    let source = concat!(
+        "object Person\n",
+        "    has age default 1\n",
+        "end\n",
+        "object Employee extends Person\n",
+        "    to can describe()\n",
+        "        give back this.age\n",
+        "    end\n",
+        "end\n",
+    );
+
+    let found = goto_definition(source, 6, 24)
+        .expect("a position inside the file is valid")
+        .expect("`this.age` resolves the inherited field through the child");
+
+    assert_eq!(
+        (found.line, found.column),
+        (2, 9),
+        "the member read resolves to the ancestor that declared the field"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 6, 24)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 9), (6, 24)],
+        "`this.age` joins the field declaration it reads"
+    );
+}
+
+#[test]
+fn edge_extends_does_not_bind_a_parent_declared_after_the_child() {
+    let source = concat!(
+        "object Employee extends Person\n",
+        "end\n",
+        "object Person\n",
+        "    has age default 1\n",
+        "end\n",
+        "say Employee.age\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 6, 14).expect("a position inside the file is valid"),
+        None,
+        "the interpreter refuses a parent declared after its child, so navigation must not inherit from it"
+    );
+    assert!(
+        find_references(source, 6, 14)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a forward `extends` is not a parent binding, so the member has no references"
+    );
+}
+
+#[test]
+fn edge_goto_definition_resolves_a_grandparent_field() {
+    let source = concat!(
+        "object GrandParent\n",
+        "    has id default 7\n",
+        "end\n",
+        "object Parent extends GrandParent\n",
+        "end\n",
+        "object Child extends Parent\n",
+        "end\n",
+        "say Child.id\n",
+    );
+
+    let found = goto_definition(source, 8, 11)
+        .expect("a position inside the file is valid")
+        .expect("a field two levels up resolves through the whole parent chain");
+
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (2, 9, "variable"),
+        "the field stays on GrandParent rather than moving to Parent or Child"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 8, 11)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 9), (8, 11)],
+        "a grandchild read joins the grandparent declaration"
+    );
+}
+
+#[test]
+fn edge_inherited_member_navigation_rejects_a_column_past_the_line() {
+    let source = concat!(
+        "object Person\n",
+        "    has age default 1\n",
+        "end\n",
+        "object Employee extends Person\n",
+        "end\n",
+        "say Employee.age\n",
+    );
+
+    assert!(
+        goto_definition(source, 6, 99).is_err(),
+        "a column past the line is not a source position for goto-definition"
+    );
+    assert!(
+        find_references(source, 6, 99).is_err(),
+        "a column past the line is not a source position for find-references"
+    );
+    assert!(
+        completions(source, 6, 99).is_err(),
+        "a column past the line is not a source position for completion"
+    );
+}
+
+#[test]
+fn edge_extends_does_not_bind_a_parent_inside_an_uncalled_function() {
+    let source = concat!(
+        "to make()\n",
+        "    object Person\n",
+        "        has age default 1\n",
+        "    end\n",
+        "end\n",
+        "object Employee extends Person\n",
+        "end\n",
+        "say Employee.age\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 8, 14).expect("a position inside the file is valid"),
+        None,
+        "the interpreter refuses a parent no call has declared, so navigation must not inherit from it"
+    );
+    assert!(
+        find_references(source, 8, 14)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a parent buried in an uncalled function is not a parent binding, so the member has no references"
+    );
+}
+
+#[test]
+fn edge_extends_does_not_bind_a_parent_inside_an_untaken_branch() {
+    let source = concat!(
+        "if no then\n",
+        "    object Person\n",
+        "        has age default 1\n",
+        "    end\n",
+        "end\n",
+        "object Employee extends Person\n",
+        "end\n",
+        "say Employee.age\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 8, 14).expect("a position inside the file is valid"),
+        None,
+        "the interpreter refuses a parent no run has declared, so navigation must not inherit from it"
+    );
+    assert!(
+        find_references(source, 8, 14)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a parent buried in an untaken branch is not a parent binding, so the member has no references"
+    );
+}
+
+#[test]
+fn edge_this_read_does_not_claim_a_field_a_child_overrides() {
+    let source = concat!(
+        "object Person\n",
+        "    has age default 1\n",
+        "    to can describe()\n",
+        "        give back this.age\n",
+        "    end\n",
+        "end\n",
+        "object Child extends Person\n",
+        "    has age default 2\n",
+        "end\n",
+        "say Child.describe()\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 4, 24).expect("a position inside the file is valid"),
+        None,
+        "the method runs against Child, whose own age shadows Person's, so the read must not claim Person's field"
+    );
+    assert!(
+        find_references(source, 4, 24)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a read whose binding depends on the runtime receiver claims no single declaration"
+    );
+}
