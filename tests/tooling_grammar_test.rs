@@ -951,6 +951,213 @@ fn edge_completions_inside_string_literal_are_empty() {
 }
 
 #[test]
+fn edge_completions_inside_an_interpolation_offer_expression_names() {
+    let source = "set greeting to \"hi\"\nsay \"message: {greeting}\"\n";
+
+    let offered = completions(source, 2, 16).expect("the position is inside the file");
+
+    assert!(
+        offered.contains(&"greeting".to_string()),
+        "the interpolated expression is code, so its scope names must be offered, got {offered:?}"
+    );
+    assert!(
+        offered.contains(&"uppercase".to_string()),
+        "a builtin is callable inside an interpolation, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"say".to_string()) && !offered.contains(&"set".to_string()),
+        "a statement keyword cannot start an interpolated expression, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_outside_an_interpolation_in_the_same_literal_are_empty() {
+    let source = "say \"hi {greeting}\"\n";
+
+    let before = completions(source, 1, 8).expect("the position is inside the file");
+    assert!(
+        before.is_empty(),
+        "text before an interpolation is still text, got {before:?}"
+    );
+
+    let after = completions("say \"a {greeting} b\"\n", 1, 19)
+        .expect("the position after the closing brace is inside the file");
+    assert!(
+        after.is_empty(),
+        "text after an interpolation is still text, got {after:?}"
+    );
+}
+
+#[test]
+fn edge_completions_inside_an_interpolation_do_not_offer_later_declarations() {
+    let source = "say \"value {name}\"\nset name to 1\n";
+
+    let offered = completions(source, 1, 13).expect("the position is inside the file");
+
+    assert!(
+        !offered.contains(&"name".to_string()),
+        "a declaration below the caret is not yet in scope, got {offered:?}"
+    );
+    assert!(
+        offered.contains(&"nothing".to_string()),
+        "literal keywords are valid in an expression, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_inside_an_interpolation_reject_a_malformed_position() {
+    let source = "say \"{value}\"\n";
+
+    let result = completions(source, 1, 999);
+
+    assert!(
+        result.is_err(),
+        "a column past the line must be a clean error, got {result:?}"
+    );
+}
+
+#[test]
+fn edge_completions_inside_balanced_braces_that_are_not_an_expression_are_empty() {
+    let source = "set obj to json.parse(\"{ \\\"name\\\": \\\"Alice\\\" }\")\n";
+    let column = source.find("name").expect("the JSON key is in the source") + 1;
+
+    let offered = completions(source, 1, column).expect("the position is inside the file");
+
+    assert!(
+        offered.is_empty(),
+        "a JSON object in a string is text to the parser, so completion must offer nothing, \
+         got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_inside_json_text_with_a_member_dot_are_empty() {
+    let source = concat!(
+        "object Person\n",
+        "    has name default \"Ada\"\n",
+        "end\n",
+        "say \"{ \\\"a\\\": Person. }\"\n",
+    );
+    let line = source
+        .lines()
+        .nth(3)
+        .expect("the say line is on the fourth line");
+    let column = line
+        .find("Person.")
+        .expect("the JSON text has a receiver-shaped tail")
+        + "Person.".len()
+        + 1;
+
+    let offered = completions(source, 4, column).expect("the position is inside the file");
+
+    assert!(
+        offered.is_empty(),
+        "a JSON document with a receiver-shaped tail is still text, not interpolation, \
+         got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_inside_an_interpolation_offer_this() {
+    let source = concat!(
+        "object Person\n",
+        "    has name default \"Ada\"\n",
+        "    to introduce()\n",
+        "        say \"I'm {this}\"\n",
+        "    end\n",
+        "end\n",
+    );
+    let column = source
+        .lines()
+        .nth(3)
+        .expect("the method body is on the fourth line")
+        .find("this")
+        .expect("the interpolation names this")
+        + 1;
+
+    let offered = completions(source, 4, column).expect("the position is inside the file");
+
+    assert!(
+        offered.contains(&"this".to_string()),
+        "`this` is a keyword a method may write in an expression, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_after_a_member_dot_inside_an_interpolation_offer_members() {
+    let source = concat!(
+        "object Person\n",
+        "    has name default \"Ada\"\n",
+        "    to introduce()\n",
+        "        say \"I'm {this.}\"\n",
+        "    end\n",
+        "end\n",
+    );
+    let line = source
+        .lines()
+        .nth(3)
+        .expect("the method body is on the fourth line");
+    let column = line
+        .find("this.")
+        .expect("the interpolation has a member slot")
+        + 6;
+
+    let offered = completions(source, 4, column).expect("the position is inside the file");
+
+    assert!(
+        offered.contains(&"name".to_string()),
+        "the enclosing object's field must be offered after the dot, got {offered:?}"
+    );
+    assert!(
+        offered.contains(&"introduce".to_string()),
+        "the enclosing object's method must be offered after the dot, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"abs".to_string()),
+        "a member slot must not fall back to the lexical registry, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_inside_a_nested_literal_in_an_interpolation_are_empty() {
+    let source = concat!(
+        "set greeting to \"hi\"\n",
+        "say \"x {uppercase(\\\"hi\\\")}\"\n",
+    );
+    let line = source
+        .lines()
+        .nth(1)
+        .expect("the say line is on the second line");
+    let column = line.find("hi").expect("the nested literal has text in it") + 1;
+
+    let offered = completions(source, 2, column).expect("the position is inside the file");
+
+    assert!(
+        offered.is_empty(),
+        "a nested text literal inside an interpolation is text, not code, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_completions_treat_unicode_escaped_braces_as_interpolation() {
+    let source = "set name to 1\nsay \"\\u007Bname}\"\n";
+    let column = source
+        .lines()
+        .nth(1)
+        .expect("the say line is on the second line")
+        .find("name")
+        .expect("the interpolation names the variable")
+        + 1;
+
+    let offered = completions(source, 2, column).expect("the position is inside the file");
+
+    assert!(
+        offered.contains(&"name".to_string()),
+        "an escaped `{{` is still an interpolation brace to the parser, got {offered:?}"
+    );
+}
+
+#[test]
 fn edge_completions_inside_line_comment_are_empty() {
     let source = "set value to 1\nsay value // a note here\n";
 

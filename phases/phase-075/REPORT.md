@@ -44,6 +44,9 @@
 | tests/tooling_grammar_test.rs | +130 −0 | four final round-1 review tests: two same-named module declarations keep their own functions; a `set` and a `constant` that shadow a module function do not navigate to the stale `to`; and a bare module-member read resolves to the published function and joins its references. |
 | src/lsp.rs | +42 −10 | round-2 review fixes: a `set` or `constant` inside a nested block removes the replaced module function by finding the innermost runtime frame's module rather than looking only at the top frame, and an `import` records the module binding it named at its own site, so an alias written before a later same-named module keeps the earlier module's functions and completed members. |
 | tests/tooling_grammar_test.rs | +99 −0 | three round-2 review tests: a nested branch's `set`/`constant` drops the stale module function; an alias between two same-named modules resolves and completes from the module its import named, not the later declaration. |
+| src/lsp.rs | +260 −0 | resumed run and round-1 review: completion inside a `{…}` text interpolation. The literal is decoded first, so `\u007B`/`\u007D` are braces to the LSP exactly as they are to the lexer; a pair is interpolation only when its contents re-parse as one complete expression, so a JSON object in a string stays text; `this` is offered as an expression keyword; and a `receiver.member` slot inside a pair is re-analyzed in the literal's enclosing scopes so it answers the object's or module's members rather than a flat lexical list. Text outside a pair, and a closed pair, still answer nothing. |
+| tests/tooling_grammar_test.rs | +160 −0 | eight interpolation tests: scope and builtins with no statement keywords; text before and after a pair in the same literal; a later declaration not offered above the caret; a malformed column/line producing a clean `Err`; JSON braces that are not an expression stay text; `this` is offered; `{this.}` offers the object's members; and a `\u007B` escape opens an interpolation. |
+| src/parser.rs | +18 −1 | round-1 review: `is_complete_expression` and a crate-visible `unmatched_opens` expose the parser's own interpolation rule, so the LSP asks the same question instead of trusting brace balance alone. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -341,6 +344,14 @@ replacement, the alias between same-named modules and its completed members.
 | edge_aliased_same_named_module_declaration_keeps_the_imported_modules_functions | duplicate names / import alias: an alias between two `module M` declarations resolves and joins the module its import named, not the later declaration |
 | edge_completions_after_a_same_named_module_alias_keep_the_imported_modules_members | duplicate names / completion: a same-named module declared after an import does not change the members its alias offers |
 | edge_bare_module_member_read_resolves_to_the_published_function | module navigation: a bare `M.f` read resolves to the published function and joins its declaration and export references |
+| edge_completions_inside_an_interpolation_offer_expression_names | context awareness: `{…}` inside text is code, so scope names and builtins are offered while statement keywords are not |
+| edge_completions_outside_an_interpolation_in_the_same_literal_are_empty | context awareness / boundary: text before and after a balanced pair in the same literal is still text |
+| edge_completions_inside_an_interpolation_do_not_offer_later_declarations | scope / declaration order: a declaration below the caret is not in scope above it |
+| edge_completions_inside_an_interpolation_reject_a_malformed_position | out of bounds / failure: a column past the line is a clean `Err`, never a panic |
+| edge_completions_inside_balanced_braces_that_are_not_an_expression_are_empty | context awareness: a JSON object in a string is text to the parser, so completion stays empty |
+| edge_completions_inside_an_interpolation_offer_this | context awareness: `this` is an expression keyword a method may write, so it is offered inside a pair |
+| edge_completions_after_a_member_dot_inside_an_interpolation_offer_members | context awareness / member completion: `{this.}` offers the enclosing object's fields and methods, not the lexical registry |
+| edge_completions_treat_unicode_escaped_braces_as_interpolation | Unicode / escapes: `\u007B` opens an interpolation exactly as the lexer reads it |
 
 ### Mandatory edge-case matrix
 
@@ -358,18 +369,31 @@ replacement, the alias between same-named modules and its completed members.
 | malformed_input | covered by `edge_malformed_source_returns_errors_not_panics` (unterminated string surfaces `Err` from all three) and by `malformed_positions_are_clean_errors_not_panics`; comment/string context checks cover `//` inside text |
 | resource_limit | covered by `edge_navigation_resolves_a_binding_after_five_thousand_lines`: a deterministic, fixed 5000-line source answers goto/references/completion at its last declaration; no wall-clock ratio is asserted |
 
+The round-1 review found four gaps in interpolation completion. A balanced
+`{…}` is not enough to make text code: the parser only treats it as a
+substitution when the inner text re-parses as one complete expression, so the
+JSON document in `json.parse("{ \"name\": \"Alice\" }")` stays text. The
+LSP now calls the parser's own `is_complete_expression` rule over the decoded
+literal, which also makes `\u007B` and `\u007D` braces match the lexer's view.
+`this` joined the expression keywords so the SPEC's `say "I'm {this.name}"`
+can be completed. Finally, a member slot inside a pair is re-analyzed as the
+decoded expression in a copy of the source, which keeps the enclosing method,
+object and module scopes and lets `{this.}`, `{person.}` and `{files.}` answer
+their members. The four new fixtures pin each half, including the JSON case that
+would otherwise be offered the lexical registry.
+
 ## Gates
 
 | Gate | Result |
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2867 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2875 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets` ran 85 test binaries and reported 2867 passed, 0
-failed and 0 ignored. That is the count from the round-2 review run's full
-gate, including the three round-2 review fixtures added now.
+`cargo test --all-targets` ran 85 test binaries and reported 2875 passed, 0
+failed and 0 ignored. That is the count from the resumed run's full gate plus
+the four round-1 review fixtures added now.
 
 ## Invariants touched
 
@@ -380,5 +404,5 @@ gate, including the three round-2 review fixtures added now.
 ## Known gaps / follow-ups
 
 - The functions implement capabilities only; the LSP transport/server loop remains phase-017 scaffolding by design.
-- Completion recognises an object or standard-module member slot, but goto-definition and find-references still do not look inside a `{…}` string interpolation, because those names are part of one text token rather than identifiers in the main token stream. Completion inside an interpolation also remains empty. This is recorded here rather than widened into this phase.
+- Completion now answers inside a `{…}` string interpolation, but goto-definition and find-references still do not look inside one: those names are part of one text token rather than identifiers in the main token stream, and resolving them would need a separate sub-analysis mapped back onto the literal. This is recorded here rather than widened into this phase.
 - Completion enumerates a program-declared module (and an `import` of it) because its `module … end` body is in the source text the navigation functions receive. A module loaded from a separate file has no declarations in that text, so these pure-source functions cannot enumerate its members; `Vm::module_member_values` can do so once the runtime has loaded the file. Reading module files here would make completion depend on the working directory rather than only on the source, so it is recorded as a follow-up instead.

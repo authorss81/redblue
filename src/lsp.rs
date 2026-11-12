@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::Error;
 use crate::lexer::{Lexer, Token, TokenKind, KEYWORDS};
+use crate::parser::{is_complete_expression, unmatched_opens};
 use crate::stdlib::{is_module, BUILTIN_NAMES, MODULES, MODULE_MEMBERS};
 
 /// Where the generated grammar is checked in. Nothing has to be built to make
@@ -2484,13 +2485,43 @@ pub fn find_references_json(source: &str, line: usize, column: usize) -> Result<
 /// `line:column`, sorted and deduplicated.
 ///
 /// Inside a string literal no code can be written, so the answer is empty
-/// rather than a list of words that would all be text.
+/// rather than a list of words that would all be text. The exception is a
+/// `{…}` interpolation, whose contents the parser reads as an expression: there
+/// the answer is that expression's names, or a receiver's members. A nested
+/// text literal inside such an expression is text again.
 pub fn completions(source: &str, line: usize, column: usize) -> Result<Vec<String>, String> {
     let map = SourceMap::new(source);
     let offset = map.validate(line, column)?;
     let analysis = analyze(source, Some(offset))?;
 
     if inside_text(&analysis.tokens, &map, offset) || inside_comment(&map, offset) {
+        if let Some(literal) = text_literal_at(&analysis.tokens, &map, offset) {
+            if let Some(interpolation) = interpolation_at(&literal, offset) {
+                if inside_nested_text(&literal, &interpolation, offset) {
+                    return Ok(Vec::new());
+                }
+                if let Some(members) =
+                    interpolation_member_completions(&map, &literal, &interpolation, offset)
+                {
+                    return Ok(members);
+                }
+                return Ok(interpolation_completions(&analysis));
+            }
+            // A `receiver.` member slot being typed inside a balanced pair is
+            // still completion even when the expression after the dot is not
+            // written yet. The parser would keep the pair as text until the
+            // expression is complete; the editor can already name its members.
+            if let Some(interpolation) = interpolation_candidate(&literal, offset) {
+                if inside_nested_text(&literal, &interpolation, offset) {
+                    return Ok(Vec::new());
+                }
+                if let Some(members) =
+                    interpolation_member_completions(&map, &literal, &interpolation, offset)
+                {
+                    return Ok(members);
+                }
+            }
+        }
         return Ok(Vec::new());
     }
 
@@ -2668,6 +2699,301 @@ pub fn completions_json(source: &str, line: usize, column: usize) -> Result<Stri
         column,
         rendered.join(","),
     ))
+}
+
+/// A text literal's decoded contents and the source offset each character came
+/// from. The parser decides interpolation on the decoded text, so tooling has
+/// to see `\u007B` as `{` too.
+struct TextLiteral {
+    /// The source offset of the opening quote.
+    start: usize,
+    /// The source offset of the closing quote.
+    end: usize,
+    /// The literal's text with every escape decoded.
+    chars: Vec<char>,
+    /// The source offset of each decoded character's first character.
+    sources: Vec<usize>,
+}
+
+impl TextLiteral {
+    /// How many decoded characters precede `offset`.
+    fn caret_index(&self, offset: usize) -> usize {
+        self.sources
+            .iter()
+            .take_while(|&&source| source < offset)
+            .count()
+    }
+}
+
+/// The text literal holding `offset`, decoded the way the lexer reads it.
+fn text_literal_at(tokens: &[Token], map: &SourceMap, offset: usize) -> Option<TextLiteral> {
+    tokens.iter().find_map(|token| {
+        if !matches!(token.kind, TokenKind::Text(_)) {
+            return None;
+        }
+        let start = map.offset(token.line, token.column);
+        let literal = decode_text_literal(map, start)?;
+        (offset >= literal.start && offset <= literal.end).then_some(literal)
+    })
+}
+
+/// Decodes the text literal whose opening quote is at `start`, recording where
+/// each decoded character was written so the caret can be mapped back to it.
+fn decode_text_literal(map: &SourceMap, start: usize) -> Option<TextLiteral> {
+    let chars = &map.chars;
+    let mut decoded = Vec::new();
+    let mut sources = Vec::new();
+    let mut cursor = start + 1;
+
+    while cursor < chars.len() {
+        match chars[cursor] {
+            '"' => {
+                return Some(TextLiteral {
+                    start,
+                    end: cursor,
+                    chars: decoded,
+                    sources,
+                });
+            }
+            '\\' => {
+                let escape = cursor;
+                cursor += 1;
+                let escaped = *chars.get(cursor)?;
+                let decoded_char = match escaped {
+                    'n' => {
+                        cursor += 1;
+                        '\n'
+                    }
+                    't' => {
+                        cursor += 1;
+                        '\t'
+                    }
+                    'r' => {
+                        cursor += 1;
+                        '\r'
+                    }
+                    '\\' => {
+                        cursor += 1;
+                        '\\'
+                    }
+                    '"' => {
+                        cursor += 1;
+                        '"'
+                    }
+                    'u' => {
+                        let mut value = 0u32;
+                        let mut index = cursor + 1;
+                        for _ in 0..4 {
+                            value = value * 16 + chars.get(index)?.to_digit(16)?;
+                            index += 1;
+                        }
+                        cursor = index;
+                        char::from_u32(value)?
+                    }
+                    _ => return None,
+                };
+                decoded.push(decoded_char);
+                sources.push(escape);
+            }
+            c => {
+                decoded.push(c);
+                sources.push(cursor);
+                cursor += 1;
+            }
+        }
+    }
+
+    None
+}
+
+/// The brace pair the parser treats as an interpolation at `offset`.
+#[derive(Clone, Copy)]
+struct Interpolation {
+    /// The decoded index of the opening `{`.
+    open: usize,
+    /// The decoded index of the matching `}`.
+    close: usize,
+}
+
+/// The matching `}` of the `{` at `open`, counted exactly as
+/// [`crate::parser::Parser`] counts braces inside a text literal.
+fn matching_close(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut scan = open + 1;
+    while scan < chars.len() && depth > 0 {
+        match chars[scan] {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        if depth > 0 {
+            scan += 1;
+        }
+    }
+    (depth == 0).then_some(scan)
+}
+
+/// The innermost balanced pair at `offset` that could still become an
+/// interpolation once the member name being typed after its dot is finished.
+///
+/// A balanced pair alone is not enough: the parser keeps a pair as text unless
+/// its contents read as one whole expression. Treating the missing member name
+/// as written is what lets `{this.}` offer members before the name exists;
+/// anything else, such as a JSON document with a receiver-shaped tail, stays
+/// text.
+fn interpolation_candidate(literal: &TextLiteral, offset: usize) -> Option<Interpolation> {
+    let caret = literal.caret_index(offset);
+    let unmatched = unmatched_opens(&literal.chars);
+    let mut found = None;
+
+    for (open, (&ch, &unmatched)) in literal.chars.iter().zip(&unmatched).enumerate() {
+        if ch != '{' || unmatched {
+            continue;
+        }
+        let Some(close) = matching_close(&literal.chars, open) else {
+            continue;
+        };
+        if !(open < caret && caret <= close) {
+            continue;
+        }
+        let interpolation = Interpolation { open, close };
+        if could_become_interpolation(literal, &interpolation) {
+            found = Some(interpolation);
+        }
+    }
+
+    found
+}
+
+/// Whether the pair could be a substitution once a member name that is still
+/// being typed is treated as complete.
+fn could_become_interpolation(literal: &TextLiteral, interpolation: &Interpolation) -> bool {
+    let inner: String = literal.chars[interpolation.open + 1..interpolation.close]
+        .iter()
+        .collect();
+    if is_complete_expression(&inner) {
+        return true;
+    }
+    let trimmed = inner.trim_end();
+    if !trimmed.ends_with('.') {
+        return false;
+    }
+    is_complete_expression(&format!("{trimmed}placeholder"))
+}
+
+/// Whether `offset` falls inside a quoted text literal written in the decoded
+/// expression of `interpolation`.
+///
+/// The outer literal is already decoded, so the quotes that delimit a nested
+/// literal appear as ordinary `"` characters here. A caret at or between them
+/// is inside text, not code, even though the enclosing interpolation is a valid
+/// expression.
+fn inside_nested_text(literal: &TextLiteral, interpolation: &Interpolation, offset: usize) -> bool {
+    let caret = literal.caret_index(offset);
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut index = interpolation.open + 1;
+
+    while index < interpolation.close {
+        let ch = literal.chars[index];
+        if index == caret {
+            return quoted || ch == '"';
+        }
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        }
+        index += 1;
+    }
+
+    false
+}
+
+/// The innermost brace pair at `offset` whose contents re-parse as one complete
+/// expression, which is the parser's own rule for interpolation.
+///
+/// A balanced pair holding a JSON document, `{ "name": "Alice" }`, is text to
+/// the parser and stays text here.
+fn interpolation_at(literal: &TextLiteral, offset: usize) -> Option<Interpolation> {
+    let caret = literal.caret_index(offset);
+    let unmatched = unmatched_opens(&literal.chars);
+    let mut found = None;
+
+    for (open, (&ch, &unmatched)) in literal.chars.iter().zip(&unmatched).enumerate() {
+        if ch != '{' || unmatched {
+            continue;
+        }
+        let Some(close) = matching_close(&literal.chars, open) else {
+            continue;
+        };
+        if !(open < caret && caret <= close) {
+            continue;
+        }
+        let inner: String = literal.chars[open + 1..close].iter().collect();
+        if is_complete_expression(&inner) {
+            found = Some(Interpolation { open, close });
+        }
+    }
+
+    found
+}
+
+/// Completion for a `receiver.member` slot written inside an interpolation.
+///
+/// The main token stream holds the whole literal as one text token, so the
+/// receiver cannot be resolved there. Re-analyze a copy of the source with the
+/// literal replaced by the interpolation's decoded expression; that keeps the
+/// enclosing scopes, objects and modules, and puts the receiver's tokens where
+/// [`member_completions`] can resolve them.
+fn interpolation_member_completions(
+    map: &SourceMap,
+    literal: &TextLiteral,
+    interpolation: &Interpolation,
+    offset: usize,
+) -> Option<Vec<String>> {
+    let caret = literal.caret_index(offset);
+    let inner_start = interpolation.open + 1;
+    if caret < inner_start || caret > interpolation.close {
+        return None;
+    }
+
+    let mut synthetic: Vec<char> = Vec::with_capacity(map.chars.len());
+    synthetic.extend_from_slice(&map.chars[..literal.start]);
+    synthetic.extend_from_slice(&literal.chars[inner_start..interpolation.close]);
+    synthetic.extend_from_slice(&map.chars[literal.end + 1..]);
+    let source: String = synthetic.into_iter().collect();
+    let synthetic_offset = literal.start + (caret - inner_start);
+    let synthetic_map = SourceMap::new(&source);
+    let full = analyze(&source, None).ok()?;
+    member_slot(&full, &synthetic_map, synthetic_offset)?;
+    Some(member_completions(&full, &synthetic_map, synthetic_offset).unwrap_or_default())
+}
+
+/// Completion for the expression written inside a text interpolation.
+///
+/// Only what an expression can use is offered: the names in scope, builtins,
+/// modules and constants, and the operator/literal keywords. A statement
+/// keyword such as `say`, `set` or `end` cannot start an interpolated
+/// expression, so it is not offered in a position that is code inside text.
+/// `this` is a keyword rather than a lexical name, but a method may write it
+/// in an expression, so it is offered too.
+fn interpolation_completions(analysis: &Analysis) -> Vec<String> {
+    const EXPRESSION_KEYWORDS: &[&str] = &[
+        "and", "is", "mod", "no", "not", "nothing", "or", "this", "yes",
+    ];
+
+    let mut names = analysis.visible.clone();
+    names.extend(EXPRESSION_KEYWORDS.iter().map(|word| (*word).to_string()));
+    names.extend(BUILTIN_NAMES.iter().map(|name| (*name).to_string()));
+    names.extend(MODULES.iter().map(|name| (*name).to_string()));
+    names.push("PI".to_string());
+    names.push("E".to_string());
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Whether `offset` falls inside a string literal's source text.
