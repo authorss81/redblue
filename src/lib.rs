@@ -38,8 +38,9 @@ use testing::reporter::Reporter;
 pub use error::{Error, Span};
 pub use failure::{value_of as failure_value, FailureKind};
 pub use lsp::{
-    diagnostics, diagnostics_json, diagnostics_to_json, textmate_grammar, Diagnostic, Severity,
-    GRAMMAR_PATH, LANGUAGE_CONFIG_PATH,
+    completions, completions_json, diagnostics, diagnostics_json, diagnostics_to_json,
+    find_references, find_references_json, goto_definition, goto_definition_json, textmate_grammar,
+    Definition, DefinitionKind, Diagnostic, Location, Severity, GRAMMAR_PATH, LANGUAGE_CONFIG_PATH,
 };
 // `FunctionValue` is re-exported because it is the payload of the public
 // `Value::Function` variant: a caller that matches that variant has to be able
