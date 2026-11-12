@@ -3915,3 +3915,351 @@ fn edge_member_completion_rejects_a_position_past_the_line() {
         "a column past the line must be a clean error even in a member slot"
     );
 }
+
+#[test]
+fn edge_goto_definition_on_a_declared_module_member_resolves_to_its_declaration() {
+    let source = concat!(
+        "module MathUtils\n",
+        "    to circle_area(r)\n",
+        "        give back r * r\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "say MathUtils.circle_area(2)\n",
+    );
+
+    let found = goto_definition(source, 7, 15)
+        .expect("a position inside the file is valid")
+        .expect("a call to a declared module's exported function names its declaration");
+
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (2, 8, "function"),
+        "the member call must point at the `to` name inside the module, not at the receiver"
+    );
+    assert_eq!(found.name, "circle_area");
+}
+
+#[test]
+fn edge_find_references_on_a_declared_module_member_spans_every_use() {
+    let source = concat!(
+        "module MathUtils\n",
+        "    to circle_area(r)\n",
+        "        give back r * r\n",
+        "    end\n",
+        "    to twice(r)\n",
+        "        give back circle_area(r) + circle_area(r)\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "import MathUtils as M\n",
+        "say M.circle_area(2)\n",
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 2, 8)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+
+    assert_eq!(
+        references,
+        vec![(2, 8), (6, 19), (6, 36), (11, 7)],
+        "the declaration, both bare calls and the aliased member call share one binding"
+    );
+}
+
+#[test]
+fn edge_declared_module_member_navigation_respects_export() {
+    let source = concat!(
+        "module MathUtils\n",
+        "    to circle_area(r)\n",
+        "        give back r * r\n",
+        "    end\n",
+        "    to hidden()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export circle_area\n",
+        "end\n",
+        "say MathUtils.hidden()\n",
+        "say MathUtils.circle_area(2)\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 10, 15).expect("a position inside the file is valid"),
+        None,
+        "a name the export leaves out is not published, so it has no declaration to jump to"
+    );
+    assert!(
+        find_references(source, 10, 15)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "an unexported member is not a reference target"
+    );
+
+    let published = goto_definition(source, 11, 15)
+        .expect("a position inside the file is valid")
+        .expect("the exported member still resolves");
+    assert_eq!(
+        (published.line, published.column),
+        (2, 8),
+        "an explicit export publishes the function it names"
+    );
+}
+
+#[test]
+fn edge_declared_module_member_navigation_rejects_a_malformed_position() {
+    let source = concat!(
+        "module MathUtils\n",
+        "    to circle_area(r)\n",
+        "        give back r * r\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "say MathUtils.circle_area(2)\n",
+    );
+
+    for (line, column) in [(0, 1), (7, 99), (99, 1)] {
+        assert!(
+            goto_definition(source, line, column).is_err(),
+            "goto_definition must reject {line}:{column} with an error"
+        );
+        assert!(
+            find_references(source, line, column).is_err(),
+            "find_references must reject {line}:{column} with an error"
+        );
+        assert!(
+            completions(source, line, column).is_err(),
+            "completions must reject {line}:{column} with an error"
+        );
+    }
+}
+
+#[test]
+fn edge_same_named_module_declarations_keep_their_own_functions() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export f\n",
+        "end\n",
+        "say M.f()\n",
+        "module M\n",
+        "    to f()\n",
+        "        give back 2\n",
+        "    end\n",
+        "    export f\n",
+        "end\n",
+        "say M.f()\n",
+    );
+
+    let first = goto_definition(source, 7, 7)
+        .expect("a position inside the file is valid")
+        .expect("the first call resolves through the first module declaration");
+    assert_eq!(
+        (first.line, first.column),
+        (2, 8),
+        "a call bound to the first module must not jump to the second module's member"
+    );
+
+    let second = goto_definition(source, 14, 7)
+        .expect("a position inside the file is valid")
+        .expect("the second call resolves through the second module declaration");
+    assert_eq!(
+        (second.line, second.column),
+        (9, 8),
+        "a redeclaration keeps its own published function table"
+    );
+}
+
+#[test]
+fn edge_module_member_shadowed_by_set_does_not_resolve_to_the_stale_function() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    set f to 2\n",
+        "    export f\n",
+        "end\n",
+        "say M.f()\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 8, 7).expect("a position inside the file is valid"),
+        None,
+        "a `set` replaces the module member's function value, so the old `to` is not its declaration"
+    );
+    assert!(
+        find_references(source, 8, 7)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "the stale function binding must not own the member call"
+    );
+}
+
+#[test]
+fn edge_module_member_shadowed_by_constant_does_not_resolve_to_the_stale_function() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    constant f to 2\n",
+        "    export f\n",
+        "end\n",
+        "say M.f()\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 8, 7).expect("a position inside the file is valid"),
+        None,
+        "a `constant` replaces the module member's function value, so the old `to` is not its declaration"
+    );
+}
+
+#[test]
+fn edge_module_member_shadowed_by_a_nested_block_replacement_does_not_resolve_to_the_stale_function(
+) {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    to g()\n",
+        "        give back 2\n",
+        "    end\n",
+        "    if yes then\n",
+        "        set f to 3\n",
+        "        constant g to 4\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "say M.f()\n",
+        "say M.g()\n",
+    );
+
+    for (line, name) in [(14, "f"), (15, "g")] {
+        assert_eq!(
+            goto_definition(source, line, 7).expect("a position inside the file is valid"),
+            None,
+            "a nested block's `set`/`constant` replaces the module member `{name}`, so the old `to` is not its declaration"
+        );
+        assert!(
+            find_references(source, line, 7)
+                .expect("a position inside the file is valid")
+                .is_empty(),
+            "the stale function binding must not own the member call for `{name}`"
+        );
+    }
+}
+
+#[test]
+fn edge_aliased_same_named_module_declaration_keeps_the_imported_modules_functions() {
+    let source = concat!(
+        "module M\n",
+        "    to first()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export first\n",
+        "end\n",
+        "import M as A\n",
+        "module M\n",
+        "    to second()\n",
+        "        give back 2\n",
+        "    end\n",
+        "    export second\n",
+        "end\n",
+        "say A.first()\n",
+        "say M.second()\n",
+        "say A.second()\n",
+    );
+
+    let first = goto_definition(source, 14, 7)
+        .expect("a position inside the file is valid")
+        .expect("the alias names the module the import itself named");
+    assert_eq!(
+        (first.line, first.column),
+        (2, 8),
+        "an alias written between two same-named modules must not jump to the later module"
+    );
+
+    let second = goto_definition(source, 15, 7)
+        .expect("a position inside the file is valid")
+        .expect("the later bare name resolves through the later module declaration");
+    assert_eq!(
+        (second.line, second.column),
+        (9, 8),
+        "the later declaration keeps its own published functions"
+    );
+
+    assert_eq!(
+        goto_definition(source, 16, 7).expect("a position inside the file is valid"),
+        None,
+        "the alias does not inherit the later same-named module's members"
+    );
+}
+
+#[test]
+fn edge_completions_after_a_same_named_module_alias_keep_the_imported_modules_members() {
+    let source = concat!(
+        "module M\n",
+        "    to first()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export first\n",
+        "end\n",
+        "import M as A\n",
+        "module M\n",
+        "    to second()\n",
+        "        give back 2\n",
+        "    end\n",
+        "    export second\n",
+        "end\n",
+        "A.\n",
+    );
+
+    let offered = completions(source, 14, 3).expect("the member slot is a valid position");
+    assert!(
+        offered.contains(&"first".to_string()),
+        "the alias offers the members of the module its import named, got {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"second".to_string()),
+        "a later same-named module must not add its members to an earlier import alias, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_bare_module_member_read_resolves_to_the_published_function() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export f\n",
+        "end\n",
+        "say M.f\n",
+    );
+
+    let found = goto_definition(source, 7, 7)
+        .expect("a position inside the file is valid")
+        .expect("a bare member read names the published function value");
+    assert_eq!(
+        (found.line, found.column),
+        (2, 8),
+        "the function value is exposed by a bare member read just as by a call"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 2, 8)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 8), (5, 12), (7, 7)],
+        "the declaration, its export and the bare member read share one binding"
+    );
+}

@@ -38,6 +38,12 @@
 | tests/tooling_grammar_test.rs | +63 −0 | two round-1 review tests: an aliased module member slot offers its published members and no keywords, and an object member slot above the object's declaration offers its field and method and no keywords. |
 | src/lsp.rs | +102 −2 | round-2 review: the analysis records each `module … end` body's top-level `to`, `set` and `constant` names and its last `export`, keyed by the module binding, and filters them into a declared-module member table when the module closes. `member_completions` consults that table before `MODULE_MEMBERS`, so a program-declared module (and an import of it) offers what it publishes even when its name is also a stdlib module's. The flat alias table is now consulted only for a receiver that has an in-scope `Import` binding, so an alias written inside a function or branch cannot answer after its `end`. |
 | tests/tooling_grammar_test.rs | +106 −0 | four round-2 review tests: `module text … end` offers its exported members rather than the stdlib `text` members; an explicit `export` filters a declared module's names; an import alias of a declared module offers its members; and an import alias used after its function or branch block offers nothing. |
+| src/lsp.rs | +39 −7 | resumed run: goto-definition and find-references follow a call to a program-declared module's published function. Each module body's top-level `to` records its binding, the module's last `export` filters the published functions when the body closes, and the deferred member pass maps `Module.name()` and `alias.name()` to that declaration. An unexported name and a standard module's member stay unresolved, matching the runtime. |
+| tests/tooling_grammar_test.rs | +113 −0 | four resumed-run tests: goto on `MathUtils.circle_area` inside a declared module; references joining the declaration, two bare calls and an aliased member call; an explicit `export` resolving the published function while the hidden one answers `None` with no references; and a clean `Err` from all three capabilities at line 0, past the line and past the file. |
+| src/lsp.rs | +30 −9 | final round-1 review fixes: the published-function table is keyed by the module binding rather than its name, so a redeclaration or a same-named module in another block cannot answer for the first module's calls, and a module declaration gives a redeclaration its own binding; a module-top-level `set` or `constant` removes the same-named function entry because it replaced the member value; and a bare `Module.name` read resolves through the same table as a call, matching the runtime's exposed function value. |
+| tests/tooling_grammar_test.rs | +130 −0 | four final round-1 review tests: two same-named module declarations keep their own functions; a `set` and a `constant` that shadow a module function do not navigate to the stale `to`; and a bare module-member read resolves to the published function and joins its references. |
+| src/lsp.rs | +42 −10 | round-2 review fixes: a `set` or `constant` inside a nested block removes the replaced module function by finding the innermost runtime frame's module rather than looking only at the top frame, and an `import` records the module binding it named at its own site, so an alias written before a later same-named module keeps the earlier module's functions and completed members. |
+| tests/tooling_grammar_test.rs | +99 −0 | three round-2 review tests: a nested branch's `set`/`constant` drops the stale module function; an alias between two same-named modules resolves and completes from the module its import named, not the later declaration. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -176,6 +182,48 @@ later declaration. The two new fixtures pin both orders. The gate count below
 was re-run and re-harvested: the previous table's `2843` did not match the
 suite, so the final number is the 2852 the round-1 review run actually reported.
 
+The final resumed run reproduced a module-navigation gap against the runtime.
+For
+`module M` / `to f()` / `give back 41` / `end` / `export f` / `end` /
+`say M.f()`, `rb run` prints `41`, but `goto_definition` on the member `f`
+answered `None` and `find_references` answered an empty list; completion
+already offered the published member. A program-declared module is a namespace
+the runtime built, so its exported function call must navigate like an object
+method call. Navigation now records each module body's top-level `to` binding,
+filters the functions by the module's last `export` when the body closes, and
+resolves `Module.name()` and `alias.name()` to that declaration in the deferred
+member pass. A standard module keeps its unresolved answer (it has no file
+span), and an unexported function stays unreachable, matching the runtime's
+`Module 'M' has no function 'hidden'`. The four fixtures pin the exported and
+aliased calls, the reference set joining bare and member calls, the export
+filter in both directions, and clean errors for malformed positions.
+
+The final round-1 review found that navigation keyed the published-function
+table by module name rather than by the module binding. Two same-named
+declarations therefore overwrote one entry when the second body closed, so a
+call bound to the first module could jump into the second module's function or
+answer nothing. The table is now keyed by the module binding, a redeclaration
+gets its own binding, and an import name is mapped to the binding a later
+`import` names. The same review found that a module-top-level `set` or
+`constant` after a `to` left the old function in the published table even
+though it replaced the member value; that entry is now removed. Finally, a
+bare `Module.name` read now resolves to the published function exactly as a
+call does, because the interpreter exposes the same value either way. Four
+fixtures pin the two declarations, both replacements and the bare read.
+
+The round-2 review found two remaining holes in the module tables. A branch
+opens an analyzer scope but no runtime frame, so a `set`/`constant` written
+inside `if … end` in a module body replaces the module's value while the
+published table still mapped `M.f()` to the old `to f`; the removal now walks
+to the innermost frame that creates variables and finds the module whose scope
+the write reaches. Also, an import alias resolved through the last-wins module
+name table, so an alias written between two same-named modules could answer
+from the later declaration. Each import now records the module binding it
+named at its own site, keyed by the import binding, and both goto-definition
+and member completion prefer that binding over the name fallback used when an
+import precedes its module declaration. The three new fixtures pin the nested
+replacement, the alias between same-named modules and its completed members.
+
 ## Tests added
 
 | Test | Edge class covered |
@@ -282,6 +330,17 @@ suite, so the final number is the 2852 the round-1 review run actually reported.
 | edge_completions_after_importing_a_declared_module_alias_offer_its_members | context awareness: an import alias of a program-declared module offers its published members |
 | edge_completions_after_a_block_do_not_use_its_import_alias | nesting / scope: an alias declared in a function or branch does not answer after its enclosing block closes |
 | edge_member_completion_rejects_a_position_past_the_line | out of bounds / failure: a column past the line in a member slot is a clean `Err` |
+| edge_goto_definition_on_a_declared_module_member_resolves_to_its_declaration | module navigation: `MathUtils.circle_area(2)` resolves to the `to circle_area` inside the module |
+| edge_find_references_on_a_declared_module_member_spans_every_use | module navigation / references: the declaration, two bare calls and an aliased `M.circle_area()` call share one binding |
+| edge_declared_module_member_navigation_respects_export | missing binding / export: an unexported member answers `None` with no references, while the explicitly exported function resolves |
+| edge_declared_module_member_navigation_rejects_a_malformed_position | out of bounds / failure: line 0, a column past the line and a line past the file are clean `Err`s from all three capabilities |
+| edge_same_named_module_declarations_keep_their_own_functions | duplicate names: two `module M` declarations each keep the function their call is bound to, so the second close does not overwrite the first table |
+| edge_module_member_shadowed_by_set_does_not_resolve_to_the_stale_function | duplicate names: a module `set f` replaces the published function value, so `M.f()` no longer navigates to the shadowed `to f` |
+| edge_module_member_shadowed_by_constant_does_not_resolve_to_the_stale_function | duplicate names: a module `constant f` likewise drops the stale function entry |
+| edge_module_member_shadowed_by_a_nested_block_replacement_does_not_resolve_to_the_stale_function | nesting / duplicate names: a `set` and `constant` inside an `if` body reach the module's runtime scope, so neither stale function is a declaration |
+| edge_aliased_same_named_module_declaration_keeps_the_imported_modules_functions | duplicate names / import alias: an alias between two `module M` declarations resolves and joins the module its import named, not the later declaration |
+| edge_completions_after_a_same_named_module_alias_keep_the_imported_modules_members | duplicate names / completion: a same-named module declared after an import does not change the members its alias offers |
+| edge_bare_module_member_read_resolves_to_the_published_function | module navigation: a bare `M.f` read resolves to the published function and joins its declaration and export references |
 
 ### Mandatory edge-case matrix
 
@@ -305,13 +364,12 @@ suite, so the final number is the 2852 the round-1 review run actually reported.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2856 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2867 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets` ran 85 test binaries and reported 2856 passed, 0
-failed and 0 ignored. This is the actual count from the round-2 review run's
-gate, including the four declared-module and import-alias fixtures added for
-the two round-2 findings.
+`cargo test --all-targets` ran 85 test binaries and reported 2867 passed, 0
+failed and 0 ignored. That is the count from the round-2 review run's full
+gate, including the three round-2 review fixtures added now.
 
 ## Invariants touched
 
