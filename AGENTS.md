@@ -216,6 +216,13 @@ Whenever an agent identifies an engine bug or spec-drift defect outside its assi
 2. **Phase Report**: Document the finding with an executable reproduction snippet in `phases/phase-XXX/FINDINGS.md`.
 3. **Master Ledger**: Append the finding to [`docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md`](docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md) with status `[OPEN]` so it is automatically queued for remediation in Section 14 (Phases 159–167).
 
+## Ecosystem Repositories Standing Directive (Phase 126 Milestone)
+
+When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler into **6 paired repositories (3 Code Targets + 3 Dedicated Ops Orchestrators)** to maintain gate security, 24/7 CI concurrency, and clean git histories:
+1. **OS Track**: `authorss81/rbos` (kernel & desktop) + `authorss81/rbos-ops` (autonomous pipeline & QEMU runner).
+2. **Apps Track**: `authorss81/rb-apps` (practical apps incubator) + `authorss81/rb-apps-ops` (autonomous app release runner).
+3. **Package Track**: `authorss81/rb-pkg` (package index & registry) + `authorss81/rb-pkg-ops` (package ingestion & crypto verification).
+
 ## Resources
 
 - [Library policy](LIBRARIES.md) — **read this before adding a stdlib module**:
