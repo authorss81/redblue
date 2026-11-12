@@ -17,10 +17,11 @@
 //! even when the line holds multi-byte characters.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use crate::error::Error;
 use crate::lexer::{Lexer, Token, TokenKind, KEYWORDS};
-use crate::parser::{is_complete_expression, unmatched_opens};
+use crate::parser::is_complete_expression;
 use crate::stdlib::{is_module, BUILTIN_NAMES, MODULES, MODULE_MEMBERS};
 
 /// Where the generated grammar is checked in. Nothing has to be built to make
@@ -2389,12 +2390,20 @@ pub fn goto_definition(
     let offset = map.validate(line, column)?;
     let analysis = analyze(source, None)?;
 
+    if inside_text(&analysis.tokens, &map, offset) {
+        return goto_definition_in_interpolation(&map, &analysis.tokens, offset);
+    }
+
     let Some(index) = name_token_at(&analysis, &map, offset) else {
         return Ok(None);
     };
 
+    Ok(definition_at_token(&analysis, index))
+}
+
+fn definition_at_token(analysis: &Analysis, index: usize) -> Option<Definition> {
     if let Some(binding) = analysis.token_binding[index] {
-        return Ok(Some(Definition::from_binding(&analysis.bindings[binding])));
+        return Some(Definition::from_binding(&analysis.bindings[binding]));
     }
 
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
@@ -2403,10 +2412,326 @@ pub fn goto_definition(
         && !analysis.type_names.contains(&index)
         && !analysis.syntax_names.contains(&index)
     {
-        Ok(Some(Definition::builtin(name)))
+        Some(Definition::builtin(name))
     } else {
-        Ok(None)
+        None
     }
+}
+
+struct InterpolationSource {
+    source: String,
+    map: SourceMap,
+    offset: usize,
+    original: Vec<usize>,
+    /// The decoded character range in `source` that holds the interpolated
+    /// expressions. Prefix and suffix text is present only to keep the
+    /// enclosing scopes analysable.
+    expressions: Range<usize>,
+}
+
+impl InterpolationSource {
+    fn original_location(&self, original_map: &SourceMap, location: Location) -> Location {
+        let start = self.map.offset(location.line, location.column);
+        let end = self.map.offset(location.end_line, location.end_column);
+        let original_start = self
+            .original
+            .get(start)
+            .copied()
+            .unwrap_or(original_map.chars.len());
+        let original_end = self.original.get(end).copied().unwrap_or(original_start);
+        let (line, column) = line_column(original_map, original_start);
+        let (end_line, end_column) = line_column(original_map, original_end);
+        Location {
+            line,
+            column,
+            end_line,
+            end_column,
+        }
+    }
+
+    fn original_definition(&self, original_map: &SourceMap, definition: Definition) -> Definition {
+        if definition.line == 0 {
+            return definition;
+        }
+        let location = self.original_location(
+            original_map,
+            Location {
+                line: definition.line,
+                column: definition.column,
+                end_line: definition.end_line,
+                end_column: definition.end_column,
+            },
+        );
+        Definition {
+            name: definition.name,
+            kind: definition.kind,
+            line: location.line,
+            column: location.column,
+            end_line: location.end_line,
+            end_column: location.end_column,
+        }
+    }
+}
+
+fn line_column(map: &SourceMap, offset: usize) -> (usize, usize) {
+    let index = map
+        .line_starts
+        .partition_point(|&start| start <= offset)
+        .saturating_sub(1);
+    let start = map.line_starts[index];
+    (index + 1, offset.saturating_sub(start) + 1)
+}
+
+fn interpolation_source_at(
+    map: &SourceMap,
+    tokens: &[Token],
+    offset: usize,
+) -> Option<InterpolationSource> {
+    let original: Vec<usize> = (0..map.chars.len()).collect();
+    interpolation_source_with(map, tokens, offset, &original)
+}
+
+/// The view of the interpolation holding `offset`, descending into a text
+/// literal written inside the interpolated expression when the caret is in
+/// that literal's own substitution.
+///
+/// `parent_original` maps each character of `map` back to the root source, so
+/// a view built from another view still reports positions the editor wrote.
+/// The parser treats the outermost valid pair of one literal as the
+/// substitution and only then parses the expression, which may contain a text
+/// literal with a substitution of its own; descending mirrors that nesting.
+fn interpolation_source_with(
+    map: &SourceMap,
+    tokens: &[Token],
+    offset: usize,
+    parent_original: &[usize],
+) -> Option<InterpolationSource> {
+    let literal = text_literal_at(tokens, map, offset)?;
+    let interpolation = interpolation_at(&literal, offset)?;
+    let caret = literal.caret_index(offset);
+    let inner_start = interpolation.open + 1;
+    let mut view = interpolation_view(map, &literal, &interpolation, parent_original);
+    view.offset = literal.start + (caret - inner_start);
+
+    if inside_nested_text(&literal, &interpolation, offset) {
+        let analysis = analyze(&view.source, None).ok()?;
+        return interpolation_source_with(&view.map, &analysis.tokens, view.offset, &view.original);
+    }
+
+    Some(view)
+}
+
+/// A copy of `map`'s source with `literal` replaced by the decoded expression
+/// of `interpolation`, recording where each copied character was written.
+fn interpolation_view(
+    map: &SourceMap,
+    literal: &TextLiteral,
+    interpolation: &Interpolation,
+    parent_original: &[usize],
+) -> InterpolationSource {
+    let inner_start = interpolation.open + 1;
+    let suffix_start = literal.end + 1;
+
+    let mut chars = Vec::with_capacity(map.chars.len());
+    let mut original = Vec::with_capacity(map.chars.len());
+    chars.extend_from_slice(&map.chars[..literal.start]);
+    original.extend_from_slice(&parent_original[..literal.start]);
+    chars.extend_from_slice(&literal.chars[inner_start..interpolation.close]);
+    original.extend(
+        literal.sources[inner_start..interpolation.close]
+            .iter()
+            .map(|&source| parent_original[source]),
+    );
+    chars.extend_from_slice(&map.chars[suffix_start..]);
+    original.extend_from_slice(&parent_original[suffix_start..]);
+
+    let source: String = chars.into_iter().collect();
+    InterpolationSource {
+        map: SourceMap::new(&source),
+        source,
+        offset: literal.start,
+        original,
+        expressions: literal.start..literal.start + (interpolation.close - inner_start),
+    }
+}
+
+/// The most expression characters one literal may have parsed while looking
+/// for its interpolations.
+///
+/// Pairing itself is linear, but deciding whether a pair is an expression has
+/// to lex and parse its contents. A literal whose braces nest without forming
+/// expressions would otherwise ask for the same suffix over and over. The cap
+/// still reaches an innermost substitution first, because candidates are tried
+/// from the inside out.
+const MAX_INTERPOLATION_CHECK_CHARS: usize = 1_000_000;
+
+/// The most text literals with substitutions one find-references query will
+/// re-analyze. Each literal needs one analysis to see the scopes around it.
+const MAX_INTERPOLATION_ANALYSES: usize = 1024;
+
+/// The matching `}` of every `{`, found in one stack pass.
+///
+/// An unmatched `{` has no entry. This is the same pairing the parser makes,
+/// but done once for the whole literal instead of restarting a forward scan at
+/// every open.
+fn matching_closes(chars: &[char]) -> Vec<Option<usize>> {
+    let mut closes = vec![None; chars.len()];
+    let mut opens = Vec::new();
+
+    for (index, ch) in chars.iter().enumerate() {
+        match ch {
+            '{' => opens.push(index),
+            '}' => {
+                if let Some(open) = opens.pop() {
+                    closes[open] = Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    closes
+}
+
+/// Which brace pairs in `literal` read as one complete expression.
+///
+/// The answer is indexed by the decoded position of the `{`. Candidates are
+/// tested from the innermost pair outward: a deeply nested literal reaches its
+/// real substitution even if the outer braces are only text and the work cap
+/// stops before every enclosing pair has been tried.
+fn interpolation_pairs(literal: &TextLiteral, check_budget: &mut usize) -> Vec<Option<usize>> {
+    let chars = &literal.chars;
+    let closes = matching_closes(chars);
+    let mut valid = vec![None; chars.len()];
+
+    for open in (0..chars.len()).rev() {
+        if chars[open] != '{' {
+            continue;
+        }
+        let Some(close) = closes[open] else {
+            continue;
+        };
+        let cost = close - open + 1;
+        if *check_budget < cost {
+            continue;
+        }
+        *check_budget -= cost;
+
+        let inner: String = chars[open + 1..close].iter().collect();
+        if is_complete_expression(&inner) {
+            valid[open] = Some(close);
+        }
+    }
+
+    valid
+}
+
+/// Every top-level brace pair in `literal` that the parser reads as an
+/// interpolation.
+///
+/// A valid outer pair hides the pairs written inside its expression, exactly as
+/// the parser's `index = scan + 1` advance does. A text literal inside that
+/// expression is found again when the view of the outer expression is walked.
+fn interpolations_in(literal: &TextLiteral, check_budget: &mut usize) -> Vec<Interpolation> {
+    let valid = interpolation_pairs(literal, check_budget);
+    let mut found = Vec::new();
+    let mut index = 0usize;
+
+    while index < literal.chars.len() {
+        if let Some(close) = valid[index] {
+            found.push(Interpolation { open: index, close });
+            index = close + 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    found
+}
+
+/// A copy of the source with `literal` replaced by every interpolated
+/// expression it contains, separated by newlines.
+///
+/// `parent_original` maps each character of `map` back to the root source, so a
+/// view can be built from another view without losing the positions an editor
+/// needs. `expressions` records the inserted range so references found in the
+/// unchanged prefix and suffix are not reported a second time.
+fn interpolations_view(
+    map: &SourceMap,
+    literal: &TextLiteral,
+    interpolations: &[Interpolation],
+    parent_original: &[usize],
+) -> InterpolationSource {
+    let suffix_start = literal.end + 1;
+    let inserted = interpolations
+        .iter()
+        .map(|interpolation| interpolation.close - interpolation.open - 1)
+        .sum::<usize>()
+        + interpolations.len().saturating_sub(1);
+
+    let mut chars = Vec::with_capacity(map.chars.len() + inserted);
+    let mut original = Vec::with_capacity(map.chars.len() + inserted);
+    chars.extend_from_slice(&map.chars[..literal.start]);
+    original.extend_from_slice(&parent_original[..literal.start]);
+
+    let expressions_start = chars.len();
+    for (position, interpolation) in interpolations.iter().enumerate() {
+        if position > 0 {
+            chars.push('\n');
+            original.push(parent_original[literal.start]);
+        }
+        let inner_start = interpolation.open + 1;
+        let inner_end = interpolation.close;
+        chars.extend_from_slice(&literal.chars[inner_start..inner_end]);
+        original.extend(
+            literal.sources[inner_start..inner_end]
+                .iter()
+                .map(|&source| parent_original[source]),
+        );
+    }
+    let expressions_end = chars.len();
+
+    chars.extend_from_slice(&map.chars[suffix_start..]);
+    original.extend_from_slice(&parent_original[suffix_start..]);
+
+    let source: String = chars.into_iter().collect();
+    InterpolationSource {
+        map: SourceMap::new(&source),
+        source,
+        offset: literal.start,
+        original,
+        expressions: expressions_start..expressions_end,
+    }
+}
+
+/// Whether a literal's decoded text can contain `name` at all.
+fn literal_contains_name(literal: &TextLiteral, name: &str) -> bool {
+    let needle: Vec<char> = name.chars().collect();
+    if needle.is_empty() {
+        return true;
+    }
+    literal
+        .chars
+        .windows(needle.len())
+        .any(|window| window == needle.as_slice())
+}
+
+fn goto_definition_in_interpolation(
+    map: &SourceMap,
+    tokens: &[Token],
+    offset: usize,
+) -> Result<Option<Definition>, String> {
+    let Some(view) = interpolation_source_at(map, tokens, offset) else {
+        return Ok(None);
+    };
+    let Ok(analysis) = analyze(&view.source, None) else {
+        return Ok(None);
+    };
+    let Some(index) = name_token_at(&analysis, &view.map, view.offset) else {
+        return Ok(None);
+    };
+    Ok(definition_at_token(&analysis, index)
+        .map(|definition| view.original_definition(map, definition)))
 }
 
 /// Goto-definition as a JSON object, or `null` when nothing is named there.
@@ -2429,9 +2754,17 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
     let offset = map.validate(line, column)?;
     let analysis = analyze(source, None)?;
 
+    if inside_text(&analysis.tokens, &map, offset) {
+        return find_references_in_interpolation(&map, &analysis, offset);
+    }
+
     let Some(index) = name_token_at(&analysis, &map, offset) else {
         return Ok(Vec::new());
     };
+    Ok(references_for(&map, &analysis, index))
+}
+
+fn references_for(map: &SourceMap, analysis: &Analysis, index: usize) -> Vec<Location> {
     let target = analysis.token_binding[index];
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
 
@@ -2445,9 +2778,140 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
         // resolves from the registry rather than from a declaration in the
         // file, so only a builtin name can have file references without a
         // binding.
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
+    let declaration = target.map(|binding| analysis.bindings[binding].location);
+    references_globally(map, analysis, declaration, name)
+}
+
+/// Every reference to a name, including uses written in any text literal's
+/// `{…}` interpolation in the file.
+///
+/// The main token stream holds a whole text literal as one token, so an
+/// interpolated use is invisible to [`references_matching`]. A literal with
+/// substitutions is re-analyzed once with all of its expressions in place of
+/// the literal, and a name that resolves to the same declaration is mapped back
+/// onto the source. This keeps a declaration-side query and a query made inside
+/// the interpolation answering the same set without re-analyzing the file once
+/// per pair.
+fn references_globally(
+    map: &SourceMap,
+    analysis: &Analysis,
+    declaration: Option<Location>,
+    name: &str,
+) -> Vec<Location> {
+    let binding = match declaration {
+        Some(declaration) => match binding_declared_at(analysis, declaration) {
+            Some(binding) => Some(binding),
+            None => return Vec::new(),
+        },
+        None => None,
+    };
+    let mut found = references_matching(analysis, binding, name);
+    let original: Vec<usize> = (0..map.chars.len()).collect();
+    let mut analyses_left = MAX_INTERPOLATION_ANALYSES;
+    let query = InterpolationQuery {
+        root_map: map,
+        declaration,
+        name,
+    };
+
+    literal_references(
+        &query,
+        map,
+        &original,
+        analysis,
+        None,
+        &mut found,
+        &mut analyses_left,
+    );
+
+    found.sort_by_key(|location| (location.line, location.column));
+    found.dedup();
+    found
+}
+
+struct InterpolationQuery<'a> {
+    root_map: &'a SourceMap,
+    declaration: Option<Location>,
+    name: &'a str,
+}
+
+/// Adds the references written in text literals of one analysis.
+///
+/// `only` restricts the walk to text that was inserted for an outer
+/// interpolation, so the unchanged prefix and suffix of a view are not visited
+/// again. The recursion handles a text literal written inside an interpolated
+/// expression, whose own substitutions are only visible after the outer view
+/// has been analyzed.
+fn literal_references(
+    query: &InterpolationQuery,
+    map: &SourceMap,
+    parent_original: &[usize],
+    analysis: &Analysis,
+    only: Option<Range<usize>>,
+    found: &mut Vec<Location>,
+    analyses_left: &mut usize,
+) {
+    for token in &analysis.tokens {
+        let Some(literal) = text_literal_token(map, token) else {
+            continue;
+        };
+        if only
+            .as_ref()
+            .is_some_and(|range| !range.contains(&literal.start))
+        {
+            continue;
+        }
+        if *analyses_left == 0 {
+            break;
+        }
+        if !literal_contains_name(&literal, query.name) {
+            continue;
+        }
+
+        let mut check_budget = MAX_INTERPOLATION_CHECK_CHARS;
+        let interpolations = interpolations_in(&literal, &mut check_budget);
+        if interpolations.is_empty() {
+            continue;
+        }
+        *analyses_left -= 1;
+
+        let view = interpolations_view(map, &literal, &interpolations, parent_original);
+        let Ok(interpolated) = analyze(&view.source, None) else {
+            continue;
+        };
+        let binding = match query.declaration {
+            Some(declaration) => {
+                match binding_declared_in(&view, query.root_map, &interpolated, declaration) {
+                    Some(binding) => Some(binding),
+                    None => continue,
+                }
+            }
+            None => None,
+        };
+
+        for location in references_matching(&interpolated, binding, query.name) {
+            let start = view.map.offset(location.line, location.column);
+            if view.expressions.contains(&start) {
+                found.push(view.original_location(query.root_map, location));
+            }
+        }
+
+        literal_references(
+            query,
+            &view.map,
+            &view.original,
+            &interpolated,
+            Some(view.expressions.clone()),
+            found,
+            analyses_left,
+        );
+    }
+}
+
+fn references_matching(analysis: &Analysis, target: Option<usize>, name: &str) -> Vec<Location> {
     let mut found = Vec::new();
     for (candidate, token) in analysis.tokens.iter().enumerate() {
         if name_of(token) != Some(name) {
@@ -2468,7 +2932,83 @@ pub fn find_references(source: &str, line: usize, column: usize) -> Result<Vec<L
     }
 
     found.sort_by_key(|location| (location.line, location.column));
-    Ok(found)
+    found
+}
+
+/// The binding declared at `declaration`, matched by the start of its name
+/// because a view mapped back onto the source can round its end span.
+fn binding_declared_at(analysis: &Analysis, declaration: Location) -> Option<usize> {
+    analysis.bindings.iter().position(|binding| {
+        binding.location.line == declaration.line && binding.location.column == declaration.column
+    })
+}
+
+/// The binding in a re-analyzed interpolation whose declaration maps back to
+/// the same source position as `declaration`.
+fn binding_declared_in(
+    view: &InterpolationSource,
+    original_map: &SourceMap,
+    analysis: &Analysis,
+    declaration: Location,
+) -> Option<usize> {
+    let target = original_map.offset(declaration.line, declaration.column);
+    analysis.bindings.iter().position(|binding| {
+        let start = view
+            .map
+            .offset(binding.location.line, binding.location.column);
+        view.original.get(start).copied() == Some(target)
+    })
+}
+
+fn find_references_in_interpolation(
+    map: &SourceMap,
+    original: &Analysis,
+    offset: usize,
+) -> Result<Vec<Location>, String> {
+    let Some(view) = interpolation_source_at(map, &original.tokens, offset) else {
+        return Ok(Vec::new());
+    };
+    let Ok(analysis) = analyze(&view.source, None) else {
+        return Ok(Vec::new());
+    };
+    let Some(index) = name_token_at(&analysis, &view.map, view.offset) else {
+        return Ok(Vec::new());
+    };
+
+    let target = analysis.token_binding[index];
+    let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
+    if target.is_none()
+        && (analysis.member_names.contains(&index)
+            || analysis.type_names.contains(&index)
+            || analysis.syntax_names.contains(&index)
+            || !is_builtin_name(name))
+    {
+        return Ok(Vec::new());
+    }
+
+    let Some(literal) = text_literal_at(&original.tokens, map, offset) else {
+        return Ok(Vec::new());
+    };
+    let declaration =
+        target.map(|binding| view.original_location(map, analysis.bindings[binding].location));
+    let declared_inside_text = declaration.is_some_and(|declaration| {
+        let start = map.offset(declaration.line, declaration.column);
+        start >= literal.start && start <= literal.end
+    });
+
+    if declared_inside_text {
+        // The declaration itself lives in this literal, so the main analysis
+        // cannot see it. Answer from the re-analysis alone, mapped back.
+        let mut found: Vec<Location> = references_matching(&analysis, target, name)
+            .into_iter()
+            .map(|location| view.original_location(map, location))
+            .collect();
+        found.sort_by_key(|location| (location.line, location.column));
+        found.dedup();
+        return Ok(found);
+    }
+
+    Ok(references_globally(map, original, declaration, name))
 }
 
 /// Find-references as the JSON array those locations render to.
@@ -2498,7 +3038,22 @@ pub fn completions(source: &str, line: usize, column: usize) -> Result<Vec<Strin
         if let Some(literal) = text_literal_at(&analysis.tokens, &map, offset) {
             if let Some(interpolation) = interpolation_at(&literal, offset) {
                 if inside_nested_text(&literal, &interpolation, offset) {
-                    return Ok(Vec::new());
+                    // The caret is inside a text literal written in the
+                    // interpolated expression. If that literal has a
+                    // substitution of its own, complete the deepest expression
+                    // while keeping the scopes the outer expression opened.
+                    let Some(view) = interpolation_source_at(&map, &analysis.tokens, offset) else {
+                        return Ok(Vec::new());
+                    };
+                    let Ok(nested) = analyze(&view.source, None) else {
+                        return Ok(Vec::new());
+                    };
+                    if member_slot(&nested, &view.map, view.offset).is_some() {
+                        return Ok(
+                            member_completions(&nested, &view.map, view.offset).unwrap_or_default()
+                        );
+                    }
+                    return Ok(interpolation_completions(&nested));
                 }
                 if let Some(members) =
                     interpolation_member_completions(&map, &literal, &interpolation, offset)
@@ -2728,13 +3283,18 @@ impl TextLiteral {
 /// The text literal holding `offset`, decoded the way the lexer reads it.
 fn text_literal_at(tokens: &[Token], map: &SourceMap, offset: usize) -> Option<TextLiteral> {
     tokens.iter().find_map(|token| {
-        if !matches!(token.kind, TokenKind::Text(_)) {
-            return None;
-        }
-        let start = map.offset(token.line, token.column);
-        let literal = decode_text_literal(map, start)?;
+        let literal = text_literal_token(map, token)?;
         (offset >= literal.start && offset <= literal.end).then_some(literal)
     })
+}
+
+/// The text literal a token holds, decoded the way the lexer reads it.
+fn text_literal_token(map: &SourceMap, token: &Token) -> Option<TextLiteral> {
+    if !matches!(token.kind, TokenKind::Text(_)) {
+        return None;
+    }
+    let start = map.offset(token.line, token.column);
+    decode_text_literal(map, start)
 }
 
 /// Decodes the text literal whose opening quote is at `start`, recording where
@@ -2815,24 +3375,6 @@ struct Interpolation {
     close: usize,
 }
 
-/// The matching `}` of the `{` at `open`, counted exactly as
-/// [`crate::parser::Parser`] counts braces inside a text literal.
-fn matching_close(chars: &[char], open: usize) -> Option<usize> {
-    let mut depth = 1usize;
-    let mut scan = open + 1;
-    while scan < chars.len() && depth > 0 {
-        match chars[scan] {
-            '{' => depth += 1,
-            '}' => depth -= 1,
-            _ => {}
-        }
-        if depth > 0 {
-            scan += 1;
-        }
-    }
-    (depth == 0).then_some(scan)
-}
-
 /// The innermost balanced pair at `offset` that could still become an
 /// interpolation once the member name being typed after its dot is finished.
 ///
@@ -2843,26 +3385,29 @@ fn matching_close(chars: &[char], open: usize) -> Option<usize> {
 /// text.
 fn interpolation_candidate(literal: &TextLiteral, offset: usize) -> Option<Interpolation> {
     let caret = literal.caret_index(offset);
-    let unmatched = unmatched_opens(&literal.chars);
-    let mut found = None;
+    let closes = matching_closes(&literal.chars);
+    let mut check_budget = MAX_INTERPOLATION_CHECK_CHARS;
 
-    for (open, (&ch, &unmatched)) in literal.chars.iter().zip(&unmatched).enumerate() {
-        if ch != '{' || unmatched {
-            continue;
-        }
-        let Some(close) = matching_close(&literal.chars, open) else {
+    for open in (0..closes.len()).rev() {
+        let Some(close) = closes[open] else {
             continue;
         };
         if !(open < caret && caret <= close) {
             continue;
         }
+        let cost = close - open + 1;
+        if check_budget < cost {
+            continue;
+        }
+        check_budget -= cost;
+
         let interpolation = Interpolation { open, close };
         if could_become_interpolation(literal, &interpolation) {
-            found = Some(interpolation);
+            return Some(interpolation);
         }
     }
 
-    found
+    None
 }
 
 /// Whether the pair could be a substitution once a member name that is still
@@ -2912,33 +3457,29 @@ fn inside_nested_text(literal: &TextLiteral, interpolation: &Interpolation, offs
     false
 }
 
-/// The innermost brace pair at `offset` whose contents re-parse as one complete
+/// The outermost brace pair at `offset` whose contents re-parse as one complete
 /// expression, which is the parser's own rule for interpolation.
 ///
-/// A balanced pair holding a JSON document, `{ "name": "Alice" }`, is text to
-/// the parser and stays text here.
+/// The parser walks a literal from left to right and, when a pair is valid,
+/// advances past the whole span instead of reading the pairs inside it. A
+/// nested pair therefore belongs to the outer expression rather than becoming
+/// a second substitution. A balanced pair holding a JSON document,
+/// `{ "name": "Alice" }`, is text to the parser and stays text here.
 fn interpolation_at(literal: &TextLiteral, offset: usize) -> Option<Interpolation> {
     let caret = literal.caret_index(offset);
-    let unmatched = unmatched_opens(&literal.chars);
-    let mut found = None;
+    let mut check_budget = MAX_INTERPOLATION_CHECK_CHARS;
+    let valid = interpolation_pairs(literal, &mut check_budget);
 
-    for (open, (&ch, &unmatched)) in literal.chars.iter().zip(&unmatched).enumerate() {
-        if ch != '{' || unmatched {
-            continue;
-        }
-        let Some(close) = matching_close(&literal.chars, open) else {
+    for (open, close) in valid.into_iter().enumerate() {
+        let Some(close) = close else {
             continue;
         };
-        if !(open < caret && caret <= close) {
-            continue;
-        }
-        let inner: String = literal.chars[open + 1..close].iter().collect();
-        if is_complete_expression(&inner) {
-            found = Some(Interpolation { open, close });
+        if open < caret && caret <= close {
+            return Some(Interpolation { open, close });
         }
     }
 
-    found
+    None
 }
 
 /// Completion for a `receiver.member` slot written inside an interpolation.

@@ -47,6 +47,12 @@
 | src/lsp.rs | +260 −0 | resumed run and round-1 review: completion inside a `{…}` text interpolation. The literal is decoded first, so `\u007B`/`\u007D` are braces to the LSP exactly as they are to the lexer; a pair is interpolation only when its contents re-parse as one complete expression, so a JSON object in a string stays text; `this` is offered as an expression keyword; and a `receiver.member` slot inside a pair is re-analyzed in the literal's enclosing scopes so it answers the object's or module's members rather than a flat lexical list. Text outside a pair, and a closed pair, still answer nothing. |
 | tests/tooling_grammar_test.rs | +160 −0 | eight interpolation tests: scope and builtins with no statement keywords; text before and after a pair in the same literal; a later declaration not offered above the caret; a malformed column/line producing a clean `Err`; JSON braces that are not an expression stay text; `this` is offered; `{this.}` offers the object's members; and a `\u007B` escape opens an interpolation. |
 | src/parser.rs | +18 −1 | round-1 review: `is_complete_expression` and a crate-visible `unmatched_opens` expose the parser's own interpolation rule, so the LSP asks the same question instead of trusting brace balance alone. |
+| src/lsp.rs | +159 −4 | resumed run: goto-definition and find-references now look inside a `{…}` text interpolation, closing the follow-up recorded by the previous attempt. The literal is decoded and re-analyzed with the interpolated expression in place of the text token; decode positions are mapped back to the original source so a use reports the caret the editor wrote, even when the braces were `\u007B`/`\u007D` or the expression sits in a nested function scope. A name in text that is not a substitution still answers `None`/no references. |
+| tests/tooling_grammar_test.rs | +139 −0 | six resumed-run tests: goto inside an interpolation returns the outer declaration's exact span; references join the declaration and the interpolated use; a builtin inside an interpolation resolves through the registry; malformed positions remain clean errors; escaped braces map back to the original span; and an interpolated use prefers the shadowing local over an outer function. |
+| src/lsp.rs | +159 −6 | round-1 review: find-references is now interpolation-aware for the whole file instead of only for a query that starts inside text. Every text literal's interpolation is re-analyzed, a name that resolves to the queried declaration is kept, and its mapped use is merged with the main token-stream answer, so the declaration-side query and the inside-text query return the same set. The old single-literal path remains only for a name declared inside the literal itself, where the main analysis has no declaration to match against other literals. |
+| tests/tooling_grammar_test.rs | +38 −0 | two round-1 review tests: a declaration-side query finds the use inside a text interpolation, and it reaches uses in every text literal in the file rather than only one. |
+| src/lsp.rs | +236 −34 | round-2 review: brace pairing is a single stack pass over the decoded literal, candidates are tested from the inside out under a bounded work budget, a valid pair skips the span it replaces exactly as the parser does, and literals whose decoded text cannot contain the queried name are skipped. All substitutions in one literal are re-analyzed together instead of analyzing the whole file once per pair; that analysis is capped per query and reused for every use in the literal. Nested text literals inside an interpolated expression are walked through the resulting view, so their substitutions still contribute references. |
+| tests/tooling_grammar_test.rs | +90 −0 | round-2 review tests: interpolation references now assert `end_line`/`end_column` for the declaration, a use followed by text, a use that fills the expression, and an escaped-brace use; a builtin inside `{abs(-3)}` is queried with `find_references` and maps back to its source span. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -348,6 +354,14 @@ replacement, the alias between same-named modules and its completed members.
 | edge_completions_outside_an_interpolation_in_the_same_literal_are_empty | context awareness / boundary: text before and after a balanced pair in the same literal is still text |
 | edge_completions_inside_an_interpolation_do_not_offer_later_declarations | scope / declaration order: a declaration below the caret is not in scope above it |
 | edge_completions_inside_an_interpolation_reject_a_malformed_position | out of bounds / failure: a column past the line is a clean `Err`, never a panic |
+| edge_goto_definition_inside_an_interpolation_resolves_to_the_outer_binding | context awareness / goto-definition: a name inside `{…}` resolves to the `set` declaration outside the literal |
+| edge_find_references_inside_an_interpolation_join_the_binding | context awareness / references: the declaration and the interpolated use share one binding while surrounding text is not a use |
+| edge_goto_definition_on_a_builtin_inside_an_interpolation_resolves_to_the_registry | builtin registry resolution inside an interpolated expression |
+| edge_navigation_inside_an_interpolation_rejects_malformed_positions | out of bounds / failure: line 0, a column past the line and a line past the file are clean `Err`s |
+| edge_navigation_inside_escaped_interpolation_braces_maps_the_original_span | Unicode / escapes: `\u007B`/`\u007D` braces answer at the source position the editor wrote |
+| edge_interpolated_use_prefers_the_shadowing_binding | nesting / shadowing: an interpolated use resolves the local binding, not an outer same-named function |
+| edge_find_references_from_the_declaration_include_interpolated_uses | context awareness / references: the normal declaration-side query finds the use inside a text interpolation |
+| edge_find_references_from_the_declaration_reach_every_text_literal | context awareness / references: every text literal in the file contributes its interpolated uses, not only the one nearest the query |
 | edge_completions_inside_balanced_braces_that_are_not_an_expression_are_empty | context awareness: a JSON object in a string is text to the parser, so completion stays empty |
 | edge_completions_inside_an_interpolation_offer_this | context awareness: `this` is an expression keyword a method may write, so it is offered inside a pair |
 | edge_completions_after_a_member_dot_inside_an_interpolation_offer_members | context awareness / member completion: `{this.}` offers the enclosing object's fields and methods, not the lexical registry |
@@ -388,12 +402,14 @@ would otherwise be offered the lexical registry.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2875 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2887 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets` ran 85 test binaries and reported 2875 passed, 0
-failed and 0 ignored. That is the count from the resumed run's full gate plus
-the four round-1 review fixtures added now.
+`cargo test --all-targets` ran 85 test binaries and reported 2887 passed, 0
+failed and 0 ignored. The round-2 change adds two more fixtures (a builtin
+reference inside an interpolation and a use that fills the expression) and
+extends the existing interpolation-reference fixtures with end-span assertions;
+2885 + 2 = 2887 matches the harvested total.
 
 ## Invariants touched
 
@@ -404,5 +420,5 @@ the four round-1 review fixtures added now.
 ## Known gaps / follow-ups
 
 - The functions implement capabilities only; the LSP transport/server loop remains phase-017 scaffolding by design.
-- Completion now answers inside a `{…}` string interpolation, but goto-definition and find-references still do not look inside one: those names are part of one text token rather than identifiers in the main token stream, and resolving them would need a separate sub-analysis mapped back onto the literal. This is recorded here rather than widened into this phase.
+- Completion, goto-definition and find-references now answer inside a `{…}` string interpolation. Find-references from a declaration outside text walks every text literal in the file and merges the uses in each interpolation (including a nested one) that resolve to the same declaration. The remaining asymmetry is a query that starts inside text when the name itself is declared inside text: that answer comes from re-analyzing the one literal, because the main token stream cannot see the inner declaration to match it against other literals.
 - Completion enumerates a program-declared module (and an `import` of it) because its `module … end` body is in the source text the navigation functions receive. A module loaded from a separate file has no declarations in that text, so these pure-source functions cannot enumerate its members; `Vm::module_member_values` can do so once the runtime has loaded the file. Reading module files here would make completion depend on the working directory rather than only on the source, so it is recorded as a follow-up instead.

@@ -4470,3 +4470,314 @@ fn edge_bare_module_member_read_resolves_to_the_published_function() {
         "the declaration, its export and the bare member read share one binding"
     );
 }
+
+#[test]
+fn edge_goto_definition_inside_an_interpolation_resolves_to_the_outer_binding() {
+    let source = "set greeting to \"hi\"\nsay \"message: {greeting}\"\n";
+
+    let found = goto_definition(source, 2, 18)
+        .expect("a position inside the file is valid")
+        .expect("the name inside an interpolation is a lexical use");
+
+    assert_eq!(
+        (
+            found.line,
+            found.column,
+            found.end_column,
+            found.kind.as_str()
+        ),
+        (1, 5, 12, "variable"),
+        "the interpolated use must point at the `set` declaration, not at the literal"
+    );
+    assert_eq!(found.name, "greeting");
+}
+
+#[test]
+fn edge_find_references_inside_an_interpolation_join_the_binding() {
+    let source = "set greeting to \"hi\"\nsay \"message: {greeting}\"\n";
+
+    let references: Vec<(usize, usize, usize, usize)> = find_references(source, 2, 18)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        references,
+        vec![(1, 5, 1, 12), (2, 16, 2, 23)],
+        "the declaration and the interpolated use share one binding, and the surrounding text is not a use"
+    );
+}
+
+#[test]
+fn edge_goto_definition_in_an_outer_interpolation_descends_into_a_nested_literal() {
+    let source = "set label to \"outer\"\nsay \"{ to (name) give back \\\"{name}\\\" }\"\n";
+
+    let found = goto_definition(source, 2, 31)
+        .expect("a position inside the file is valid")
+        .expect("the nested substitution names the function literal's parameter");
+
+    assert_eq!(
+        (
+            found.name.as_str(),
+            found.line,
+            found.column,
+            found.end_column,
+        ),
+        ("name", 2, 12, 15),
+        "the outermost valid pair is the interpolation; its expression opens the scope the nested literal uses"
+    );
+}
+
+#[test]
+fn edge_find_references_in_an_outer_interpolation_descends_into_a_nested_literal() {
+    let source = "set label to \"outer\"\nsay \"{ to (name) give back \\\"{name}\\\" }\"\n";
+
+    let references: Vec<(usize, usize, usize, usize)> = find_references(source, 2, 31)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        references,
+        vec![(2, 12, 2, 15), (2, 31, 2, 34)],
+        "the function literal's parameter and its nested use share one binding, so the outer `set label` is not a reference"
+    );
+}
+
+#[test]
+fn edge_goto_definition_on_a_builtin_inside_an_interpolation_resolves_to_the_registry() {
+    let source = "say \"{abs(-3)}\"\n";
+
+    let found = goto_definition(source, 1, 8)
+        .expect("a position inside the file is valid")
+        .expect("`abs` is a builtin inside the interpolated expression");
+
+    assert_eq!(
+        (
+            found.kind.as_str(),
+            found.name.as_str(),
+            found.line,
+            found.column,
+        ),
+        ("builtin", "abs", 0, 0),
+        "a builtin resolves through the registry even when it is written inside text"
+    );
+}
+
+#[test]
+fn edge_navigation_inside_an_interpolation_rejects_malformed_positions() {
+    let source = "say \"{abs(-3)}\"\n";
+
+    assert!(
+        goto_definition(source, 0, 1).is_err(),
+        "line 0 is not a source position"
+    );
+    assert!(
+        find_references(source, 1, 99).is_err(),
+        "a column past the line is not a source position"
+    );
+    assert!(
+        completions(source, 3, 1).is_err(),
+        "a line past the file is not a source position"
+    );
+}
+
+#[test]
+fn edge_navigation_inside_escaped_interpolation_braces_maps_the_original_span() {
+    let source = "set greeting to \"hi\"\nsay \"\\u007Bgreeting\\u007D\"\n";
+
+    let found = goto_definition(source, 2, 15)
+        .expect("a position inside the file is valid")
+        .expect("the escaped braces open an interpolation exactly as the lexer reads them");
+
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (1, 5, "variable"),
+        "the decoded name maps back to the declaration outside the literal"
+    );
+
+    let references: Vec<(usize, usize, usize, usize)> = find_references(source, 2, 15)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+    assert_eq!(
+        references,
+        vec![(1, 5, 1, 12), (2, 12, 2, 19)],
+        "the interpolated use is reported at its own source span, not at the escape"
+    );
+}
+
+#[test]
+fn edge_interpolated_use_prefers_the_shadowing_binding() {
+    let source = concat!(
+        "to f()\n",
+        "    give back 2\n",
+        "end\n",
+        "to g()\n",
+        "    set f to 1\n",
+        "    say \"{f}\"\n",
+        "end\n",
+        "say f\n",
+    );
+
+    let found = goto_definition(source, 6, 11)
+        .expect("a position inside the file is valid")
+        .expect("the interpolated name names the local variable");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (5, 9, "variable"),
+        "the use inside the function must not jump to the outer function"
+    );
+
+    let inner: Vec<(usize, usize, usize, usize)> = find_references(source, 6, 11)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+    let outer: Vec<(usize, usize, usize, usize)> = find_references(source, 1, 4)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+
+    assert_eq!(inner, vec![(5, 9, 5, 9), (6, 11, 6, 11)]);
+    assert_eq!(outer, vec![(1, 4, 1, 4), (8, 5, 8, 5)]);
+}
+
+#[test]
+fn edge_find_references_from_the_declaration_include_interpolated_uses() {
+    let source = "set greeting to \"hi\"\nsay \"message: {greeting}\"\n";
+
+    let references: Vec<(usize, usize, usize, usize)> = find_references(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        references,
+        vec![(1, 5, 1, 12), (2, 16, 2, 23)],
+        "a declaration-side query must see the use inside the text interpolation"
+    );
+}
+
+#[test]
+fn edge_find_references_inside_an_interpolation_end_at_the_expression_boundary() {
+    let source = "set greeting to \"hi\"\nsay \"{greeting}\"\n";
+
+    let references: Vec<(usize, usize, usize, usize)> = find_references(source, 2, 7)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        references,
+        vec![(1, 5, 1, 12), (2, 7, 2, 14)],
+        "a use that fills the whole expression keeps the interpolated name's end, not the closing brace's"
+    );
+}
+
+#[test]
+fn edge_find_references_on_a_builtin_inside_an_interpolation_resolves_to_the_registry() {
+    let source = "say \"{abs(-3)}\"\n";
+
+    let references: Vec<(usize, usize, usize, usize)> = find_references(source, 1, 8)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        references,
+        vec![(1, 7, 1, 9)],
+        "a builtin reference inside an interpolation is the registry use, mapped to its source span"
+    );
+}
+
+#[test]
+fn edge_find_references_from_the_declaration_reach_every_text_literal() {
+    let source = concat!(
+        "set greeting to \"hi\"\n",
+        "say \"one: {greeting}\"\n",
+        "say \"two: {greeting}\"\n",
+    );
+
+    let references: Vec<(usize, usize, usize, usize)> = find_references(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| {
+            (
+                location.line,
+                location.column,
+                location.end_line,
+                location.end_column,
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        references,
+        vec![(1, 5, 1, 12), (2, 12, 2, 19), (3, 12, 3, 19)],
+        "every text literal in the file contributes its interpolated uses"
+    );
+}
