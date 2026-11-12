@@ -471,8 +471,35 @@ Embedding end-user applications (`rb-httpd`, `rb-todo`, `rb-kv`, `rb-markdown`, 
    - **Stage 1 (At Phase 126 Milestone)**: Spin up `authorss81/rb-apps` alongside `authorss81/rbos`. Build early CLI dogfooding tools (`rb-todo`, `rb-markdown`, `rb-ssg`, `rb-lsp`).
    - **Stage 2 (Following Phase 152)**: Build high-performance, network-intensive tools (`rb-httpd` web server, `rb-kv` ACID key-value store, `rb-git`) utilizing Perceus zero-pause memory and bump arenas.
 
+### 13.3 The 6-Repository Architectural Blueprint (The Code + Ops Decoupling Principle)
+
+The foundational architecture of Redblue relies on strict decoupling:
+`authorss81/redblue` (the language engine) is driven, verified, and audited by `authorss81/rbops` (the autonomous pipeline orchestrator).
+
+Following this exact paradigm, **the downstream ecosystem must NOT be 3 monolithic repositories, but 6 paired repositories (3 Target Codebases + 3 Dedicated Ops Orchestrators)**:
+
+1. **Operating System Track**:
+   - **`authorss81/rbos`**: Operating system kernel, microkernel simulator, process table, fiber task scheduler, window manager, and shell code.
+   - **`authorss81/rbos-ops`**: Dedicated autonomous pipeline, QEMU/virtual machine test harnesses, boot benchmarks, phase queue, and recovery branches.
+2. **Applications Incubator Track**:
+   - **`authorss81/rb-apps`**: Practical applications, CLI tools, web servers, markdown engines, and GUI apps written in pure Redblue.
+   - **`authorss81/rb-apps-ops`**: Dedicated autonomous application runner, end-to-end integration test gates, performance regressions, and package release pipeline.
+3. **Package Registry & Distribution Track**:
+   - **`authorss81/rb-pkg`**: Central package index, capability permission manifests, dependency solver, and `rb-pkg` CLI client.
+   - **`authorss81/rb-pkg-ops`**: Autonomous package ingestion pipeline, cryptographic signature verification, supply-chain security scanner, and registry mirror automation.
+
+#### The 4 Non-Negotiable Invariants of the 6-Repo Model:
+1. **Separation of Powers (Gate Security)**: Coding agents executing in `rbos`, `rb-apps`, or `rb-pkg` must NEVER have write access to `.github/workflows/` or the gate verification scripts (`verify.sh`). The `-ops` repositories hold the evaluation lock, preventing agents from weakening their own gates.
+2. **Independent 24/7 Concurrency**: Each `-ops` pipeline runs on its own independent GitHub Actions concurrency queue (`cancel-in-progress: false`). Language development, OS kernel hacking, application development, and package verification execute concurrently 24/7 without competing for runner slots.
+3. **Pristine Git History**: Hundreds of 300-second WIP checkpoints, model attempt branches, and debugging logs are isolated in the `-ops` repositories, keeping the production repositories (`rbos`, `rb-apps`, `rb-pkg`) clean with release-quality tags and squashed delivery commits.
+4. **Domain-Specific Verification Harnesses**: Kernel boot simulations, application HTTP load tests, and package dependency DAG verifications each require specialized environments and dependencies that must not bloat a single monolithic workflow.
+
 > [!IMPORTANT]
-> **Standing Directive**: When Phase 126 completes and lands on `main`, the agent MUST immediately alert the user to spin up both **`authorss81/rbos`** AND **`authorss81/rb-apps`**, and repeat this prompt in every response until confirmed.
+> **Standing Directive**: When Phase 126 completes and lands on `main`, the agent MUST immediately alert the user to spin up the **6 paired ecosystem repositories**:
+> 1. `authorss81/rbos` & `authorss81/rbos-ops`
+> 2. `authorss81/rb-apps` & `authorss81/rb-apps-ops`
+> 3. `authorss81/rb-pkg` & `authorss81/rb-pkg-ops`
+> and repeat this prompt in every response until confirmed.
 
 ---
 
