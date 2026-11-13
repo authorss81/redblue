@@ -22,7 +22,7 @@ use std::ops::Range;
 use crate::error::Error;
 use crate::lexer::{Lexer, Token, TokenKind, KEYWORDS};
 use crate::parser::is_complete_expression;
-use crate::stdlib::{is_module, BUILTIN_NAMES, MODULES, MODULE_MEMBERS};
+use crate::stdlib::{is_module, module_has_member, BUILTIN_NAMES, MODULES, MODULE_MEMBERS};
 
 /// Where the generated grammar is checked in. Nothing has to be built to make
 /// the grammar valid: the file is plain JSON, and this constant names it.
@@ -488,13 +488,14 @@ struct Analysis {
     object_parents: HashMap<usize, usize>,
     /// A `this` token to the object whose body encloses it.
     this_objects: HashMap<usize, usize>,
-    /// An import name or alias to the module it names, mirroring the runtime's
-    /// `module_aliases`. A standard module is in the table under its own name
-    /// even when it is imported unaliased.
-    module_aliases: HashMap<String, String>,
     /// The module binding an import named at its own site, keyed by the import
     /// binding. A later same-named module cannot change what the import means.
     import_module_bindings: HashMap<usize, usize>,
+    /// The module spelling an import binding names, keyed by the import
+    /// binding. It is not shared by every spelling of an alias, so two scopes
+    /// may reuse an alias for different modules without one canonicalising to
+    /// the other.
+    import_module_sources: HashMap<usize, String>,
     /// The names a program's own `module … end` declaration publishes, keyed by
     /// the module's name. A declared module is a namespace the program built,
     /// so its members are read from its `export` rather than from the stdlib's
@@ -503,6 +504,22 @@ struct Analysis {
     /// The same published names keyed by the module binding, so an import alias
     /// keeps the members of the module it actually named.
     declared_module_members_by_binding: HashMap<usize, Vec<String>>,
+    /// Every `module … end` declaration with the token index and lexical scope
+    /// where it is written. A declaration only shadows a standard module for
+    /// uses after it that can see its scope.
+    module_declarations: Vec<ModuleDeclaration>,
+    /// The lexical scope of every token, used to decide whether a module
+    /// declaration is visible where a receiver is written.
+    token_scope: Vec<usize>,
+    /// Every lexical scope's parent, indexed by scope id.
+    scope_parents: Vec<Option<usize>>,
+}
+
+struct ModuleDeclaration {
+    name: String,
+    index: usize,
+    binding: usize,
+    scope: usize,
 }
 
 fn visible_names(scopes: &[HashMap<String, usize>]) -> Vec<String> {
@@ -1275,6 +1292,87 @@ fn is_builtin_name(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name) || MODULES.contains(&name) || name == "PI" || name == "E"
 }
 
+/// Whether `outer` is `inner` or an ancestor of it in the lexical scope tree.
+fn scope_encloses(scope_parents: &[Option<usize>], outer: usize, mut inner: usize) -> bool {
+    loop {
+        if inner == outer {
+            return true;
+        }
+        match scope_parents.get(inner).copied().flatten() {
+            Some(parent) => inner = parent,
+            None => return false,
+        }
+    }
+}
+
+/// The module binding a program declaration puts in force for a receiver.
+///
+/// A declaration shadows a standard module only when it is written before the
+/// receiver and its scope encloses the receiver's. A module declared in a
+/// branch, function or other block the receiver cannot see therefore leaves the
+/// standard module in force.
+fn module_in_force(analysis: &Analysis, name: &str, receiver: usize) -> Option<usize> {
+    let scope = analysis.token_scope.get(receiver).copied().unwrap_or(0);
+    analysis
+        .module_declarations
+        .iter()
+        .filter(|declaration| {
+            declaration.name == name
+                && declaration.index <= receiver
+                && scope_encloses(&analysis.scope_parents, declaration.scope, scope)
+        })
+        .max_by_key(|declaration| declaration.index)
+        .map(|declaration| declaration.binding)
+}
+
+/// The standard module a receiver names, if it is one and not a program-declared
+/// module or a shadowing local binding.
+fn standard_module_of(analysis: &Analysis, receiver: usize) -> Option<&str> {
+    let receiver_name = name_of(analysis.tokens.get(receiver)?)?;
+    let module = match analysis.token_binding[receiver] {
+        Some(binding) => match analysis.bindings[binding].kind {
+            DefinitionKind::Import => {
+                if analysis.import_module_bindings.contains_key(&binding) {
+                    return None;
+                }
+                analysis
+                    .import_module_sources
+                    .get(&binding)
+                    .map(String::as_str)
+                    .unwrap_or(receiver_name)
+            }
+            _ => return None,
+        },
+        None => receiver_name,
+    };
+    if module_in_force(analysis, module, receiver).is_some() || !is_module(module) {
+        return None;
+    }
+    Some(module)
+}
+
+/// The standard module and member a member name resolves to.
+fn standard_module_member(analysis: &Analysis, index: usize) -> Option<(&str, &str)> {
+    if !analysis.member_names.contains(&index) {
+        return None;
+    }
+    let module = standard_module_of(analysis, index.checked_sub(2)?)?;
+    let member = name_of(analysis.tokens.get(index)?)?;
+    module_has_member(module, member).then_some((module, member))
+}
+
+/// Every use of one standard module member, in source order.
+fn module_member_references(analysis: &Analysis, module: &str, member: &str) -> Vec<Location> {
+    let mut found = Vec::new();
+    for (index, token) in analysis.tokens.iter().enumerate() {
+        if standard_module_member(analysis, index) == Some((module, member)) {
+            found.push(Location::of_name(token, member));
+        }
+    }
+    found.sort_by_key(|location| (location.line, location.column));
+    found
+}
+
 /// Whether a name written before its declaration may resolve to `declaration`.
 ///
 /// A builtin answers until the program claims its name. A declaration earlier
@@ -1321,7 +1419,6 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // pass so the `extends` name has the binding the walk gave it.
     let mut object_parents: HashMap<usize, usize> = HashMap::new();
     let mut this_objects: HashMap<usize, usize> = HashMap::new();
-    let mut module_aliases: HashMap<String, String> = HashMap::new();
     // The top-level names each live `module … end` body declares, and the last
     // `export` it writes. Both are keyed by the module's binding; the names are
     // filtered by the export when the module closes.
@@ -1354,6 +1451,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // reaches it, so a write can be compared with each read it might affect.
     let mut member_runtime_paths: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut import_module_bindings: HashMap<usize, usize> = HashMap::new();
+    let mut import_module_sources: HashMap<usize, String> = HashMap::new();
+    let mut module_declarations: Vec<ModuleDeclaration> = Vec::new();
     // The latest module binding for a name, used only by an import written
     // before its module is declared: at that point there is no binding to
     // record, so the deferred pass falls back to this table.
@@ -1604,6 +1703,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     );
                     mark_declaration(&mut token_binding, &mut declarations, index + 1, binding);
                     module = Some(binding);
+                    module_declarations.push(ModuleDeclaration {
+                        name: name.to_string(),
+                        index: index + 1,
+                        binding,
+                        scope: binding_scopes[binding],
+                    });
                 }
                 let mut frame = Frame::scoped(FrameKind::Module);
                 frame.module = module;
@@ -1856,9 +1961,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                 cursor,
                                 binding,
                             );
-                            module_aliases
-                                .entry(name.clone())
-                                .or_insert_with(|| name.clone());
+                            import_module_sources.insert(binding, name.clone());
                             source_binding = module_name_bindings.get(&name).copied();
                             if let Some(module_binding) = source_binding {
                                 import_module_bindings.insert(binding, module_binding);
@@ -1889,7 +1992,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                     import_module_bindings.insert(binding, module_binding);
                                 }
                                 if let Some(source) = module.take() {
-                                    module_aliases.insert(name.to_string(), source);
+                                    import_module_sources.insert(binding, source);
                                 }
                                 cursor += 1;
                             }
@@ -2371,8 +2474,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         .get(&receiver_binding)
                         .copied()
                         .or_else(|| {
-                            name_of(&tokens[receiver])
-                                .and_then(|alias| module_aliases.get(alias))
+                            import_module_sources
+                                .get(&receiver_binding)
                                 .and_then(|module| module_name_bindings.get(module).copied())
                         })?,
                     _ => return None,
@@ -2413,8 +2516,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     DefinitionKind::Module => Some(binding),
                     DefinitionKind::Import => {
                         import_module_bindings.get(&binding).copied().or_else(|| {
-                            name_of(&tokens[receiver])
-                                .and_then(|alias| module_aliases.get(alias))
+                            import_module_sources
+                                .get(&binding)
                                 .and_then(|module| module_name_bindings.get(module).copied())
                         })
                     }
@@ -2492,10 +2595,13 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
         object_methods,
         object_parents,
         this_objects,
-        module_aliases,
         import_module_bindings,
+        import_module_sources,
         declared_module_members,
         declared_module_members_by_binding,
+        module_declarations,
+        token_scope,
+        scope_parents,
     })
 }
 
@@ -2603,6 +2709,9 @@ fn definition_at_token(analysis: &Analysis, index: usize) -> Option<Definition> 
     }
 
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
+    if let Some((module, member)) = standard_module_member(analysis, index) {
+        return Some(Definition::builtin(&format!("{module}.{member}")));
+    }
     if is_builtin_name(name)
         && !analysis.member_names.contains(&index)
         && !analysis.type_names.contains(&index)
@@ -2964,6 +3073,12 @@ fn references_for(map: &SourceMap, analysis: &Analysis, index: usize) -> Vec<Loc
     let target = analysis.token_binding[index];
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
 
+    if target.is_none() {
+        if let Some((module, member)) = standard_module_member(analysis, index) {
+            return references_globally(map, analysis, None, name, Some((module, member)));
+        }
+    }
+
     if target.is_none()
         && (analysis.member_names.contains(&index)
             || analysis.type_names.contains(&index)
@@ -2978,7 +3093,7 @@ fn references_for(map: &SourceMap, analysis: &Analysis, index: usize) -> Vec<Loc
     }
 
     let declaration = target.map(|binding| analysis.bindings[binding].location);
-    references_globally(map, analysis, declaration, name)
+    references_globally(map, analysis, declaration, name, None)
 }
 
 /// Every reference to a name, including uses written in any text literal's
@@ -2996,6 +3111,7 @@ fn references_globally(
     analysis: &Analysis,
     declaration: Option<Location>,
     name: &str,
+    module_member: Option<(&str, &str)>,
 ) -> Vec<Location> {
     let binding = match declaration {
         Some(declaration) => match binding_declared_at(analysis, declaration) {
@@ -3004,13 +3120,17 @@ fn references_globally(
         },
         None => None,
     };
-    let mut found = references_matching(analysis, binding, name);
+    let mut found = match module_member {
+        Some((module, member)) => module_member_references(analysis, module, member),
+        None => references_matching(analysis, binding, name),
+    };
     let original: Vec<usize> = (0..map.chars.len()).collect();
     let mut analyses_left = MAX_INTERPOLATION_ANALYSES;
     let query = InterpolationQuery {
         root_map: map,
         declaration,
         name,
+        module_member,
     };
 
     literal_references(
@@ -3032,6 +3152,7 @@ struct InterpolationQuery<'a> {
     root_map: &'a SourceMap,
     declaration: Option<Location>,
     name: &'a str,
+    module_member: Option<(&'a str, &'a str)>,
 }
 
 /// Adds the references written in text literals of one analysis.
@@ -3078,17 +3199,21 @@ fn literal_references(
         let Ok(interpolated) = analyze(&view.source, None) else {
             continue;
         };
-        let binding = match query.declaration {
-            Some(declaration) => {
+        let binding = match (query.module_member, query.declaration) {
+            (None, Some(declaration)) => {
                 match binding_declared_in(&view, query.root_map, &interpolated, declaration) {
                     Some(binding) => Some(binding),
                     None => continue,
                 }
             }
-            None => None,
+            _ => None,
+        };
+        let matched = match query.module_member {
+            Some((module, member)) => module_member_references(&interpolated, module, member),
+            None => references_matching(&interpolated, binding, query.name),
         };
 
-        for location in references_matching(&interpolated, binding, query.name) {
+        for location in matched {
             let start = view.map.offset(location.line, location.column);
             if view.expressions.contains(&start) {
                 found.push(view.original_location(query.root_map, location));
@@ -3173,7 +3298,13 @@ fn find_references_in_interpolation(
 
     let target = analysis.token_binding[index];
     let name = name_of(&analysis.tokens[index]).expect("a name token has a name");
+    let module_member = if target.is_none() {
+        standard_module_member(&analysis, index)
+    } else {
+        None
+    };
     if target.is_none()
+        && module_member.is_none()
         && (analysis.member_names.contains(&index)
             || analysis.type_names.contains(&index)
             || analysis.syntax_names.contains(&index)
@@ -3204,7 +3335,13 @@ fn find_references_in_interpolation(
         return Ok(found);
     }
 
-    Ok(references_globally(map, original, declaration, name))
+    Ok(references_globally(
+        map,
+        original,
+        declaration,
+        name,
+        module_member,
+    ))
 }
 
 /// Find-references as the JSON array those locations render to.
@@ -3380,24 +3517,24 @@ fn member_completions(analysis: &Analysis, map: &SourceMap, offset: usize) -> Op
     let receiver_binding = analysis.token_binding[receiver];
     let binding_kind = receiver_binding.map(|binding| analysis.bindings[binding].kind);
 
-    // The alias table is flat, so only a binding that is actually in scope may
-    // make an alias resolve. An import written inside a function or a branch
-    // leaves its alias behind after `end`; that out-of-scope name has no
-    // binding, so it must not reach the alias table. An unbound name is still a
-    // standard module name, because the runtime lets a program write
-    // `files.read(..)` without importing `files`.
+    // Only a binding that is actually in scope may make an alias resolve. An
+    // import written inside a function or a branch leaves its alias behind
+    // after `end`; that out-of-scope name has no binding, so it must not reach
+    // the per-binding module source. An unbound name is still a standard module
+    // name, because the runtime lets a program write `files.read(..)` without
+    // importing `files`.
     let (module_binding, module, namespace) = match binding_kind {
         Some(DefinitionKind::Import) => {
-            let module_binding = receiver_binding
-                .and_then(|binding| analysis.import_module_bindings.get(&binding).copied());
+            let binding = receiver_binding.expect("a binding kind has a binding");
+            let imported = analysis.import_module_bindings.get(&binding).copied();
             let module = analysis
-                .module_aliases
-                .get(name)
+                .import_module_sources
+                .get(&binding)
                 .map(String::as_str)
                 .unwrap_or(name);
-            let known = module_binding.is_some()
-                || is_module(module)
-                || analysis.declared_module_members.contains_key(module);
+            let shadowing = module_in_force(analysis, module, receiver);
+            let module_binding = imported.or(shadowing);
+            let known = module_binding.is_some() || (shadowing.is_none() && is_module(module));
             (module_binding, module, known)
         }
         Some(DefinitionKind::Module) => {
@@ -3408,17 +3545,28 @@ fn member_completions(analysis: &Analysis, map: &SourceMap, offset: usize) -> Op
             }) || is_module(name);
             (receiver_binding, name, known)
         }
-        None => (None, name, is_module(name)),
+        None => {
+            let shadowing = module_in_force(analysis, name, receiver);
+            (shadowing, name, shadowing.is_some() || is_module(name))
+        }
         _ => return None,
     };
     if !namespace {
         return None;
     }
 
-    let members: Vec<&str> = if let Some(declared) = module_binding
-        .and_then(|binding| analysis.declared_module_members_by_binding.get(&binding))
-        .or_else(|| analysis.declared_module_members.get(module))
+    let members: Vec<&str> = if let Some(declared) =
+        module_binding.and_then(|binding| analysis.declared_module_members_by_binding.get(&binding))
     {
+        declared.iter().map(String::as_str).collect()
+    } else if module_binding.is_none() && is_module(module) {
+        MODULE_MEMBERS
+            .iter()
+            .find(|(listed, _)| *listed == module)
+            .map(|(_, members)| *members)
+            .unwrap_or(&[])
+            .to_vec()
+    } else if let Some(declared) = analysis.declared_module_members.get(module) {
         declared.iter().map(String::as_str).collect()
     } else {
         MODULE_MEMBERS

@@ -5466,3 +5466,232 @@ fn edge_module_value_navigation_rejects_a_malformed_position() {
         );
     }
 }
+
+#[test]
+fn edge_goto_definition_on_a_standard_module_member_resolves_to_the_registry() {
+    let source = "say files.read(\"x\")\n";
+    let member = goto_definition(source, 1, 11)
+        .expect("a position inside the file is valid")
+        .expect("a standard module member resolves through the registry");
+    assert_eq!(
+        (
+            member.kind.as_str(),
+            member.name.as_str(),
+            member.line,
+            member.column
+        ),
+        ("builtin", "files.read", 0, 0),
+        "a standard module member has no file span; the registry names it"
+    );
+
+    let module = goto_definition(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .expect("the module itself is a builtin");
+    assert_eq!(
+        (module.kind.as_str(), module.name.as_str()),
+        ("builtin", "files"),
+        "the receiver still resolves to the module registry"
+    );
+}
+
+#[test]
+fn edge_find_references_on_a_standard_module_member_separates_modules_and_aliases() {
+    let source = concat!(
+        "import files as f\n",
+        "say f.read(\"a\")\n",
+        "say files.read(\"b\")\n",
+        "say json.parse(\"{}\")\n",
+        "say read\n",
+    );
+
+    let files_reads: Vec<(usize, usize)> = find_references(source, 2, 7)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        files_reads,
+        vec![(2, 7), (3, 11)],
+        "an alias and the module's own name share one member, not another module's"
+    );
+
+    let json_parses: Vec<(usize, usize)> = find_references(source, 4, 10)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        json_parses,
+        vec![(4, 10)],
+        "`json.parse` is a different member from `files.read` and a plain `read`"
+    );
+}
+
+#[test]
+fn edge_goto_definition_on_an_aliased_standard_module_member_names_its_module() {
+    let source = concat!("import files as f\n", "say f.read(\"x\")\n");
+    let found = goto_definition(source, 2, 7)
+        .expect("a position inside the file is valid")
+        .expect("an aliased standard module member resolves through the registry");
+    assert_eq!(
+        (found.kind.as_str(), found.name.as_str()),
+        ("builtin", "files.read"),
+        "the alias resolves to the module it names, not to the alias spelling"
+    );
+}
+
+#[test]
+fn edge_same_alias_in_two_scopes_canonicalises_to_each_bindings_module() {
+    let source = concat!(
+        "import files as f\n",
+        "to load()\n",
+        "    import json as f\n",
+        "    say f.parse(\"{}\")\n",
+        "end\n",
+        "say f.read(\"x\")\n",
+    );
+
+    let inner = goto_definition(source, 4, 11)
+        .expect("a position inside the file is valid")
+        .expect("the inner alias resolves to the module it named");
+    assert_eq!(
+        (inner.kind.as_str(), inner.name.as_str()),
+        ("builtin", "json.parse"),
+        "the inner alias must canonicalise to `json`, not the outer `files`"
+    );
+
+    let outer = goto_definition(source, 6, 7)
+        .expect("a position inside the file is valid")
+        .expect("the outer alias resolves to the module it named");
+    assert_eq!(
+        (outer.kind.as_str(), outer.name.as_str()),
+        ("builtin", "files.read"),
+        "the outer alias must keep `files` after another scope reused `f` for `json`"
+    );
+
+    let outer_references: Vec<(usize, usize)> = find_references(source, 6, 7)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        outer_references,
+        vec![(6, 7)],
+        "the outer `f.read` must not borrow the inner `f.parse` reference set"
+    );
+}
+
+#[test]
+fn edge_a_module_declared_in_a_block_does_not_shadow_a_standard_module_elsewhere() {
+    let in_a_branch = concat!(
+        "if no then\n",
+        "    module files\n",
+        "        to read(path)\n",
+        "            give back \"shadow\"\n",
+        "        end\n",
+        "        export read\n",
+        "    end\n",
+        "end\n",
+        "say files.read(\"x\")\n",
+    );
+    let in_a_function = concat!(
+        "to load()\n",
+        "    module files\n",
+        "        to read(path)\n",
+        "            give back \"shadow\"\n",
+        "        end\n",
+        "        export read\n",
+        "    end\n",
+        "end\n",
+        "say files.read(\"x\")\n",
+    );
+    let before_a_later_declaration = concat!(
+        "say files.read(\"x\")\n",
+        "module files\n",
+        "    to read(path)\n",
+        "        give back \"shadow\"\n",
+        "    end\n",
+        "    export read\n",
+        "end\n",
+    );
+
+    for (source, line, case) in [
+        (in_a_branch, 9, "a branch body"),
+        (in_a_function, 9, "a function body"),
+        (before_a_later_declaration, 1, "a later declaration"),
+    ] {
+        let found = goto_definition(source, line, 11)
+            .expect("a position inside the file is valid")
+            .expect("the standard module is in force at this use");
+        assert_eq!(
+            (found.kind.as_str(), found.name.as_str()),
+            ("builtin", "files.read"),
+            "a module declared in {case} must not shadow the standard module here"
+        );
+    }
+}
+
+#[test]
+fn edge_unknown_or_shadowed_standard_module_member_answers_nothing() {
+    let unknown = "say files.not_a_member\n";
+    assert_eq!(
+        goto_definition(unknown, 1, 11).expect("a position inside the file is valid"),
+        None,
+        "a word the module does not publish is not a builtin member"
+    );
+    assert!(
+        find_references(unknown, 1, 11)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "an unpublished member has no references to answer"
+    );
+
+    let shadowed = concat!("set files to 1\n", "say files.read(\"x\")\n");
+    assert_eq!(
+        goto_definition(shadowed, 2, 11).expect("a position inside the file is valid"),
+        None,
+        "a local binding named `files` shadows the standard module"
+    );
+    assert!(
+        find_references(shadowed, 2, 11)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a member of a shadowing local is not the standard module member"
+    );
+}
+
+#[test]
+fn edge_standard_module_member_references_reach_inside_interpolation() {
+    let source = concat!("say files.read(\"a\")\n", "say \"at {files.read}\"\n");
+
+    let references: Vec<(usize, usize)> = find_references(source, 1, 11)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(1, 11), (2, 16)],
+        "the registry member's references include its use inside text"
+    );
+}
+
+#[test]
+fn edge_standard_module_member_navigation_rejects_malformed_positions() {
+    let source = "say files.read(\"x\")\n";
+
+    for (line, column) in [(0, 1), (3, 1), (1, 999)] {
+        assert!(
+            goto_definition(source, line, column).is_err(),
+            "goto_definition must reject {line}:{column} with an error"
+        );
+        assert!(
+            find_references(source, line, column).is_err(),
+            "find_references must reject {line}:{column} with an error"
+        );
+        assert!(
+            completions(source, line, column).is_err(),
+            "completions must reject {line}:{column} with an error"
+        );
+    }
+}

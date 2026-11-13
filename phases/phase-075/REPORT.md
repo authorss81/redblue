@@ -64,6 +64,10 @@
 | tests/module_system_test.rs | +24 −0 | round-3 golden test: a module's `set` is a published member while its `constant` is a program global the module does not publish, pinned against the runtime's own member table. |
 | src/lsp.rs | +10 −4 | round-2 review: a `to` is published only when its declaration frame is the `Module` frame itself, so a function written inside a branch or loop is not a module body item; and the `set` publication owner is the same innermost runtime frame the value table uses, so a nested-branch `set` is both appended to `module_declared` and kept by the filter that builds `declared_module_values`. |
 | tests/tooling_grammar_test.rs | +76 −0 | two round-2 review tests: a function declared inside a module branch is not published, so `M.f()` answers `None`, has no references and is not offered by completion; and a module `constant` after a same-named `set` leaves the published value navigable and shares its references. |
+| src/lsp.rs | +87 −8 | resumed run: goto-definition and find-references now follow a **standard** module member through its registry row. A receiver that is an imported or directly written standard module resolves `files.read` to a `builtin` definition named `files.read` at no file span; an import alias canonicalises to the module it named; a program-declared module or a shadowing local still wins, and a word the module does not publish stays unresolved. References separate modules with a same-named member and reach uses inside `{…}` text interpolations. |
+| tests/tooling_grammar_test.rs | +138 −0 | six resumed-run tests: standard module-member goto, aliased goto, references that keep `files.read` apart from `json.parse` and a plain `read`, unknown/shadowed members answering nothing, a reference inside interpolation, and malformed positions as clean `Err`s. |
+| src/lsp.rs | +86 −23 | round-1 review: an import binding records the module spelling it named, so two scopes may reuse one alias for different modules without the top-level use canonicalising to the later binding; a program `module` declaration shadows a standard module only for a receiver written after it in a scope that can see the declaration, so a declaration in an uncalled function or an untaken branch — or a use before a later declaration — keeps the standard module's registry row. |
+| tests/tooling_grammar_test.rs | +91 −0 | two round-1 review tests: the same alias imported as `files` in one scope and `json` in a nested scope keeps each use on its own module and reference set; and `files.read` still resolves to the standard module when `module files` is declared in a branch, in a function, or later in the file. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -199,8 +203,8 @@ same-scope function fallback could jump forward past a shadowing `set` to a
 and raises `Unknown function 'f'`; the fallback is now bounded by source
 position, and the deferred pass still resolves a genuine call written before a
 later declaration. The two new fixtures pin both orders. The gate count is
-re-harvested from the current `cargo test --all-targets` run: 2911 passed, 0
-failed and 0 ignored across 85 test binaries. The four test instances added in
+re-harvested from the current `cargo test --all-targets` run: the tests harvested at that point, with 0
+failures and 0 ignored across 85 test binaries. The four test instances added in
 that earlier round were the two module-member-write fixtures plus the
 cross-target worker-layout fixture, which is compiled into both the `rb-bench`
 unit harness and `tests/bench_test.rs`. The worker-lookup repair is also what
@@ -209,7 +213,7 @@ instances (the `rb-bench` unit harness and `tests/bench_test.rs`) from failing
 to passing; this resumed delta then added the five module-value navigation
 tests, the round-3 review added the nested-set fixture and the runtime golden
 test, and this round-2 review added the branch-function refusal and the
-constant-after-set fixture, taking the run to 2911.
+constant-after-set fixture, taking the run to the harvested total described here.
 
 The final resumed run reproduced a module-navigation gap against the runtime.
 For
@@ -425,6 +429,14 @@ published value intact.
 | edge_module_value_navigation_rejects_a_malformed_position | out of bounds / failure: line 0, a line past the file and a column past the line are clean `Err`s from all three capabilities |
 | edge_a_function_declared_in_a_branch_is_not_a_published_module_member | module navigation / nesting: a `to` inside an `if` body is not a module body item, so `M.f()` answers `None`, has no references, and completion does not offer it |
 | edge_a_module_constant_after_a_same_named_set_leaves_the_value_published | duplicate names / module navigation: a `constant` after a module `set` is a program global, so `M.f` still resolves to the set and shares its references |
+| edge_goto_definition_on_a_standard_module_member_resolves_to_the_registry | builtin registry: `files.read` answers a `builtin` definition named `files.read` at line 0, never a file span |
+| edge_find_references_on_a_standard_module_member_separates_modules_and_aliases | duplicate names / import alias: `f.read` and `files.read` share one reference set while `json.parse` and a plain `read` stay out |
+| edge_goto_definition_on_an_aliased_standard_module_member_names_its_module | import alias: an alias canonicalises to the standard module it names |
+| edge_unknown_or_shadowed_standard_module_member_answers_nothing | missing binding / shadowing: an unpublished member and a member of a local binding named `files` answer `None` with no references |
+| edge_standard_module_member_references_reach_inside_interpolation | nesting: a registry member's references include its use inside a `{…}` text interpolation |
+| edge_standard_module_member_navigation_rejects_malformed_positions | out of bounds / failure: line 0, a line past the file and a column past the line are clean `Err`s from all three capabilities |
+| edge_same_alias_in_two_scopes_canonicalises_to_each_bindings_module | duplicate names / import alias: `f` names `files` outside a function and `json` inside it, and each member use keeps its own module and references |
+| edge_a_module_declared_in_a_block_does_not_shadow_a_standard_module_elsewhere | shadowing / scoping: `module files` in a branch, in a function, or after the use leaves `files.read` on the standard module |
 
 ### Mandatory edge-case matrix
 
@@ -476,14 +488,14 @@ phase, must confirm them.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2911 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2919 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets` was re-run on this checkout: 2911 passed, 0 failed
-and 0 ignored. This resumed delta added five module-value navigation tests to
-the harvested total, the round-3 review added the nested-set fixture and the
-runtime golden test, and this round-2 review added the branch-function refusal
-and the constant-after-set fixture; 2902 + 5 + 2 + 2 = 2911. The two out-of-scope repairs
+`cargo test --all-targets` was re-run on this checkout: 2919 passed, 0 failed
+and 0 ignored. The previous resumed delta and reviews brought the harvested
+total to its prior count; this resumed delta adds six standard-module-member
+navigation tests, and the round-1 review adds the same-alias and block-declared
+module fixtures, taking the current run to 2919. The two out-of-scope repairs
 (the benchmark worker lookup in `tests/bench/mod.rs` and the `needless_bool`
 clippy diagnostic in `phases/phase-088/scan.rs`) are retained only because each
 was a pre-existing failure of a mandatory gate; the ledger records them for the
