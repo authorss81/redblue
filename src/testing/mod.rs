@@ -8,7 +8,9 @@ pub use harness::TestHarness;
 pub use reporter::PrettyReporter;
 pub use runner::TestRunner;
 
-use crate::error::Result;
+use std::path::{Path, PathBuf};
+
+use crate::error::{Error, Result};
 
 /// Why a single test body did not pass. An `Assertion` failure is a Redblue
 /// `expect` that did not hold; an `Error` is a lexer/parser/analyzer/runtime
@@ -39,9 +41,24 @@ pub fn run_test_file(path: &str) -> Result<TestResults> {
 }
 
 pub fn run_all_tests() -> Result<TestResults> {
-    let mut harness = TestHarness::new();
+    run_tests_in("tests/")
+}
 
-    let test_files = find_test_files("tests/")?;
+/// Runs every Redblue test file under `dir`, recursively.
+///
+/// [`run_all_tests`] is this against the checkout's own `tests/`; a project's
+/// bare `rb test` is this against the `tests/` beside its manifest.
+pub fn run_tests_in(dir: impl AsRef<Path>) -> Result<TestResults> {
+    let mut harness = TestHarness::new();
+    let dir = dir.as_ref();
+
+    let test_files = find_test_files(dir)?;
+    if test_files.is_empty() {
+        return Err(Error::Io(format!(
+            "No Redblue test files found in '{}'",
+            dir.display()
+        )));
+    }
 
     for file in test_files {
         if let Err(e) = harness.run_file(&file) {
@@ -58,30 +75,52 @@ pub fn run_all_tests() -> Result<TestResults> {
 /// Redblue, so handing it Rust source — the `tests/*_test.rs` files that
 /// belong to `cargo test` — can only ever produce noise.
 ///
+/// A directory that does not exist collects nothing, because asking whether a
+/// path exists is not the same as failing to read one. A directory that exists
+/// but cannot be read is an error: silently skipping it would let a test run
+/// report success after examining none of the files it was pointed at.
+///
 /// The result is sorted. `read_dir` yields entries in filesystem hash order,
 /// which differs between machines and filesystems; an unsorted list would make
 /// the reported test order — and therefore the failure output — unstable.
-pub fn find_test_files(dir: &str) -> Result<Vec<String>> {
-    let mut files = collect_test_files(dir);
+pub fn find_test_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    let mut files = collect_test_files(dir.as_ref())?;
     files.sort();
     Ok(files)
 }
 
-fn collect_test_files(dir: &str) -> Vec<String> {
+fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_dir() {
-                files.extend(collect_test_files(&path.to_string_lossy()));
-            } else if path.extension() == Some("rb".as_ref()) {
-                files.push(path.to_string_lossy().to_string());
-            }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => {
+            return Err(Error::Io(format!(
+                "Cannot read test directory '{}': {}",
+                dir.display(),
+                error
+            )))
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::Io(format!(
+                "Cannot read test directory '{}': {}",
+                dir.display(),
+                error
+            ))
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(collect_test_files(&path)?);
+        } else if path.extension() == Some("rb".as_ref()) {
+            files.push(path);
         }
     }
 
-    files
+    Ok(files)
 }
 
 #[derive(Debug, Clone)]

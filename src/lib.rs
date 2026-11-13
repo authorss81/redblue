@@ -17,6 +17,7 @@ pub mod manifest;
 mod matrix;
 pub mod parser;
 pub mod path;
+pub mod project;
 pub mod repl;
 mod runtime;
 pub mod statistics;
@@ -152,17 +153,32 @@ pub fn run_repl() {
 }
 
 pub fn run_test(path: Option<&str>) -> Result<(), Error> {
-    let mut harness = testing::TestHarness::new();
-
     match path {
         Some(p) => {
+            let mut harness = testing::TestHarness::new();
             harness.run_file(p)?;
             // Report the failures and exit non-zero. Without this a failing
             // `expect` printed only a dot/F and still exited 0.
             testing::PrettyReporter::new().report(&harness.results());
         }
         None => {
-            let results = testing::run_all_tests()?;
+            // Bare `rb test` is about the project the caller is standing in,
+            // not about whichever `tests/` happens to be in the working
+            // directory. The walk finds the nearest manifest at or above the
+            // working directory, so `rb test` from `src/` still runs the
+            // project's own suite.
+            let cwd = env::current_dir().map_err(|error| {
+                Error::Io(format!("Cannot read the working directory: {error}"))
+            })?;
+            let root = project::find_project_root(&cwd).ok_or_else(|| {
+                Error::Runtime(
+                    "No Redblue project found here: run `rb new <name>` to create one".to_string(),
+                    Span::unknown(),
+                )
+            })?;
+            project::check_manifest(&root)?;
+
+            let results = testing::run_tests_in(project::tests_dir(&root))?;
             println!("Tests run: {}", results.total);
             println!("Passed: {}", results.passed);
             println!("Failed: {}", results.failed);
@@ -190,6 +206,12 @@ pub fn run_cli() {
                         eprintln!("Error: {}", e);
                         process::exit(1);
                     }
+                }
+                // Bare `rb new` names no project, and guessing one would create
+                // a directory the caller did not ask for.
+                "new" => {
+                    eprintln!("Error: `rb new` needs a project name, as in `rb new hello`");
+                    process::exit(1);
                 }
                 "grammar" => print!("{}", textmate_grammar()),
                 "keywords" => {
@@ -231,6 +253,22 @@ pub fn run_cli() {
             let cmd = &args[1];
             let path = &args[2];
             match cmd.as_str() {
+                "new" => {
+                    let cwd = match env::current_dir() {
+                        Ok(cwd) => cwd,
+                        Err(error) => {
+                            eprintln!("Error: Cannot read the working directory: {}", error);
+                            process::exit(1);
+                        }
+                    };
+                    match project::create_project(&cwd, path) {
+                        Ok(root) => println!("Created project {} at {}", path, root.display()),
+                        Err(error) => {
+                            eprintln!("Error: {}", error);
+                            process::exit(1);
+                        }
+                    }
+                }
                 "test" => {
                     if let Err(e) = run_test(Some(path)) {
                         eprintln!("Error: {}", e);
@@ -573,7 +611,8 @@ fn print_help() {
     println!("  rb              Start interactive REPL");
     println!("  rb <file>      Run a Redblue file");
     println!("  rb run <file>  Run a Redblue file");
-    println!("  rb test        Run all tests");
+    println!("  rb new <name>  Create a project with src/, tests/ and a manifest");
+    println!("  rb test        Run the current project's tests");
     println!("  rb test <file> Run specific test file");
     println!("  rb format <file>  Format a Redblue file");
     println!("  rb format --check <file>  Check if file needs formatting");

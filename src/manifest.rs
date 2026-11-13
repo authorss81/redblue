@@ -344,26 +344,30 @@ fn words_in_a_line(field: &str) -> usize {
 /// reach, so it is refused where it is written rather than at the import that
 /// can never find it.
 fn check_module_name(name: &str, label: &str, line: usize) -> Result<()> {
-    let refused = || {
-        Error::Runtime(
-            format!(
-                "{label} line {line}: '{name}' is not a module name: a module name starts with a \
-                 letter or an underscore and holds only letters, digits and underscores"
-            ),
-            Span::unknown(),
-        )
-    };
+    if is_module_name(name) {
+        return Ok(());
+    }
+    Err(Error::Runtime(
+        format!(
+            "{label} line {line}: '{name}' is not a module name: a module name starts with a \
+             letter or an underscore and holds only letters, digits and underscores"
+        ),
+        Span::unknown(),
+    ))
+}
+
+/// Whether `name` could be written as a module name.
+///
+/// The manifest and `rb new` both name things an `import` has to be able to
+/// reach, so they ask this one question. Keeping the rule in one place is what
+/// stops the two validators from drifting into disagreeing about a name.
+pub(crate) fn is_module_name(name: &str) -> bool {
     let mut characters = name.chars();
     let Some(first) = characters.next() else {
-        return Err(refused());
+        return false;
     };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(refused());
-    }
-    if !characters.all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(refused());
-    }
-    Ok(())
+    (first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Where module versions are published, as far as a resolution is concerned.

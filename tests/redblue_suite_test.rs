@@ -5,10 +5,10 @@
 //! reported a non-zero test count while asserting nothing at all. These tests
 //! fail if that regresses.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Every `.rb` file the Redblue harness collects.
-fn suite_files() -> Vec<String> {
+fn suite_files() -> Vec<PathBuf> {
     let mut files = redblue::testing::find_test_files("tests").expect("tests/ should be readable");
     files.sort();
     assert!(
@@ -19,8 +19,9 @@ fn suite_files() -> Vec<String> {
 }
 
 /// Source of one suite file.
-fn read(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {}", path, e))
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e))
 }
 
 /// Keywords that open a Redblue block and are closed by `end`. `else`,
@@ -122,7 +123,7 @@ fn edge_suite_declares_no_skip_markers() {
             assert!(
                 !trimmed.starts_with("// skip") && !trimmed.starts_with("# skip"),
                 "{}:{} carries a skip marker: {}",
-                path,
+                path.display(),
                 n + 1,
                 trimmed
             );
@@ -140,7 +141,7 @@ fn every_test_block_carries_an_assertion() {
         assert!(
             !blocks.is_empty(),
             "{} declares no test blocks; a suite of zero tests is not a suite",
-            path
+            path.display()
         );
 
         for (line, name, body) in blocks {
@@ -149,7 +150,9 @@ fn every_test_block_carries_an_assertion() {
             assert!(
                 asserts,
                 "{}:{} `test \"{}\"` has no assertion - a smoke test proves nothing",
-                path, line, name
+                path.display(),
+                line,
+                name
             );
         }
     }
@@ -228,7 +231,7 @@ fn edge_suite_files_are_not_all_commented_out() {
     let mut live_blocks = 0usize;
 
     for path in suite_files() {
-        let base = Path::new(&path)
+        let base = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
