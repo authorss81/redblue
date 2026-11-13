@@ -29,6 +29,12 @@ Historically, this produced over **416 individual findings scattered across 67 s
 | **Memory & Object Cycles** | 24 | 16 | **8 (Assigned to Phase 143 / 166)** |
 | **Total Across 67 `FINDINGS.md`** | **416** | **341 (82.0%)** | **75 Active Remediation Targets** |
 
+> Gate-repair entries `F-073-02` and `F-088-01` (Section 3.F) were found while
+> running Phase 075. Phase 075 applied the minimal gate repairs but leaves the
+> findings `[RESOLVED — verify in owner phase]`; the owner phases must confirm
+> and re-own them. They are listed separately and are not part of the historical
+> 67-file count above.
+
 ---
 
 ## 3. High-Priority Open Findings & Assigned Remediation Phases
@@ -74,6 +80,13 @@ Historically, this produced over **416 individual findings scattered across 67 s
 | **F-063-02** | `phase-063/FINDINGS.md` §2 | `src/vfs.rs` | Windows backslash `\` vs POSIX slash `/` path normalization mismatch in VFS mount points. | **Phase 161** | `[OPEN]` |
 | **F-064-04** | `phase-064/FINDINGS.md` §4 | `src/stdlib.rs` (`files`) | `files.read` loads entire multi-gigabyte files into memory without streaming chunk iterators. | **Phase 165** | `[OPEN]` |
 | **F-068-01** | `phase-068/FINDINGS.md` §1 | `src/stdlib.rs` (`network`) | Socket connection timeouts leak file descriptors under heavy concurrent load. | **Phase 161** | `[OPEN]` |
+
+### F. Build, Test Harness & Lint Gates (Repaired for Phase 075; verify in owner phase)
+
+| Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **F-073-02** | `phase-075/FINDINGS.md` §1 (owner: phase-073) | `tests/bench/mod.rs:408-452` | The `rb-bench` binary's own unit tests live under `target/<profile>/build/…`, where the old sibling lookup could not find the runner, so `edge_child_measurement_accepts_an_explicit_environment` failed with `Load("cannot locate the rb-bench worker binary …")`. Phase 075 resolves only `target/<profile>/rb-bench` (and `target/<triple>/<profile>/rb-bench` for a cross-target build) for the current Cargo profile, so a stale binary elsewhere on the ancestor path is never measured. | **Phase 073** | `[RESOLVED — verify in owner phase]` |
+| **F-088-01** | `phase-075/FINDINGS.md` §2 (owner: phase-088) | `phases/phase-088/scan.rs:524` | `is_reachability_check` returned a bool literal after an `if`, which clippy rejects as `needless_bool` under `-D warnings`. Phase 075 returns `!negates_an_is_ok_call(argument)`; behaviour is unchanged. | **Phase 088** | `[RESOLVED — verify in owner phase]` |
 
 ---
 

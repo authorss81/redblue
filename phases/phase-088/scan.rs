@@ -521,10 +521,7 @@ fn is_reachability_check(argument: &[char]) -> bool {
             return false;
         }
     }
-    if negates_an_is_ok_call(argument) {
-        return false;
-    }
-    true
+    !negates_an_is_ok_call(argument)
 }
 
 /// Whether the text negates an `is_ok()` call.
