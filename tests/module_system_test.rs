@@ -260,6 +260,30 @@ fn export_all_publishes_the_modules_functions() {
     );
 }
 
+/// A module's `set` is a member it publishes; a `constant` is a program global
+/// whatever block declares it, so the module has no member of that name.
+#[test]
+fn edge_a_module_constant_is_a_global_and_not_a_published_member() {
+    let source = "module M\n    set count to 1\n    constant label to \"n\"\n    export all\nend\n";
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("source should lex");
+    let program = redblue::parser::parse(tokens).expect("source should parse");
+    redblue::analyzer::analyze(&program).expect("source should analyze");
+
+    let (vm, result) = redblue::run_isolated(&program);
+    result.expect("the module declaration should run");
+
+    let members: Vec<String> = vm
+        .module_member_values("M")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        members,
+        vec!["count".to_string()],
+        "the module publishes its `set` but not its `constant`"
+    );
+}
+
 /// A module declaration with no body at all is the empty boundary: it declares
 /// nothing and faults on nothing.
 #[test]

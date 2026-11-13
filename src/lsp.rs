@@ -1327,6 +1327,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // filtered by the export when the module closes.
     let mut module_declared: HashMap<usize, Vec<String>> = HashMap::new();
     let mut module_functions: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    let mut module_values: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     let mut module_exports: HashMap<usize, (Vec<String>, bool)> = HashMap::new();
     let mut declared_module_members: HashMap<String, Vec<String>> = HashMap::new();
     // The same published names, keyed by the module binding so a same-named
@@ -1337,6 +1338,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // the binding it names at the import site, so a later same-named module
     // cannot change what an earlier import refers to.
     let mut declared_module_functions: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    // The published `set` values of each module, keyed like the functions
+    // above so a member read resolves to the declaration that wrote the value.
+    // A `constant` is a program global and is not published by the namespace.
+    let mut declared_module_values: HashMap<usize, HashMap<String, usize>> = HashMap::new();
     // Member tokens that are the target of a `set Receiver.member` write, each
     // mapped to the runtime frame path where the write happens. A write
     // replaces the module member's value, so the deferred pass must drop the
@@ -1431,8 +1436,8 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             members.sort();
                             members.dedup();
                             let name = bindings[module].name.clone();
-                            // Only a published function is reachable through
-                            // `Module.name()`, matching the runtime's module
+                            // Only published members are reachable through
+                            // `Module.name`, matching the runtime's module
                             // table, so navigation keeps only those bindings.
                             let published: HashMap<String, usize> = module_functions
                                 .remove(&module)
@@ -1441,6 +1446,13 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                                 .filter(|(member, _)| members.contains(member))
                                 .collect();
                             declared_module_functions.insert(module, published);
+                            let published_values: HashMap<String, usize> = module_values
+                                .remove(&module)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|(member, _)| members.contains(member))
+                                .collect();
+                            declared_module_values.insert(module, published_values);
                             declared_module_members_by_binding.insert(module, members.clone());
                             module_name_bindings.insert(name.clone(), module);
                             declared_module_members.insert(name, members);
@@ -1702,7 +1714,14 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     };
                     let location = Location::of_name(&tokens[cursor], &name);
                     let method_owner = frames.last().and_then(|frame| frame.object);
-                    let module_owner = frames.last().and_then(|frame| frame.module);
+                    // Only a `to` whose declaration frame is the module body
+                    // itself is a published member. A nested branch or loop
+                    // frame has no module binding, and the runtime never puts
+                    // a function declared inside it in the module table.
+                    let module_owner = frames
+                        .last()
+                        .filter(|frame| frame.kind == FrameKind::Module)
+                        .and_then(|frame| frame.module);
                     let scope_id = *scope_ids.last().expect("the root scope always exists");
                     let binding = if method_owner.is_some() {
                         declare_fresh(
@@ -1737,6 +1756,12 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             .entry(owner)
                             .or_default()
                             .insert(name.clone(), binding);
+                        // A function declaration replaces a same-named module
+                        // value, so the value table must not keep resolving
+                        // `Module.name` to the earlier `set`.
+                        if let Some(values) = module_values.get_mut(&owner) {
+                            values.remove(&name);
+                        }
                     }
                     frames.push(Frame::scoped(FrameKind::To));
                     push_scope(
@@ -1909,27 +1934,36 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         }
                         break;
                     }
-                    if let Some(owner) = frames.last().and_then(|frame| frame.module) {
-                        module_declared
-                            .entry(owner)
-                            .or_default()
-                            .push(name.to_string());
-                    }
-                    // A `set` or `constant` after a same-named `to` replaces the
-                    // module member's value, so the function binding no longer
-                    // answers a call through the module. The replacement may be
-                    // written in a nested block, which opens an analyzer scope
-                    // but no runtime frame, so find the module whose scope the
-                    // write reaches by walking to the innermost frame that
-                    // creates variables rather than looking only at the top.
-                    if let Some(owner) = frames
+                    // Only a `set` declares a published module member. A
+                    // `constant` binds a global whatever block declares it, so
+                    // the module scope never holds it and the namespace never
+                    // publishes it. The owner is the module whose runtime
+                    // scope the write reaches, so a `set` inside a nested
+                    // branch is published exactly where its value is written.
+                    let runtime_module = frames
                         .iter()
                         .rev()
                         .find(|frame| pushes_runtime_scope(frame.kind))
-                        .and_then(|frame| frame.module)
-                    {
-                        if let Some(functions) = module_functions.get_mut(&owner) {
-                            functions.remove(name);
+                        .and_then(|frame| frame.module);
+                    if matches!(token.kind, TokenKind::Set) {
+                        if let Some(owner) = runtime_module {
+                            module_declared
+                                .entry(owner)
+                                .or_default()
+                                .push(name.to_string());
+                        }
+                        // A `set` after a same-named `to` replaces the module
+                        // member's value, so the function binding no longer
+                        // answers a call through the module. The replacement
+                        // may be written in a nested block, which opens an
+                        // analyzer scope but no runtime frame, so find the
+                        // module whose scope the write reaches by walking to
+                        // the innermost frame that creates variables rather
+                        // than looking only at the top.
+                        if let Some(owner) = runtime_module {
+                            if let Some(functions) = module_functions.get_mut(&owner) {
+                                functions.remove(name);
+                            }
                         }
                     }
                     // `set` writes through to an enclosing binding when one
@@ -2021,6 +2055,21 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                             )
                         };
                         mark_declaration(&mut token_binding, &mut declarations, cursor, binding);
+                    }
+                    if matches!(token.kind, TokenKind::Set) {
+                        if let (Some(owner), Some(binding)) =
+                            (runtime_module, token_binding[cursor])
+                        {
+                            // A module namespace exposes the values its body's
+                            // `set`s write into its scope, so remember which
+                            // declaration `Module.name` must reach. The
+                            // innermost runtime frame is the module the write
+                            // lands in even when a nested block surrounds it.
+                            module_values
+                                .entry(owner)
+                                .or_default()
+                                .insert(name.to_string(), binding);
+                        }
                     }
                     cursor += 1;
 
@@ -2386,6 +2435,18 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     if let Some(member) = declared_module_functions
                         .get(&module)
                         .and_then(|members| members.get(name))
+                        .or_else(|| {
+                            // A value is not callable: a `Module.name()` call
+                            // after a `set` replaced the function has no
+                            // declaration to jump to, matching the runtime's
+                            // refusal to call a non-function.
+                            if call_follows(&tokens, index) {
+                                return None;
+                            }
+                            declared_module_values
+                                .get(&module)
+                                .and_then(|members| members.get(name))
+                        })
                     {
                         token_binding[index] = Some(*member);
                         continue;

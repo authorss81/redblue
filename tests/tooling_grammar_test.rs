@@ -4307,7 +4307,7 @@ fn edge_module_member_shadowed_by_set_does_not_resolve_to_the_stale_function() {
 }
 
 #[test]
-fn edge_module_member_shadowed_by_constant_does_not_resolve_to_the_stale_function() {
+fn edge_a_module_constant_does_not_replace_the_published_function() {
     let source = concat!(
         "module M\n",
         "    to f()\n",
@@ -4319,16 +4319,18 @@ fn edge_module_member_shadowed_by_constant_does_not_resolve_to_the_stale_functio
         "say M.f()\n",
     );
 
+    let found = goto_definition(source, 8, 7)
+        .expect("a position inside the file is valid")
+        .expect("a constant binds a global, so the module still publishes the function");
     assert_eq!(
-        goto_definition(source, 8, 7).expect("a position inside the file is valid"),
-        None,
-        "a `constant` replaces the module member's function value, so the old `to` is not its declaration"
+        (found.line, found.column, found.kind.as_str()),
+        (2, 8, "function"),
+        "the module's published function is not replaced by a program global"
     );
 }
 
 #[test]
-fn edge_module_member_shadowed_by_a_nested_block_replacement_does_not_resolve_to_the_stale_function(
-) {
+fn edge_a_nested_block_set_replaces_the_published_function_but_a_constant_does_not() {
     let source = concat!(
         "module M\n",
         "    to f()\n",
@@ -4347,19 +4349,102 @@ fn edge_module_member_shadowed_by_a_nested_block_replacement_does_not_resolve_to
         "say M.g()\n",
     );
 
-    for (line, name) in [(14, "f"), (15, "g")] {
-        assert_eq!(
-            goto_definition(source, line, 7).expect("a position inside the file is valid"),
-            None,
-            "a nested block's `set`/`constant` replaces the module member `{name}`, so the old `to` is not its declaration"
-        );
-        assert!(
-            find_references(source, line, 7)
-                .expect("a position inside the file is valid")
-                .is_empty(),
-            "the stale function binding must not own the member call for `{name}`"
-        );
-    }
+    assert_eq!(
+        goto_definition(source, 14, 7).expect("a position inside the file is valid"),
+        None,
+        "a nested block's `set` replaces the module member, so the old `to` is not its declaration"
+    );
+    assert!(
+        find_references(source, 14, 7)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "the stale function binding must not own the member call for `f`"
+    );
+
+    let kept = goto_definition(source, 15, 7)
+        .expect("a position inside the file is valid")
+        .expect("a nested block's `constant` binds a global, so the module function survives");
+    assert_eq!(
+        (kept.line, kept.column, kept.kind.as_str()),
+        (5, 8, "function"),
+        "the module still publishes the function the constant did not replace"
+    );
+}
+
+#[test]
+fn edge_a_function_declared_in_a_branch_is_not_a_published_module_member() {
+    let source = concat!(
+        "module M\n",
+        "    if yes then\n",
+        "        to f()\n",
+        "            give back 1\n",
+        "        end\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "say M.f()\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 9, 7).expect("a position inside the file is valid"),
+        None,
+        "a `to` declared inside a branch is not a module body item, so `export all` does not publish it"
+    );
+    assert!(
+        find_references(source, 9, 7)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "the branch's function has no module member to own the call"
+    );
+
+    let with_member_slot = concat!(
+        "module M\n",
+        "    if yes then\n",
+        "        to f()\n",
+        "            give back 1\n",
+        "        end\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "M.\n",
+    );
+    let offered = completions(with_member_slot, 9, 3).expect("the member slot is a valid position");
+    assert!(
+        !offered.contains(&"f".to_string()),
+        "a function declared inside a branch is not offered as a module member, got {offered:?}"
+    );
+}
+
+#[test]
+fn edge_a_module_constant_after_a_same_named_set_leaves_the_value_published() {
+    let source = concat!(
+        "module M\n",
+        "    set f to 1\n",
+        "    constant f to 2\n",
+        "    export all\n",
+        "end\n",
+        "say M.f\n",
+    );
+
+    let found = goto_definition(source, 6, 7)
+        .expect("a position inside the file is valid")
+        .expect("the module still publishes the `set` value the constant did not replace");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (2, 9, "variable"),
+        "a program-global constant does not replace the module's published value"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 9), (6, 7)],
+        "the module value and its member read share one binding"
+    );
 }
 
 #[test]
@@ -5191,4 +5276,193 @@ fn edge_member_assignment_navigation_rejects_a_malformed_position() {
         completions(source, 0, 1).is_err(),
         "completion on line 0 must be a clean error"
     );
+}
+
+#[test]
+fn edge_goto_definition_on_a_declared_module_value_resolves_to_its_declaration() {
+    let source = concat!(
+        "module Counter\n",
+        "    set count to 1\n",
+        "    constant label to \"n\"\n",
+        "    export all\n",
+        "end\n",
+        "say Counter.count\n",
+        "say Counter.label\n",
+    );
+
+    let count = goto_definition(source, 6, 13)
+        .expect("a position inside the file is valid")
+        .expect("a read of a declared module's exported value names its declaration");
+    assert_eq!(
+        (count.line, count.column, count.kind.as_str()),
+        (2, 9, "variable"),
+        "the member read must point at the module's `set` name"
+    );
+    assert_eq!(count.name, "count");
+
+    assert_eq!(
+        goto_definition(source, 7, 13).expect("a position inside the file is valid"),
+        None,
+        "a constant binds a program global rather than the module scope, so the module does not publish it"
+    );
+    assert!(
+        find_references(source, 7, 13)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "a module `constant` is not a published member, so `Module.name` has no references to join"
+    );
+}
+
+#[test]
+fn edge_goto_definition_on_a_module_value_written_in_a_nested_block_resolves_to_it() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    if yes then\n",
+        "        set f to 2\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "say M.f\n",
+    );
+
+    let found = goto_definition(source, 10, 7)
+        .expect("a position inside the file is valid")
+        .expect("a nested block's `set` writes the module's published value");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (6, 13, "variable"),
+        "the member read must reach the `set` inside the branch, not the replaced function"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 6, 13)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(6, 13), (10, 7)],
+        "the nested set and the module member read share one binding"
+    );
+}
+
+#[test]
+fn edge_find_references_on_a_declared_module_value_do_not_cross_a_same_named_variable() {
+    let source = concat!(
+        "module Counter\n",
+        "    set count to 1\n",
+        "    export all\n",
+        "end\n",
+        "set count to 99\n",
+        "say count\n",
+        "say Counter.count\n",
+    );
+
+    let module_value: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        module_value,
+        vec![(2, 9), (7, 13)],
+        "the module value's references must exclude the same-named program variable"
+    );
+
+    let program_variable: Vec<(usize, usize)> = find_references(source, 5, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        program_variable,
+        vec![(5, 5), (6, 5)],
+        "the program variable's references must exclude the module value"
+    );
+}
+
+#[test]
+fn edge_declared_module_value_navigation_respects_export() {
+    let source = concat!(
+        "module Counter\n",
+        "    set hidden to 1\n",
+        "    set shown to 2\n",
+        "    export shown\n",
+        "end\n",
+        "say Counter.hidden\n",
+        "say Counter.shown\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 6, 13).expect("a position inside the file is valid"),
+        None,
+        "a value the export leaves out is not published, so it has no declaration to jump to"
+    );
+    assert!(
+        find_references(source, 6, 13)
+            .expect("a position inside the file is valid")
+            .is_empty(),
+        "an unexported value is not a reference target"
+    );
+
+    let published = goto_definition(source, 7, 13)
+        .expect("a position inside the file is valid")
+        .expect("the exported value still resolves");
+    assert_eq!(
+        (published.line, published.column, published.kind.as_str()),
+        (3, 9, "variable"),
+        "an explicit export publishes the value it names"
+    );
+}
+
+#[test]
+fn edge_a_module_function_after_a_value_replaces_the_published_binding() {
+    let source = concat!(
+        "module Counter\n",
+        "    set read to 1\n",
+        "    to read()\n",
+        "        give back 2\n",
+        "    end\n",
+        "    export all\n",
+        "end\n",
+        "say Counter.read()\n",
+    );
+
+    let found = goto_definition(source, 8, 13)
+        .expect("a position inside the file is valid")
+        .expect("the later function replaces the module value of the same name");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (3, 8, "function"),
+        "the call must jump to the `to` declaration, not the replaced `set`"
+    );
+}
+
+#[test]
+fn edge_module_value_navigation_rejects_a_malformed_position() {
+    let source = concat!(
+        "module Counter\n",
+        "    set count to 1\n",
+        "    export all\n",
+        "end\n",
+        "say Counter.count\n",
+    );
+
+    for (line, column) in [(0, 1), (7, 1), (5, 99)] {
+        assert!(
+            goto_definition(source, line, column).is_err(),
+            "goto_definition must reject {line}:{column} with an error"
+        );
+        assert!(
+            find_references(source, line, column).is_err(),
+            "find_references must reject {line}:{column} with an error"
+        );
+        assert!(
+            completions(source, line, column).is_err(),
+            "completions must reject {line}:{column} with an error"
+        );
+    }
 }

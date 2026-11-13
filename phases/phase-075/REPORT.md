@@ -40,14 +40,14 @@
 | tests/tooling_grammar_test.rs | +106 −0 | four round-2 review tests: `module text … end` offers its exported members rather than the stdlib `text` members; an explicit `export` filters a declared module's names; an import alias of a declared module offers its members; and an import alias used after its function or branch block offers nothing. |
 | src/lsp.rs | +39 −7 | resumed run: goto-definition and find-references follow a call to a program-declared module's published function. Each module body's top-level `to` records its binding, the module's last `export` filters the published functions when the body closes, and the deferred member pass maps `Module.name()` and `alias.name()` to that declaration. An unexported name and a standard module's member stay unresolved, matching the runtime. |
 | tests/tooling_grammar_test.rs | +113 −0 | four resumed-run tests: goto on `MathUtils.circle_area` inside a declared module; references joining the declaration, two bare calls and an aliased member call; an explicit `export` resolving the published function while the hidden one answers `None` with no references; and a clean `Err` from all three capabilities at line 0, past the line and past the file. |
-| src/lsp.rs | +30 −9 | final round-1 review fixes: the published-function table is keyed by the module binding rather than its name, so a redeclaration or a same-named module in another block cannot answer for the first module's calls, and a module declaration gives a redeclaration its own binding; a module-top-level `set` or `constant` removes the same-named function entry because it replaced the member value; and a bare `Module.name` read resolves through the same table as a call, matching the runtime's exposed function value. |
-| tests/tooling_grammar_test.rs | +130 −0 | four final round-1 review tests: two same-named module declarations keep their own functions; a `set` and a `constant` that shadow a module function do not navigate to the stale `to`; and a bare module-member read resolves to the published function and joins its references. |
-| src/lsp.rs | +42 −10 | round-2 review fixes: a `set` or `constant` inside a nested block removes the replaced module function by finding the innermost runtime frame's module rather than looking only at the top frame, and an `import` records the module binding it named at its own site, so an alias written before a later same-named module keeps the earlier module's functions and completed members. |
+| src/lsp.rs | +30 −9 | final round-1 review fixes: the published-function table is keyed by the module binding rather than its name, so a redeclaration or a same-named module in another block cannot answer for the first module's calls, and a module declaration gives a redeclaration its own binding; a module-top-level `set` removes the same-named function entry because it replaced the member value (the round-3 review corrected the `constant` half: a module `constant` binds a program global and leaves the function published); and a bare `Module.name` read resolves through the same table as a call, matching the runtime's exposed function value. |
+| tests/tooling_grammar_test.rs | +130 −0 | four final round-1 review tests: two same-named module declarations keep their own functions; a `set` that shadows a module function does not navigate to the stale `to` (the `constant` half was corrected in round 3); and a bare module-member read resolves to the published function and joins its references. |
+| src/lsp.rs | +42 −10 | round-2 review fixes: a `set` inside a nested block removes the replaced module function by finding the innermost runtime frame's module rather than looking only at the top frame (the round-3 review narrowed this from `set` or `constant` to `set`, because a constant is a global), and an `import` records the module binding it named at its own site, so an alias written before a later same-named module keeps the earlier module's functions and completed members. |
 | src/lsp.rs | +26 −0 | resumed run: a member write (`set Person.name to …`) no longer declares its receiver as a fresh variable. The `set`/`constant` target walk stops at a following `.`, leaving the receiver to the ordinary identifier pass and the written member to the member pass, so goto-definition on either side resolves the object and its field and the object keeps its program-scope binding for later reads. A write whose receiver resolves to a declared module or import alias also removes the replaced member from that module's published-function table before the write is resolved, so neither the write nor a later read resolves to the stale `to`. |
 | tests/tooling_grammar_test.rs | +221 −0 | six navigation tests for member writes: the receiver resolves to the object declaration and the member to `has name`, a later read still resolves the object rather than a shadowing variable, a write inside a branch is a reference to the program-scope object and field, malformed positions remain clean `Err`s, and `set M.f`/`set A.f` through a module or an import alias drops the replaced published function while an earlier read still resolves it. |
 | tests/bench/mod.rs | +74 −5 | gate repair for a pre-existing cross-target defect: the `rb-bench` binary's own unit tests live under `target/<profile>/build/…`, where the old sibling lookup could not find the runner. The lookup now resolves `target/<profile>/rb-bench` and the cross-target `target/<triple>/<profile>/rb-bench`, so the child-process measurement remains real instead of failing with "cannot locate the rb-bench worker binary" or measuring a stale binary elsewhere; a fixture pins both layouts. |
 | phases/phase-088/scan.rs | +1 −4 | gate repair for a pre-existing clippy `needless_bool` diagnostic in an unrelated phase's scanner; the expression is unchanged in meaning. |
-| tests/tooling_grammar_test.rs | +99 −0 | three round-2 review tests: a nested branch's `set`/`constant` drops the stale module function; an alias between two same-named modules resolves and completes from the module its import named, not the later declaration. |
+| tests/tooling_grammar_test.rs | +99 −0 | three round-2 review tests: a nested branch's `set` drops the stale module function (the `constant` half was corrected in round 3); an alias between two same-named modules resolves and completes from the module its import named, not the later declaration. |
 | src/lsp.rs | +260 −0 | resumed run and round-1 review: completion inside a `{…}` text interpolation. The literal is decoded first, so `\u007B`/`\u007D` are braces to the LSP exactly as they are to the lexer; a pair is interpolation only when its contents re-parse as one complete expression, so a JSON object in a string stays text; `this` is offered as an expression keyword; and a `receiver.member` slot inside a pair is re-analyzed in the literal's enclosing scopes so it answers the object's or module's members rather than a flat lexical list. Text outside a pair, and a closed pair, still answer nothing. |
 | tests/tooling_grammar_test.rs | +160 −0 | eight interpolation tests: scope and builtins with no statement keywords; text before and after a pair in the same literal; a later declaration not offered above the caret; a malformed column/line producing a clean `Err`; JSON braces that are not an expression stay text; `this` is offered; `{this.}` offers the object's members; and a `\u007B` escape opens an interpolation. |
 | src/parser.rs | +18 −1 | round-1 review: `is_complete_expression` and a crate-visible `unmatched_opens` expose the parser's own interpolation rule, so the LSP asks the same question instead of trusting brace balance alone. |
@@ -57,6 +57,13 @@
 | tests/tooling_grammar_test.rs | +38 −0 | two round-1 review tests: a declaration-side query finds the use inside a text interpolation, and it reaches uses in every text literal in the file rather than only one. |
 | src/lsp.rs | +236 −34 | round-2 review: brace pairing is a single stack pass over the decoded literal, candidates are tested from the inside out under a bounded work budget, a valid pair skips the span it replaces exactly as the parser does, and literals whose decoded text cannot contain the queried name are skipped. All substitutions in one literal are re-analyzed together instead of analyzing the whole file once per pair; that analysis is capped per query and reused for every use in the literal. Nested text literals inside an interpolated expression are walked through the resulting view, so their substitutions still contribute references. |
 | tests/tooling_grammar_test.rs | +90 −0 | round-2 review tests: interpolation references now assert `end_line`/`end_column` for the declaration, a use followed by text, a use that fills the expression, and an escaped-brace use; a builtin inside `{abs(-3)}` is queried with `find_references` and maps back to its source span. |
+| src/lsp.rs | +42 −3 | resumed run: a declared module's published `set` values now navigate. Each `module … end` body's top-level value bindings are recorded and filtered by its last `export`, a later `to` of the same name replaces the value, and a bare `Module.name` read resolves to the value declaration while a `Module.name()` call stays unresolved because a value is not callable. |
+| tests/tooling_grammar_test.rs | +150 −0 | five module-value navigation tests: goto on an exported `set` member, references keeping a module value apart from a same-named program variable, export filtering, a later function replacing the value, and malformed positions as clean `Err`s. |
+| src/lsp.rs | +20 −8 | round-3 review: the owning module for a published value is the innermost runtime frame's module, so a replacing `set` inside an `if`/loop in a module body is recorded exactly as the function-removal walk already found it; and a `constant` is no longer treated as a module value at all. The VM binds a module `constant` to a program global, so it is neither published by the namespace nor a replacement for a same-named module function. |
+| tests/tooling_grammar_test.rs | +50 −20 | round-3 review tests: a `set` written in a nested branch resolves a later bare `M.f` and shares its references; a module `constant` does not replace the published function at the body's top level or inside a branch; and the module-value fixture now asserts a `constant` member answers `None` with no references. |
+| tests/module_system_test.rs | +24 −0 | round-3 golden test: a module's `set` is a published member while its `constant` is a program global the module does not publish, pinned against the runtime's own member table. |
+| src/lsp.rs | +10 −4 | round-2 review: a `to` is published only when its declaration frame is the `Module` frame itself, so a function written inside a branch or loop is not a module body item; and the `set` publication owner is the same innermost runtime frame the value table uses, so a nested-branch `set` is both appended to `module_declared` and kept by the filter that builds `declared_module_values`. |
+| tests/tooling_grammar_test.rs | +76 −0 | two round-2 review tests: a function declared inside a module branch is not published, so `M.f()` answers `None`, has no references and is not offered by completion; and a module `constant` after a same-named `set` leaves the published value navigable and shares its references. |
 
 No server loop or transport was added: the phase asks for pure functions over source text, and the existing `diagnostics_json` shape is extended per capability.
 
@@ -192,15 +199,17 @@ same-scope function fallback could jump forward past a shadowing `set` to a
 and raises `Unknown function 'f'`; the fallback is now bounded by source
 position, and the deferred pass still resolves a genuine call written before a
 later declaration. The two new fixtures pin both orders. The gate count is
-re-harvested from the current `cargo test --all-targets` run: 2893 + 4 = 2897
-passed, 0 failed and 0 ignored across 85 test binaries. The four new test
-instances are the two module-member-write fixtures plus the cross-target
-worker-layout fixture, which is compiled into both the `rb-bench` unit harness
-and `tests/bench_test.rs`. The worker-lookup repair is also what moved the two
-`edge_child_measurement_accepts_an_explicit_environment` instances (the
-`rb-bench` unit harness and `tests/bench_test.rs`) from failing to passing,
-which reconciles the earlier 2887 + 4 member-write tests + 2 benchmark tests =
-2893 figure.
+re-harvested from the current `cargo test --all-targets` run: 2911 passed, 0
+failed and 0 ignored across 85 test binaries. The four test instances added in
+that earlier round were the two module-member-write fixtures plus the
+cross-target worker-layout fixture, which is compiled into both the `rb-bench`
+unit harness and `tests/bench_test.rs`. The worker-lookup repair is also what
+moved the two `edge_child_measurement_accepts_an_explicit_environment`
+instances (the `rb-bench` unit harness and `tests/bench_test.rs`) from failing
+to passing; this resumed delta then added the five module-value navigation
+tests, the round-3 review added the nested-set fixture and the runtime golden
+test, and this round-2 review added the branch-function refusal and the
+constant-after-set fixture, taking the run to 2911.
 
 The final resumed run reproduced a module-navigation gap against the runtime.
 For
@@ -224,25 +233,48 @@ declarations therefore overwrote one entry when the second body closed, so a
 call bound to the first module could jump into the second module's function or
 answer nothing. The table is now keyed by the module binding, a redeclaration
 gets its own binding, and an import name is mapped to the binding a later
-`import` names. The same review found that a module-top-level `set` or
-`constant` after a `to` left the old function in the published table even
-though it replaced the member value; that entry is now removed. Finally, a
-bare `Module.name` read now resolves to the published function exactly as a
-call does, because the interpreter exposes the same value either way. Four
-fixtures pin the two declarations, both replacements and the bare read.
+`import` names. The same review found that a module-top-level `set` after a
+`to` left the old function in the published table even though it replaced the
+member value; that entry is now removed. The round-3 review settled the
+`constant` half against the runtime: a module `constant` is bound as a program
+global, so the namespace keeps publishing the function. Finally, a bare
+`Module.name` read now resolves to the published function exactly as a call
+does, because the interpreter exposes the same value either way. Four
+fixtures pin the two declarations, the replacement and the bare read.
 
 The round-2 review found two remaining holes in the module tables. A branch
-opens an analyzer scope but no runtime frame, so a `set`/`constant` written
-inside `if … end` in a module body replaces the module's value while the
-published table still mapped `M.f()` to the old `to f`; the removal now walks
-to the innermost frame that creates variables and finds the module whose scope
-the write reaches. Also, an import alias resolved through the last-wins module
+opens an analyzer scope but no runtime frame, so a `set` written inside
+`if … end` in a module body replaces the module's value while the published
+table still mapped `M.f()` to the old `to f`; the removal now walks to the
+innermost frame that creates variables and finds the module whose scope the
+write reaches.
+
+The round-3 review found that the module-value table used the top frame rather
+than that same innermost runtime frame, so a replacing `set` inside a branch
+was never recorded and a later bare `M.f` answered `None`. It uses the
+runtime-frame module now, and the new fixture pins the nested replacement. The
+same review showed that a module `constant` is a program global: the runtime
+member table never holds it, and it does not replace a published function.
+Navigation now records and removes only `set` values, and a runtime golden test
+asserts the member table holds the module's `set` and not its `constant`. Also, an import alias resolved through the last-wins module
 name table, so an alias written between two same-named modules could answer
 from the later declaration. Each import now records the module binding it
 named at its own site, keyed by the import binding, and both goto-definition
 and member completion prefer that binding over the name fallback used when an
 import precedes its module declaration. The three new fixtures pin the nested
 replacement, the alias between same-named modules and its completed members.
+
+This round-2 review found that the two module tables still disagreed about the
+owner. A `to` was attributed to whichever frame was on top, but only a
+declaration written directly in the module body is a module body item, so the
+owner now comes from a frame that is itself the `Module` frame; a function
+inside an `if`/loop is neither published by `export all` nor offered by
+completion. The `set` publication filter now uses the same innermost runtime
+frame as the value table, so a `set` written inside a branch is appended to
+`module_declared` and survives the filter that builds
+`declared_module_values`. The two new fixtures pin the branch function's
+refusal and a module `constant` written after a same-named `set` leaving the
+published value intact.
 
 ## Tests added
 
@@ -356,8 +388,8 @@ replacement, the alias between same-named modules and its completed members.
 | edge_declared_module_member_navigation_rejects_a_malformed_position | out of bounds / failure: line 0, a column past the line and a line past the file are clean `Err`s from all three capabilities |
 | edge_same_named_module_declarations_keep_their_own_functions | duplicate names: two `module M` declarations each keep the function their call is bound to, so the second close does not overwrite the first table |
 | edge_module_member_shadowed_by_set_does_not_resolve_to_the_stale_function | duplicate names: a module `set f` replaces the published function value, so `M.f()` no longer navigates to the shadowed `to f` |
-| edge_module_member_shadowed_by_constant_does_not_resolve_to_the_stale_function | duplicate names: a module `constant f` likewise drops the stale function entry |
-| edge_module_member_shadowed_by_a_nested_block_replacement_does_not_resolve_to_the_stale_function | nesting / duplicate names: a `set` and `constant` inside an `if` body reach the module's runtime scope, so neither stale function is a declaration |
+| edge_a_module_constant_does_not_replace_the_published_function | duplicate names: a module `constant f` binds a program global, so the module still publishes its function |
+| edge_a_nested_block_set_replaces_the_published_function_but_a_constant_does_not | nesting / duplicate names: a `set` inside an `if` body reaches the module's runtime scope and replaces the function, while a `constant` there stays a global and leaves the function published |
 | edge_aliased_same_named_module_declaration_keeps_the_imported_modules_functions | duplicate names / import alias: an alias between two `module M` declarations resolves and joins the module its import named, not the later declaration |
 | edge_completions_after_a_same_named_module_alias_keep_the_imported_modules_members | duplicate names / completion: a same-named module declared after an import does not change the members its alias offers |
 | edge_bare_module_member_read_resolves_to_the_published_function | module navigation: a bare `M.f` read resolves to the published function and joins its declaration and export references |
@@ -384,6 +416,15 @@ replacement, the alias between same-named modules and its completed members.
 | edge_member_assignment_does_not_shadow_the_object_for_later_reads | duplicate names / scope: the member write does not replace the object binding, so the later read and the write share the object and field references |
 | edge_member_assignment_inside_a_branch_writes_through_to_the_object | nesting: a member write inside an `if` body reaches the program-scope object and field |
 | edge_member_assignment_navigation_rejects_a_malformed_position | out of bounds / failure: line past the file, column past the line and line 0 are clean `Err`s from goto-definition, find-references and completion |
+| edge_goto_definition_on_a_declared_module_value_resolves_to_its_declaration | module navigation / exact span: `Counter.count` resolves to the module's `set`, while `Counter.label` answers `None` because a `constant` is a program global |
+| edge_goto_definition_on_a_module_value_written_in_a_nested_block_resolves_to_it | nesting / module navigation: a `set` inside an `if` body is the module's published value, so a later bare `M.f` resolves to it and shares its references |
+| edge_a_module_constant_is_a_global_and_not_a_published_member | runtime golden: the module member table holds its `set` and not its `constant` |
+| edge_find_references_on_a_declared_module_value_do_not_cross_a_same_named_variable | duplicate names / shadowing: the module value and a same-named program variable keep separate reference sets |
+| edge_declared_module_value_navigation_respects_export | module navigation / boundary: an unexported value answers `None`/no references while an explicitly exported one resolves |
+| edge_a_module_function_after_a_value_replaces_the_published_binding | duplicate names / declaration order: a later `to` replaces the module value, so the call jumps to the function |
+| edge_module_value_navigation_rejects_a_malformed_position | out of bounds / failure: line 0, a line past the file and a column past the line are clean `Err`s from all three capabilities |
+| edge_a_function_declared_in_a_branch_is_not_a_published_module_member | module navigation / nesting: a `to` inside an `if` body is not a module body item, so `M.f()` answers `None`, has no references, and completion does not offer it |
+| edge_a_module_constant_after_a_same_named_set_leaves_the_value_published | duplicate names / module navigation: a `constant` after a module `set` is a program global, so `M.f` still resolves to the set and shares its references |
 
 ### Mandatory edge-case matrix
 
@@ -435,17 +476,14 @@ phase, must confirm them.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2897 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2911 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets` was re-run on this checkout: 2897 passed, 0 failed
-and 0 ignored across 85 test binaries. The arithmetic now reconciles from the
-harvested total: 2887 + 4 member-write tests = 2891, plus the two
-`edge_child_measurement_accepts_an_explicit_environment` instances returned to
-passing by the worker lookup = 2893, which was the pre-round total. This round
-adds four more test instances: two module-member-write tests and the
-cross-target worker-layout fixture, compiled into both the `rb-bench` unit
-harness and `tests/bench_test.rs`, giving 2897. The two out-of-scope repairs
+`cargo test --all-targets` was re-run on this checkout: 2911 passed, 0 failed
+and 0 ignored. This resumed delta added five module-value navigation tests to
+the harvested total, the round-3 review added the nested-set fixture and the
+runtime golden test, and this round-2 review added the branch-function refusal
+and the constant-after-set fixture; 2902 + 5 + 2 + 2 = 2911. The two out-of-scope repairs
 (the benchmark worker lookup in `tests/bench/mod.rs` and the `needless_bool`
 clippy diagnostic in `phases/phase-088/scan.rs`) are retained only because each
 was a pre-existing failure of a mandatory gate; the ledger records them for the
