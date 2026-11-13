@@ -4,6 +4,7 @@ use crate::lexer::Lexer;
 use crate::parser::{Parser, Program, Stmt};
 use crate::testing::{TestError, TestFailure, TestResults};
 use std::collections::HashMap;
+use std::path::Path;
 
 pub struct TestHarness {
     results: TestResults,
@@ -59,9 +60,10 @@ impl TestHarness {
         Ok(())
     }
 
-    pub fn run_file(&mut self, path: &str) -> Result<()> {
+    pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
         let source = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io(format!("Failed to read {}: {}", path, e)))?;
+            .map_err(|e| Error::Io(format!("Failed to read {}: {}", path.display(), e)))?;
 
         self.run_source(&source)
     }
