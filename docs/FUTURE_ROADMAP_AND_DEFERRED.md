@@ -471,13 +471,14 @@ Embedding end-user applications (`rb-httpd`, `rb-todo`, `rb-kv`, `rb-markdown`, 
    - **Stage 1 (At Phase 126 Milestone)**: Spin up `authorss81/rb-apps` alongside `authorss81/rbos`. Build early CLI dogfooding tools (`rb-todo`, `rb-markdown`, `rb-ssg`, `rb-lsp`).
    - **Stage 2 (Following Phase 152)**: Build high-performance, network-intensive tools (`rb-httpd` web server, `rb-kv` ACID key-value store, `rb-git`) utilizing Perceus zero-pause memory and bump arenas.
 
-### 13.3 The 6-Repository Architectural Blueprint (The Code + Ops Decoupling Principle)
+### 13.3 The 8-Repository Architectural Blueprint (The 4 Paired Code + Ops Tracks)
 
 The foundational architecture of Redblue relies on strict decoupling:
 `authorss81/redblue` (the language engine) is driven, verified, and audited by `authorss81/rbops` (the autonomous pipeline orchestrator).
 
-Following this exact paradigm, **the downstream ecosystem must NOT be 3 monolithic repositories, but 6 paired repositories (3 Target Codebases + 3 Dedicated Ops Orchestrators)**:
+Following this exact paradigm, **the downstream ecosystem expands into 8 paired repositories (4 Target Codebases + 4 Dedicated Ops Orchestrators)** across two structured waves:
 
+#### Wave 1: Foundational Ecosystem (Spin-Up at Phase 126 Milestone — 6 Repositories)
 1. **Operating System Track**:
    - **`authorss81/rbos`**: Operating system kernel, microkernel simulator, process table, fiber task scheduler, window manager, and shell code.
    - **`authorss81/rbos-ops`**: Dedicated autonomous pipeline, QEMU/virtual machine test harnesses, boot benchmarks, phase queue, and recovery branches.
@@ -488,18 +489,38 @@ Following this exact paradigm, **the downstream ecosystem must NOT be 3 monolith
    - **`authorss81/rb-pkg`**: Central package index, capability permission manifests, dependency solver, and `rb-pkg` CLI client.
    - **`authorss81/rb-pkg-ops`**: Autonomous package ingestion pipeline, cryptographic signature verification, supply-chain security scanner, and registry mirror automation.
 
-#### The 4 Non-Negotiable Invariants of the 6-Repo Model:
-1. **Separation of Powers (Gate Security)**: Coding agents executing in `rbos`, `rb-apps`, or `rb-pkg` must NEVER have write access to `.github/workflows/` or the gate verification scripts (`verify.sh`). The `-ops` repositories hold the evaluation lock, preventing agents from weakening their own gates.
-2. **Independent 24/7 Concurrency**: Each `-ops` pipeline runs on its own independent GitHub Actions concurrency queue (`cancel-in-progress: false`). Language development, OS kernel hacking, application development, and package verification execute concurrently 24/7 without competing for runner slots.
-3. **Pristine Git History**: Hundreds of 300-second WIP checkpoints, model attempt branches, and debugging logs are isolated in the `-ops` repositories, keeping the production repositories (`rbos`, `rb-apps`, `rb-pkg`) clean with release-quality tags and squashed delivery commits.
-4. **Domain-Specific Verification Harnesses**: Kernel boot simulations, application HTTP load tests, and package dependency DAG verifications each require specialized environments and dependencies that must not bloat a single monolithic workflow.
+#### Wave 2: Tooling & Developer Experience Track (Spin-Up at Milestone 1.5 — 2 Repositories)
+4. **Tooling & IDE Track**:
+   - **`authorss81/rb-ide`**: Dedicated Language Server Protocol (`rb lsp` daemon, stdio/JSON-RPC transport), VS Code extension backend, Debug Adapter Protocol (DAP), code formatting protocol (`rb format`), linter integration (`rb lint`), syntax highlighting grammars (TextMate / Tree-sitter), and editor integrations (VS Code, Neovim, JetBrains).
+   - **`authorss81/rb-ide-ops`**: Autonomous tooling pipeline, headless VS Code extension test runner, multi-editor conformance matrix, protocol compliance fuzzing, and marketplace publishing automation.
+
+#### Timing Analysis: Why Milestone 1.5 is the Optimal Launch Window
+- **Why NOT at Phase 126 simultaneously?**
+  Spinning up 8 concurrent repositories on day one dilutes pipeline focus. More importantly, an IDE requires three concrete inputs that do not yet exist at Phase 126:
+  1. The package directory layout and manifest format (`rb.toml` / capabilities) defined by `rb-pkg`.
+  2. Concrete end-user codebases in `rb-apps` (`app-todo`, `app-markdown`) to serve as real-world dogfooding fixtures for autocompletion, goto-definition, and refactoring tests.
+  3. The core language baseline: Phase 075 already proved the core in-memory navigation algorithms (+9,500 lines) within `authorss81/redblue`.
+- **Why NOT delayed until Phase 152?**
+  Waiting until Phase 152 is far too late. By Phase 152, dozens of packages and applications will have been written; forcing developers and autonomous agents to write large codebases without a working VS Code extension, inline errors, and real-time completions severely impairs productivity.
+- **The Golden Window (Milestone 1.5 / Midway)**:
+  - **Trigger**: As soon as `rb-pkg` establishes its package manifest schema (approx. App/Pkg Phase 005) and `rb-apps` delivers its first 3 foundational applications, OR when `redblue` reaches Core Phase 135 (Visual Polish & Ergonomics).
+  - **Action**: Extract `src/lsp.rs` and editor utilities out of `redblue` into `authorss81/rb-ide`. This completely unburdens the core compiler CI while giving `rb-ide` its own dedicated 24/7 autonomous test harness (`rb-ide-ops`).
+
+#### The 4 Non-Negotiable Invariants of the Paired Model:
+1. **Separation of Powers (Gate Security)**: Coding agents executing in target codebases (`rbos`, `rb-apps`, `rb-pkg`, `rb-ide`) must NEVER have write access to `.github/workflows/` or the gate verification scripts (`verify.sh`). The `-ops` repositories hold the evaluation lock, preventing agents from weakening their own gates.
+2. **Independent 24/7 Concurrency**: Each `-ops` pipeline runs on its own independent GitHub Actions concurrency queue (`cancel-in-progress: false`). Language development, OS kernel hacking, application development, package verification, and IDE extensions execute concurrently 24/7 without competing for runner slots.
+3. **Pristine Git History**: Hundreds of 300-second WIP checkpoints, model attempt branches, and debugging logs are isolated in the `-ops` repositories, keeping the production repositories clean with release-quality tags and squashed delivery commits.
+4. **Domain-Specific Verification Harnesses**: Kernel boot simulations, application HTTP load tests, package dependency DAG verifications, and headless editor UI tests each require specialized environments and dependencies that must not bloat a single monolithic workflow.
 
 > [!IMPORTANT]
-> **Standing Directive**: When Phase 126 completes and lands on `main`, the agent MUST immediately alert the user to spin up the **6 paired ecosystem repositories**:
-> 1. `authorss81/rbos` & `authorss81/rbos-ops`
-> 2. `authorss81/rb-apps` & `authorss81/rb-apps-ops`
-> 3. `authorss81/rb-pkg` & `authorss81/rb-pkg-ops`
-> and repeat this prompt in every response until confirmed.
+> **Standing Directive**:
+> 1. **At Phase 126 Completion**: The agent MUST immediately alert the user to spin up the **Wave 1 Foundational Repositories (6 Repositories / 3 Paired Tracks)**:
+>    - `authorss81/rbos` & `authorss81/rbos-ops`
+>    - `authorss81/rb-apps` & `authorss81/rb-apps-ops`
+>    - `authorss81/rb-pkg` & `authorss81/rb-pkg-ops`
+> 2. **At Milestone 1.5 (Dogfooding / Pkg-005 / Core Phase 135)**: The agent MUST alert the user to spin up the **Wave 2 Tooling Track (2 Repositories / 1 Paired Track)**:
+>    - `authorss81/rb-ide` & `authorss81/rb-ide-ops`
+> and repeat this directive in responses until confirmed.
 
 ---
 

@@ -216,12 +216,19 @@ Whenever an agent identifies an engine bug or spec-drift defect outside its assi
 2. **Phase Report**: Document the finding with an executable reproduction snippet in `phases/phase-XXX/FINDINGS.md`.
 3. **Master Ledger**: Append the finding to [`docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md`](docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md) with status `[OPEN]` so it is automatically queued for remediation in Section 14 (Phases 159–167).
 
-## Ecosystem Repositories Standing Directive (Phase 126 Milestone)
+## Ecosystem Repositories Standing Directive (Phase 126 & Staged Spin-Up)
 
-When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler into **6 paired repositories (3 Code Targets + 3 Dedicated Ops Orchestrators)** to maintain gate security, 24/7 CI concurrency, and clean git histories:
+When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler into **paired repositories (Code Targets + Dedicated Ops Orchestrators)** to maintain gate security, 24/7 CI concurrency, and clean git histories:
+
+### Wave 1: Immediate Spin-Up at Phase 126 Landing (6 Repositories / 3 Paired Tracks)
 1. **OS Track**: `authorss81/rbos` (kernel & desktop) + `authorss81/rbos-ops` (autonomous pipeline & QEMU runner).
 2. **Apps Track**: `authorss81/rb-apps` (practical apps incubator) + `authorss81/rb-apps-ops` (autonomous app release runner).
 3. **Package Track**: `authorss81/rb-pkg` (package index & registry) + `authorss81/rb-pkg-ops` (package ingestion & crypto verification).
+
+### Wave 2: Staged Tooling Spin-Up at Dogfooding Milestone (2 Repositories / 1 Paired Track)
+4. **Tooling & IDE Track**: `authorss81/rb-ide` + `authorss81/rb-ide-ops`
+   - **Scope**: Dedicated Language Server Protocol (`rb lsp` daemon & JSON-RPC transport), VS Code extension backend, Debug Adapter Protocol (DAP), code formatting protocol (`rb format`), linter integration (`rb lint`), syntax highlighting grammars (TextMate / Tree-sitter), and editor integrations (VS Code, Neovim, JetBrains).
+   - **Spin-Up Timing**: Initiated at **Milestone 1.5** (midway, once `rb-pkg` establishes the package manifest schema and `rb-apps` ships its first 3 dogfooding apps, or at Core Phase 135), decoupling editor server maintenance completely from compiler core development.
 
 ## Resources
 
