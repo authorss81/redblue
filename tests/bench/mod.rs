@@ -416,11 +416,40 @@ fn worker_binary() -> Option<PathBuf> {
     if current.file_stem().and_then(|stem| stem.to_str()) == Some("rb-bench") {
         return Some(current);
     }
-    let sibling = current
-        .parent()
-        .and_then(Path::parent)
-        .map(|target| target.join(format!("rb-bench{}", std::env::consts::EXE_SUFFIX)))?;
-    sibling.is_file().then_some(sibling)
+    // `cargo test` runs this module both through `tests/bench_test.rs` and as
+    // the `rb-bench` binary's own unit tests. In the latter the test harness
+    // lives under `target/<profile>/build/...`, so the runner sits several
+    // levels above it rather than beside it. Find Cargo's target directory and
+    // resolve only the current profile's runner, so a stale binary elsewhere on
+    // the ancestor path can never be measured; never fall back to an in-process
+    // run.
+    let name = format!("rb-bench{}", std::env::consts::EXE_SUFFIX);
+    let target = current.ancestors().find(|directory| {
+        directory.join(".rustc_info.json").is_file() || directory.join("CACHEDIR.TAG").is_file()
+    })?;
+    let relative = current.strip_prefix(target).ok()?;
+    runner_binary_in_target(target, relative, &name)
+}
+
+/// Resolve the runner inside Cargo's target directory.
+///
+/// A host build places it at `target/<profile>/<name>`; a cross-target build
+/// adds a triple level, `target/<triple>/<profile>/<name>`. Try the direct
+/// layout first and then the nested one instead of assuming the first component
+/// after the target directory is always the profile.
+fn runner_binary_in_target(target: &Path, relative: &Path, name: &str) -> Option<PathBuf> {
+    let mut components = relative.components();
+    let first = components.next()?;
+    let direct = target.join(first.as_os_str()).join(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let second = components.next()?;
+    let nested = target
+        .join(first.as_os_str())
+        .join(second.as_os_str())
+        .join(name);
+    nested.is_file().then_some(nested)
 }
 
 fn measure_in_child(
@@ -1698,6 +1727,46 @@ mod tests {
             finished_marker.is_file(),
             "the child did not observe {HANG_SENTINEL_ENV}; it never wrote {}",
             finished_marker.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edge_worker_binary_resolves_a_cross_target_layout() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("rb-bench-target-{}-{unique}", std::process::id()));
+        let name = format!("rb-bench{}", std::env::consts::EXE_SUFFIX);
+        let triple = "x86_64-unknown-linux-gnu";
+        let profile = "debug";
+
+        let cross = dir.join(triple).join(profile).join(&name);
+        std::fs::create_dir_all(cross.parent().expect("the runner has a parent"))
+            .expect("the cross-target directory is creatable");
+        std::fs::write(&cross, b"stub").expect("the runner fixture is writable");
+        let relative = Path::new(triple)
+            .join(profile)
+            .join("deps")
+            .join("bench-test");
+        assert_eq!(
+            runner_binary_in_target(&dir, &relative, &name),
+            Some(cross),
+            "a cross-target build resolves target/<triple>/<profile>/<name>"
+        );
+
+        let plain = dir.join(profile).join(&name);
+        std::fs::create_dir_all(plain.parent().expect("the runner has a parent"))
+            .expect("the profile directory is creatable");
+        std::fs::write(&plain, b"stub").expect("the runner fixture is writable");
+        let relative = Path::new(profile).join("deps").join("bench-test");
+        assert_eq!(
+            runner_binary_in_target(&dir, &relative, &name),
+            Some(plain),
+            "a host build still resolves target/<profile>/<name>"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

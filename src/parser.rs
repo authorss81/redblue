@@ -3133,6 +3133,23 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
     parser.parse()
 }
 
+/// Whether `source` reads as exactly one expression.
+///
+/// This is the rule that decides whether a balanced `{…}` inside a text
+/// literal is interpolation: [`Parser::read_interpolated`] accepts the inner
+/// text only when it tokenizes and parses as one whole expression. Tooling
+/// asks the same question so a JSON document written in a string stays text.
+pub(crate) fn is_complete_expression(source: &str) -> bool {
+    let Ok(tokens) = crate::lexer::Lexer::tokenize(source) else {
+        return false;
+    };
+    let mut parser = Parser::new(tokens);
+    if parser.parse_expression().is_err() {
+        return false;
+    }
+    parser.current().map(|token| &token.kind) == Some(&TokenKind::Eof)
+}
+
 /// Marks the `{`s of a text literal that no `}` closes.
 ///
 /// One backward walk with a counter: a `}` raises the depth and a `{` spends
@@ -3148,7 +3165,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program> {
 /// opens first lets the walk skip each of them in constant time instead, which
 /// is the whole difference between linear and quadratic in the length of a
 /// literal a program can write.
-fn unmatched_opens(chars: &[char]) -> Vec<bool> {
+pub(crate) fn unmatched_opens(chars: &[char]) -> Vec<bool> {
     let mut unmatched = vec![false; chars.len()];
     let mut depth = 0usize;
     for index in (0..chars.len()).rev() {
