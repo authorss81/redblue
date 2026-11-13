@@ -966,6 +966,7 @@ fn close_due_frames(
     scopes: &mut Vec<HashMap<String, usize>>,
     scope_ids: &mut Vec<usize>,
     runtime_scopes: &mut Vec<usize>,
+    runtime_module_frames: &mut Vec<bool>,
     index: usize,
 ) {
     while matches!(
@@ -978,8 +979,45 @@ fn close_due_frames(
         }
         if pushes_runtime_scope(frame.kind) {
             runtime_scopes.pop();
+            runtime_module_frames.pop();
         }
     }
+}
+
+/// The identity of the runtime frames enclosing a token, outermost first.
+///
+/// A `module` body runs inline where its declaration appears, so it is
+/// transparent: a write there reaches the runtime frame that contains the
+/// declaration. A function, function literal or test body runs later (or not at
+/// all), so it adds a frame of its own. A later write applies to a read only
+/// when the write's frame path is a prefix of the read's — the write happens in
+/// the same frame or one that encloses the read, never in a function the read's
+/// frame cannot have entered.
+fn runtime_path(
+    runtime_scopes: &[usize],
+    runtime_module_frames: &[bool],
+    scope_ids: &[usize],
+) -> Vec<usize> {
+    runtime_scopes
+        .iter()
+        .zip(runtime_module_frames)
+        .filter(|(_, is_module)| !**is_module)
+        .map(|(position, _)| scope_ids[*position])
+        .collect()
+}
+
+/// Whether `write` happens in the same runtime frame as `read` or in one that
+/// encloses it.
+fn runtime_path_encloses(write: &[usize], read: &[usize]) -> bool {
+    write.len() <= read.len() && write.iter().zip(read).all(|(left, right)| left == right)
+}
+
+/// A member write that may replace a program-declared module's function.
+struct ModuleMemberWrite {
+    index: usize,
+    module: usize,
+    name: String,
+    path: Vec<usize>,
 }
 
 /// Whether a frame is a place where the VM's `set` creates a variable.
@@ -1299,6 +1337,17 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // the binding it names at the import site, so a later same-named module
     // cannot change what an earlier import refers to.
     let mut declared_module_functions: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    // Member tokens that are the target of a `set Receiver.member` write, each
+    // mapped to the runtime frame path where the write happens. A write
+    // replaces the module member's value, so the deferred pass must drop the
+    // stale published function before resolving the write or any later read —
+    // but only for reads in the same runtime frame (or one it encloses), since
+    // a write inside an uncalled function never touches the module table.
+    // Object writes keep their member binding and are unaffected.
+    let mut member_writes: HashMap<usize, Vec<usize>> = HashMap::new();
+    // The runtime frame path of every member token, recorded when the walk
+    // reaches it, so a write can be compared with each read it might affect.
+    let mut member_runtime_paths: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut import_module_bindings: HashMap<usize, usize> = HashMap::new();
     // The latest module binding for a name, used only by an import written
     // before its module is declared: at that point there is no binding to
@@ -1318,6 +1367,9 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
     // a test body. Block scopes are analyzer-only, so a `set` there writes to
     // the innermost entry of this stack.
     let mut runtime_scopes: Vec<usize> = vec![0];
+    // One flag per live runtime frame: whether it is a `module` body, which
+    // runs inline and is therefore transparent for write reachability.
+    let mut runtime_module_frames: Vec<bool> = vec![false];
     let mut visible = None;
     let mut last_significant_line: Option<usize> = None;
     let mut last_significant: Option<usize> = None;
@@ -1333,6 +1385,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             &mut scopes,
             &mut scope_ids,
             &mut runtime_scopes,
+            &mut runtime_module_frames,
             index,
         );
         token_scope[index] = scope_ids.last().copied().unwrap_or(0);
@@ -1395,6 +1448,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     }
                     if pushes_runtime_scope(frame.kind) {
                         runtime_scopes.pop();
+                        runtime_module_frames.pop();
                     }
                 }
             }
@@ -1550,6 +1604,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 );
                 module_scopes.push(scopes.len() - 1);
                 runtime_scopes.push(scopes.len() - 1);
+                runtime_module_frames.push(true);
             }
             // The test harness parses each `test "..."` body on its own and
             // runs it in an isolated VM, so two tests never share a binding.
@@ -1566,6 +1621,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 );
                 test_scopes.push(scopes.len() - 1);
                 runtime_scopes.push(scopes.len() - 1);
+                runtime_module_frames.push(false);
             }
             TokenKind::Try => frames.push(Frame::block(FrameKind::Try)),
             // A `catch` body runs through `run_catch_body`, which pushes a
@@ -1690,6 +1746,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         &mut next_scope_id,
                     );
                     runtime_scopes.push(scopes.len() - 1);
+                    runtime_module_frames.push(false);
                     declare_params(
                         &tokens,
                         cursor + 1,
@@ -1714,6 +1771,7 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                         &mut next_scope_id,
                     );
                     runtime_scopes.push(scopes.len() - 1);
+                    runtime_module_frames.push(false);
                     let mut body = index + 1;
                     if matches!(
                         tokens.get(body).map(|token| &token.kind),
@@ -1825,6 +1883,32 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                 };
                 let mut cursor = index + 1;
                 while let Some(name) = tokens.get(cursor).and_then(name_of) {
+                    // `set Person.name to …` writes a member of an existing
+                    // receiver (an object or a module), so the name is a use of
+                    // that binding, not a fresh variable. Leaving the token
+                    // unanswered lets the ordinary identifier pass resolve it
+                    // and the member pass resolve the field or method.
+                    if matches!(
+                        tokens.get(cursor + 1).map(|token| &token.kind),
+                        Some(TokenKind::Dot)
+                    ) {
+                        if tokens.get(cursor + 2).and_then(name_of).is_some() {
+                            let path =
+                                runtime_path(&runtime_scopes, &runtime_module_frames, &scope_ids);
+                            member_writes.insert(cursor + 2, path);
+                        }
+                        // A typed target's annotation is a type, not a use of
+                        // the variable or parameter that shares its spelling.
+                        // The member walk breaks here, so consume the type
+                        // segment before it does.
+                        if matches!(
+                            tokens.get(cursor + 3).map(|token| &token.kind),
+                            Some(TokenKind::Colon)
+                        ) {
+                            skip_type_expression(&tokens, cursor + 4, true, &mut type_names);
+                        }
+                        break;
+                    }
                     if let Some(owner) = frames.last().and_then(|frame| frame.module) {
                         module_declared
                             .entry(owner)
@@ -2021,6 +2105,10 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
                     // happens to be in scope.
                 } else if is_member_access(&tokens, index) {
                     member_names.insert(index);
+                    member_runtime_paths.insert(
+                        index,
+                        runtime_path(&runtime_scopes, &runtime_module_frames, &scope_ids),
+                    );
                     let receiver = index
                         .checked_sub(2)
                         .and_then(|receiver| tokens.get(receiver))
@@ -2214,6 +2302,40 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
         // the access that uses it.
         let mut members: Vec<usize> = member_names.iter().copied().collect();
         members.sort_unstable();
+
+        // A member write replaces the member's function value in the runtime
+        // module table, so a later read through the module must not resolve the
+        // stale published function. The runtime only performs the write if the
+        // frame holding it actually runs, so each write carries its frame path
+        // and applies only to reads in that frame or a frame nested inside it.
+        // A write in an uncalled function therefore leaves the module table —
+        // and every outside read — untouched.
+        let module_member_writes: Vec<ModuleMemberWrite> = member_writes
+            .iter()
+            .filter_map(|(&index, path)| {
+                let receiver = index.checked_sub(2)?;
+                let name = name_of(&tokens[index])?.to_string();
+                let receiver_binding = token_binding[receiver]?;
+                let module = match bindings[receiver_binding].kind {
+                    DefinitionKind::Module => receiver_binding,
+                    DefinitionKind::Import => import_module_bindings
+                        .get(&receiver_binding)
+                        .copied()
+                        .or_else(|| {
+                            name_of(&tokens[receiver])
+                                .and_then(|alias| module_aliases.get(alias))
+                                .and_then(|module| module_name_bindings.get(module).copied())
+                        })?,
+                    _ => return None,
+                };
+                Some(ModuleMemberWrite {
+                    index,
+                    module,
+                    name,
+                    path: path.clone(),
+                })
+            })
+            .collect();
         for index in members {
             let Some(receiver) = index.checked_sub(2) else {
                 continue;
@@ -2235,21 +2357,34 @@ fn analyze(source: &str, stop: Option<usize>) -> Result<Analysis, String> {
             // whether it is called or read as a function value. A standard
             // module has no declaration in this file, so it keeps the
             // unresolved answer the walk gave it.
-            if !receiver_is_this {
-                if let Some(binding) = receiver_binding {
-                    let module = match bindings[binding].kind {
-                        DefinitionKind::Module => Some(binding),
-                        DefinitionKind::Import => {
-                            import_module_bindings.get(&binding).copied().or_else(|| {
-                                name_of(&tokens[receiver])
-                                    .and_then(|alias| module_aliases.get(alias))
-                                    .and_then(|module| module_name_bindings.get(module).copied())
-                            })
-                        }
-                        _ => None,
-                    };
-                    if let Some(member) = module
-                        .and_then(|module| declared_module_functions.get(&module))
+            let module_receiver = if receiver_is_this {
+                None
+            } else {
+                receiver_binding.and_then(|binding| match bindings[binding].kind {
+                    DefinitionKind::Module => Some(binding),
+                    DefinitionKind::Import => {
+                        import_module_bindings.get(&binding).copied().or_else(|| {
+                            name_of(&tokens[receiver])
+                                .and_then(|alias| module_aliases.get(alias))
+                                .and_then(|module| module_name_bindings.get(module).copied())
+                        })
+                    }
+                    _ => None,
+                })
+            };
+            if let Some(module) = module_receiver {
+                let read_path = member_runtime_paths.get(&index);
+                let replaced = read_path.is_some_and(|read_path| {
+                    module_member_writes.iter().any(|write| {
+                        write.module == module
+                            && write.name == name
+                            && write.index <= index
+                            && runtime_path_encloses(&write.path, read_path)
+                    })
+                });
+                if !replaced {
+                    if let Some(member) = declared_module_functions
+                        .get(&module)
                         .and_then(|members| members.get(name))
                     {
                         token_binding[index] = Some(*member);

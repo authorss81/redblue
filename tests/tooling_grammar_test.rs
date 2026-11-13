@@ -4363,6 +4363,77 @@ fn edge_module_member_shadowed_by_a_nested_block_replacement_does_not_resolve_to
 }
 
 #[test]
+fn edge_module_member_write_replaces_the_published_function() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export f\n",
+        "end\n",
+        "say M.f\n",
+        "set M.f to 2\n",
+        "say M.f\n",
+    );
+
+    let before = goto_definition(source, 7, 7)
+        .expect("a position inside the file is valid")
+        .expect("a read before the write still names the published function");
+    assert_eq!(
+        (before.line, before.column),
+        (2, 8),
+        "the write only replaces the member for later uses"
+    );
+
+    for line in [8, 9] {
+        assert_eq!(
+            goto_definition(source, line, 7).expect("a position inside the file is valid"),
+            None,
+            "a member write replaces the module function, so line {line} must not resolve to the stale `to`"
+        );
+        assert!(
+            find_references(source, line, 7)
+                .expect("a position inside the file is valid")
+                .is_empty(),
+            "the stale function binding must not own the member on line {line}"
+        );
+    }
+}
+
+#[test]
+fn edge_import_alias_member_write_replaces_the_published_function() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export f\n",
+        "end\n",
+        "import M as A\n",
+        "say A.f\n",
+        "set A.f to 2\n",
+        "say A.f\n",
+    );
+
+    let before = goto_definition(source, 8, 7)
+        .expect("a position inside the file is valid")
+        .expect("a read through the alias before the write names the published function");
+    assert_eq!(
+        (before.line, before.column),
+        (2, 8),
+        "the aliased read before the write still resolves to the function"
+    );
+
+    for line in [9, 10] {
+        assert_eq!(
+            goto_definition(source, line, 7).expect("a position inside the file is valid"),
+            None,
+            "a member write through an import alias replaces the module function, so line {line} must not resolve to the stale `to`"
+        );
+    }
+}
+
+#[test]
 fn edge_aliased_same_named_module_declaration_keeps_the_imported_modules_functions() {
     let source = concat!(
         "module M\n",
@@ -4779,5 +4850,345 @@ fn edge_find_references_from_the_declaration_reach_every_text_literal() {
         references,
         vec![(1, 5, 1, 12), (2, 12, 2, 19), (3, 12, 3, 19)],
         "every text literal in the file contributes its interpolated uses"
+    );
+}
+
+#[test]
+fn edge_member_assignment_receiver_resolves_to_the_object_declaration() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "end\n",
+        "set Person.name to \"Alice\"\n",
+    );
+
+    let receiver = goto_definition(source, 4, 5)
+        .expect("a position inside the file is valid")
+        .expect("the receiver of a member assignment names the object");
+    assert_eq!(
+        (receiver.line, receiver.column, receiver.kind.as_str()),
+        (1, 8, "object"),
+        "`Person` on the left of a member write must resolve to the object declaration, not a new variable"
+    );
+
+    let field = goto_definition(source, 4, 12)
+        .expect("a position inside the file is valid")
+        .expect("the written member names the object field");
+    assert_eq!(
+        (field.line, field.column, field.kind.as_str()),
+        (2, 9, "variable"),
+        "`name` on the left of a member write must resolve to `has name`"
+    );
+
+    let receiver_references: Vec<(usize, usize)> = find_references(source, 1, 8)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        receiver_references,
+        vec![(1, 8), (4, 5)],
+        "the object's references must include the member-write receiver"
+    );
+
+    let field_references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        field_references,
+        vec![(2, 9), (4, 12)],
+        "the field's references must include the member write"
+    );
+}
+
+#[test]
+fn edge_member_assignment_does_not_shadow_the_object_for_later_reads() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "end\n",
+        "set Person.name to \"Alice\"\n",
+        "say Person.name\n",
+    );
+
+    let found = goto_definition(source, 5, 5)
+        .expect("a position inside the file is valid")
+        .expect("a read after the write still names the object");
+    assert_eq!(
+        (found.line, found.column, found.kind.as_str()),
+        (1, 8, "object"),
+        "the member write must not replace the object binding with a variable"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 1, 8)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(1, 8), (4, 5), (5, 5)],
+        "both the write and the later read are references to the object"
+    );
+
+    let field_references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        field_references,
+        vec![(2, 9), (4, 12), (5, 12)],
+        "the field's references span the write and the read"
+    );
+}
+
+#[test]
+fn edge_member_assignment_inside_a_branch_writes_through_to_the_object() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "end\n",
+        "if yes then\n",
+        "    set Person.name to \"Alice\"\n",
+        "end\n",
+        "say Person.name\n",
+    );
+
+    let receiver_references: Vec<(usize, usize)> = find_references(source, 1, 8)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        receiver_references,
+        vec![(1, 8), (5, 9), (7, 5)],
+        "a member write inside a branch still refers to the program-scope object"
+    );
+
+    let field_references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        field_references,
+        vec![(2, 9), (5, 16), (7, 12)],
+        "the field's references span the branch write and the read"
+    );
+}
+
+#[test]
+fn edge_constant_module_member_write_replaces_the_published_function() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export f\n",
+        "end\n",
+        "say M.f\n",
+        "constant M.f to 2\n",
+        "say M.f\n",
+    );
+
+    let before = goto_definition(source, 7, 7)
+        .expect("a position inside the file is valid")
+        .expect("a read before the write still names the published function");
+    assert_eq!(
+        (before.line, before.column),
+        (2, 8),
+        "the constant write only replaces the member for later uses"
+    );
+
+    for line in [8, 9] {
+        assert_eq!(
+            goto_definition(source, line, 7).expect("a position inside the file is valid"),
+            None,
+            "a constant member write replaces the module function, so line {line} must not resolve to the stale `to`"
+        );
+        assert!(
+            find_references(source, line, 7)
+                .expect("a position inside the file is valid")
+                .is_empty(),
+            "the stale function binding must not own the member on line {line}"
+        );
+    }
+}
+
+#[test]
+fn edge_member_assignment_through_this_inside_a_method() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "    to can rename(value)\n",
+        "        set this.name to value\n",
+        "    end\n",
+        "end\n",
+        "set Person.name to \"Alice\"\n",
+        "say Person.name\n",
+    );
+
+    let written = goto_definition(source, 4, 18)
+        .expect("a position inside the file is valid")
+        .expect("the member written through `this` names the object field");
+    assert_eq!(
+        (written.line, written.column, written.kind.as_str()),
+        (2, 9, "variable"),
+        "`this.name` on the left of a member write must resolve to `has name`"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 2, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(2, 9), (4, 18), (7, 12), (8, 12)],
+        "the field's references span the method write and the later writes and reads"
+    );
+}
+
+#[test]
+fn edge_member_assignment_inside_a_function_body() {
+    let source = concat!(
+        "module M\n",
+        "    to f()\n",
+        "        give back 1\n",
+        "    end\n",
+        "    export f\n",
+        "end\n",
+        "object Person\n",
+        "    has name\n",
+        "end\n",
+        "to update()\n",
+        "    set M.f to 2\n",
+        "    set Person.name to \"Alice\"\n",
+        "end\n",
+        "say M.f()\n",
+        "say Person.name\n",
+    );
+
+    let published = goto_definition(source, 14, 7)
+        .expect("a position inside the file is valid")
+        .expect("an uncalled function's write never touches the module table");
+    assert_eq!(
+        (published.line, published.column),
+        (2, 8),
+        "the runtime only performs the write if `update` runs, so the later call still names the published function"
+    );
+
+    let field = goto_definition(source, 12, 16)
+        .expect("a position inside the file is valid")
+        .expect("the field written inside a function still names `has name`");
+    assert_eq!(
+        (field.line, field.column),
+        (8, 9),
+        "a member write inside a function frame still refers to the object field"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 8, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(8, 9), (12, 16), (15, 12)],
+        "the field's references span the write and the read inside and after the function"
+    );
+}
+
+#[test]
+fn edge_member_assignment_before_a_later_object_declaration() {
+    let source = concat!(
+        "set Person.name to \"Alice\"\n",
+        "object Person\n",
+        "    has name\n",
+        "end\n",
+        "say Person.name\n",
+    );
+
+    let receiver = goto_definition(source, 1, 5)
+        .expect("a position inside the file is valid")
+        .expect("the forward receiver names the object declared below it");
+    assert_eq!(
+        (receiver.line, receiver.column),
+        (2, 8),
+        "`Person` on the left of a forward member write resolves to the later object declaration"
+    );
+
+    let field = goto_definition(source, 1, 12)
+        .expect("a position inside the file is valid")
+        .expect("the written member names the field declared below it");
+    assert_eq!(
+        (field.line, field.column),
+        (3, 9),
+        "`name` on the left of a forward member write resolves to the later `has name`"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 3, 9)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(1, 12), (3, 9), (5, 12)],
+        "the field's references span the forward write and the later read"
+    );
+}
+
+#[test]
+fn edge_member_assignment_does_not_resolve_a_type_annotation_as_a_variable() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "end\n",
+        "set Text to 1\n",
+        "set Person.name: Text to \"Alice\"\n",
+    );
+
+    assert_eq!(
+        goto_definition(source, 5, 18).expect("a position inside the file is valid"),
+        None,
+        "the annotation after the written member is a type, not a use of the `Text` variable"
+    );
+
+    let references: Vec<(usize, usize)> = find_references(source, 4, 5)
+        .expect("a position inside the file is valid")
+        .into_iter()
+        .map(|location| (location.line, location.column))
+        .collect();
+    assert_eq!(
+        references,
+        vec![(4, 5)],
+        "the type annotation must not join the same-spelled variable's references"
+    );
+}
+
+#[test]
+fn edge_member_assignment_navigation_rejects_a_malformed_position() {
+    let source = concat!(
+        "object Person\n",
+        "    has name\n",
+        "end\n",
+        "set Person.name to \"Alice\"\n",
+    );
+
+    assert!(
+        goto_definition(source, 99, 1).is_err(),
+        "goto-definition past the file must be a clean error"
+    );
+    assert!(
+        find_references(source, 4, 99).is_err(),
+        "find-references past the line must be a clean error"
+    );
+    assert!(
+        completions(source, 0, 1).is_err(),
+        "completion on line 0 must be a clean error"
     );
 }

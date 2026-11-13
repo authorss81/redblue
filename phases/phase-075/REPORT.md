@@ -43,6 +43,10 @@
 | src/lsp.rs | +30 −9 | final round-1 review fixes: the published-function table is keyed by the module binding rather than its name, so a redeclaration or a same-named module in another block cannot answer for the first module's calls, and a module declaration gives a redeclaration its own binding; a module-top-level `set` or `constant` removes the same-named function entry because it replaced the member value; and a bare `Module.name` read resolves through the same table as a call, matching the runtime's exposed function value. |
 | tests/tooling_grammar_test.rs | +130 −0 | four final round-1 review tests: two same-named module declarations keep their own functions; a `set` and a `constant` that shadow a module function do not navigate to the stale `to`; and a bare module-member read resolves to the published function and joins its references. |
 | src/lsp.rs | +42 −10 | round-2 review fixes: a `set` or `constant` inside a nested block removes the replaced module function by finding the innermost runtime frame's module rather than looking only at the top frame, and an `import` records the module binding it named at its own site, so an alias written before a later same-named module keeps the earlier module's functions and completed members. |
+| src/lsp.rs | +26 −0 | resumed run: a member write (`set Person.name to …`) no longer declares its receiver as a fresh variable. The `set`/`constant` target walk stops at a following `.`, leaving the receiver to the ordinary identifier pass and the written member to the member pass, so goto-definition on either side resolves the object and its field and the object keeps its program-scope binding for later reads. A write whose receiver resolves to a declared module or import alias also removes the replaced member from that module's published-function table before the write is resolved, so neither the write nor a later read resolves to the stale `to`. |
+| tests/tooling_grammar_test.rs | +221 −0 | six navigation tests for member writes: the receiver resolves to the object declaration and the member to `has name`, a later read still resolves the object rather than a shadowing variable, a write inside a branch is a reference to the program-scope object and field, malformed positions remain clean `Err`s, and `set M.f`/`set A.f` through a module or an import alias drops the replaced published function while an earlier read still resolves it. |
+| tests/bench/mod.rs | +74 −5 | gate repair for a pre-existing cross-target defect: the `rb-bench` binary's own unit tests live under `target/<profile>/build/…`, where the old sibling lookup could not find the runner. The lookup now resolves `target/<profile>/rb-bench` and the cross-target `target/<triple>/<profile>/rb-bench`, so the child-process measurement remains real instead of failing with "cannot locate the rb-bench worker binary" or measuring a stale binary elsewhere; a fixture pins both layouts. |
+| phases/phase-088/scan.rs | +1 −4 | gate repair for a pre-existing clippy `needless_bool` diagnostic in an unrelated phase's scanner; the expression is unchanged in meaning. |
 | tests/tooling_grammar_test.rs | +99 −0 | three round-2 review tests: a nested branch's `set`/`constant` drops the stale module function; an alias between two same-named modules resolves and completes from the module its import named, not the later declaration. |
 | src/lsp.rs | +260 −0 | resumed run and round-1 review: completion inside a `{…}` text interpolation. The literal is decoded first, so `\u007B`/`\u007D` are braces to the LSP exactly as they are to the lexer; a pair is interpolation only when its contents re-parse as one complete expression, so a JSON object in a string stays text; `this` is offered as an expression keyword; and a `receiver.member` slot inside a pair is re-analyzed in the literal's enclosing scopes so it answers the object's or module's members rather than a flat lexical list. Text outside a pair, and a closed pair, still answer nothing. |
 | tests/tooling_grammar_test.rs | +160 −0 | eight interpolation tests: scope and builtins with no statement keywords; text before and after a pair in the same literal; a later declaration not offered above the caret; a malformed column/line producing a clean `Err`; JSON braces that are not an expression stay text; `this` is offered; `{this.}` offers the object's members; and a `\u007B` escape opens an interpolation. |
@@ -187,9 +191,16 @@ same-scope function fallback could jump forward past a shadowing `set` to a
 `to` written after the call, even though the runtime holds the variable there
 and raises `Unknown function 'f'`; the fallback is now bounded by source
 position, and the deferred pass still resolves a genuine call written before a
-later declaration. The two new fixtures pin both orders. The gate count below
-was re-run and re-harvested: the previous table's `2843` did not match the
-suite, so the final number is the 2852 the round-1 review run actually reported.
+later declaration. The two new fixtures pin both orders. The gate count is
+re-harvested from the current `cargo test --all-targets` run: 2893 + 4 = 2897
+passed, 0 failed and 0 ignored across 85 test binaries. The four new test
+instances are the two module-member-write fixtures plus the cross-target
+worker-layout fixture, which is compiled into both the `rb-bench` unit harness
+and `tests/bench_test.rs`. The worker-lookup repair is also what moved the two
+`edge_child_measurement_accepts_an_explicit_environment` instances (the
+`rb-bench` unit harness and `tests/bench_test.rs`) from failing to passing,
+which reconciles the earlier 2887 + 4 member-write tests + 2 benchmark tests =
+2893 figure.
 
 The final resumed run reproduced a module-navigation gap against the runtime.
 For
@@ -350,6 +361,9 @@ replacement, the alias between same-named modules and its completed members.
 | edge_aliased_same_named_module_declaration_keeps_the_imported_modules_functions | duplicate names / import alias: an alias between two `module M` declarations resolves and joins the module its import named, not the later declaration |
 | edge_completions_after_a_same_named_module_alias_keep_the_imported_modules_members | duplicate names / completion: a same-named module declared after an import does not change the members its alias offers |
 | edge_bare_module_member_read_resolves_to_the_published_function | module navigation: a bare `M.f` read resolves to the published function and joins its declaration and export references |
+| edge_module_member_write_replaces_the_published_function | module navigation / duplicate names: `set M.f` removes the replaced published function, so the write and a later `M.f` answer `None` while an earlier read still resolves the `to f` |
+| edge_import_alias_member_write_replaces_the_published_function | module navigation / import alias: `set A.f` through `import M as A` replaces the same published function, and an earlier aliased read still resolves it |
+| edge_worker_binary_resolves_a_cross_target_layout | build harness / boundary: the worker lookup finds both `target/<profile>/<name>` and `target/<triple>/<profile>/<name>` (the fixture runs in the `rb-bench` unit harness and `tests/bench_test.rs`) |
 | edge_completions_inside_an_interpolation_offer_expression_names | context awareness: `{…}` inside text is code, so scope names and builtins are offered while statement keywords are not |
 | edge_completions_outside_an_interpolation_in_the_same_literal_are_empty | context awareness / boundary: text before and after a balanced pair in the same literal is still text |
 | edge_completions_inside_an_interpolation_do_not_offer_later_declarations | scope / declaration order: a declaration below the caret is not in scope above it |
@@ -366,6 +380,10 @@ replacement, the alias between same-named modules and its completed members.
 | edge_completions_inside_an_interpolation_offer_this | context awareness: `this` is an expression keyword a method may write, so it is offered inside a pair |
 | edge_completions_after_a_member_dot_inside_an_interpolation_offer_members | context awareness / member completion: `{this.}` offers the enclosing object's fields and methods, not the lexical registry |
 | edge_completions_treat_unicode_escaped_braces_as_interpolation | Unicode / escapes: `\u007B` opens an interpolation exactly as the lexer reads it |
+| edge_member_assignment_receiver_resolves_to_the_object_declaration | member write / references: `Person` on the left of `set Person.name` is the object declaration, and `name` is its `has` field; both reference sets include the write |
+| edge_member_assignment_does_not_shadow_the_object_for_later_reads | duplicate names / scope: the member write does not replace the object binding, so the later read and the write share the object and field references |
+| edge_member_assignment_inside_a_branch_writes_through_to_the_object | nesting: a member write inside an `if` body reaches the program-scope object and field |
+| edge_member_assignment_navigation_rejects_a_malformed_position | out of bounds / failure: line past the file, column past the line and line 0 are clean `Err`s from goto-definition, find-references and completion |
 
 ### Mandatory edge-case matrix
 
@@ -396,26 +414,49 @@ object and module scopes and lets `{this.}`, `{person.}` and `{files.}` answer
 their members. The four new fixtures pin each half, including the JSON case that
 would otherwise be offered the lexical registry.
 
+The round-2 review found that a member write to a declared module still left the
+replaced function in the published table: the write broke out of the
+`set`/`constant` walk before the module bookkeeping, so the deferred pass kept
+resolving `set M.f`, later `M.f` reads and `M.f()` calls to the stale `to f`.
+The deferred member pass now records member-write tokens and removes the written
+member from that module's (or import alias's) published-function table at the
+write's source position, so earlier reads keep the function and later uses do
+not. Two fixtures cover the direct module and the import alias. The review also
+found the benchmark worker lookup only understood `target/<profile>/…`; it now
+tries both that layout and `target/<triple>/<profile>/…`, with a fixture. Both
+out-of-scope gate repairs remain recorded in
+`docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md` as `F-073-02` and `F-088-01`; their rows
+now say `[RESOLVED — verify in owner phase]` because the owner phases, not this
+phase, must confirm them.
+
 ## Gates
 
 | Gate | Result |
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2887 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2897 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-075" | pass |
 
-`cargo test --all-targets` ran 85 test binaries and reported 2887 passed, 0
-failed and 0 ignored. The round-2 change adds two more fixtures (a builtin
-reference inside an interpolation and a use that fills the expression) and
-extends the existing interpolation-reference fixtures with end-span assertions;
-2885 + 2 = 2887 matches the harvested total.
+`cargo test --all-targets` was re-run on this checkout: 2897 passed, 0 failed
+and 0 ignored across 85 test binaries. The arithmetic now reconciles from the
+harvested total: 2887 + 4 member-write tests = 2891, plus the two
+`edge_child_measurement_accepts_an_explicit_environment` instances returned to
+passing by the worker lookup = 2893, which was the pre-round total. This round
+adds four more test instances: two module-member-write tests and the
+cross-target worker-layout fixture, compiled into both the `rb-bench` unit
+harness and `tests/bench_test.rs`, giving 2897. The two out-of-scope repairs
+(the benchmark worker lookup in `tests/bench/mod.rs` and the `needless_bool`
+clippy diagnostic in `phases/phase-088/scan.rs`) are retained only because each
+was a pre-existing failure of a mandatory gate; the ledger records them for the
+owner phases to verify rather than silently closing them here.
 
 ## Invariants touched
 
 - None to the public `Value`, `Error`, grammar or `.rb` extension. The only public additions are new `redblue::lsp` items re-exported from `redblue`.
 - Scope modeling now follows the analyzer and the runtime together: an `if`/`unless` branch body is its own scope, but a `set` inside it writes through to an enclosing binding (or the program scope when the name is new), so it survives `end` while a function, object or import declared there does not. Each `test` body is scoped on its own because the harness runs it in an isolated VM; the previous attempt modeled both as shared, so a name could leak from one test to the next, and the restored isolation fixture pins that distinction. A `constant` always binds in the program scope (the test body's scope inside a `test`), and the catch scope closes when `finally` starts.
 - A function and a variable of the same spelling share one slot in the runtime, so a later `set`, `constant` or `to` replaces a binding of another kind. Navigation now models that declaration order: the later declaration owns the following uses, while the earlier declaration keeps its own uses. An inner `set` over an outer function creates a local variable rather than writing through the function. No test from `main` was deleted or weakened.
+- A member write (`set Receiver.member to …`) is a use of `Receiver` and a reference to the field, never a new variable named after the receiver. The interpreter mutates the object/module, and navigation now models that instead of letting the assignment shadow the object binding.
 
 ## Known gaps / follow-ups
 
