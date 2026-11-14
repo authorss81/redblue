@@ -4,11 +4,13 @@ use crate::lexer::Lexer;
 use crate::parser::{Parser, Program, Stmt};
 use crate::testing::{TestError, TestFailure, TestResults};
 use std::collections::HashMap;
+use std::path::Path;
 
 pub struct TestHarness {
     results: TestResults,
     _globals: HashMap<String, crate::value::Value>,
     _test_context: HashMap<String, crate::value::Value>,
+    source_name: String,
 }
 
 impl TestHarness {
@@ -17,6 +19,7 @@ impl TestHarness {
             results: TestResults::new(),
             _globals: crate::stdlib::builtins(),
             _test_context: HashMap::new(),
+            source_name: "inline".to_string(),
         }
     }
 
@@ -59,11 +62,18 @@ impl TestHarness {
         Ok(())
     }
 
-    pub fn run_file(&mut self, path: &str) -> Result<()> {
+    pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
         let source = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io(format!("Failed to read {}: {}", path, e)))?;
+            .map_err(|e| Error::Io(format!("Failed to read {}: {}", path.display(), e)))?;
 
-        self.run_source(&source)
+        // A failure in a file should name that file, not every file as
+        // "inline". The name is restored afterwards so one harness can run
+        // several files without the second inheriting the first's label.
+        let previous = std::mem::replace(&mut self.source_name, path.display().to_string());
+        let result = self.run_source(&source);
+        self.source_name = previous;
+        result
     }
 
     /// Runs every `test "..." ... end` block the parser found in `source`.
@@ -76,12 +86,17 @@ impl TestHarness {
         let program = match Lexer::tokenize(source).and_then(|tokens| Parser::new(tokens).parse()) {
             Ok(program) => program,
             Err(e) => {
-                // A marker-style file (`// test "..."`) declares no real block,
-                // so its commented bodies are not required to parse and the
-                // marker scan below owns that file. When a real block *was*
-                // asked for and cannot be read, that is a failure, not silence.
-                if declares_test_block(source) {
-                    self.add_error(e.to_string());
+                // A marker scan executes each `// test "..."` body on its own,
+                // so an error inside a body belongs to that scan. An error
+                // outside every body belongs to the file as a whole and must
+                // still be reported even when the file also contains a marker
+                // test: otherwise a stray syntax error after `// end` is hidden
+                // behind a passing marker test and `rb test` exits 0.
+                let inside_marker_body = e
+                    .span()
+                    .is_some_and(|span| line_is_in_marker_body(source, span.line));
+                if !inside_marker_body {
+                    self.add_source_error(&e);
                 }
                 return;
             }
@@ -136,7 +151,7 @@ impl TestHarness {
             Err(TestFailure::Assertion(failure)) => {
                 self.results.add_fail(TestError {
                     test_name: name.to_string(),
-                    file: "inline".to_string(),
+                    file: self.source_name.clone(),
                     line: Some(line),
                     message: failure.message.clone(),
                     expected: failure.expected.clone(),
@@ -147,7 +162,7 @@ impl TestHarness {
             Err(TestFailure::Error(e)) => {
                 self.results.add_fail(TestError {
                     test_name: name.to_string(),
-                    file: "inline".to_string(),
+                    file: self.source_name.clone(),
                     line: Some(line),
                     message: e.to_string(),
                     expected: None,
@@ -159,6 +174,7 @@ impl TestHarness {
     }
 
     fn run_benchmark(&mut self, lines: &[&str], i: &mut usize, bench_name: &str) -> Result<()> {
+        let line = *i + 1;
         let mut bench_lines = Vec::new();
         *i += 1;
 
@@ -178,8 +194,23 @@ impl TestHarness {
 
         let start = std::time::Instant::now();
 
+        let mut failure = None;
         for _ in 0..iterations {
-            let _ = self.execute_test_code(&bench_code);
+            match self.execute_test_code(&bench_code) {
+                Ok(()) => {}
+                Err(error) => {
+                    // A broken benchmark is a failure, not an absent test. The
+                    // zero-execution guard would otherwise replace the benchmark
+                    // body's own error with "No tests were defined".
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+
+        if let Some(error) = failure {
+            self.report_test(bench_name, line, Err(error));
+            return Ok(());
         }
 
         let elapsed = start.elapsed();
@@ -189,6 +220,11 @@ impl TestHarness {
             "  {}: {} ns/iter ({} iterations)",
             bench_name, avg_ns, iterations
         );
+
+        // A benchmark that ran to completion executed something, so it counts as
+        // a pass. Without this the zero-execution guard saw `total == 0` and
+        // rejected a file whose only test is a passing benchmark.
+        self.results.add_pass();
 
         Ok(())
     }
@@ -229,12 +265,30 @@ impl TestHarness {
         run.map(|_| ()).map_err(TestFailure::Error)
     }
 
-    pub fn add_error(&mut self, error: String) {
+    /// Records a whole-file lex/parse failure against the file it came from.
+    ///
+    /// The error still knows where it happened, so discarding its span would
+    /// turn a located syntax error into `Location: unknown` with no line.
+    fn add_source_error(&mut self, error: &Error) {
+        let file = self.source_name.clone();
+        self.add_located_error(&file, error);
+    }
+
+    /// Records an error raised while `run_file` was reading or running `path`.
+    ///
+    /// `run_file` restores the previous source label before returning, so the
+    /// caller cannot rely on `source_name` to name the file that failed. This
+    /// takes the path explicitly and keeps any span the error carried.
+    pub fn add_source_error_at(&mut self, path: &Path, error: &Error) {
+        self.add_located_error(&path.display().to_string(), error);
+    }
+
+    fn add_located_error(&mut self, file: &str, error: &Error) {
         self.results.add_fail(TestError {
             test_name: "File execution".to_string(),
-            file: "unknown".to_string(),
-            line: None,
-            message: error,
+            file: file.to_string(),
+            line: error.span().map(|span| span.line),
+            message: error.to_string(),
             expected: None,
             actual: None,
         });
@@ -251,13 +305,48 @@ impl Default for TestHarness {
     }
 }
 
-/// True when `source` opens a real `test "..."` block on a line of its own.
+/// True when 1-based `line` falls inside a marker-style `test`/`bench` body.
 ///
-/// Marker-style tests are written `// test "..."`, which never starts with
-/// `test`, so this separates the two discovery conventions.
-fn declares_test_block(source: &str) -> bool {
-    source
-        .lines()
-        .map(str::trim_start)
-        .any(|line| line.starts_with("test "))
+/// The body runs from the line after the marker to the line before its `end`.
+/// Those are exactly the lines the marker scan executes separately, so their
+/// parse errors belong to that scan. Any other line belongs to the file as a
+/// whole, even when the file also contains a marker test.
+fn line_is_in_marker_body(source: &str, line: usize) -> bool {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let text = lines[i].trim();
+        let is_marker = text.starts_with("// test ")
+            || text.starts_with("# test ")
+            || text.starts_with("// bench ")
+            || text.starts_with("# bench ");
+
+        if !is_marker {
+            i += 1;
+            continue;
+        }
+
+        let body_start = i + 2;
+
+        let mut end = i + 1;
+        while end < lines.len() {
+            let body_line = lines[end].trim();
+            if body_line.starts_with("// end") || body_line == "end" {
+                break;
+            }
+            end += 1;
+        }
+
+        // `end` is the 0-based terminator index, so its 1-based line is the
+        // first line after the body. Without a terminator the body runs to EOF.
+        let body_end = end + 1;
+        if line >= body_start && line < body_end {
+            return true;
+        }
+
+        i = end;
+    }
+
+    false
 }
