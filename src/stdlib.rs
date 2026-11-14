@@ -147,7 +147,16 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
     // both directions.
     (
         "list",
-        &["map", "length", "filter", "reduce", "sort", "reverse"],
+        &[
+            "map",
+            "length",
+            "filter",
+            "reduce",
+            "sort",
+            "reverse",
+            "zip",
+            "enumerate",
+        ],
     ),
     (
         "math",
@@ -359,10 +368,12 @@ pub fn dotted_call_reaches(
 
 /// The function a method-spelled `map` call was given, or the refusal it earns.
 ///
-/// `map` is the one builtin whose argument has to be a Redblue function, so it
-/// is the one call whose bad arguments are named rather than merely counted:
-/// `xs.map(5)` says what it got, and a call with no argument at all says that
-/// too. Both engines ask this — see [`crate::interpreter::Vm::call_method`] and
+/// `map`, `filter` and `reduce` each require a Redblue function as their
+/// following argument, so their bad arguments are named rather than merely
+/// counted: `xs.map(5)` says what it got, and a call with no argument at all
+/// says that too. [`list_function`] and [`reduce_parts`] carry the same naming
+/// for `filter` and `reduce`, and both engines ask this — see
+/// [`crate::interpreter::Vm::call_method`] and
 /// [`crate::bytecode::vm::BytecodeVm::call_method`] — because the two engines
 /// refusing with different words is a divergence `tests/differential_test.rs`
 /// reports for a program that is behaving the same way.
@@ -583,9 +594,9 @@ pub fn builtins() -> HashMap<String, Value> {
     globals.insert("reduce".to_string(), Value::Builtin("reduce".to_string()));
     globals.insert("sort".to_string(), Value::Builtin("sort".to_string()));
     globals.insert("reverse".to_string(), Value::Builtin("reverse".to_string()));
-    // The iteration helpers. They are flat builtins with no dotted spelling:
-    // `list.sort` and `list.reverse` are in the member table, while these
-    // pairing and slicing helpers are not list methods.
+    // The iteration helpers. `zip` and `enumerate` also have dotted spellings
+    // (`list.zip` and `list.enumerate`) and are in the member table; the rest
+    // are flat builtins with no dotted spelling.
     for name in [
         "chain",
         "zip",

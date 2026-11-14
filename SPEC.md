@@ -1579,19 +1579,23 @@ set ordered to list.sort([3, 1, 2])                                    // [1, 2,
 set backwards to list.reverse([1, 2, 3])                               // [3, 2, 1]
 set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0 end)
 set total to list.reduce([1, 2, 3], to (a, b) give back a + b end, 0)
+set pairs to list.zip([1, 2], ["a", "b"])                              // [[1, a], [2, b]]
+set indexed to list.enumerate(["a", "b"])                              // [[0, a], [1, b]]
 ```
 
 `map`, `filter` and `reduce` are higher-order builtins, and each is a member
-of `list`. `sort(xs)` orders a homogeneous list ascending and
-`sort(xs, field)` orders records by one field; `sort` is stable and refuses a
-list that mixes kinds. `reverse(xs)` answers the list backwards, and
+of `list`. `sort(xs)` orders a homogeneous list ascending when its items are
+numbers, text, `yes`/`no` values, decimals, dates, or durations; a homogeneous
+list of any other kind is refused. `sort(xs, field)` orders records by one
+field; `sort` is stable and refuses a list that mixes kinds. `reverse(xs)` answers the list backwards, and
 `reduce(xs, f)` folds from the first item (an empty list is refused).
 
 `map` works in three spellings: `map(xs, f)`, `list.map(xs, f)` and
 `[1, 2, 3].map(f)`. `list.length` is `length` under its module spelling, as
-§ text writes it for a text; `list.sort`, `list.reverse`, `list.filter` and
-`list.reduce` are the dotted spellings of those builtins. `reduce(xs, f, start)`
-folds from `start`, so an empty list answers `start`.
+§ text writes it for a text; `list.sort`, `list.reverse`, `list.filter`,
+`list.reduce`, `list.zip` and `list.enumerate` are the dotted spellings of those
+builtins. `reduce(xs, f, start)` folds from `start`, so an empty list answers
+`start`.
 
 The third spelling takes its receiver **literally**. A dotted call resolves its
 receiver against modules and objects first, so a module or object named `xs`

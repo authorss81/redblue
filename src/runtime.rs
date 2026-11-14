@@ -3340,12 +3340,7 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             for arg in args {
                 match arg {
                     Value::List(items) => lists.push(items),
-                    _ => {
-                        return Err(Error::Runtime(
-                            "zip requires at least two lists".to_string(),
-                            span,
-                        ))
-                    }
+                    _ => return Err(Error::Runtime("zip requires lists".to_string(), span)),
                 }
             }
             if lists.len() < 2 {

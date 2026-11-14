@@ -425,6 +425,8 @@ list.filter(xs, to (x) give back x > 1 end)  // keep what the predicate accepts
 list.reduce([1, 2, 3], to (a, b) give back a + b end, 0)  // fold, with a start
 list.sort([3, 1, 2])                   // [1, 2, 3], stably
 list.reverse([1, 2, 3])                // [3, 2, 1]
+list.zip([1, 2], ["a", "b"])           // [[1, a], [2, b]]
+list.enumerate(["a", "b"])             // [[0, a], [1, b]]
 length(xs), push(xs, x)                // flat list builtins
 ```
 

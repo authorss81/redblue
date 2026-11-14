@@ -10,19 +10,19 @@ phase-105; rank 1 gained `filter` and `reduce` and rank 4 gained `sort` and
 `reverse` in phase-077. The entries are kept so the ranking and its history stay
 readable.
 
-- **Builtins in the registry**: 164 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:2140`,
-  which closes with `"input"` at `src/stdlib.rs:2304`. The six module-only
+- **Builtins in the registry**: 164 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:2149`,
+  which closes with `"input"` at `src/stdlib.rs:2313`. The six module-only
   `text.wrap`, `text.diff`, `text.dedent`, `text.template`, `text.pad` and
   `text.align` utilities are deliberately not in this table, and neither is
   `sys.parse` nor the nine `logging` calls, whose only spellings are
   `sys.parse` and `logging.<member>`.
 - **Modules a dotted call may name**: 24 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 153 — `stdlib::MODULE_MEMBERS` at
+- **Dotted members those modules accept**: 155 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:85`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
 of what a dotted call is allowed to reach, because a name not in them is refused
-before a call happens (`src/stdlib.rs:291`, `module_has_member`). So the ceiling
+before a call happens (`src/stdlib.rs:300`, `module_has_member`). So the ceiling
 of the language is knowable by reading one file, and that is what this survey
 reads.
 
@@ -102,28 +102,28 @@ survey measures against, and it is short.
 | `console` | `log`, `error`, `clear` | `src/stdlib.rs:106` |
 | `logging` | `debug`, `info`, `warn`, `error`, `set_level`, `level`, `set_timestamps`, `set_destination`, `reset` | `src/stdlib.rs:107` |
 | `csv` | `parse`, `stringify` | `src/stdlib.rs:121` |
-| `decimal` | `from_text`, `from_number`, `to_text`, `to_number`, `sum` | `src/stdlib.rs:176` |
+| `decimal` | `from_text`, `from_number`, `to_text`, `to_number`, `sum` | `src/stdlib.rs:185` |
 | `files` | `read`, `write`, `append`, `exists`, `lines`, `delete`, `copy`, `rename` | `src/stdlib.rs:122` |
 | `hash` | `sha256`, `sha512` | `src/stdlib.rs:128` |
 | `hex` | `encode`, `decode` | `src/stdlib.rs:129` |
 | `json` | `parse`, `stringify`, `parse_lines`, `stringify_lines` | `src/stdlib.rs:130` |
-| `list` | `map`, `length`, `filter`, `reduce`, `sort`, `reverse` | `src/stdlib.rs:149` |
-| `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp`, `mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile`, `correlation` | `src/stdlib.rs:153` |
-| `matrix` | `zeros`, `ones`, `identity`, `from_lists`, `to_lists`, `shape`, `add`, `subtract`, `multiply`, `divide`, `scale`, `matmul`, `transpose`, `sum`, `mean`, `min`, `max`, `at`, `row`, `column` | `src/stdlib.rs:180` |
-| `network` | `get`, `post` | `src/stdlib.rs:205` |
-| `path` | `join`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, `resolve`, `normalize`, `list` | `src/stdlib.rs:206` |
-| `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:220` |
-| `sys` | `argv`, `parse` | `src/stdlib.rs:224` |
-| `tar` | `read`, `write` | `src/stdlib.rs:256` |
-| `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`, `wrap`, `diff`, `dedent`, `template`, `pad`, `align` | `src/stdlib.rs:225` |
-| `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:257` |
-| `toml` | `parse` | `src/stdlib.rs:253` |
-| `uuid` | `generate`, `parse` | `src/stdlib.rs:254` |
-| `zip` | `read`, `write` | `src/stdlib.rs:255` |
+| `list` | `map`, `length`, `filter`, `reduce`, `sort`, `reverse`, `zip`, `enumerate` | `src/stdlib.rs:149` |
+| `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp`, `mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile`, `correlation` | `src/stdlib.rs:162` |
+| `matrix` | `zeros`, `ones`, `identity`, `from_lists`, `to_lists`, `shape`, `add`, `subtract`, `multiply`, `divide`, `scale`, `matmul`, `transpose`, `sum`, `mean`, `min`, `max`, `at`, `row`, `column` | `src/stdlib.rs:189` |
+| `network` | `get`, `post` | `src/stdlib.rs:214` |
+| `path` | `join`, `parent`, `filename`, `stem`, `extension`, `is_absolute`, `resolve`, `normalize`, `list` | `src/stdlib.rs:215` |
+| `regex` | `match`, `is_match`, `capture`, `replace`, `split` | `src/stdlib.rs:229` |
+| `sys` | `argv`, `parse` | `src/stdlib.rs:233` |
+| `tar` | `read`, `write` | `src/stdlib.rs:265` |
+| `text` | `uppercase`, `lowercase`, `trim`, `split`, `join`, `contains`, `starts_with`, `ends_with`, `replace`, `length`, `wrap`, `diff`, `dedent`, `template`, `pad`, `align` | `src/stdlib.rs:234` |
+| `time` | `now`, `sleep`, `format`, `parse`, `unix`, `from_unix`, `date`, `datetime`, `duration`, `add_years`, `add_months`, `add_days`, `add_hours`, `add_minutes`, `add_seconds` | `src/stdlib.rs:266` |
+| `toml` | `parse` | `src/stdlib.rs:262` |
+| `uuid` | `generate`, `parse` | `src/stdlib.rs:263` |
+| `zip` | `read`, `write` | `src/stdlib.rs:264` |
 Two observations from that table that the rest of this document depends on:
 
 - **`text` has no way to take a piece of a text.** `split` and `join` can get
-  there with loss (`src/stdlib.rs:921` — the separator is a literal, so
+  there with loss (`src/stdlib.rs:930` — the separator is a literal, so
   `split("a1b22c", "2")` loses the separators), but there is no `slice`, no
   `index_of`, no `pad_left`. Every "extract the field between the colons" task is
   rank 5.
@@ -174,7 +174,7 @@ Answers `[2, 3]` since phase-077.
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:1769` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:1778` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -208,7 +208,7 @@ Before phase-095 the same program was refused as
   inside `if let Value::List(items)`, so a record is not a list and the loop body
   never runs. `src/runtime.rs:1525` — `length` refuses a record outright with
   *"length requires a list or text"*. And the registry holds no `keys` and no
-  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:2190` without one.
+  `values`: `BUILTIN_NAMES` runs to `"input"` at `src/stdlib.rs:2199` without one.
 - **Why it matters more than it looks**: a record is Redblue's only map type. A
   program cannot count a record, iterate it, merge one into another, or turn one
   back into text. Grouping is the operation almost every data program performs
@@ -249,10 +249,10 @@ Answers `[1, 2, 3]` since phase-077.
 
 - **Blocked programs**: 4 — 21, 23, 24, 25 (at survey time; 23 since phase-101)
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:172` — the `text` row now carries the ten original
+- **Evidence**: `src/stdlib.rs:181` — the `text` row now carries the ten original
   names plus `wrap`, `diff`, `dedent`, `template`, `pad` and `align`, none of
   which takes an index or produces a substring. `split` is documented at
-  `src/stdlib.rs:921` as taking a literal separator, and `src/stdlib.rs:921` is
+  `src/stdlib.rs:930` as taking a literal separator, and `src/stdlib.rs:930` is
   the comment explaining why there is no pattern to give it. `length` counts
   **characters**, not bytes (`src/runtime.rs:1522`), so a slicing design has a
   defined unit to slice by; the gap is that no slicing or searching call exists.
@@ -278,7 +278,7 @@ Refused as `RuntimeError: Module 'text' has no function 'slice'`.
 - **Blocked programs**: 4 — 2, 9, 10, 11 (at survey time; 0 since phase-097)
 - **Implementable**: binding-required
 - **Rust crate**: `chrono`
-- **Evidence**: `src/stdlib.rs:236` — the `time` row carries the date and
+- **Evidence**: `src/stdlib.rs:245` — the `time` row carries the date and
 duration surface added by phase-096 (`date`, `datetime`, `duration`, and the six
 `add_*` movers), plus `time.parse` added by phase-097. `src/runtime.rs:720`
 parses the ISO-8601 forms, including an offset and a fraction, into the date
@@ -328,7 +328,7 @@ Refused as `RuntimeError: Module 'files' has no function 'glob'`.
 - **Implementable**: binding-required
 - **Rust crate**: `base64`, `hex`, `percent-encoding`, `sha2`, `uuid`
 - **Evidence**: `src/stdlib.rs:85`, `src/stdlib.rs:127`, `src/stdlib.rs:128`
-  and `src/stdlib.rs:232` — the `base64`, `hash`, `hex` and `uuid` rows now
+  and `src/stdlib.rs:241` — the `base64`, `hash`, `hex` and `uuid` rows now
   bind the `base64`, `sha2`, `hex` and `uuid` crates. The dependency block in
   `Cargo.toml` holds all four.
 - **Why**: base64 auth headers, percent-encoded URLs and content hashes are
@@ -351,11 +351,11 @@ Refused as `AnalyzerError: Unknown variable 'percent'`.
 
 - **Blocked programs**: 2 — 10, 22
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:542` and `src/stdlib.rs:544` — `to_text` and
+- **Evidence**: `src/stdlib.rs:551` and `src/stdlib.rs:553` — `to_text` and
   `to_number` are the only two conversions between a number and anything else,
   and neither takes a second argument. There is no precision, no base, no
   thousands separator and no padding. The nearest thing to formatting is
-  `src/stdlib.rs:2391`, `to_text(any) -> text`, which is the default rendering.
+  `src/stdlib.rs:2400`, `to_text(any) -> text`, which is the default rendering.
 - **Why**: "print $1,234.50" is the last line of a money program, and
   "parse the integer after the marker" is a step of program 10. Both need the
   same thing — a format the caller states.
@@ -372,8 +372,8 @@ Refused as `RuntimeError: Unknown function 'to_fixed'`.
 - **Implementable**: implementable-in-Redblue
 - **Evidence**: `src/stdlib.rs:120` now exposes `csv.parse` and
   `csv.stringify`; `src/stdlib.rs:130` exposes both JSON directions and both
-  line-delimited directions; `src/stdlib.rs:231` reads the documented TOML
-  subset; `src/stdlib.rs:233` and `src/stdlib.rs:234` read and write zip and tar
+  line-delimited directions; `src/stdlib.rs:240` reads the documented TOML
+  subset; `src/stdlib.rs:242` and `src/stdlib.rs:243` read and write zip and tar
   archives.
 - **Why it was ranked**: reading data was solved and writing it back was not.
   A program that normalised, filtered or summarised a CSV had nowhere to put its
@@ -393,12 +393,12 @@ entries first.
 
 | Gap | Evidence | Blocks |
 |---|---|---|
-| No `sys` surface beyond `argv` and CLI flags: no environment variables, exit code, cwd, platform | `src/stdlib.rs:202` | 31, 32 |
+| No `sys` surface beyond `argv` and CLI flags: no environment variables, exit code, cwd, platform | `src/stdlib.rs:211` | 31, 32 |
 | No set algebra: `unique`, `flatten`, `reverse`, intersection | `src/stdlib.rs:151` | 3 |
-| No integer maths or `min`/`max` over a list: `gcd`, `log2` and inverse trig are still absent, and the descriptive statistics (`mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile`, `correlation`) are now in `math` | `src/stdlib.rs:153` | 8 |
-| No token generation beyond `uuid.generate`; `random_choice`/`random_shuffle` exist but no token-shaped call | `src/stdlib.rs:737` | 28 |
-| No concurrency, no timeout or retry control on `network.get` | `src/stdlib.rs:183` | 29 |
-| No `inspect`-style pretty printer; no assertion library beyond `expect`/`assert` | `src/stdlib.rs:709` | — |
+| No integer maths or `min`/`max` over a list: `gcd`, `log2` and inverse trig are still absent, and the descriptive statistics (`mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile`, `correlation`) are now in `math` | `src/stdlib.rs:162` | 8 |
+| No token generation beyond `uuid.generate`; `random_choice`/`random_shuffle` exist but no token-shaped call | `src/stdlib.rs:746` | 28 |
+| No concurrency, no timeout or retry control on `network.get` | `src/stdlib.rs:192` | 29 |
+| No `inspect`-style pretty printer; no assertion library beyond `expect`/`assert` | `src/stdlib.rs:718` | — |
 | No YAML/XML reader or writer | `src/stdlib.rs:19` | — |
 
 Four limits of this survey, stated so they are not mistaken for more:
