@@ -66,7 +66,7 @@ In high-performance language runtimes (such as V8, LuaJIT, PyPy, and Julia), per
 
 ---
 
-## 4. Requirements for Future Speedup Phases (Phases 173–178)
+## 4. Requirements for Future Speedup Phases (Phases 176–183)
 
 When executing any optimization phase, the agent must adhere to the following protocol:
 1. **Back-to-Back Comparison**: Run both the unmodified base compiler and the optimized compiler on the **exact same machine** within the same workflow run to eliminate cloud runner hardware variance.

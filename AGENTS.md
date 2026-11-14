@@ -214,7 +214,7 @@ Whenever a phase implements a compiler optimization, VM enhancement, or executio
 Whenever an agent identifies an engine bug or spec-drift defect outside its assigned phase scope:
 1. **Never Hack Unprompted Fixes**: Do not attempt an out-of-scope fix that violates the phase's single responsibility.
 2. **Phase Report**: Document the finding with an executable reproduction snippet in `phases/phase-XXX/FINDINGS.md`.
-3. **Master Ledger**: Append the finding to [`docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md`](docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md) with status `[OPEN]` so it is automatically queued for remediation in Section 14 (Phases 159–167).
+3. **Master Ledger**: Append the finding to [`docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md`](docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md) with status `[OPEN]` so it is automatically queued for remediation in Section 14 (Phases 162–170).
 
 ## Ecosystem Repositories Standing Directive (Phase 126 & Staged Spin-Up)
 

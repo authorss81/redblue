@@ -13,17 +13,17 @@ Historically, this produced over **416 individual findings scattered across 67 s
 3. Remediation phases lack an authoritative checklist to audit against.
 
 ### The Remediation Invariant
-**Every defect cataloged in this ledger marked as `[OPEN]` must be resolved by an assigned remediation phase (Phases 159–167) before the engine enters Extreme Execution Velocity (Cranelift JIT Phases 173–178) or S4 Self-Hosting Bootstrapping (Phase 186).**
+**Every defect cataloged in this ledger marked as `[OPEN]` must be resolved by an assigned remediation phase (Phases 162–170) before the engine enters Extreme Execution Velocity (Cranelift JIT Phases 176–183) or S4 Self-Hosting Bootstrapping (Phase 191).**
 
 ---
 
 ## 2. Master Status Summary
 
-| Category | Total Findings Cataloged | Resolved in Base Phases (001–126) | Open / Deferred to Remediation (159–167) |
+| Category | Total Findings Cataloged | Resolved in Base Phases (001–126) | Open / Deferred to Remediation (162–170) |
 | :--- | :---: | :---: | :---: |
 | **Control Flow & Functions** | 42 | 34 | **8 (Assigned to Phase 163)** |
 | **Self-Hosted Compiler (`bootstrap/`)** | 28 | 21 | **7 (Assigned to Phase 163 / 164)** |
-| **Numeric & Temporal Precision** | 35 | 22 | **13 (Assigned to Phase 159)** |
+| **Numeric & Temporal Precision** | 35 | 22 | **13 (Assigned to Phase 162)** |
 | **Unicode, Text & Collections** | 56 | 39 | **17 (Assigned to Phase 160 / 162)** |
 | **System, Files & I/O** | 48 | 36 | **12 (Assigned to Phase 161 / 165)** |
 | **Memory & Object Cycles** | 24 | 16 | **8 (Assigned to Phase 143 / 166)** |
@@ -57,13 +57,13 @@ Historically, this produced over **416 individual findings scattered across 67 s
 | **F-022-04** | `phase-022/FINDINGS.md` §4 | `bootstrap/compiler.rb:2644` | Linear symbol interning was $O(N^2)$; resolved by Phase 074 hash interning (+52.4% speedup). | **Phase 074** | `[RESOLVED]` |
 | **F-037-02** | `phase-037/FINDINGS.md` §2 | `bootstrap/compiler.rb` | Stage 2 compiler emits unoptimized duplicate jump targets on nested `else if` ladders. | **Phase 164** | `[OPEN]` |
 
-### C. Numeric & Temporal Precision (Assigned to Phase 159)
+### C. Numeric & Temporal Precision (Assigned to Phase 162)
 
 | Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-096-01** | `phase-096/FINDINGS.md` §1 | `src/stdlib.rs` (`time`) | `time.from_unix` uses `as i64` truncation toward zero, collapsing $[-0.5, +0.5]$ into a double-bucket epoch anomaly. | **Phase 159** | `[OPEN]` |
-| **F-048-03** | `phase-048/FINDINGS.md` §3 | `src/statistics.rs` | Extreme floating point arrays ($> 10^{300}$) overflow to `Infinity` on naive mean calculation; needs Welford algorithm. | **Phase 159** | `[OPEN]` |
-| **F-054-02** | `phase-054/FINDINGS.md` §2 | `src/decimal.rs` | Decimal string conversions with trailing zeroes produce non-canonical representation keys in records. | **Phase 159** | `[OPEN]` |
+| **F-096-01** | `phase-096/FINDINGS.md` §1 | `src/stdlib.rs` (`time`) | `time.from_unix` uses `as i64` truncation toward zero, collapsing $[-0.5, +0.5]$ into a double-bucket epoch anomaly. | **Phase 162** | `[OPEN]` |
+| **F-048-03** | `phase-048/FINDINGS.md` §3 | `src/statistics.rs` | Extreme floating point arrays ($> 10^{300}$) overflow to `Infinity` on naive mean calculation; needs Welford algorithm. | **Phase 162** | `[OPEN]` |
+| **F-054-02** | `phase-054/FINDINGS.md` §2 | `src/decimal.rs` | Decimal string conversions with trailing zeroes produce non-canonical representation keys in records. | **Phase 162** | `[OPEN]` |
 
 ### D. Unicode, Text & Collection Semantics (Assigned to Phase 160 & 162)
 
@@ -90,7 +90,7 @@ Historically, this produced over **416 individual findings scattered across 67 s
 
 ---
 
-## 4. Complete Remediation Workflow (Phases 159–167)
+## 4. Complete Remediation Workflow (Phases 162–170)
 
 ```mermaid
 flowchart TD
@@ -102,13 +102,13 @@ flowchart TD
         F5["F-063-02: VFS path parity"]
     end
 
-    subgraph AuditTracks["Audit Track (Phases 159-161)"]
-        P159["Phase 159: Numeric & Time Audit"]
+    subgraph AuditTracks["Audit Track (Phases 162-164)"]
+        P159["Phase 162: Numeric & Time Audit"]
         P160["Phase 160: Unicode & Records Audit"]
         P161["Phase 161: Systems & VFS Audit"]
     end
 
-    subgraph RemediationPasses["Remediation Execution (Phases 162-167)"]
+    subgraph RemediationPasses["Remediation Execution (Phases 165-170)"]
         P162["Phase 162: Unicode Grapheme Clusters"]
         P163["Phase 163: Control Flow Unwinding & Parser Loop"]
         P164["Phase 164: Compiler Optimizations"]
@@ -121,7 +121,7 @@ flowchart TD
     AuditTracks --> RemediationPasses
     RemediationPasses --> Gates["All [OPEN] Marked [RESOLVED]"]
     Gates --> JIT["Phases 173-178 (Cranelift JIT)"]
-    JIT --> S4["Phase 186 (S4 Self-Hosting)"]
+    JIT --> S4["Phase 191 (S4 Self-Hosting)"]
 ```
 
 ---
@@ -130,4 +130,4 @@ flowchart TD
 
 1. **Whenever a phase finishes**: If its `FINDINGS.md` reports any defect not resolved in that phase, it must be appended to this ledger with an `F-XXX-NN` identifier.
 2. **Whenever a remediation phase lands**: The corresponding rows in this ledger must be updated from `[OPEN]` to `[RESOLVED by phase-NNN]`, citing the landing commit hash.
-3. **Bootstrapping Gate Requirement**: Phase 186 (S4 Bootstrapping) verification will parse this ledger and fail the build if any row remains `[OPEN]`.
+3. **Bootstrapping Gate Requirement**: Phase 191 (S4 Bootstrapping) verification will parse this ledger and fail the build if any row remains `[OPEN]`.
