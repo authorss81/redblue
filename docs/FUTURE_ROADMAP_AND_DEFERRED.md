@@ -48,6 +48,7 @@ A comparison against [`authorss81/Ipp`](https://github.com/authorss81/Ipp) and [
 
 ### Phase 133: Interactive Debugger & Breakpoint Stepper (`rb debug`)
 - **Goal**: Provide an interactive CLI debugger supporting line breakpoints, single-stepping (`next`, `step in`), stack frame inspection, and expression evaluation at pause points.
+- **Decoupling Protocol**: Core `redblue` ships only the terminal stepper (`rb debug`); the graphical Debug Adapter Protocol (DAP) server for VS Code and Neovim is built in the dedicated **`authorss81/rb-ide`** repository at Milestone 1.5.
 
 ### Phase 134: Structured Doc-Comment Extractor & Markdown API Generator (`rb doc`)
 - **Goal**: Extract `///` docstrings from Redblue source files and generate clean GitHub-flavored Markdown API reference documentation for libraries and modules.
@@ -404,11 +405,13 @@ While Redblue solves major developer frustrations, **it also introduces real fri
   - The compiler treats them as exact synonyms.
   - The official formatter (`rb format`) provides `--style=english` (canonical) and `--style=compact` so teams can view code in their preferred visual density.
 
-### Phase 154: Polyglot FFI & WASM Component Model
-- **Pain Point Addressed (Limitation 2 - The Ecosystem Desert)**: A developer cannot build modern AI pipelines or web UIs in Redblue today because there is no `pip install torch` or `npm install react`. Redblue starts with zero community packages.
-- **Implementation**:
-  - Implement a zero-boilerplate Foreign Function Interface (FFI) to call C and Rust shared libraries (`.so`, `.dll`).
-  - Support the WebAssembly Component Model (`WASI 0.2`): allow Redblue programs to import and run pre-compiled Python, C, and Rust components hermetically inside the Redblue runtime.
+### Phase 154: Polyglot FFI & WASM Component Model (Partitioned)
+To prevent bundling native dynamic library loading with WebAssembly runtime hosting into one monolithic failure point, Phase 154 is strictly partitioned into two single-responsibility sub-phases:
+- **Phase 154A: Native C & Rust Shared Library FFI (`ffi` Module)**:
+  - Implement a zero-boilerplate Foreign Function Interface (`ffi.open`, `ffi.symbol`, `ffi.call`) for calling native shared libraries (`.so`, `.dll`, `.dylib`).
+  - Strict type marshaling for C primitives (`int`, `float`, `char*`, raw pointers) with memory safety wrappers.
+- **Phase 154B: Hermetic WebAssembly Component Model (`WASI 0.2` Host)**:
+  - Embed a sandboxed WebAssembly component runtime (`wasmtime` integration) allowing Redblue programs to import pre-compiled Python, C, and Rust components without native host compilation.
 
 ### Phase 155: Gradual Type Contracts & Refinement Types
 - **Pain Point Addressed (Limitation 3 - Refactoring Fear at Scale)**: At 500 lines, dynamic typing is delightful. At 50,000 lines, changing a function parameter or record field without static type checks is terrifying.
@@ -421,22 +424,30 @@ While Redblue solves major developer frustrations, **it also introduces real fri
     ```
   - The static analyzer checks these contracts before execution, catching refactoring bugs ahead of runtime.
 
-### Phase 156: Official Tree-Sitter & Language Server Protocol Daemon
-- **Pain Point Addressed (Limitation 4 - Tooling Vacuum in IDEs)**: Modern developers rely heavily on VS Code / Cursor / Neovim autocomplete, hover documentation, and instant red squigglies. Coding without them feels like using Notepad.
-- **Implementation**:
-  - Publish an official Tree-Sitter grammar for syntax highlighting on GitHub, Prism, and editors.
-  - Deliver `rb-lsp` as a single binary delivering auto-completion, jump-to-definition, hover docs, and instant diagnostics to all major code editors.
+### Phase 156: Official Language Server & Editor Integration (Decoupled to `authorss81/rb-ide`)
+> [!IMPORTANT]
+> **Decoupling Mandate**: Following the lessons of Phase 075, Language Server Protocol daemons and editor grammars **MUST NOT be implemented inside the core compiler repository**. 
+> Phase 156 is formally decoupled and reassigned to the dedicated Tooling Track (**`authorss81/rb-ide` + `authorss81/rb-ide-ops`**), launched at **Milestone 1.5** across three discrete phases:
+- **Phase 156A (In `rb-ide`)**: Standalone `rb-lsp` daemon with JSON-RPC stdio/TCP transport, extracting `src/lsp.rs` from core `redblue` into an independent process.
+- **Phase 156B (In `rb-ide`)**: Official Tree-Sitter & TextMate grammars for syntax highlighting across VS Code, Neovim, JetBrains, and GitHub.
+- **Phase 156C (In `rb-ide`)**: Official VS Code extension backend, Debug Adapter Protocol (DAP), and Open VSX marketplace publishing.
+*(The core `redblue` repository only provides the headless syntax AST export API).*
 
 ### Phase 157: Safe Raw Byte Buffers & Struct Packing
 - **Pain Point Addressed (Limitation 5 - Systems Programming Control)**: Operating system drivers, network packet dissection, and binary file formats require raw byte manipulation, endianness conversion, and ring buffers. Currently, Redblue abstracts numbers as `f64` and arrays as high-level collections.
 - **Implementation**:
   - Add native fixed-size byte buffers (`buffer.create(size)`), structured packing (`struct.pack("<HHI", ...)`), and explicit endianness reading (`buffer.read_u32_be(offset)`).
 
-### Phase 158: Work-Stealing Multi-Threaded Fiber Scheduler
-- **Pain Point Addressed (Limitation 6 - Modern Multi-Core CPUs Idle)**: If Redblue fibers run on a single operating system thread (like Node.js or Python's GIL), intensive computational workloads cannot utilize 16-core or 64-core processors.
-- **Implementation**:
-  - Upgrade the fiber runtime to an $M:N$ work-stealing scheduler (modeled after Go's runtime and Rust's Tokio).
-  - Fibers distribute automatically across all available CPU cores with thread-safe message channels, unlocking true parallel processing without shared mutable memory races.
+### Phase 158: Work-Stealing Multi-Threaded Fiber Scheduler (Partitioned)
+A monolithic "Add Multi-Threaded Concurrency" phase would exceed 10,000 lines of unsafe runtime code and stall CI for weeks. Phase 158 is partitioned into four modular, gate-verified sub-phases:
+- **Phase 158A: Fiber Stack Allocation & Context Switching**:
+  - Implement low-level stack allocation (regional bump arena), Fiber Control Blocks (FCB), and cooperative context switching (`yield`, `resume`) on a single thread.
+- **Phase 158B: M:N Multi-Threaded Work-Stealing Run Queue**:
+  - Implement an $M:N$ thread pool with per-thread local run-queues and Chase-Lev work-stealing deques, scaling compute across all physical CPU cores.
+- **Phase 158C: Asynchronous Non-Blocking I/O Integration**:
+  - Connect the fiber scheduler to the host OS I/O event multiplexer (`epoll` on Linux, `kqueue` on macOS, `IOCP` on Windows) so blocking `network.get` or `files.read` parks only the fiber, not the OS thread.
+- **Phase 158D: Structured Concurrency Blocks & Safe Channels**:
+  - Add grammar and runtime for `parallel ... until done` execution blocks and thread-safe fiber message channels (`channel.send`, `channel.receive`) with zero data race risk.
 
 ### Limitation 7: The "Permission Fatigue" Friction (Manual Capability Grants)
 - **The Pain Point**: Explicit capability security models (such as early Deno) force developers to grant permissions manually via endless CLI flags or per-file imports. This friction causes developers to bypass security entirely with `--allow-all`.
@@ -449,6 +460,18 @@ While Redblue solves major developer frustrations, **it also introduces real fri
 ### Limitation 9: Deeply Nested Record Mutation Friction
 - **The Pain Point**: In pure functional immutable languages, updating a nested field (`user.company.address.city`) requires tedious manual copying at each nesting level.
 - **The Remediation (Phase 147 & Phase 160)**: Perceus Functional-But-In-Place (FBIP) analysis allows direct path mutation syntax (`set user.company.address.city to "Tokyo"`). When the reference count is 1, the engine mutates the nested memory in-place with zero allocation and native C speed.
+
+### 12.2 Post-126 Architectural Partitioning & Decoupling Ledger
+
+To permanently prevent monolithic pipeline stalls (such as Phase 075's 75-hour freeze), the following architectural guardrails are codified for all post-126 phase specifications:
+
+| Original Phase Area | Architectural Vulnerability | Mandated Partition / Decoupling Strategy | Target Repository |
+|---|---|---|---|
+| **Phase 133** (`rb debug`) | DAP IDE server protocol coupled with CLI stepper | **Partitioned**: Terminal stepping in core `redblue`; graphical DAP server in `rb-ide`. | `redblue` + `rb-ide` |
+| **Phase 154** (FFI & WASM) | Native C shared library loader bundled with WASI 0.2 runtime | **Partitioned into 2 sub-phases**:<br>• `154A`: C/Rust Dynamic FFI (`ffi` module)<br>• `154B`: WebAssembly Component Model (`wasmtime` host) | `authorss81/redblue` |
+| **Phase 156** (LSP & Tree-Sitter) | Full IDE language server daemon in core compiler queue | **Decoupled to Wave 2 Tooling Track**:<br>• `156A`: Standalone `rb-lsp` JSON-RPC daemon<br>• `156B`: Official Tree-Sitter / TextMate grammars<br>• `156C`: VS Code marketplace extension & DAP | `authorss81/rb-ide` + `rb-ide-ops` |
+| **Phase 158** (Fiber Concurrency) | Multi-threaded M:N scheduler, I/O multiplexer, and syntax bundled | **Partitioned into 4 sub-phases**:<br>• `158A`: Fiber stack bump allocation & context switching<br>• `158B`: M:N multi-threaded Chase-Lev work stealing<br>• `158C`: Asynchronous epoll/kqueue/IOCP event loop<br>• `158D`: Structured concurrency syntax & channels | `authorss81/redblue` |
+| **Phase 178** (Tiered JIT) | Cranelift SSA optimizer bundled with baseline JIT and trampolines | **Partitioned into 3 sub-phases**:<br>• `178A`: Bytecode-to-Cranelift SSA IR translation<br>• `178B`: Native machine code emission & trampolines<br>• `178C`: On-Stack Replacement (OSR) & deopt bailouts | `authorss81/redblue` |
 
 ---
 
@@ -753,13 +776,17 @@ While early VM phases (Phases 139–142) provide baseline efficiency (NaN-boxing
   - Redblue's Perceus immutable value semantics guarantee data race freedom. Pure loops (`for each x in items ...`) above a minimum size threshold ($\ge 10,000$ elements) are automatically partitioned across a pool of worker OS threads using work-stealing deques.
 - **Speedup**: Near-linear $N\times$ scaling on $N$-core processors. An 8-core CPU executes Redblue data-processing loops faster than single-threaded native C.
 
-### Phase 178: Tiered Adaptive JIT Compilation Engine (Baseline JIT + Cranelift SSA Optimizer)
-- **Goal**: Two-tier runtime execution strategy ensuring instant zero-cost startup with peak long-running speed.
-- **Architecture**:
-  - **Tier 0 (Fast Bytecode Interpreter)**: Runs code immediately with 0 ms compilation latency (ideal for CLI scripts and fast tests).
-  - **Tier 1 (Method JIT / Cranelift SSA Backend)**: Hot functions (detected via execution counters $> 1,000$ iterations) are asynchronously compiled to optimized machine code using Cranelift.
-  - **On-Stack Replacement (OSR)**: Long-running loops transition from Tier 0 to Tier 1 mid-execution without waiting for function return.
-  - **Deoptimization Guards (Bailouts)**: If dynamic type assumptions are violated (e.g. passing a string into a previously purely numeric function), the runtime safely bails out to the interpreter at the exact instruction.
+### Phase 178: Tiered Adaptive JIT Compilation Engine (Partitioned)
+- **Goal**: Two-tier runtime execution strategy ensuring instant zero-cost startup with peak long-running speed, partitioned into three discrete compiler sub-phases:
+- **Phase 178A: Bytecode-to-Cranelift SSA IR Translation**:
+  - Implement the intermediate lowering pass translating Redblue bytecode instructions into Cranelift SSA (Static Single Assignment) form.
+  - Implement execution profiling counters ($> 1,000$ iterations) identifying hot loop headers and functions.
+- **Phase 178B: Native Machine Code Emission & Memory Page Trampolines**:
+  - Compile Cranelift IR into native machine code (x86_64 and ARM64).
+  - Allocate executable memory pages (`mmap` with `PROT_EXEC`) and establish ABI call trampolines between the interpreter stack and native compiled frames.
+- **Phase 178C: On-Stack Replacement (OSR) & Dynamic Deoptimization Bailout**:
+  - Implement On-Stack Replacement (OSR) so running loops switch from interpreter to JIT code mid-flight.
+  - Implement deoptimization bailout traps: if dynamic type assumptions are violated (e.g., passing a record to a previously purely integer loop), the engine safely falls back to the bytecode interpreter at the exact instruction.
 
 ---
 
