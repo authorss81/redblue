@@ -103,24 +103,24 @@ flowchart TD
     end
 
     subgraph AuditTracks["Audit Track (Phases 162-164)"]
-        P159["Phase 162: Numeric & Time Audit"]
-        P160["Phase 160: Unicode & Records Audit"]
-        P161["Phase 161: Systems & VFS Audit"]
+        P162["Phase 162: Numeric & Time Audit"]
+        P163["Phase 163: Unicode & Records Audit"]
+        P164["Phase 164: Systems & VFS Audit"]
     end
 
     subgraph RemediationPasses["Remediation Execution (Phases 165-170)"]
-        P162["Phase 162: Unicode Grapheme Clusters"]
-        P163["Phase 163: Control Flow Unwinding & Parser Loop"]
-        P164["Phase 164: Compiler Optimizations"]
-        P165["Phase 165: Streaming I/O & Cycle Detection"]
-        P166["Phase 166: BigInt Promotion"]
-        P167["Phase 167: Stdlib Consistency"]
+        P165["Phase 165: Unicode Grapheme Clusters"]
+        P166["Phase 166: Control Flow Unwinding & Parser Loop"]
+        P167["Phase 167: Streaming I/O & Iterators"]
+        P168["Phase 168: Structural Deep Equality & Cycles"]
+        P169["Phase 169: BigInt Promotion & Arithmetic Safety"]
+        P170["Phase 170: Stdlib Consistency & Param Order"]
     end
 
     MasterLedger --> AuditTracks
     AuditTracks --> RemediationPasses
     RemediationPasses --> Gates["All [OPEN] Marked [RESOLVED]"]
-    Gates --> JIT["Phases 173-178 (Cranelift JIT)"]
+    Gates --> JIT["Phases 176-183 (Cranelift JIT)"]
     JIT --> S4["Phase 191 (S4 Self-Hosting)"]
 ```
 
