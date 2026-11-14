@@ -2634,6 +2634,18 @@ mod list_surface {
     }
 
     #[test]
+    fn edge_sort_with_a_field_refuses_non_records_by_name() {
+        both_refuse(
+            r#"sort([1, 2], "x")"#,
+            "sort with a field requires records, but was given a number",
+        );
+        both_refuse(
+            r#"sort([{a: 1}, 2], "a")"#,
+            "sort with a field requires records, but was given a number",
+        );
+    }
+
+    #[test]
     fn edge_sort_of_empty_and_singleton_lists() {
         assert_eq!(both("sort([])").to_string(), "[]");
         assert_eq!(both("sort([7])").to_string(), "[7]");
@@ -2717,6 +2729,27 @@ mod list_surface {
     }
 
     #[test]
+    fn edge_reduce_of_a_singleton_without_a_start_value_never_calls_the_function() {
+        let value = both(
+            r#"
+    set calls to 0
+    to add(acc, x)
+        set calls to calls + 1
+        give back acc + x
+    end
+    set total to reduce([5], add)
+    [total, calls]
+    "#,
+        );
+        assert_eq!(
+            value.to_string(),
+            "[5, 0]",
+            "reduce without a start value over one item must answer that item without \
+             calling the function"
+        );
+    }
+
+    #[test]
     fn edge_filter_failure_mid_list_aborts_without_partial_results() {
         let source = r#"
     set seen to []
@@ -2737,12 +2770,28 @@ mod list_surface {
         for (source, needle) in [
             ("reverse(\"text\")", "reverse requires one list"),
             (
+                "filter([1])",
+                "filter requires a function, but no argument was given",
+            ),
+            (
                 "filter([1], 5)",
                 "filter requires a function, but was given 5",
             ),
             (
+                "filter([1], to (x) give back yes end, 0)",
+                "filter requires a function, but was given 2 arguments",
+            ),
+            (
+                "reduce([1])",
+                "reduce requires a function, but no argument was given",
+            ),
+            (
                 "reduce([1], 5)",
                 "reduce requires a function, but was given 5",
+            ),
+            (
+                "reduce([1], to (a, b) give back a end, 0, 1)",
+                "reduce requires a function and an optional start value, but was given 3 arguments",
             ),
             (
                 "sort(\"text\")",
@@ -2751,6 +2800,34 @@ mod list_surface {
         ] {
             both_refuse(source, needle);
         }
+    }
+
+    #[test]
+    fn edge_nested_higher_order_calls_answer_identically_on_both_engines() {
+        assert_eq!(
+            both(
+                "filter([1, 2, 3], to (x) give back reduce([x, x], to (a, b) give back a + b end, 0) > 2 end)"
+            )
+            .to_string(),
+            "[2, 3]",
+            "a filter predicate may nest a reduce"
+        );
+        assert_eq!(
+            both(
+                "map([1, 2, 3], to (x) give back filter([1, 2, 3], to (y) give back y > x end) end)"
+            )
+            .to_string(),
+            "[[2, 3], [3], []]",
+            "a map function may nest a filter"
+        );
+        assert_eq!(
+            both(
+                "reduce([1, 2], to (a, x) give back a + reduce(map([x], to (y) give back y * 10 end), to (p, q) give back p + q end, 0) end, 0)"
+            )
+            .to_string(),
+            "30",
+            "a reduce function may nest a reduce whose input comes from a map"
+        );
     }
 
     #[test]
@@ -2783,5 +2860,77 @@ mod list_surface {
             both("reduce([1, 2, 3], to (a, b) give back a + b end, 0)").to_string(),
             "list.reduce must answer what reduce answers"
         );
+    }
+
+    #[test]
+    fn edge_dotted_zip_and_enumerate_answer_like_the_flat_ones() {
+        assert_eq!(
+            both(r#"list.zip([1, 2, 3], ["a", "b"])"#).to_string(),
+            both(r#"zip([1, 2, 3], ["a", "b"])"#).to_string(),
+            "list.zip must answer what zip answers"
+        );
+        assert_eq!(
+            both(r#"list.enumerate(["a", "b"])"#).to_string(),
+            both(r#"enumerate(["a", "b"])"#).to_string(),
+            "list.enumerate must answer what enumerate answers"
+        );
+    }
+
+    #[test]
+    fn edge_dotted_zip_stops_at_the_shorter_and_enumerate_numbers_from_zero() {
+        assert_eq!(
+            both(r#"list.zip([1, 2, 3], ["a"])"#).to_string(),
+            "[[1, a]]",
+            "list.zip must stop at the shorter input, as the flat zip does"
+        );
+        assert_eq!(
+            both("list.zip([], [1, 2])").to_string(),
+            "[]",
+            "list.zip over an empty input has no rows"
+        );
+        assert_eq!(
+            both(r#"list.enumerate(["a", "b"])"#).to_string(),
+            "[[0, a], [1, b]]",
+            "list.enumerate must number from zero"
+        );
+        assert_eq!(both("list.enumerate([])").to_string(), "[]");
+    }
+
+    #[test]
+    fn edge_dotted_zip_and_enumerate_refuse_what_the_flat_ones_refuse() {
+        both_refuse("list.zip([1])", "zip requires at least two lists");
+        both_refuse("list.zip([1], 2)", "zip requires lists");
+        both_refuse(r#"list.enumerate("text")"#, "enumerate requires one list");
+    }
+
+    #[test]
+    fn edge_dotted_zip_and_enumerate_name_the_exact_reason_on_both_engines() {
+        #[track_caller]
+        fn exact(source: &str, expected: &str) {
+            let walked = run_source_value(source).expect_err("the tree-walker should refuse");
+            match walked {
+                Error::Runtime(message, span) => {
+                    assert_eq!(message, expected, "tree-walker message for:\n{source}");
+                    assert!(span.is_known(), "tree-walker span for:\n{source}");
+                }
+                other => panic!("expected a Runtime error from the tree-walker, got {other:?}"),
+            }
+
+            let chunk = compile_source(source)
+                .unwrap_or_else(|error| panic!("source should compile:\n{source}\n{error:?}"));
+            let mut vm = BytecodeVm::new();
+            let compiled = vm.run(&chunk).expect_err("the bytecode VM should refuse");
+            match compiled {
+                Error::Runtime(message, span) => {
+                    assert_eq!(message, expected, "bytecode VM message for:\n{source}");
+                    assert!(span.is_known(), "bytecode VM span for:\n{source}");
+                }
+                other => panic!("expected a Runtime error from the bytecode VM, got {other:?}"),
+            }
+        }
+
+        exact("list.zip([1])", "zip requires at least two lists");
+        exact("list.zip([1], 2)", "zip requires lists");
+        exact(r#"list.enumerate("text")"#, "enumerate requires one list");
     }
 }
