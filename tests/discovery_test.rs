@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use redblue::manifest;
-use redblue::project::find_project_root;
+use redblue::project::{check_manifest, find_project_root};
 use redblue::testing::{find_test_files, run_all_tests, TestHarness};
 
 /// Scratch directory inside the project's own `target/tmp`, never the system
@@ -1610,5 +1610,145 @@ fn edge_discovery_refuses_a_symlinked_root_with_a_trailing_separator() {
     assert!(
         message.contains("tests"),
         "the refusal should name the root, got: {message}"
+    );
+}
+
+/// A manifest entry is the thing that makes a directory the nearest project
+/// marker, even when it is a link that cannot be used. Discovery must stop at
+/// the link and leave the refusal to `check_manifest`; walking past it would
+/// silently run an ancestor project's suite. A regular manifest in a sibling
+/// still resolves to that sibling, which proves the walk itself works.
+#[cfg(unix)]
+#[test]
+fn edge_project_root_stops_at_a_symlinked_manifest() {
+    use std::os::unix::fs::symlink;
+
+    let target = scratch_dir("symlinked-manifest-target");
+    write_file(&target, "redblue.manifest", b"name target\nversion 0.1.0\n");
+    let fake = scratch_dir("symlinked-manifest");
+    symlink(
+        target.join("redblue.manifest"),
+        fake.join("redblue.manifest"),
+    )
+    .expect("fixture symlink");
+
+    let found = find_project_root(&fake);
+    let fake = fs::canonicalize(&fake).expect("fixture path should canonicalise");
+    assert_eq!(
+        found.as_deref(),
+        Some(fake.as_path()),
+        "discovery must stop at the symlinked manifest in {} rather than walking to an ancestor",
+        fake.display()
+    );
+
+    let regular = scratch_dir("regular-manifest-sibling");
+    write_file(
+        &regular,
+        "redblue.manifest",
+        b"name sibling\nversion 0.1.0\n",
+    );
+    let found = find_project_root(&regular).expect("a regular manifest should be found");
+    let regular = fs::canonicalize(&regular).expect("fixture path should canonicalise");
+    assert_eq!(
+        found, regular,
+        "discovery must still resolve a directory holding a regular manifest"
+    );
+}
+
+/// The command boundary must refuse the nearest project's unusable manifest,
+/// not fall through to an ancestor's suite. The scratch tree lives under the
+/// checkout, whose own regular manifest is exactly the ancestor discovery used
+/// to run instead of reporting the link.
+#[cfg(unix)]
+#[test]
+fn edge_rb_test_refuses_a_symlinked_manifest_instead_of_running_an_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let target = scratch_dir("rb-test-symlinked-manifest-target");
+    write_file(&target, "redblue.manifest", b"name target\nversion 0.1.0\n");
+    let dir = scratch_dir("rb-test-symlinked-manifest");
+    symlink(
+        target.join("redblue.manifest"),
+        dir.join("redblue.manifest"),
+    )
+    .expect("fixture symlink");
+
+    let ran = run_in(&dir, &["test"]);
+    assert!(
+        !ran.status.success(),
+        "`rb test` must refuse a symlinked manifest, got: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let message = stderr(&ran);
+    assert!(
+        message.contains("symbolic link"),
+        "the error should name the symbolic link, got: {message}"
+    );
+    assert!(
+        !stdout(&ran).contains("Passed:"),
+        "an ancestor project's suite ran instead of refusing the link: {}",
+        stdout(&ran)
+    );
+}
+
+/// The library boundary refuses a symlinked manifest explicitly, naming the
+/// link, instead of following it to a file outside the project.
+#[cfg(unix)]
+#[test]
+fn edge_check_manifest_refuses_a_symlinked_manifest() {
+    use std::os::unix::fs::symlink;
+
+    let target = scratch_dir("check-symlinked-manifest-target");
+    write_file(&target, "redblue.manifest", b"name target\nversion 0.1.0\n");
+    let dir = scratch_dir("check-symlinked-manifest");
+    symlink(
+        target.join("redblue.manifest"),
+        dir.join("redblue.manifest"),
+    )
+    .expect("fixture symlink");
+
+    let error = check_manifest(&dir).expect_err("a symlinked manifest is not a project manifest");
+    let message = error.to_string();
+    assert!(
+        message.contains("redblue.manifest"),
+        "the refusal should name the manifest file, got: {message}"
+    );
+    assert!(
+        message.contains("symbolic link"),
+        "the refusal should say the manifest is a link, got: {message}"
+    );
+}
+
+/// A dangling manifest link is still the link, not a missing manifest: the
+/// refusal must not depend on whether the target happens to exist.
+#[cfg(unix)]
+#[test]
+fn edge_check_manifest_refuses_a_dangling_manifest_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = scratch_dir("check-dangling-manifest");
+    symlink(dir.join("missing.manifest"), dir.join("redblue.manifest")).expect("fixture symlink");
+
+    let error = check_manifest(&dir).expect_err("a dangling manifest link is not a manifest");
+    assert!(
+        error.to_string().contains("symbolic link"),
+        "the refusal should name the symbolic link, got: {error}"
+    );
+}
+
+/// A directory named `redblue.manifest` is not a regular file either, so it
+/// must not be read as one. The error is a clean refusal, not an IO failure
+/// from opening a directory.
+#[test]
+fn edge_check_manifest_refuses_a_manifest_that_is_not_a_regular_file() {
+    let dir = scratch_dir("manifest-is-a-directory");
+    fs::create_dir(dir.join("redblue.manifest")).expect("fixture directory");
+
+    let error = check_manifest(&dir)
+        .expect_err("a directory named like a manifest is not a project manifest");
+    assert!(
+        error.to_string().contains("not a regular file"),
+        "the refusal should say the manifest is not a regular file, got: {error}"
     );
 }

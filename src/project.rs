@@ -32,10 +32,13 @@ pub const DEFAULT_VERSION: &str = "0.1.0";
 /// The root of the project containing `start`, or `None` when there is none.
 ///
 /// A project root is the nearest directory at or above `start` holding a
-/// `redblue.manifest`. The walk follows every ancestor to the filesystem root,
-/// so a directory nested inside a project finds that project. A directory is
-/// outside every project only when neither it nor any ancestor holds a
-/// manifest; then the answer is `None`. `start` may be a directory or a file;
+/// `redblue.manifest` entry. The walk follows every ancestor to the filesystem
+/// root, so a directory nested inside a project finds that project. A directory
+/// is outside every project only when neither it nor any ancestor holds a
+/// manifest entry; then the answer is `None`. Discovery stops at an entry even
+/// when it is a symlink or a directory, leaving [`check_manifest`] to refuse it:
+/// walking past an unusable manifest would silently run an ancestor project's
+/// suite instead. `start` may be a directory or a file;
 /// a relative `start` is resolved against the working directory and the path is
 /// canonicalised (or lexically cleaned when it does not exist), so `..`
 /// components walk toward the parent rather than being treated as a child.
@@ -52,12 +55,26 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
         start
     };
     loop {
-        if current.join(MANIFEST_FILE).is_file() {
+        if has_manifest(&current) {
             return Some(current);
         }
         if !current.pop() {
             return None;
         }
+    }
+}
+
+/// Whether `dir` holds an entry named like a manifest.
+///
+/// Discovery must not decide whether that entry is usable: a symlink or a
+/// directory named `redblue.manifest` is still the nearest project marker, and
+/// walking past it would silently run an *ancestor* project's suite. Stop here
+/// and let [`check_manifest`] classify the entry and refuse it with a message
+/// naming the manifest.
+fn has_manifest(dir: &Path) -> bool {
+    match fs::symlink_metadata(dir.join(MANIFEST_FILE)) {
+        Ok(_) => true,
+        Err(error) => error.kind() != ErrorKind::NotFound,
     }
 }
 
@@ -209,6 +226,24 @@ fn cleanup_scaffold(root: &Path, root_existed: bool) {
 /// success for a caller that never checked for the file.
 pub fn check_manifest(root: &Path) -> Result<()> {
     let path = root.join(MANIFEST_FILE);
+    // Discovery stops at any entry named like a manifest, including a link or
+    // a directory, so this is where it is classified. A caller can also reach
+    // this function with a root of its own. Inspect the entry itself rather
+    // than letting `read_to_string` follow a link out of the project.
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| Error::Io(format!("Cannot inspect '{}': {}", path.display(), error)))?;
+    if metadata.file_type().is_symlink() {
+        return Err(Error::Io(format!(
+            "Cannot read '{}': it is a symbolic link, not a regular file",
+            path.display()
+        )));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(Error::Io(format!(
+            "Cannot read '{}': it is not a regular file",
+            path.display()
+        )));
+    }
     let text = fs::read_to_string(&path)
         .map_err(|error| Error::Io(format!("Cannot read '{}': {}", path.display(), error)))?;
     Manifest::parse(&text, &path.display().to_string()).map(|_| ())

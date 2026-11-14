@@ -25,6 +25,7 @@ a manifest, so a command run from `src/` could not find the project's tests.
 |---|---|---|
 | `src/project.rs` | +191 (new) | `find_project_root` walks up to the nearest `redblue.manifest`; `create_project` writes `src/`, `tests/`, `src/main.rb`, `tests/main_test.rb` and a manifest in phase-044's schema; `check_manifest` parses it with `Manifest::parse` and refuses a directory with no manifest; `tests_dir` names the project's suite |
 | `src/project.rs` | +30 −8 | `create_project` inspects the root with `symlink_metadata` and refuses a symbolic link in the project's place, including a dangling one. Following it would write the scaffold outside `parent`, the same escape a path separator would allow |
+| `src/project.rs` | +26 −2 | `has_manifest` treats any entry named `redblue.manifest` as the nearest project marker, so a manifest symlink stops discovery instead of silently running an ancestor project's suite; `check_manifest` refuses a symlink or a non-regular manifest, naming the file, before reading it |
 | `src/lib.rs` | +51 −5 | `rb new <name>` command (bare `rb new` is a usage error); bare `rb test` discovers the project root, validates its manifest and runs the root's `tests/`; a failing project suite now finishes with the same failure detail (`test name`, `FAILED`, location, message) the explicit-path form prints instead of only a count; `rb test <path>` still runs exactly the named file, and its failure location now names that file instead of `inline`; help text lists `rb new` |
 | `src/testing/mod.rs` | +69 −? | `run_tests_in(dir)` is the directory-scoped runner; `run_all_tests()` now calls it with `tests/`, so the existing suite is byte-identical, and an empty directory keeps returning a zero-count result; the command layer owns the "No Redblue test files" rejection; `collect_test_files` propagates a real `read_dir` error instead of silently reporting success, skips directory symlinks so a link cycle cannot recurse, and refuses a symlinked root before `read_dir` follows it |
 | `src/testing/harness.rs` | +13 −4 | `TestHarness::run_file` accepts any path-like value, so a discovered `PathBuf` is run without a lossy string conversion, and records that path as the failure location instead of labelling every file `inline`; a whole-file parse error is recorded even when the file has no `test` block, while marker-style bodies keep owning their own errors |
@@ -74,7 +75,7 @@ manifest last, so a half-written layout is not discoverable as a project.
 | the zero-execution guard checked `total`, but a skip increments it, so a skip-only suite exited 0 having run no test | `reject_zero_test_run` now checks `passed + failed == 0`, regardless of skipped markers; `edge_rb_test_that_only_skips_fails` pins both `rb test` and `rb test <file>` |
 | a whole-file lex/parse error was recorded only when a literal `test ` line was present, so a syntax error in a file with no test block was hidden behind `No tests were defined` | `run_test_blocks` records the error unless the file uses the comment-marker convention, whose bodies the marker scan reports individually; `edge_rb_test_reports_a_syntax_error_without_a_test_block` pins the file and line |
 | discovery opened a caller-supplied root through a symlink because only entries below it were inspected | `collect_test_files` reads `symlink_metadata` for the root and refuses a symbolic link before `read_dir`; `edge_discovery_refuses_a_symlinked_root` pins it |
-| the gate row reported a count that did not match the change set | the fresh `cargo test --all-targets` run reports 2956 passed, recorded below |
+| the gate row reported a count that did not match the change set | the fresh `cargo test --all-targets` run after the round-8 fixes reports 2963 passed, recorded below |
 
 ## Round 6 review fixes
 
@@ -90,6 +91,13 @@ manifest last, so a half-written layout is not discoverable as a project.
 |---|---|
 | a successful `// bench` recorded nothing, so the zero-execution guard rejected a file or project whose only test was a passing benchmark | `run_benchmark` calls `results.add_pass()` once the measured loop completes, and `edge_rb_test_reports_a_passing_benchmark` pins both `rb test <file>` and bare `rb test` exiting 0 |
 | bare `rb test` walked the suite twice: `find_test_files` for the emptiness check, then again inside `run_tests_in` | `run_test_files(&[PathBuf])` runs an already-collected listing; `run_tests_in` collects once and calls it, and `run_test(None)` passes the listing it checked, so each project run walks the tree once |
+
+## Round 8 resume fixes
+
+| Finding | Fix |
+|---|---|
+| `find_project_root` skipped a directory whose nearest `redblue.manifest` was a symlink, so `rb test` silently ran an ancestor project's suite instead of refusing the link | `has_manifest` stops at any manifest entry, regular or not, and `check_manifest` classifies it: a symlink or non-regular manifest is refused with a message naming the file; `edge_project_root_stops_at_a_symlinked_manifest` and `edge_rb_test_refuses_a_symlinked_manifest_instead_of_running_an_ancestor` pin discovery and the command boundary |
+| `check_manifest` followed a manifest symlink (including a dangling one) to wherever it pointed, or failed with a raw directory IO error | `check_manifest` inspects the entry first and refuses a symbolic link or a non-regular file, naming the manifest; `edge_check_manifest_refuses_a_symlinked_manifest`, `edge_check_manifest_refuses_a_dangling_manifest_symlink` and `edge_check_manifest_refuses_a_manifest_that_is_not_a_regular_file` pin the three forms |
 
 ## Tests added
 
@@ -130,6 +138,11 @@ manifest last, so a half-written layout is not discoverable as a project.
 | `edge_rb_test_reports_a_failing_benchmark` | malformed input: a benchmark body's own error is reported as a failure instead of being replaced by the zero-execution guard |
 | `edge_discovery_refuses_a_symlinked_root_with_a_trailing_separator` | resource/traversal: the `tests/` form `run_all_tests` uses is refused too, because the trailing separator is normalised before inspection |
 | `edge_rb_test_reports_a_passing_benchmark` | happy path/zero-execution: a benchmark that completes counts as one executed pass through both the explicit-path and project forms, instead of being rejected as "No tests were defined" |
+| `edge_project_root_stops_at_a_symlinked_manifest` | resource/traversal: discovery stops at a `redblue.manifest` symlink so `check_manifest` can refuse it, and a sibling with a regular manifest still resolves to that sibling |
+| `edge_rb_test_refuses_a_symlinked_manifest_instead_of_running_an_ancestor` | resource/traversal: bare `rb test` in a directory whose manifest is a symlink fails with the symbolic-link refusal instead of running the checkout's suite |
+| `edge_check_manifest_refuses_a_symlinked_manifest` | resource/traversal: the library boundary refuses a manifest link and names it instead of following it outside the project |
+| `edge_check_manifest_refuses_a_dangling_manifest_symlink` | malformed input: a link to a missing manifest is still the link, so the refusal does not depend on whether the target exists |
+| `edge_check_manifest_refuses_a_manifest_that_is_not_a_regular_file` | malformed input: a directory named like the manifest is refused as "not a regular file", never opened as one |
 
 ### Mandatory edge-case matrix
 
@@ -145,9 +158,9 @@ manifest last, so a half-written layout is not discoverable as a project.
 | nesting_recursion | covered: `edge_rb_test_walks_up_from_a_nested_directory` walks up three directories (`src/a/b`) |
 | duplicate_missing_keys | covered: `edge_rb_new_refuses_an_existing_non_empty_directory` (occupied directory), `edge_rb_new_refuses_a_file_named_after_the_project`, `edge_rb_test_in_a_project_with_no_test_files_fails` (missing/empty tests), and `edge_rb_test_with_a_malformed_manifest_names_the_file_and_line` (unknown manifest field) |
 | malformed_input | covered: malformed manifest names the file and line; invalid names and occupied directories are refused cleanly |
-| resource_limit | covered: `edge_discovery_does_not_follow_symlinked_directories` proves a `loop -> .` link cannot recurse, `edge_discovery_refuses_a_too_deep_directory_tree` bounds a genuinely deep real tree, `edge_discovery_refuses_a_symlinked_root` refuses the root itself, and the three symlink-refusal tests keep a scaffold from writing outside its parent; the walk descends only into real directories, never a directory symlink, and sort/output stay bounded by the real files |
+| resource_limit | covered: `edge_discovery_does_not_follow_symlinked_directories` proves a `loop -> .` link cannot recurse, `edge_discovery_refuses_a_too_deep_directory_tree` bounds a genuinely deep real tree, `edge_discovery_refuses_a_symlinked_root` refuses the root itself, the three symlink-refusal tests keep a scaffold from writing outside its parent, and `edge_project_root_stops_at_a_symlinked_manifest` and `edge_rb_test_refuses_a_symlinked_manifest_instead_of_running_an_ancestor` plus the three `check_manifest` refusals keep discovery from reading a manifest through a link; the walk descends only into real directories, never a directory symlink, and sort/output stay bounded by the real files |
 
-The suite adds 35 `#[test]` functions, 34 named `edge_*`. Zero new `#[ignore]`,
+The suite adds 40 `#[test]` functions, 39 named `edge_*`. Zero new `#[ignore]`,
 `// skip` or `allow(clippy::` suppressions.
 
 ## Gates
@@ -156,7 +169,7 @@ The suite adds 35 `#[test]` functions, 34 named `edge_*`. Zero new `#[ignore]`,
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 2956 passed, 0 failed, 0 ignored |
+| cargo test --all-targets | 2963 passed, 0 failed, 0 ignored |
 | ../rbops/verify.sh "phase-076" | pass |
 
 ## Invariants touched
