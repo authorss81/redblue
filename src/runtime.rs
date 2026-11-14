@@ -3478,6 +3478,13 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             [Value::List(items), Value::Text(field)] => {
                 sorted_list(span, items, Some(field)).map(Some)
             }
+            [Value::List(_), other] => Err(Error::Runtime(
+                format!(
+                    "sort with a field requires a field name, but was given a {}",
+                    other.type_name()
+                ),
+                span,
+            )),
             _ => Err(Error::Runtime(
                 "sort requires a list and an optional field name".to_string(),
                 span,

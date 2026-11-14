@@ -2933,4 +2933,95 @@ mod list_surface {
         exact("list.zip([1], 2)", "zip requires lists");
         exact(r#"list.enumerate("text")"#, "enumerate requires one list");
     }
+
+    #[test]
+    fn edge_sort_refuses_a_non_text_field_by_name() {
+        both_refuse(
+            "sort([{a: 1}], 5)",
+            "sort with a field requires a field name, but was given a number",
+        );
+        both_refuse(
+            r#"sort([{a: 1}], yes)"#,
+            "sort with a field requires a field name, but was given a yes/no",
+        );
+    }
+
+    #[test]
+    fn edge_sort_of_mixed_types_is_a_runtime_error() {
+        let source = r#"sort([1, "two"])"#;
+
+        let walked = run_source_value(source);
+        assert!(
+            walked.is_err(),
+            "the tree-walker must refuse a mixed-type sort, got {walked:?}"
+        );
+
+        let chunk = compile_source(source).expect("the mixed-type sort should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm.run(&chunk);
+        assert!(
+            compiled.is_err(),
+            "the bytecode VM must refuse a mixed-type sort, got {compiled:?}"
+        );
+    }
+
+    #[test]
+    fn edge_sort_by_field_on_the_dotted_spelling_answers_like_the_flat_one() {
+        assert_eq!(
+            both(r#"list.sort([{k: 2, n: "b"}, {k: 1, n: "a"}], "k")"#).to_string(),
+            both(r#"sort([{k: 2, n: "b"}, {k: 1, n: "a"}], "k")"#).to_string(),
+            "list.sort with a field must answer what the flat sort answers"
+        );
+    }
+
+    #[test]
+    fn edge_zip_with_three_lists_stops_at_the_shortest() {
+        assert_eq!(
+            both("zip([1, 2, 3], [4, 5], [6, 7, 8])").to_string(),
+            "[[1, 4, 6], [2, 5, 7]]",
+            "zip must stop at the shortest of more than two inputs"
+        );
+        assert_eq!(
+            both("zip([1], [2, 3], [4, 5])").to_string(),
+            "[[1, 2, 4]]",
+            "a single row is still a row when one input has one item"
+        );
+    }
+
+    #[test]
+    fn edge_filter_of_an_empty_list_never_calls_the_predicate() {
+        let value = both(
+            r#"
+    set calls to 0
+    to accept(x)
+        set calls to calls + 1
+        give back yes
+    end
+    set kept to filter([], accept)
+    [kept, calls]
+    "#,
+        );
+        assert_eq!(
+            value.to_string(),
+            "[[], 0]",
+            "filter over an empty list must answer [] without calling the predicate"
+        );
+    }
+
+    #[test]
+    fn edge_list_builtins_do_not_mutate_their_input() {
+        let value = both(
+            r#"
+    set xs to [3, 1, 2]
+    set ordered to sort(xs)
+    set backwards to reverse(xs)
+    [ordered, backwards, xs]
+    "#,
+        );
+        assert_eq!(
+            value.to_string(),
+            "[[1, 2, 3], [2, 1, 3], [3, 1, 2]]",
+            "sort and reverse must answer new lists and leave the input unchanged"
+        );
+    }
 }
