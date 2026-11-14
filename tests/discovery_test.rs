@@ -130,6 +130,41 @@ fn edge_discovery_does_not_follow_symlinked_directories() {
     );
 }
 
+/// Traversal: a symlinked `.rb` file is still a link, not a regular file.
+/// Following it would run a suite from outside the directory discovery was
+/// pointed at, which is the same escape a directory symlink would allow.
+#[cfg(unix)]
+#[test]
+fn edge_discovery_does_not_collect_symlinked_rb_files() {
+    use std::os::unix::fs::symlink;
+
+    let outside = scratch_dir("symlink-file-outside");
+    let outside_file = write_file(
+        &outside,
+        "escape.rb",
+        b"// test \"outside\"\nexpect 1 to be 1\n// end\n",
+    );
+
+    let dir = scratch_dir("symlink-file");
+    write_file(&dir, "inside.rb", b"// test \"inside\"\n// end\n");
+    symlink(&outside_file, dir.join("escape.rb")).expect("file symlink should be creatable");
+
+    let found = find_test_files(&dir).expect("a file symlink must not break discovery");
+    assert_eq!(found.len(), 1, "file symlink produced {:?}", found);
+    assert!(
+        found[0].ends_with("inside.rb"),
+        "expected only inside.rb to be collected, got {:?}",
+        found
+    );
+
+    let results = redblue::testing::run_tests_in(&dir).expect("the suite should run");
+    assert_eq!(
+        results.total, 1,
+        "a symlinked .rb file was executed from outside the suite: {:?}",
+        results.errors
+    );
+}
+
 /// Resource / recursion: a real directory tree deep enough to overflow the
 /// stack is refused with a reported error rather than a crash. A symlink cycle
 /// is not the only unbounded shape discovery has to survive.
@@ -1217,5 +1252,363 @@ fn edge_create_project_refuses_an_empty_name() {
         fs::read_dir(&parent).expect("scratch dir").count(),
         0,
         "a refused name must not leave a directory behind"
+    );
+}
+
+/// A symbolic link in the project's place must not be followed. Writing through
+/// it would put the scaffold outside the working directory, which is the same
+/// escape a path separator would allow.
+#[cfg(unix)]
+#[test]
+fn edge_rb_new_refuses_a_symlinked_directory_in_place() {
+    use std::os::unix::fs::symlink;
+
+    let parent = scratch("symlink-empty");
+    let outside = scratch("symlink-empty-target");
+    let root = parent.join("hello");
+    symlink(&outside, &root).expect("fixture symlink");
+
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        !created.status.success(),
+        "`rb new` over a symlinked directory must fail, got: {}{}",
+        stdout(&created),
+        stderr(&created)
+    );
+    let message = stderr(&created);
+    assert!(
+        message.contains("symbolic link"),
+        "the refusal should name the symbolic link, got: {message}"
+    );
+    assert!(
+        message.contains("hello"),
+        "the refusal must name the project, got: {message}"
+    );
+    assert_eq!(
+        fs::read_dir(&outside).expect("outside dir").count(),
+        0,
+        "`rb new` wrote through the symlink into {}",
+        outside.display()
+    );
+    assert!(
+        root.symlink_metadata()
+            .expect("symlink survives")
+            .file_type()
+            .is_symlink(),
+        "`rb new` replaced the caller's symbolic link"
+    );
+}
+
+/// A dangling symbolic link is still a link, not free ground: it is refused and
+/// its target is not created.
+#[cfg(unix)]
+#[test]
+fn edge_rb_new_refuses_a_dangling_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let parent = scratch("symlink-dangling");
+    let target = parent.join("missing-target");
+    let root = parent.join("hello");
+    symlink(&target, &root).expect("fixture symlink");
+
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        !created.status.success(),
+        "`rb new` over a dangling symlink must fail, got: {}{}",
+        stdout(&created),
+        stderr(&created)
+    );
+    assert!(
+        stderr(&created).contains("symbolic link"),
+        "the refusal should name the symbolic link, got: {}",
+        stderr(&created)
+    );
+    assert!(
+        !target.exists(),
+        "`rb new` created the dangling link's target at {}",
+        target.display()
+    );
+    assert!(
+        root.symlink_metadata()
+            .expect("symlink survives")
+            .file_type()
+            .is_symlink(),
+        "`rb new` replaced the caller's dangling link"
+    );
+}
+
+/// The library entry point refuses a symlinked root for the same reason the
+/// command does: the scaffold must stay under `parent`.
+#[cfg(unix)]
+#[test]
+fn edge_create_project_refuses_a_symlinked_root() {
+    use std::os::unix::fs::symlink;
+
+    let parent = scratch("symlink-api");
+    let outside = scratch("symlink-api-target");
+    let root = parent.join("hello");
+    symlink(&outside, &root).expect("fixture symlink");
+
+    let result = redblue::project::create_project(&parent, "hello");
+    assert!(
+        result.is_err(),
+        "create_project must refuse a symlinked root, got: {result:?}"
+    );
+    assert_eq!(
+        fs::read_dir(&outside).expect("outside dir").count(),
+        0,
+        "create_project wrote through the symlink into {}",
+        outside.display()
+    );
+}
+
+/// A skip still increments `total`, so a suite whose only marker is a skip has
+/// executed no test. Both `rb test` and `rb test <file>` must reject it instead
+/// of exiting 0 with `Tests run: 1`.
+#[test]
+fn edge_rb_test_that_only_skips_fails() {
+    let parent = scratch("skip-only");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    let source = "// skip\nnot implemented yet\n";
+    fs::write(root.join("tests/main_test.rb"), source).expect("fixture suite");
+
+    let project_run = run_in(&root, &["test"]);
+    assert!(
+        !project_run.status.success(),
+        "`rb test` with only a skip must fail, got: {}{}",
+        stdout(&project_run),
+        stderr(&project_run)
+    );
+    assert!(
+        stderr(&project_run).contains("No tests were run")
+            && stderr(&project_run).contains("(1 skipped)"),
+        "the project run should say the only test was skipped, got: {}",
+        stderr(&project_run)
+    );
+
+    fs::write(root.join("skip_only.rb"), source).expect("fixture file");
+    let file_run = run_in(&root, &["test", "skip_only.rb"]);
+    assert!(
+        !file_run.status.success(),
+        "`rb test <file>` with only a skip must fail, got: {}{}",
+        stdout(&file_run),
+        stderr(&file_run)
+    );
+    assert!(
+        stderr(&file_run).contains("No tests were run")
+            && stderr(&file_run).contains("(1 skipped)"),
+        "the explicit run should say the only test was skipped, got: {}",
+        stderr(&file_run)
+    );
+}
+
+/// A syntax error is a failure even when the file has no `test` block to label
+/// it. Dropping the error made `rb test <file>` answer `No tests were defined`,
+/// hiding the line the reader has to fix.
+#[test]
+fn edge_rb_test_reports_a_syntax_error_without_a_test_block() {
+    let parent = scratch("syntax-error-no-block");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(root.join("broken.rb"), "say \"hi\"\nset x to (\n").expect("fixture file");
+
+    let ran = run_in(&root, &["test", "broken.rb"]);
+    assert!(
+        !ran.status.success(),
+        "a file that does not parse must fail: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        !output.contains("No tests were defined"),
+        "the syntax error was hidden behind the zero-test guard: {output}"
+    );
+    assert!(
+        output.contains("FAILED") && output.contains("broken.rb:2"),
+        "the failure must name the syntax error and its line, got: {output}"
+    );
+}
+
+/// A syntax error outside a marker body is still the whole file's error. A
+/// passing marker test must not hide a stray unparsable line after `// end`,
+/// which would let `rb test` exit 0 over a file that does not parse.
+#[test]
+fn edge_rb_test_reports_a_syntax_error_outside_a_marker_test() {
+    let parent = scratch("syntax-error-outside-marker");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    let source = "// test \"passing marker\"\nexpect 1 to be 1\n// end\nset x to (\n";
+    fs::write(root.join("tests/main_test.rb"), source).expect("fixture suite");
+
+    let project_run = run_in(&root, &["test"]);
+    assert!(
+        !project_run.status.success(),
+        "a syntax error outside the marker body must fail: {}{}",
+        stdout(&project_run),
+        stderr(&project_run)
+    );
+    let project_output = format!("{}{}", stdout(&project_run), stderr(&project_run));
+    assert!(
+        project_output.contains("FAILED") && project_output.contains("main_test.rb:4"),
+        "the failure must name the syntax error and its line, got: {project_output}"
+    );
+
+    fs::write(root.join("trailing.rb"), source).expect("fixture file");
+    let file_run = run_in(&root, &["test", "trailing.rb"]);
+    assert!(
+        !file_run.status.success(),
+        "the explicit form must report the same syntax error: {}{}",
+        stdout(&file_run),
+        stderr(&file_run)
+    );
+    let file_output = format!("{}{}", stdout(&file_run), stderr(&file_run));
+    assert!(
+        file_output.contains("FAILED") && file_output.contains("trailing.rb:4"),
+        "the explicit failure must name the syntax error and its line, got: {file_output}"
+    );
+}
+
+/// A benchmark body that fails must be reported as a failure. Dropping the
+/// outcome let the zero-execution guard answer `No tests were defined` and hide
+/// the benchmark's own syntax or runtime error.
+#[test]
+fn edge_rb_test_reports_a_failing_benchmark() {
+    let parent = scratch("benchmark-error");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    let source = "// bench \"broken\"\nset to to to\n// end\n";
+    fs::write(root.join("bench.rb"), source).expect("fixture benchmark");
+
+    let ran = run_in(&root, &["test", "bench.rb"]);
+    assert!(
+        !ran.status.success(),
+        "a failing benchmark must fail the run: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        !output.contains("No tests were defined"),
+        "the benchmark failure was hidden behind the zero-test guard: {output}"
+    );
+    assert!(
+        output.contains("broken") && output.contains("FAILED"),
+        "the failure must name the benchmark, got: {output}"
+    );
+}
+
+/// A benchmark that runs to completion is executed work, not an empty file. It
+/// must therefore satisfy the zero-execution guard, both through an explicit
+/// path and as the only file in a project's suite.
+#[test]
+fn edge_rb_test_reports_a_passing_benchmark() {
+    let parent = scratch("benchmark-passing");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    let tests_dir = root.join("tests");
+    // Leave the benchmark as the project's only test, so bare `rb test` proves
+    // a passing benchmark is not mistaken for an empty suite.
+    fs::remove_file(tests_dir.join("main_test.rb")).expect("remove scaffold test");
+    let source = "// bench \"passing\"\nset total to 1 + 1\n// end\n";
+    fs::write(tests_dir.join("bench.rb"), source).expect("fixture benchmark");
+
+    let file_run = run_in(&root, &["test", "tests/bench.rb"]);
+    assert!(
+        file_run.status.success(),
+        "a passing benchmark must exit 0: {}{}",
+        stdout(&file_run),
+        stderr(&file_run)
+    );
+    let file_output = format!("{}{}", stdout(&file_run), stderr(&file_run));
+    assert!(
+        !file_output.contains("No tests were defined"),
+        "the passing benchmark was hidden behind the zero-test guard: {file_output}"
+    );
+    assert!(
+        file_output.contains("BENCHMARK") && file_output.contains("ns/iter"),
+        "the passing benchmark must report its measurement, got: {file_output}"
+    );
+
+    let project_run = run_in(&root, &["test"]);
+    assert!(
+        project_run.status.success(),
+        "a project whose only file is a passing benchmark must exit 0: {}{}",
+        stdout(&project_run),
+        stderr(&project_run)
+    );
+    let project_output = format!("{}{}", stdout(&project_run), stderr(&project_run));
+    assert!(
+        !project_output.contains("No tests were defined"),
+        "the project run hid the passing benchmark behind the zero-test guard: {project_output}"
+    );
+    assert!(
+        project_output.contains("Passed: 1"),
+        "the passing benchmark should count as one executed test, got: {project_output}"
+    );
+}
+
+/// `read_dir` follows a symlink for the path it is given, so a symlinked root
+/// would run a suite from outside the project. Discovery must inspect the root
+/// itself and refuse it before opening anything.
+#[cfg(unix)]
+#[test]
+fn edge_discovery_refuses_a_symlinked_root() {
+    use std::os::unix::fs::symlink;
+
+    let target = scratch_dir("symlinked-root-target");
+    write_file(&target, "outside.rb", b"// test \"outside\"\n// end\n");
+    let parent = scratch_dir("symlinked-root");
+    let root = parent.join("tests");
+    symlink(&target, &root).expect("fixture symlink");
+
+    let error = find_test_files(&root).expect_err("a symlinked root must not be followed");
+    let message = error.to_string();
+    assert!(
+        message.contains("symbolic link"),
+        "the refusal should name the symbolic link, got: {message}"
+    );
+    assert!(
+        message.contains("tests"),
+        "the refusal should name the root, got: {message}"
+    );
+}
+
+/// A trailing separator forces the OS to resolve through the final link, so
+/// the root has to be normalised before inspection. `run_all_tests` supplies
+/// `tests/` with exactly that separator.
+#[cfg(unix)]
+#[test]
+fn edge_discovery_refuses_a_symlinked_root_with_a_trailing_separator() {
+    use std::os::unix::fs::symlink;
+
+    let target = scratch_dir("symlinked-root-separator-target");
+    write_file(&target, "outside.rb", b"// test \"outside\"\n// end\n");
+    let parent = scratch_dir("symlinked-root-separator");
+    let root = parent.join("tests");
+    symlink(&target, &root).expect("fixture symlink");
+
+    let with_separator = format!("{}/", root.display());
+    let error = find_test_files(&with_separator)
+        .expect_err("a symlinked root with a trailing separator must not be followed");
+    let message = error.to_string();
+    assert!(
+        message.contains("symbolic link"),
+        "the refusal should name the symbolic link, got: {message}"
+    );
+    assert!(
+        message.contains("tests"),
+        "the refusal should name the root, got: {message}"
     );
 }

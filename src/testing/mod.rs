@@ -62,14 +62,21 @@ pub fn run_all_tests() -> Result<TestResults> {
 /// result, which is what [`run_all_tests`] has always returned for an empty
 /// `tests/`. The command layer decides whether "no tests" is a failure.
 pub fn run_tests_in(dir: impl AsRef<Path>) -> Result<TestResults> {
-    let mut harness = TestHarness::new();
-    let dir = dir.as_ref();
-
     let test_files = find_test_files(dir)?;
+    run_test_files(&test_files)
+}
 
-    for file in test_files {
-        if let Err(e) = harness.run_file(&file) {
-            harness.add_source_error_at(&file, &e);
+/// Runs the already-discovered test files, preserving their order.
+///
+/// [`run_tests_in`] collects once and calls this, and callers that need to
+/// inspect the listing first (to distinguish "no files" from "no tests") can
+/// pass the same list here instead of walking the directory a second time.
+pub fn run_test_files(files: &[PathBuf]) -> Result<TestResults> {
+    let mut harness = TestHarness::new();
+
+    for file in files {
+        if let Err(e) = harness.run_file(file) {
+            harness.add_source_error_at(file, &e);
         }
     }
 
@@ -91,15 +98,29 @@ pub fn run_tests_in(dir: impl AsRef<Path>) -> Result<TestResults> {
 /// which differs between machines and filesystems; an unsorted list would make
 /// the reported test order — and therefore the failure output — unstable.
 ///
-/// Directory symlinks are never followed. `Path::is_dir` dereferences a link,
-/// so a link such as `tests/loop -> .` would make this walk recurse until the
-/// process overflowed its stack. `DirEntry::file_type` reports the link itself,
-/// so a symlinked directory is skipped and the walk can only descend into real
-/// directories.
+/// Symlinks are never followed, whether they name a directory or a file.
+/// `Path::is_dir` dereferences a link, so a link such as `tests/loop -> .`
+/// would make this walk recurse until the process overflowed its stack.
+/// `DirEntry::file_type` reports the link itself, so a symlinked directory is
+/// skipped and the walk can only descend into real directories. For the same
+/// reason a symlinked `.rb` file is not a regular file and is not collected:
+/// `tests/escape.rb -> /somewhere/outside.rb` would otherwise run a suite from
+/// outside the project. The caller-supplied root is refused when it is itself
+/// a link: `read_dir` would follow it and run tests from outside the project.
 pub fn find_test_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
-    let mut files = collect_test_files(dir.as_ref(), 0)?;
+    let dir = without_trailing_separator(dir.as_ref());
+    let mut files = collect_test_files(&dir, 0)?;
     files.sort();
     Ok(files)
+}
+
+/// Drops trailing separators (and a final `.`) so the root is inspected as
+/// itself. `symlink_metadata("tests/")` resolves through the final link because
+/// a trailing separator requires a directory, so it reports the target and the
+/// symlink check never fires. `Path::components` normalises repeated and
+/// trailing separators, including the one `run_all_tests` supplies.
+fn without_trailing_separator(dir: &Path) -> PathBuf {
+    dir.components().collect()
 }
 
 fn collect_test_files(dir: &Path, depth: usize) -> Result<Vec<PathBuf>> {
@@ -110,6 +131,27 @@ fn collect_test_files(dir: &Path, depth: usize) -> Result<Vec<PathBuf>> {
             depth,
             MAX_TEST_DIR_DEPTH
         )));
+    }
+
+    // `read_dir` follows a symlink for the path it is handed, even though this
+    // walk checks every entry below it. Inspect the root with `symlink_metadata`
+    // so a symlinked `tests/` cannot run a suite from outside the project.
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Error::Io(format!(
+                "Refusing to search '{}': it is a symbolic link",
+                dir.display()
+            )))
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(Error::Io(format!(
+                "Cannot inspect test directory '{}': {}",
+                dir.display(),
+                error
+            )))
+        }
     }
 
     let mut files = Vec::new();
@@ -144,7 +186,7 @@ fn collect_test_files(dir: &Path, depth: usize) -> Result<Vec<PathBuf>> {
         })?;
         if file_type.is_dir() {
             files.extend(collect_test_files(&path, depth + 1)?);
-        } else if path.extension() == Some("rb".as_ref()) {
+        } else if file_type.is_file() && path.extension() == Some("rb".as_ref()) {
             files.push(path);
         }
     }

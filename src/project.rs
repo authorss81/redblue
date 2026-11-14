@@ -8,6 +8,7 @@
 //! that does not parse before a command acts on the project.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -95,13 +96,36 @@ fn clean_path(path: &Path) -> PathBuf {
 /// second project into a directory that is not empty, and neither is something
 /// a scaffold should do silently. An existing *empty* directory is accepted: it
 /// is not occupied ground.
+///
+/// A symbolic link in the project's place is always refused, even when it
+/// points at an empty directory or at nothing at all. Following it would write
+/// the scaffold somewhere other than `parent`, which is the same escape a path
+/// separator would allow and is never what `rb new` was asked for.
 pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf> {
     check_project_name(name)?;
 
     let root = parent.join(name);
-    let root_existed = root.exists();
-    if root_existed {
-        if !root.is_dir() {
+    let root_metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(Error::Io(format!(
+                "Cannot inspect '{}': {}",
+                root.display(),
+                error
+            )))
+        }
+    };
+    let root_existed = root_metadata.is_some();
+    if let Some(metadata) = root_metadata {
+        if metadata.file_type().is_symlink() {
+            return Err(Error::Io(format!(
+                "Cannot create project '{}': {} already exists and is a symbolic link",
+                name,
+                root.display()
+            )));
+        }
+        if !metadata.is_dir() {
             return Err(Error::Io(format!(
                 "Cannot create project '{}': {} already exists and is not a directory",
                 name,

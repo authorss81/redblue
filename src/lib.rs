@@ -153,10 +153,19 @@ pub fn run_repl() {
 }
 
 /// Rejects a run that executed nothing, whichever form of `rb test` asked for
-/// it. A file or project that defines no `test` blocks has verified nothing, so
-/// a zero failure count must not let the process exit 0.
-fn reject_zero_test_run(total: usize, location: &str) -> Result<(), Error> {
-    if total == 0 {
+/// it. A file or project that defines no `test` blocks — or whose only markers
+/// are skips — has verified nothing, so it must not exit 0. A skip increments
+/// `total`, so the count of tests that actually ran is `passed + failed`.
+fn reject_zero_test_run(results: &testing::TestResults, location: &str) -> Result<(), Error> {
+    if results.passed + results.failed == 0 {
+        // A skip still increments `total`, so "nothing was defined" is the
+        // wrong story when the suite did define tests and skipped all of them.
+        if results.total > 0 && results.skipped == results.total {
+            return Err(Error::Io(format!(
+                "No tests were run in '{}' ({} skipped)",
+                location, results.skipped
+            )));
+        }
         return Err(Error::Io(format!(
             "No tests were defined in '{}'",
             location
@@ -173,7 +182,7 @@ pub fn run_test(path: Option<&str>) -> Result<(), Error> {
             let results = harness.results();
             // The explicit-path form shares the zero-execution guard with the
             // project form: a file with no `test` blocks is not a passing suite.
-            reject_zero_test_run(results.total, p)?;
+            reject_zero_test_run(&results, p)?;
             // Report the failures and exit non-zero. Without this a failing
             // `expect` printed only a dot/F and still exited 0.
             testing::PrettyReporter::new().report(&results);
@@ -196,20 +205,24 @@ pub fn run_test(path: Option<&str>) -> Result<(), Error> {
             project::check_manifest(&root)?;
 
             let tests = project::tests_dir(&root);
-            if testing::find_test_files(&tests)?.is_empty() {
+            let test_files = testing::find_test_files(&tests)?;
+            if test_files.is_empty() {
                 return Err(Error::Io(format!(
                     "No Redblue test files found in '{}'",
                     tests.display()
                 )));
             }
 
-            let results = testing::run_tests_in(&tests)?;
+            // Run the listing this command already collected. Calling
+            // `run_tests_in` here would walk the whole tree again and could even
+            // disagree with the emptiness check if a file changed between walks.
+            let results = testing::run_test_files(&test_files)?;
             // A run that executed nothing is not a passing suite. A `tests/`
             // holding only comment-only or empty `.rb` files passes the
             // file-count check above but defines no `test` blocks, and a zero
             // failure count would otherwise let the process exit 0 having
             // verified nothing.
-            reject_zero_test_run(results.total, &tests.display().to_string())?;
+            reject_zero_test_run(&results, &tests.display().to_string())?;
             println!("Tests run: {}", results.total);
             println!("Passed: {}", results.passed);
             println!("Failed: {}", results.failed);
