@@ -12,6 +12,15 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+/// The most directory levels [`find_test_files`] will read, counting the root
+/// as level 0. A directory at level `MAX_TEST_DIR_DEPTH` is refused before it
+/// is opened.
+///
+/// Skipping directory symlinks stops a cycle, but a real tree can still be deep
+/// enough to overflow the stack. A fixed bound turns that resource failure into
+/// a reported error instead of a crash.
+const MAX_TEST_DIR_DEPTH: usize = 64;
+
 /// Why a single test body did not pass. An `Assertion` failure is a Redblue
 /// `expect` that did not hold; an `Error` is a lexer/parser/analyzer/runtime
 /// fault, which is a different kind of test failure.
@@ -48,21 +57,19 @@ pub fn run_all_tests() -> Result<TestResults> {
 ///
 /// [`run_all_tests`] is this against the checkout's own `tests/`; a project's
 /// bare `rb test` is this against the `tests/` beside its manifest.
+///
+/// A directory with no test files is not an error here: it yields a zero-count
+/// result, which is what [`run_all_tests`] has always returned for an empty
+/// `tests/`. The command layer decides whether "no tests" is a failure.
 pub fn run_tests_in(dir: impl AsRef<Path>) -> Result<TestResults> {
     let mut harness = TestHarness::new();
     let dir = dir.as_ref();
 
     let test_files = find_test_files(dir)?;
-    if test_files.is_empty() {
-        return Err(Error::Io(format!(
-            "No Redblue test files found in '{}'",
-            dir.display()
-        )));
-    }
 
     for file in test_files {
         if let Err(e) = harness.run_file(&file) {
-            harness.add_error(e.to_string());
+            harness.add_source_error_at(&file, &e);
         }
     }
 
@@ -83,13 +90,28 @@ pub fn run_tests_in(dir: impl AsRef<Path>) -> Result<TestResults> {
 /// The result is sorted. `read_dir` yields entries in filesystem hash order,
 /// which differs between machines and filesystems; an unsorted list would make
 /// the reported test order — and therefore the failure output — unstable.
+///
+/// Directory symlinks are never followed. `Path::is_dir` dereferences a link,
+/// so a link such as `tests/loop -> .` would make this walk recurse until the
+/// process overflowed its stack. `DirEntry::file_type` reports the link itself,
+/// so a symlinked directory is skipped and the walk can only descend into real
+/// directories.
 pub fn find_test_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
-    let mut files = collect_test_files(dir.as_ref())?;
+    let mut files = collect_test_files(dir.as_ref(), 0)?;
     files.sort();
     Ok(files)
 }
 
-fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>> {
+fn collect_test_files(dir: &Path, depth: usize) -> Result<Vec<PathBuf>> {
+    if depth >= MAX_TEST_DIR_DEPTH {
+        return Err(Error::Io(format!(
+            "Test directory '{}' is nested {} levels deep, at the limit of {}",
+            dir.display(),
+            depth,
+            MAX_TEST_DIR_DEPTH
+        )));
+    }
+
     let mut files = Vec::new();
 
     let entries = match std::fs::read_dir(dir) {
@@ -113,8 +135,15 @@ fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>> {
             ))
         })?;
         let path = entry.path();
-        if path.is_dir() {
-            files.extend(collect_test_files(&path)?);
+        let file_type = entry.file_type().map_err(|error| {
+            Error::Io(format!(
+                "Cannot read test directory '{}': {}",
+                dir.display(),
+                error
+            ))
+        })?;
+        if file_type.is_dir() {
+            files.extend(collect_test_files(&path, depth + 1)?);
         } else if path.extension() == Some("rb".as_ref()) {
             files.push(path);
         }

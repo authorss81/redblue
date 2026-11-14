@@ -109,8 +109,49 @@ fn find_test_files_walks_nested_directories() {
     );
 }
 
-/// Empty / resource: a directory with nothing to collect yields no files and
-/// no error; a directory that does not exist is not an error either.
+/// Resource / recursion: `Path::is_dir` follows symlinks, so a link such as
+/// `loop -> .` must not make discovery recurse until the stack overflows.
+/// Directory symlinks are skipped; real files are still collected.
+#[cfg(unix)]
+#[test]
+fn edge_discovery_does_not_follow_symlinked_directories() {
+    use std::os::unix::fs::symlink;
+
+    let dir = scratch_dir("symlink-cycle");
+    write_file(&dir, "only.rb", b"// test \"only\"\n// end\n");
+    symlink(&dir, dir.join("loop")).expect("directory symlink should be creatable");
+
+    let found = find_test_files(&dir).expect("a symlink cycle must not break discovery");
+    assert_eq!(found.len(), 1, "symlink cycle produced {:?}", found);
+    assert!(
+        found[0].ends_with("only.rb"),
+        "expected only.rb to be collected, got {:?}",
+        found
+    );
+}
+
+/// Resource / recursion: a real directory tree deep enough to overflow the
+/// stack is refused with a reported error rather than a crash. A symlink cycle
+/// is not the only unbounded shape discovery has to survive.
+#[test]
+fn edge_discovery_refuses_a_too_deep_directory_tree() {
+    let dir = scratch_dir("too-deep");
+    let mut deep = dir.clone();
+    for _ in 0..100 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).expect("a deep but real directory tree should be creatable");
+
+    let error = find_test_files(&dir).expect_err("an unbounded tree must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("levels deep"),
+        "the refusal should explain the depth bound, got: {message}"
+    );
+}
+
+/// Empty / library contract: a directory with nothing to collect yields no
+/// files and no error; a directory that does not exist is not an error either.
 #[test]
 fn edge_discovery_of_empty_and_missing_directory_is_empty() {
     let empty = scratch_dir("empty");
@@ -122,6 +163,38 @@ fn edge_discovery_of_empty_and_missing_directory_is_empty() {
     let found = find_test_files(missing.to_str().expect("utf-8 scratch path"))
         .expect("missing directory should not error");
     assert!(found.is_empty(), "missing directory produced {:?}", found);
+}
+
+/// The library runner keeps its previous contract for an empty suite: a
+/// zero-count result, not an error. The command layer owns the rejection.
+#[test]
+fn edge_run_tests_in_empty_directory_is_a_zero_count_result() {
+    let empty = scratch_dir("empty-suite");
+
+    let results =
+        redblue::testing::run_tests_in(&empty).expect("an empty suite is not a library error");
+
+    assert_eq!(
+        (results.total, results.passed, results.failed),
+        (0, 0, 0),
+        "an empty suite should report zero tests, got {:?}",
+        results
+    );
+}
+
+/// A directory with no manifest is not a project, so `check_manifest` refuses
+/// it instead of reporting a silent success for a caller that never checked.
+#[test]
+fn edge_check_manifest_refuses_a_directory_without_a_manifest() {
+    let dir = scratch_dir("missing-manifest");
+
+    let error = redblue::project::check_manifest(&dir)
+        .expect_err("a directory without a manifest is not a project");
+
+    assert!(
+        error.to_string().contains("redblue.manifest"),
+        "the refusal should name the missing manifest, got: {error}"
+    );
 }
 
 /// Unreadable / contract: a regular file is not a directory that can be
@@ -272,6 +345,27 @@ fn edge_non_utf8_rb_file_is_reported_as_an_io_error() {
         message.contains("bad.rb"),
         "error should name the offending file, got: {}",
         message
+    );
+}
+
+/// A project suite that cannot read one of its `.rb` files must name that file
+/// in the failure, not report the anonymous `unknown` location.
+#[test]
+fn edge_run_tests_in_names_an_unreadable_file() {
+    let dir = scratch_dir("unreadable-named");
+    write_file(&dir, "bad.rb", &[0xff, 0xfe, 0x00, b'/']);
+
+    let results = redblue::testing::run_tests_in(&dir).expect("the suite should run");
+    assert_eq!(
+        results.failed, 1,
+        "an unreadable .rb file must be a failure: {:?}",
+        results.errors
+    );
+    let error = &results.errors[0];
+    assert!(
+        error.file.ends_with("bad.rb"),
+        "the failure should name the unreadable file, got {:?}",
+        error.file
     );
 }
 
@@ -567,6 +661,19 @@ fn rb_new_scaffolds_a_project_that_tests_green() {
         parsed.dependencies
     );
 
+    let entry_ran = run_in(&root, &["run", "src/main.rb"]);
+    assert!(
+        entry_ran.status.success(),
+        "the scaffolded entry point does not run: {}{}",
+        stdout(&entry_ran),
+        stderr(&entry_ran)
+    );
+    assert!(
+        stdout(&entry_ran).contains("Hello from hello"),
+        "the scaffolded entry point did not greet the project: {}",
+        stdout(&entry_ran)
+    );
+
     let ran = run_in(&root, &["test"]);
     assert!(
         ran.status.success(),
@@ -840,6 +947,68 @@ fn edge_rb_test_in_a_project_with_no_test_files_fails() {
     }
 }
 
+/// A `tests/` directory with `.rb` files but no `test` blocks has executed
+/// nothing, so `rb test` must fail instead of reporting a zero-test success.
+#[test]
+fn edge_rb_test_that_defines_no_tests_fails() {
+    let cases = [
+        ("comment-only", b"// nothing here\n".as_slice()),
+        ("empty-file", b"".as_slice()),
+    ];
+
+    for (name, contents) in cases {
+        let parent = scratch(&format!("zero-tests-{name}"));
+        let created = run_in(&parent, &["new", "hello"]);
+        assert!(created.status.success(), "{}", stderr(&created));
+
+        let root = parent.join("hello");
+        fs::write(root.join("tests/main_test.rb"), contents).expect("fixture suite");
+
+        let ran = run_in(&root, &["test"]);
+        assert!(
+            !ran.status.success(),
+            "`rb test` with zero defined tests must fail for {name}, got: {}{}",
+            stdout(&ran),
+            stderr(&ran)
+        );
+        assert!(
+            stderr(&ran).contains("No tests were defined"),
+            "the error should say no tests were defined for {name}, got: {}",
+            stderr(&ran)
+        );
+    }
+}
+
+/// The explicit-path form has the same zero-execution guard as the project
+/// form: `rb test empty.rb` must not exit 0 after defining no tests.
+#[test]
+fn edge_rb_test_with_a_path_that_defines_no_tests_fails() {
+    for (name, contents) in [
+        ("comment-only", b"// nothing here\n".as_slice()),
+        ("empty-file", b"".as_slice()),
+    ] {
+        let parent = scratch(&format!("explicit-zero-tests-{name}"));
+        let created = run_in(&parent, &["new", "hello"]);
+        assert!(created.status.success(), "{}", stderr(&created));
+
+        let root = parent.join("hello");
+        fs::write(root.join("empty.rb"), contents).expect("fixture file");
+
+        let ran = run_in(&root, &["test", "empty.rb"]);
+        assert!(
+            !ran.status.success(),
+            "`rb test <file>` with zero defined tests must fail for {name}, got: {}{}",
+            stdout(&ran),
+            stderr(&ran)
+        );
+        assert!(
+            stderr(&ran).contains("No tests were defined"),
+            "the error should say no tests were defined for {name}, got: {}",
+            stderr(&ran)
+        );
+    }
+}
+
 /// A project whose manifest does not parse is refused before any test runs,
 /// naming the manifest and the offending line.
 #[test]
@@ -896,5 +1065,157 @@ fn edge_rb_test_with_a_path_runs_only_that_file() {
         "`rb test <path>` must run only the named file: {}{}",
         stdout(&ran),
         stderr(&ran)
+    );
+}
+
+/// The explicit-path form still runs exactly the named file, and a failure
+/// names the file it ran instead of the old generic `inline` label.
+#[test]
+fn edge_rb_test_with_a_path_names_the_file_in_failure_output() {
+    let parent = scratch("explicit-path-failure");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("failing.rb"),
+        "test \"explicit failure\"\n    expect 1 to be 2\nend\n",
+    )
+    .expect("fixture file");
+
+    let ran = run_in(&root, &["test", "failing.rb"]);
+    assert!(
+        !ran.status.success(),
+        "a failing explicit file must exit non-zero: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        output.contains("explicit failure"),
+        "the failure output must name the failing test, got: {output}"
+    );
+    assert!(
+        output.contains("Location:") && output.contains("failing.rb"),
+        "the failure output must point at the named file, got: {output}"
+    );
+}
+
+/// A whole-file parse failure still names the file and the line it came from;
+/// discarding the error's span would leave the reader at `Location: unknown`.
+#[test]
+fn edge_rb_test_with_a_path_reports_a_parse_failure_file_and_line() {
+    let parent = scratch("explicit-path-parse-failure");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("broken.rb"),
+        "test \"broken\"\n    expect x to be\nend\n",
+    )
+    .expect("fixture file");
+
+    let ran = run_in(&root, &["test", "broken.rb"]);
+    assert!(
+        !ran.status.success(),
+        "a file that does not parse must fail: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        output.contains("broken.rb:2"),
+        "the failure must name the file and line, got: {output}"
+    );
+}
+
+/// A failing project suite must say which test failed and why, not only print
+/// a count. The count alone leaves the reader unable to find the failure.
+#[test]
+fn edge_rb_test_reports_the_failing_test_name_and_assertion() {
+    let parent = scratch("failing-report");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("tests/main_test.rb"),
+        "test \"math works\"\n    expect 1 + 1 to be 3\nend\n",
+    )
+    .expect("fixture suite");
+
+    let ran = run_in(&root, &["test"]);
+    assert!(
+        !ran.status.success(),
+        "a failing project suite must exit non-zero: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        output.contains("math works"),
+        "the failure output must name the failing test, got: {output}"
+    );
+    assert!(
+        output.contains("FAILED"),
+        "the failure output must mark the test as failed, got: {output}"
+    );
+    assert!(
+        output.contains("Location:") && output.contains("main_test.rb"),
+        "the failure output must point at the test file, got: {output}"
+    );
+    assert!(
+        output.contains("Error:"),
+        "the failure output must carry the assertion message, got: {output}"
+    );
+}
+
+/// Every failure is reported, not just the first one. A runner that stops at
+/// the first failure hides the rest of the suite behind a rerun loop.
+#[test]
+fn edge_rb_test_reports_every_failing_test_not_just_the_first() {
+    let parent = scratch("all-failures");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("tests/main_test.rb"),
+        "test \"first failure\"\n    expect 1 to be 2\nend\n\n\
+         test \"second failure\"\n    expect 3 to be 4\nend\n",
+    )
+    .expect("fixture suite");
+
+    let ran = run_in(&root, &["test"]);
+    assert!(
+        !ran.status.success(),
+        "a suite with two failures must exit non-zero: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    for name in ["first failure", "second failure"] {
+        assert!(
+            output.contains(name),
+            "the failure report must name {name:?}, got: {output}"
+        );
+    }
+}
+
+/// An empty project name is refused before any directory is created.
+#[test]
+fn edge_create_project_refuses_an_empty_name() {
+    let parent = scratch("empty-project-name");
+    let result = redblue::project::create_project(&parent, "");
+    assert!(
+        result.is_err(),
+        "an empty project name must be an error, got: {:?}",
+        result
+    );
+    assert_eq!(
+        fs::read_dir(&parent).expect("scratch dir").count(),
+        0,
+        "a refused name must not leave a directory behind"
     );
 }

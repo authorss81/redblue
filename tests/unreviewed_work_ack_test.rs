@@ -243,6 +243,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// are all in this history, arrived in a delivery commit, and none of their
 /// delivery commits' SHAs are knowable while the work is being written.
 const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
+    "resume phase-076:",
     "resume phase-075:",
     "resume phase-074:",
     "resume phase-073:",

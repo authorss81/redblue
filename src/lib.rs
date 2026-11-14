@@ -152,14 +152,31 @@ pub fn run_repl() {
     repl.run();
 }
 
+/// Rejects a run that executed nothing, whichever form of `rb test` asked for
+/// it. A file or project that defines no `test` blocks has verified nothing, so
+/// a zero failure count must not let the process exit 0.
+fn reject_zero_test_run(total: usize, location: &str) -> Result<(), Error> {
+    if total == 0 {
+        return Err(Error::Io(format!(
+            "No tests were defined in '{}'",
+            location
+        )));
+    }
+    Ok(())
+}
+
 pub fn run_test(path: Option<&str>) -> Result<(), Error> {
     match path {
         Some(p) => {
             let mut harness = testing::TestHarness::new();
             harness.run_file(p)?;
+            let results = harness.results();
+            // The explicit-path form shares the zero-execution guard with the
+            // project form: a file with no `test` blocks is not a passing suite.
+            reject_zero_test_run(results.total, p)?;
             // Report the failures and exit non-zero. Without this a failing
             // `expect` printed only a dot/F and still exited 0.
-            testing::PrettyReporter::new().report(&harness.results());
+            testing::PrettyReporter::new().report(&results);
         }
         None => {
             // Bare `rb test` is about the project the caller is standing in,
@@ -178,12 +195,29 @@ pub fn run_test(path: Option<&str>) -> Result<(), Error> {
             })?;
             project::check_manifest(&root)?;
 
-            let results = testing::run_tests_in(project::tests_dir(&root))?;
+            let tests = project::tests_dir(&root);
+            if testing::find_test_files(&tests)?.is_empty() {
+                return Err(Error::Io(format!(
+                    "No Redblue test files found in '{}'",
+                    tests.display()
+                )));
+            }
+
+            let results = testing::run_tests_in(&tests)?;
+            // A run that executed nothing is not a passing suite. A `tests/`
+            // holding only comment-only or empty `.rb` files passes the
+            // file-count check above but defines no `test` blocks, and a zero
+            // failure count would otherwise let the process exit 0 having
+            // verified nothing.
+            reject_zero_test_run(results.total, &tests.display().to_string())?;
             println!("Tests run: {}", results.total);
             println!("Passed: {}", results.passed);
             println!("Failed: {}", results.failed);
             if results.failed > 0 {
-                process::exit(1);
+                // The counts alone do not say which test failed or why. The
+                // same reporter the explicit-path form uses prints the failure
+                // detail and exits non-zero.
+                testing::PrettyReporter::new().report(&results);
             }
         }
     }

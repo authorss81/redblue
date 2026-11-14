@@ -99,7 +99,8 @@ pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf> {
     check_project_name(name)?;
 
     let root = parent.join(name);
-    if root.exists() {
+    let root_existed = root.exists();
+    if root_existed {
         if !root.is_dir() {
             return Err(Error::Io(format!(
                 "Cannot create project '{}': {} already exists and is not a directory",
@@ -120,27 +121,58 @@ pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf> {
 
     let source = root.join(SOURCE_DIR);
     let tests = root.join(TESTS_DIR);
-    fs::create_dir_all(&source)
-        .map_err(|error| Error::Io(format!("Cannot create '{}': {}", source.display(), error)))?;
-    fs::create_dir_all(&tests)
-        .map_err(|error| Error::Io(format!("Cannot create '{}': {}", tests.display(), error)))?;
 
-    // The manifest is written last: a discovery walk finds a project by its
-    // manifest, so a half-written layout must not become one.
-    write(
-        &root.join(ENTRY_FILE),
-        &format!("say \"Hello from {name}\"\n"),
-    )?;
-    write(
-        &root.join(TEST_FILE),
-        &format!("test \"{name}\"\n    expect 1 + 1 to be 2\nend\n"),
-    )?;
-    write(
-        &root.join(MANIFEST_FILE),
-        &format!("name {name}\nversion {DEFAULT_VERSION}\n"),
-    )?;
+    let result = (|| -> Result<()> {
+        fs::create_dir_all(&source).map_err(|error| {
+            Error::Io(format!("Cannot create '{}': {}", source.display(), error))
+        })?;
+        fs::create_dir_all(&tests).map_err(|error| {
+            Error::Io(format!("Cannot create '{}': {}", tests.display(), error))
+        })?;
+
+        // The manifest is written last: a discovery walk finds a project by its
+        // manifest, so a half-written layout must not become one.
+        write(
+            &root.join(ENTRY_FILE),
+            &format!("say \"Hello from {name}\"\n"),
+        )?;
+        write(
+            &root.join(TEST_FILE),
+            &format!("test \"{name}\"\n    expect 1 + 1 to be 2\nend\n"),
+        )?;
+        write(
+            &root.join(MANIFEST_FILE),
+            &format!("name {name}\nversion {DEFAULT_VERSION}\n"),
+        )?;
+
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        // A failed write must not leave a partial layout behind. The next
+        // `rb new` refuses a non-empty directory, so leftover `src/` or
+        // `tests/` would turn a transient failure into a permanent one.
+        cleanup_scaffold(&root, root_existed);
+        return Err(error);
+    }
 
     Ok(root)
+}
+
+/// Removes what [`create_project`] wrote before a failure.
+///
+/// When the project directory already existed (and was empty), only the entries
+/// this call created are removed, leaving the caller's empty directory in place
+/// so a retry is accepted. When this call created the directory too, removing it
+/// whole is what makes the retry possible.
+fn cleanup_scaffold(root: &Path, root_existed: bool) {
+    if root_existed {
+        let _ = fs::remove_file(root.join(MANIFEST_FILE));
+        let _ = fs::remove_dir_all(root.join(SOURCE_DIR));
+        let _ = fs::remove_dir_all(root.join(TESTS_DIR));
+    } else {
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 /// Parses the manifest of the project in `root`, naming the file and line when
@@ -148,20 +180,13 @@ pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf> {
 ///
 /// Discovery only proves the file is there. A command about to run a project's
 /// tests has to know the project is one it can read, and the manifest's own
-/// parser is the single authority on that schema.
+/// parser is the single authority on that schema. A directory with no manifest
+/// is refused too: it is not a project, so treating it as one would be a silent
+/// success for a caller that never checked for the file.
 pub fn check_manifest(root: &Path) -> Result<()> {
     let path = root.join(MANIFEST_FILE);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(Error::Io(format!(
-                "Cannot read '{}': {}",
-                path.display(),
-                error
-            )))
-        }
-    };
+    let text = fs::read_to_string(&path)
+        .map_err(|error| Error::Io(format!("Cannot read '{}': {}", path.display(), error)))?;
     Manifest::parse(&text, &path.display().to_string()).map(|_| ())
 }
 
@@ -188,4 +213,64 @@ fn check_project_name(name: &str) -> Result<()> {
 fn write(path: &Path, contents: &str) -> Result<()> {
     fs::write(path, contents)
         .map_err(|error| Error::Io(format!("Cannot write '{}': {}", path.display(), error)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/tmp/project-cleanup-test")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("cleanup scratch dir should be creatable");
+        dir
+    }
+
+    /// A failure after this call created the project directory must remove the
+    /// whole partial layout, so a retry does not find it occupying the name.
+    #[test]
+    fn cleanup_scaffold_removes_a_root_created_by_the_failed_attempt() {
+        let parent = scratch("created-root");
+        let root = parent.join("hello");
+        fs::create_dir_all(root.join(SOURCE_DIR)).expect("fixture src");
+        fs::create_dir_all(root.join(TESTS_DIR)).expect("fixture tests");
+        fs::write(root.join(SOURCE_DIR).join("main.rb"), "partial").expect("fixture entry");
+        fs::write(root.join(MANIFEST_FILE), "partial").expect("fixture manifest");
+
+        cleanup_scaffold(&root, false);
+
+        assert!(
+            !root.exists(),
+            "a project directory created by the failed scaffold must be removed: {}",
+            root.display()
+        );
+    }
+
+    /// A pre-existing empty directory must survive cleanup and be left empty,
+    /// which is what lets the caller retry the scaffold in the same place.
+    #[test]
+    fn cleanup_scaffold_leaves_a_pre_existing_directory_empty() {
+        let parent = scratch("existing-root");
+        let root = parent.join("hello");
+        fs::create_dir_all(&root).expect("fixture root");
+        fs::create_dir_all(root.join(SOURCE_DIR)).expect("fixture src");
+        fs::create_dir_all(root.join(TESTS_DIR)).expect("fixture tests");
+        fs::write(root.join(SOURCE_DIR).join("main.rb"), "partial").expect("fixture entry");
+        fs::write(root.join(MANIFEST_FILE), "partial").expect("fixture manifest");
+
+        cleanup_scaffold(&root, true);
+
+        assert!(
+            root.is_dir(),
+            "the pre-existing directory must not be removed: {}",
+            root.display()
+        );
+        assert_eq!(
+            fs::read_dir(&root).expect("fixture root").count(),
+            0,
+            "cleanup must remove every entry the failed scaffold wrote"
+        );
+    }
 }
