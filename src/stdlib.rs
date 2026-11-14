@@ -131,15 +131,11 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
         "json",
         &["parse", "stringify", "parse_lines", "stringify_lines"],
     ),
-    // `filter` and `reduce` are **not** here, and leaving them out is what
-    // `list.filter(xs, f)` needs rather than a detail. Both are registered as
-    // flat builtins and neither is implemented — `tests/stdlib_module_docs_test.rs`
-    // carries them in `known_gaps()` with the program that still fails — so a
-    // dotted spelling of one reached a dispatcher that refuses every call: a name
-    // the analyzer accepted and the runtime could only ever refuse. That is the
-    // same position as `math.random`, which SPEC.md also documents as
-    // "not implemented" and which `math.random(1, 6)` refuses by name. A builtin
-    // that is not implemented is not a member of a module.
+    // `filter`, `reduce`, `sort` and `reverse` are here for the same reason
+    // `map` is: each is a flat builtin with a dotted spelling, and the member
+    // table is the surface a dotted call is allowed to reach. A member with no
+    // builtin behind it would pass the analyzer and fail at the first call, so
+    // an unimplemented name stays out until it can answer.
     //
     // `length` is here for the same reason `map` is: it is a flat builtin with a
     // dotted spelling, and `tests/text_split_join_test.rs` pins `list.length`
@@ -149,7 +145,19 @@ pub const MODULE_MEMBERS: &[(&str, &[&str])] = &[
     // member of: see the same name under `text`. Both documents write the
     // spelling, which is what `tests/stdlib_module_names_test.rs` checks in
     // both directions.
-    ("list", &["map", "length"]),
+    (
+        "list",
+        &[
+            "map",
+            "length",
+            "filter",
+            "reduce",
+            "sort",
+            "reverse",
+            "zip",
+            "enumerate",
+        ],
+    ),
     (
         "math",
         &[
@@ -360,10 +368,12 @@ pub fn dotted_call_reaches(
 
 /// The function a method-spelled `map` call was given, or the refusal it earns.
 ///
-/// `map` is the one builtin whose argument has to be a Redblue function, so it
-/// is the one call whose bad arguments are named rather than merely counted:
-/// `xs.map(5)` says what it got, and a call with no argument at all says that
-/// too. Both engines ask this — see [`crate::interpreter::Vm::call_method`] and
+/// `map`, `filter` and `reduce` each require a Redblue function as their
+/// following argument, so their bad arguments are named rather than merely
+/// counted: `xs.map(5)` says what it got, and a call with no argument at all
+/// says that too. [`list_function`] and [`reduce_parts`] carry the same naming
+/// for `filter` and `reduce`, and both engines ask this — see
+/// [`crate::interpreter::Vm::call_method`] and
 /// [`crate::bytecode::vm::BytecodeVm::call_method`] — because the two engines
 /// refusing with different words is a divergence `tests/differential_test.rs`
 /// reports for a program that is behaving the same way.
@@ -380,6 +390,62 @@ pub fn map_function(args: &[Value]) -> Result<&FunctionValue, String> {
             "map requires a function, but was given {} arguments",
             many.len()
         )),
+    }
+}
+
+/// The function a higher-order list call was given, or the refusal it earns.
+///
+/// `filter` and `reduce` share `map`'s shape: the list is the receiver and the
+/// following argument is the Redblue function. Naming the operation in the
+/// message is what lets a caller tell which call was wrong when a program has
+/// several of them.
+pub fn list_function<'a>(operation: &str, args: &'a [Value]) -> Result<&'a FunctionValue, String> {
+    match args {
+        [Value::Function(function)] => Ok(function),
+        [] => Err(format!(
+            "{operation} requires a function, but no argument was given"
+        )),
+        [one] => Err(format!(
+            "{operation} requires a function, but was given {one}"
+        )),
+        many => Err(format!(
+            "{operation} requires a function, but was given {} arguments",
+            many.len()
+        )),
+    }
+}
+
+/// The function and optional start value a `reduce` call was given.
+///
+/// `reduce(xs, f)` folds from the list's first item, and `reduce(xs, f, start)`
+/// folds from `start`. The two empty-list cases therefore differ: a start value
+/// answers itself, and no start value is a failure because there is no first
+/// item to fold from.
+pub fn reduce_parts(args: &[Value]) -> Result<(&FunctionValue, Option<&Value>), String> {
+    match args {
+        [Value::Function(function)] => Ok((function, None)),
+        [Value::Function(function), start] => Ok((function, Some(start))),
+        [] => Err("reduce requires a function, but no argument was given".to_string()),
+        [one] => Err(format!("reduce requires a function, but was given {one}")),
+        many => Err(format!(
+            "reduce requires a function and an optional start value, but was given {} arguments",
+            many.len()
+        )),
+    }
+}
+
+/// The higher-order operation a builtin name spells, if it is one.
+///
+/// The module spelling arrives as `list_filter`, and `map` has its own
+/// `list_map` entry in the registry, so both spellings of each are named here.
+/// This is the one place both engines ask, which keeps a name from being
+/// higher-order in one and a plain refused builtin in the other.
+pub fn list_operation(name: &str) -> Option<&'static str> {
+    match name {
+        "map" | "list_map" => Some("map"),
+        "filter" | "list_filter" => Some("filter"),
+        "reduce" | "list_reduce" => Some("reduce"),
+        _ => None,
     }
 }
 
@@ -526,8 +592,11 @@ pub fn builtins() -> HashMap<String, Value> {
     globals.insert("map".to_string(), Value::Builtin("map".to_string()));
     globals.insert("filter".to_string(), Value::Builtin("filter".to_string()));
     globals.insert("reduce".to_string(), Value::Builtin("reduce".to_string()));
-    // The iteration helpers. They are flat builtins rather than members of
-    // `list`, because they are not list methods and phase-077 owns that surface.
+    globals.insert("sort".to_string(), Value::Builtin("sort".to_string()));
+    globals.insert("reverse".to_string(), Value::Builtin("reverse".to_string()));
+    // The iteration helpers. `zip` and `enumerate` also have dotted spellings
+    // (`list.zip` and `list.enumerate`) and are in the member table; the rest
+    // are flat builtins with no dotted spelling.
     for name in [
         "chain",
         "zip",
@@ -2115,6 +2184,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "map",
     "filter",
     "reduce",
+    "sort",
+    "reverse",
     "chain",
     "zip",
     "enumerate",
@@ -2384,7 +2455,18 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
         "filter",
         "filter(list, predicate) -> the items the predicate accepts",
     ),
-    ("reduce", "reduce(list, function, start) -> one value"),
+    (
+        "reduce",
+        "reduce(list, function) -> one value, folding from the first item\nreduce(list, function, start) -> one value, folding from start",
+    ),
+    (
+        "sort",
+        "sort(list) -> the list in ascending order\nsort(list, field) -> records in ascending order of that field",
+    ),
+    (
+        "reverse",
+        "reverse(list) -> the list with its items in the opposite order",
+    ),
     (
         "chain",
         "chain(list, list, ...) -> a list of every argument list's items in the order given",

@@ -891,6 +891,22 @@ say length(bytes.from_text("héllo"))"#
             "[2, 3]\n".into(),
         ),
         (
+            "filter",
+            "say filter([1, 2, 3], to (x) give back x > 1 end)".into(),
+            "[2, 3]\n".into(),
+        ),
+        (
+            "reduce",
+            "say reduce([1, 2, 3], to (a, b) give back a + b end, 0)".into(),
+            "6\n".into(),
+        ),
+        ("sort", "say sort([3, 1, 2])".into(), "[1, 2, 3]\n".into()),
+        (
+            "reverse",
+            "say reverse([1, 2, 3])".into(),
+            "[3, 2, 1]\n".into(),
+        ),
+        (
             "chain",
             "say chain([1, 2], [3])".into(),
             "[1, 2, 3]\n".into(),
@@ -1506,21 +1522,15 @@ say files.exists("{}")"#,
 /// `edge_a_known_gap_is_still_a_gap` can run it, so an entry that starts
 /// answering fails here instead of sitting in a list that reads as current.
 ///
-/// Each is a higher-order builtin: it has to call a Redblue function, which
-/// needs a walker's captured scopes. `map` has them, and `list.map` is the same
-/// builtin under its module spelling — which is why `list_map` left this list
-/// when it was found answering.
+/// It is now empty. The last two entries, `filter` and `reduce`, were the
+/// higher-order pair: they needed a walker's captured scopes, which `map` had
+/// already established, and phase-077 gave them the same driver on both engines.
+/// They moved into [`answerable_builtins`] with the exact programs they must
+/// answer, so the surface is checked rather than excused. Keeping the function
+/// and its two tests is the point: the next unimplemented builtin has a place to
+/// be listed, with the program that still fails, rather than being invisible.
 fn known_gaps() -> &'static [(&'static str, &'static str)] {
-    &[
-        (
-            "filter",
-            "say filter([1, 2, 3], to (x) give back x > 1 end)",
-        ),
-        (
-            "reduce",
-            "say reduce([1, 2, 3], to (a, b) give back a + b end, 0)",
-        ),
-    ]
+    &[]
 }
 
 /// `builtins()` registers a name; something has to answer it.

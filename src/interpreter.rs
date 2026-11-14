@@ -2714,23 +2714,24 @@ impl Vm {
         // alone answers only the names that need a `Result`; the rest are
         // `stdlib::builtin_function`'s, and until this call existed they were
         // registered in the global table and answered by nothing.
-        // `map` is excluded here and answered by this walker's `map_builtin` below: it
-        // is registered as a builtin name but has to *call* a Redblue function,
-        // which the shared resolver cannot do. Asking it first would turn a
-        // working higher-order call into a refusal.
-        if !matches!(name, "map" | "list_map") {
-            if let Some(value) = stdlib::builtin(self.span(), stdlib::resolve(name), args)? {
-                return Ok(value);
-            }
+        // The higher-order list calls (`map`, `filter`, `reduce`) are excluded
+        // here and answered below: each is registered as a builtin name but has
+        // to *call* a Redblue function, which the shared resolver cannot do.
+        // Asking the resolver first would turn a working call into a refusal.
+        if let Some(operation) = stdlib::list_operation(name) {
+            return match operation {
+                "map" => self.map_builtin(args),
+                "filter" => self.filter_builtin(args),
+                "reduce" => self.reduce_builtin(args),
+                _ => Err(Error::Runtime(
+                    format!("Unknown function '{}'", name),
+                    self.span(),
+                )),
+            };
         }
 
-        // `map` is registered as a builtin name but has to *call* a Redblue function,
-        // which the free `runtime::builtin` cannot do, so it is answered by this
-        // walker's `map_builtin` below. It must be asked for before the shared
-        // resolver, which would otherwise claim the name and refuse it as one it
-        // cannot use — turning a working higher-order call into an error.
-        if matches!(name, "map" | "list_map") {
-            return self.map_builtin(args);
+        if let Some(value) = stdlib::builtin(self.span(), stdlib::resolve(name), args)? {
+            return Ok(value);
         }
         match self.get_var(name) {
             Some(Value::Function(function)) => self.call_user_function(name, &function, args),
@@ -2793,6 +2794,66 @@ impl Vm {
         }
 
         Ok(Value::list(mapped))
+    }
+
+    /// `filter(list, predicate)` — the higher-order builtin behind both the flat
+    /// spelling and `list.filter`.
+    ///
+    /// The predicate runs once per item in input order, and only its truthiness
+    /// is asked. An item is kept by cloning it into the answer, so the input list
+    /// is untouched; a failure inside the predicate fails the whole call before
+    /// any partial answer can be returned.
+    fn filter_builtin(&mut self, args: &[Value]) -> Result<Value> {
+        let [Value::List(items), rest @ ..] = args else {
+            return Err(Error::Runtime(
+                "filter requires a list and a function".to_string(),
+                self.span(),
+            ));
+        };
+        let function = stdlib::list_function("filter", rest)
+            .map_err(|message| Error::Runtime(message, self.span()))?;
+
+        let mut kept = Vec::new();
+        for item in items.iter() {
+            let accepted =
+                self.call_user_function(&function.name, function, std::slice::from_ref(item))?;
+            if accepted.is_truthy() {
+                kept.push(item.clone());
+            }
+        }
+        Ok(Value::list(kept))
+    }
+
+    /// `reduce(list, function)` and `reduce(list, function, start)`.
+    ///
+    /// With a start value every item is folded onto it; without one the first
+    /// item is the accumulator and the remaining items are folded. An empty list
+    /// without a start value has nothing to fold from and is refused by name.
+    fn reduce_builtin(&mut self, args: &[Value]) -> Result<Value> {
+        let [Value::List(items), rest @ ..] = args else {
+            return Err(Error::Runtime(
+                "reduce requires a list and a function".to_string(),
+                self.span(),
+            ));
+        };
+        let (function, initial) =
+            stdlib::reduce_parts(rest).map_err(|message| Error::Runtime(message, self.span()))?;
+
+        let mut remaining = items.iter();
+        let mut accumulator = match initial {
+            Some(start) => start.clone(),
+            None => remaining.next().cloned().ok_or_else(|| {
+                Error::Runtime(
+                    "reduce requires a non-empty list when no start value is given".to_string(),
+                    self.span(),
+                )
+            })?,
+        };
+        for item in remaining {
+            accumulator =
+                self.call_user_function(&function.name, function, &[accumulator, item.clone()])?;
+        }
+        Ok(accumulator)
     }
 
     /// Runs the body of a user function `name` in its own scope and returns the
