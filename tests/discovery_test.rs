@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
+use redblue::manifest;
+use redblue::project::find_project_root;
 use redblue::testing::{find_test_files, run_all_tests, TestHarness};
 
 /// Scratch directory inside the project's own `target/tmp`, never the system
@@ -21,6 +24,14 @@ fn write_file(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
     path
 }
 
+fn is_rb(path: &Path) -> bool {
+    path.extension() == Some("rb".as_ref())
+}
+
+fn is_rs(path: &Path) -> bool {
+    path.extension() == Some("rs".as_ref())
+}
+
 /// The Redblue harness is a Redblue *parser*. Feeding it Rust source is never
 /// correct, so discovery must drop every `.rs` path.
 #[test]
@@ -36,7 +47,7 @@ fn edge_discovery_never_returns_rust_files() {
         .expect("discovery should succeed");
 
     assert!(
-        found.iter().all(|path| path.ends_with(".rb")),
+        found.iter().all(|path| is_rb(path)),
         "discovery handed Rust source to the Redblue harness: {:?}",
         found
     );
@@ -92,14 +103,55 @@ fn find_test_files_walks_nested_directories() {
         found
     );
     assert!(
-        found.iter().all(|p| !p.ends_with(".rs")),
+        found.iter().all(|p| !is_rs(p)),
         "nested Rust source leaked into discovery: {:?}",
         found
     );
 }
 
-/// Empty / resource: a directory with nothing to collect yields no files and
-/// no error; a directory that does not exist is not an error either.
+/// Resource / recursion: `Path::is_dir` follows symlinks, so a link such as
+/// `loop -> .` must not make discovery recurse until the stack overflows.
+/// Directory symlinks are skipped; real files are still collected.
+#[cfg(unix)]
+#[test]
+fn edge_discovery_does_not_follow_symlinked_directories() {
+    use std::os::unix::fs::symlink;
+
+    let dir = scratch_dir("symlink-cycle");
+    write_file(&dir, "only.rb", b"// test \"only\"\n// end\n");
+    symlink(&dir, dir.join("loop")).expect("directory symlink should be creatable");
+
+    let found = find_test_files(&dir).expect("a symlink cycle must not break discovery");
+    assert_eq!(found.len(), 1, "symlink cycle produced {:?}", found);
+    assert!(
+        found[0].ends_with("only.rb"),
+        "expected only.rb to be collected, got {:?}",
+        found
+    );
+}
+
+/// Resource / recursion: a real directory tree deep enough to overflow the
+/// stack is refused with a reported error rather than a crash. A symlink cycle
+/// is not the only unbounded shape discovery has to survive.
+#[test]
+fn edge_discovery_refuses_a_too_deep_directory_tree() {
+    let dir = scratch_dir("too-deep");
+    let mut deep = dir.clone();
+    for _ in 0..100 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).expect("a deep but real directory tree should be creatable");
+
+    let error = find_test_files(&dir).expect_err("an unbounded tree must be refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("levels deep"),
+        "the refusal should explain the depth bound, got: {message}"
+    );
+}
+
+/// Empty / library contract: a directory with nothing to collect yields no
+/// files and no error; a directory that does not exist is not an error either.
 #[test]
 fn edge_discovery_of_empty_and_missing_directory_is_empty() {
     let empty = scratch_dir("empty");
@@ -111,6 +163,58 @@ fn edge_discovery_of_empty_and_missing_directory_is_empty() {
     let found = find_test_files(missing.to_str().expect("utf-8 scratch path"))
         .expect("missing directory should not error");
     assert!(found.is_empty(), "missing directory produced {:?}", found);
+}
+
+/// The library runner keeps its previous contract for an empty suite: a
+/// zero-count result, not an error. The command layer owns the rejection.
+#[test]
+fn edge_run_tests_in_empty_directory_is_a_zero_count_result() {
+    let empty = scratch_dir("empty-suite");
+
+    let results =
+        redblue::testing::run_tests_in(&empty).expect("an empty suite is not a library error");
+
+    assert_eq!(
+        (results.total, results.passed, results.failed),
+        (0, 0, 0),
+        "an empty suite should report zero tests, got {:?}",
+        results
+    );
+}
+
+/// A directory with no manifest is not a project, so `check_manifest` refuses
+/// it instead of reporting a silent success for a caller that never checked.
+#[test]
+fn edge_check_manifest_refuses_a_directory_without_a_manifest() {
+    let dir = scratch_dir("missing-manifest");
+
+    let error = redblue::project::check_manifest(&dir)
+        .expect_err("a directory without a manifest is not a project");
+
+    assert!(
+        error.to_string().contains("redblue.manifest"),
+        "the refusal should name the missing manifest, got: {error}"
+    );
+}
+
+/// Unreadable / contract: a regular file is not a directory that can be
+/// searched. `read_dir` answers a non-`NotFound` failure, which discovery must
+/// surface rather than reporting an empty suite.
+#[test]
+fn edge_discovery_unreadable_directory_is_an_error() {
+    let dir = scratch_dir("not-a-directory");
+    let file = write_file(&dir, "not-a-directory.rb", b"// test \"noop\"\n// end\n");
+
+    let error = find_test_files(&file).expect_err("a regular file is not a readable directory");
+    let message = error.to_string();
+    assert!(
+        message.contains("Cannot read test directory"),
+        "error should say the test directory could not be read, got: {message}"
+    );
+    assert!(
+        message.contains("not-a-directory.rb"),
+        "error should name the offending path, got: {message}"
+    );
 }
 
 /// Determinism: `read_dir` yields entries in filesystem hash order, so
@@ -186,7 +290,7 @@ fn edge_repository_rust_suite_is_never_handed_to_the_harness() {
     let found = find_test_files(root.join("tests").to_str().expect("utf-8 path"))
         .expect("discovery should succeed");
 
-    let rust_leaked: Vec<&String> = found.iter().filter(|p| p.ends_with(".rs")).collect();
+    let rust_leaked: Vec<&PathBuf> = found.iter().filter(|p| is_rs(p)).collect();
     assert!(
         rust_leaked.is_empty(),
         "the Redblue harness was handed Rust sources: {:?}",
@@ -241,6 +345,58 @@ fn edge_non_utf8_rb_file_is_reported_as_an_io_error() {
         message.contains("bad.rb"),
         "error should name the offending file, got: {}",
         message
+    );
+}
+
+/// A project suite that cannot read one of its `.rb` files must name that file
+/// in the failure, not report the anonymous `unknown` location.
+#[test]
+fn edge_run_tests_in_names_an_unreadable_file() {
+    let dir = scratch_dir("unreadable-named");
+    write_file(&dir, "bad.rb", &[0xff, 0xfe, 0x00, b'/']);
+
+    let results = redblue::testing::run_tests_in(&dir).expect("the suite should run");
+    assert_eq!(
+        results.failed, 1,
+        "an unreadable .rb file must be a failure: {:?}",
+        results.errors
+    );
+    let error = &results.errors[0];
+    assert!(
+        error.file.ends_with("bad.rb"),
+        "the failure should name the unreadable file, got {:?}",
+        error.file
+    );
+}
+
+/// A directory whose own name is not valid UTF-8 is still a real directory:
+/// discovery and the harness must keep the `Path` rather than round-tripping
+/// the path through lossy text and looking somewhere else.
+#[cfg(unix)]
+#[test]
+fn edge_non_utf8_directory_path_is_discovered_and_run() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = scratch_dir("non-utf8-path");
+    let dir = parent.join(OsStr::from_bytes(b"suite-\xff"));
+    fs::create_dir_all(&dir).expect("non-UTF-8 scratch dir should be creatable");
+    write_file(&dir, "only.rb", b"// test \"non utf8 path\"\n// end\n");
+
+    let found = find_test_files(&dir).expect("non-UTF-8 directory should be searched");
+    assert_eq!(found.len(), 1, "expected the .rb file, got {:?}", found);
+    assert!(
+        found[0].ends_with("only.rb"),
+        "expected only.rb to be collected, got {:?}",
+        found[0]
+    );
+
+    let results = redblue::testing::run_tests_in(&dir).expect("the suite should run");
+    assert_eq!(
+        (results.total, results.passed, results.failed),
+        (1, 1, 0),
+        "non-UTF-8 directory test did not pass cleanly: {:?}",
+        results.errors
     );
 }
 
@@ -393,5 +549,673 @@ fn edge_rb_path_with_spaces_is_discovered_and_run() {
         (1, 1, 0),
         "spaced-path test did not pass cleanly: {:?}",
         results.errors
+    );
+}
+/// A fresh, empty directory under the project's own `target/tmp/`.
+fn scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/tmp/project-test")
+        .join(name);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("scratch dir should be creatable");
+    dir
+}
+
+/// A fresh, empty directory outside every Redblue project, removed on drop.
+///
+/// `TMPDIR` is caller-controlled and may point inside the checkout, so the
+/// system temp directory alone cannot guarantee "outside a project": discovery
+/// walks every ancestor. Starting there, climb above the outermost project that
+/// contains it, then assert the result really has no manifest above it.
+struct OutsideScratch {
+    path: PathBuf,
+}
+
+impl OutsideScratch {
+    fn new(name: &str) -> Self {
+        let mut base = std::env::temp_dir();
+        while let Some(root) = find_project_root(&base) {
+            let Some(parent) = root.parent() else {
+                break;
+            };
+            base = parent.to_path_buf();
+        }
+
+        let path = base
+            .join("rb-redblue-discovery")
+            .join(format!("{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("outside scratch dir should be creatable");
+        assert!(
+            find_project_root(&path).is_none(),
+            "{} is inside a Redblue project, so it cannot test `rb test` outside one",
+            path.display()
+        );
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for OutsideScratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// The `rb` binary under test.
+fn rb() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_rb"))
+}
+
+/// Runs `rb` in `dir` with `args`.
+fn run_in(dir: &Path, args: &[&str]) -> Output {
+    rb().current_dir(dir)
+        .args(args)
+        .output()
+        .expect("rb should be runnable")
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// End-to-end: `rb new hello` writes the layout, its manifest parses through
+/// phase-044's schema, and bare `rb test` inside it runs the scaffolded test.
+#[test]
+fn rb_new_scaffolds_a_project_that_tests_green() {
+    let parent = scratch("scaffold");
+
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        created.status.success(),
+        "`rb new hello` failed: {}",
+        stderr(&created)
+    );
+
+    let root = parent.join("hello");
+    let manifest_path = root.join("redblue.manifest");
+    let entry = root.join("src/main.rb");
+    let tests = root.join("tests/main_test.rb");
+    for path in [&manifest_path, &entry, &tests] {
+        assert!(path.is_file(), "expected {} to exist", path.display());
+    }
+
+    let text = fs::read_to_string(&manifest_path).expect("manifest should be readable");
+    let parsed = manifest::parse_manifest(&text)
+        .unwrap_or_else(|error| panic!("fresh manifest is not valid: {error}"));
+    assert_eq!(parsed.name.as_deref(), Some("hello"));
+    assert_eq!(
+        parsed.version.map(|v| v.to_string()).as_deref(),
+        Some("0.1.0")
+    );
+    assert!(
+        parsed.dependencies.is_empty(),
+        "`rb new` must not invent dependencies: {:?}",
+        parsed.dependencies
+    );
+
+    let entry_ran = run_in(&root, &["run", "src/main.rb"]);
+    assert!(
+        entry_ran.status.success(),
+        "the scaffolded entry point does not run: {}{}",
+        stdout(&entry_ran),
+        stderr(&entry_ran)
+    );
+    assert!(
+        stdout(&entry_ran).contains("Hello from hello"),
+        "the scaffolded entry point did not greet the project: {}",
+        stdout(&entry_ran)
+    );
+
+    let ran = run_in(&root, &["test"]);
+    assert!(
+        ran.status.success(),
+        "`rb test` in a fresh project failed: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    assert!(
+        stdout(&ran).contains("Passed: 1"),
+        "the scaffolded test did not run: {}",
+        stdout(&ran)
+    );
+}
+
+/// `rb new` must never merge into occupied ground. The refused directory keeps
+/// the file it already had, and no scaffold file appears beside it.
+#[test]
+fn edge_rb_new_refuses_an_existing_non_empty_directory() {
+    let parent = scratch("occupied");
+    let root = parent.join("hello");
+    fs::create_dir_all(&root).expect("fixture dir");
+    fs::write(root.join("keep.txt"), b"mine\n").expect("fixture file");
+
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        !created.status.success(),
+        "`rb new` into an occupied directory must fail, got: {}{}",
+        stdout(&created),
+        stderr(&created)
+    );
+    assert!(
+        stderr(&created).contains("hello"),
+        "the refusal must name the directory, got: {}",
+        stderr(&created)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("keep.txt")).expect("file survives"),
+        "mine\n",
+        "`rb new` overwrote an existing file"
+    );
+    assert!(
+        !root.join("redblue.manifest").exists(),
+        "`rb new` wrote a manifest into occupied ground"
+    );
+}
+
+/// A file in the project's place is not occupied ground to merge into: the
+/// scaffold is refused and the file is left untouched.
+#[test]
+fn edge_rb_new_refuses_a_file_named_after_the_project() {
+    let parent = scratch("file-in-the-way");
+    let root = parent.join("hello");
+    fs::write(&root, b"not a directory\n").expect("fixture file");
+
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        !created.status.success(),
+        "`rb new` over a file must fail, got: {}{}",
+        stdout(&created),
+        stderr(&created)
+    );
+    assert!(
+        stderr(&created).contains("not a directory"),
+        "the refusal should explain that the path is not a directory, got: {}",
+        stderr(&created)
+    );
+    assert_eq!(
+        fs::read_to_string(&root).expect("fixture file survives"),
+        "not a directory\n",
+        "`rb new` overwrote the file in its way"
+    );
+    assert!(
+        !root.join("redblue.manifest").exists(),
+        "`rb new` tried to build a project inside a file"
+    );
+}
+
+/// An existing empty directory is not occupied ground, so it is accepted and
+/// the scaffold is written into it.
+#[test]
+fn edge_rb_new_accepts_an_existing_empty_directory() {
+    let parent = scratch("empty-existing");
+    let root = parent.join("hello");
+    fs::create_dir_all(&root).expect("fixture dir");
+
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        created.status.success(),
+        "`rb new` into an empty directory must succeed, got: {}{}",
+        stdout(&created),
+        stderr(&created)
+    );
+    for path in [
+        root.join("redblue.manifest"),
+        root.join("src/main.rb"),
+        root.join("tests/main_test.rb"),
+    ] {
+        assert!(path.is_file(), "expected {} to exist", path.display());
+    }
+
+    let ran = run_in(&root, &["test"]);
+    assert!(
+        ran.status.success(),
+        "`rb test` in the accepted empty directory failed: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    assert!(
+        stdout(&ran).contains("Passed: 1"),
+        "the scaffolded test did not run: {}",
+        stdout(&ran)
+    );
+}
+
+/// A missing name is a usage error, not a project called ``.
+#[test]
+fn edge_rb_new_without_a_name_is_a_usage_error() {
+    let parent = scratch("no-name");
+
+    let created = run_in(&parent, &["new"]);
+    assert!(
+        !created.status.success(),
+        "bare `rb new` must fail, got: {}{}",
+        stdout(&created),
+        stderr(&created)
+    );
+    assert!(
+        stderr(&created).contains("project name"),
+        "the error should say a name is needed, got: {}",
+        stderr(&created)
+    );
+    assert_eq!(
+        fs::read_dir(&parent).expect("scratch dir").count(),
+        0,
+        "bare `rb new` created something in the working directory"
+    );
+}
+
+/// A name carrying a path separator is refused and creates nothing anywhere:
+/// the scaffold stays in the working directory or does not happen at all.
+#[test]
+fn edge_rb_new_with_a_path_separator_is_refused_in_place() {
+    let parent = scratch("separator");
+
+    let created = run_in(&parent, &["new", "nested/hello"]);
+    assert!(
+        !created.status.success(),
+        "`rb new nested/hello` must be refused, got: {}{}",
+        stdout(&created),
+        stderr(&created)
+    );
+    assert!(
+        stderr(&created).contains("path separator"),
+        "the refusal should name the path separator, got: {}",
+        stderr(&created)
+    );
+    assert!(
+        !parent.join("nested").exists(),
+        "`rb new` created a directory outside the working directory"
+    );
+    assert!(
+        !parent.join("hello").exists(),
+        "`rb new` created the leaf in the working directory"
+    );
+    assert_eq!(
+        fs::read_dir(&parent).expect("scratch dir").count(),
+        0,
+        "the refused scaffold left files behind"
+    );
+}
+
+/// Outside any project, bare `rb test` is a clean error naming `rb new`, not a
+/// silent success that ran nothing.
+#[test]
+fn edge_rb_test_outside_a_project_names_rb_new() {
+    let dir = OutsideScratch::new("outside");
+
+    let ran = run_in(dir.path(), &["test"]);
+    assert!(
+        !ran.status.success(),
+        "`rb test` outside a project must fail, got: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    assert!(
+        stderr(&ran).contains("rb new"),
+        "the error should tell the reader about `rb new`, got: {}",
+        stderr(&ran)
+    );
+}
+
+/// Root discovery walks up: from three directories inside `src/`, bare
+/// `rb test` finds the project root and runs the root's `tests/` directory.
+#[test]
+fn edge_rb_test_walks_up_from_a_nested_directory() {
+    let parent = scratch("walk-up");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    let deep = root.join("src/a/b");
+    fs::create_dir_all(&deep).expect("nested fixture dirs");
+
+    let ran = run_in(&deep, &["test"]);
+    assert!(
+        ran.status.success(),
+        "`rb test` from a nested directory failed: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    assert!(
+        stdout(&ran).contains("Passed: 1"),
+        "the project's own test did not run from a nested directory: {}",
+        stdout(&ran)
+    );
+}
+
+/// A path with `..` components is canonicalised before the walk, so it answers
+/// the project root itself rather than a path that still contains the parent
+/// components.
+#[test]
+fn edge_project_root_canonicalises_parent_components() {
+    let parent = scratch("root-dotdot");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    let deep = root.join("src/a/b");
+    fs::create_dir_all(&deep).expect("nested fixture dirs");
+
+    let found = find_project_root(&deep.join("../../..")).expect("project root should be found");
+    let expected = fs::canonicalize(&root).expect("fixture root should canonicalise");
+    assert_eq!(
+        found, expected,
+        "root discovery should answer the canonical project root"
+    );
+}
+
+/// A project with no test files is a failure, not a report of zero tests that
+/// exits successfully. A missing `tests/` and an empty one both say so.
+#[test]
+fn edge_rb_test_in_a_project_with_no_test_files_fails() {
+    for (name, remove_directory) in [("no-tests-dir", true), ("empty-tests-dir", false)] {
+        let parent = scratch(name);
+        let created = run_in(&parent, &["new", "hello"]);
+        assert!(created.status.success(), "{}", stderr(&created));
+
+        let root = parent.join("hello");
+        let tests = root.join("tests");
+        if remove_directory {
+            fs::remove_dir_all(&tests).expect("fixture tests dir");
+        } else {
+            for entry in fs::read_dir(&tests).expect("fixture tests dir") {
+                let path = entry.expect("tests entry").path();
+                fs::remove_file(path).expect("fixture test file");
+            }
+        }
+
+        let ran = run_in(&root, &["test"]);
+        assert!(
+            !ran.status.success(),
+            "`rb test` with no test files must fail, got: {}{}",
+            stdout(&ran),
+            stderr(&ran)
+        );
+        assert!(
+            stderr(&ran).contains("No Redblue test files"),
+            "the error should say no test files were found, got: {}",
+            stderr(&ran)
+        );
+    }
+}
+
+/// A `tests/` directory with `.rb` files but no `test` blocks has executed
+/// nothing, so `rb test` must fail instead of reporting a zero-test success.
+#[test]
+fn edge_rb_test_that_defines_no_tests_fails() {
+    let cases = [
+        ("comment-only", b"// nothing here\n".as_slice()),
+        ("empty-file", b"".as_slice()),
+    ];
+
+    for (name, contents) in cases {
+        let parent = scratch(&format!("zero-tests-{name}"));
+        let created = run_in(&parent, &["new", "hello"]);
+        assert!(created.status.success(), "{}", stderr(&created));
+
+        let root = parent.join("hello");
+        fs::write(root.join("tests/main_test.rb"), contents).expect("fixture suite");
+
+        let ran = run_in(&root, &["test"]);
+        assert!(
+            !ran.status.success(),
+            "`rb test` with zero defined tests must fail for {name}, got: {}{}",
+            stdout(&ran),
+            stderr(&ran)
+        );
+        assert!(
+            stderr(&ran).contains("No tests were defined"),
+            "the error should say no tests were defined for {name}, got: {}",
+            stderr(&ran)
+        );
+    }
+}
+
+/// The explicit-path form has the same zero-execution guard as the project
+/// form: `rb test empty.rb` must not exit 0 after defining no tests.
+#[test]
+fn edge_rb_test_with_a_path_that_defines_no_tests_fails() {
+    for (name, contents) in [
+        ("comment-only", b"// nothing here\n".as_slice()),
+        ("empty-file", b"".as_slice()),
+    ] {
+        let parent = scratch(&format!("explicit-zero-tests-{name}"));
+        let created = run_in(&parent, &["new", "hello"]);
+        assert!(created.status.success(), "{}", stderr(&created));
+
+        let root = parent.join("hello");
+        fs::write(root.join("empty.rb"), contents).expect("fixture file");
+
+        let ran = run_in(&root, &["test", "empty.rb"]);
+        assert!(
+            !ran.status.success(),
+            "`rb test <file>` with zero defined tests must fail for {name}, got: {}{}",
+            stdout(&ran),
+            stderr(&ran)
+        );
+        assert!(
+            stderr(&ran).contains("No tests were defined"),
+            "the error should say no tests were defined for {name}, got: {}",
+            stderr(&ran)
+        );
+    }
+}
+
+/// A project whose manifest does not parse is refused before any test runs,
+/// naming the manifest and the offending line.
+#[test]
+fn edge_rb_test_with_a_malformed_manifest_names_the_file_and_line() {
+    let parent = scratch("malformed-manifest");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    let manifest_path = root.join("redblue.manifest");
+    fs::write(&manifest_path, "name hello\nbogus value\n").expect("fixture manifest");
+
+    let ran = run_in(&root, &["test"]);
+    assert!(
+        !ran.status.success(),
+        "a malformed manifest must fail `rb test`, got: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let message = stderr(&ran);
+    assert!(
+        message.contains("redblue.manifest"),
+        "the error should name the manifest, got: {message}"
+    );
+    assert!(
+        message.contains("line 2"),
+        "the error should name the offending line, got: {message}"
+    );
+}
+
+/// `rb test <path>` keeps its old meaning: it runs exactly that file, even
+/// inside a project whose own `tests/` would fail.
+#[test]
+fn edge_rb_test_with_a_path_runs_only_that_file() {
+    let parent = scratch("explicit-path");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("tests/main_test.rb"),
+        "test \"project suite\"\n    expect 1 to be 2\nend\n",
+    )
+    .expect("fixture suite");
+    fs::write(
+        root.join("passing.rb"),
+        "test \"explicit\"\n    expect 1 + 1 to be 2\nend\n",
+    )
+    .expect("fixture file");
+
+    let ran = run_in(&root, &["test", "passing.rb"]);
+    assert!(
+        ran.status.success(),
+        "`rb test <path>` must run only the named file: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+}
+
+/// The explicit-path form still runs exactly the named file, and a failure
+/// names the file it ran instead of the old generic `inline` label.
+#[test]
+fn edge_rb_test_with_a_path_names_the_file_in_failure_output() {
+    let parent = scratch("explicit-path-failure");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("failing.rb"),
+        "test \"explicit failure\"\n    expect 1 to be 2\nend\n",
+    )
+    .expect("fixture file");
+
+    let ran = run_in(&root, &["test", "failing.rb"]);
+    assert!(
+        !ran.status.success(),
+        "a failing explicit file must exit non-zero: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        output.contains("explicit failure"),
+        "the failure output must name the failing test, got: {output}"
+    );
+    assert!(
+        output.contains("Location:") && output.contains("failing.rb"),
+        "the failure output must point at the named file, got: {output}"
+    );
+}
+
+/// A whole-file parse failure still names the file and the line it came from;
+/// discarding the error's span would leave the reader at `Location: unknown`.
+#[test]
+fn edge_rb_test_with_a_path_reports_a_parse_failure_file_and_line() {
+    let parent = scratch("explicit-path-parse-failure");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("broken.rb"),
+        "test \"broken\"\n    expect x to be\nend\n",
+    )
+    .expect("fixture file");
+
+    let ran = run_in(&root, &["test", "broken.rb"]);
+    assert!(
+        !ran.status.success(),
+        "a file that does not parse must fail: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        output.contains("broken.rb:2"),
+        "the failure must name the file and line, got: {output}"
+    );
+}
+
+/// A failing project suite must say which test failed and why, not only print
+/// a count. The count alone leaves the reader unable to find the failure.
+#[test]
+fn edge_rb_test_reports_the_failing_test_name_and_assertion() {
+    let parent = scratch("failing-report");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("tests/main_test.rb"),
+        "test \"math works\"\n    expect 1 + 1 to be 3\nend\n",
+    )
+    .expect("fixture suite");
+
+    let ran = run_in(&root, &["test"]);
+    assert!(
+        !ran.status.success(),
+        "a failing project suite must exit non-zero: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        output.contains("math works"),
+        "the failure output must name the failing test, got: {output}"
+    );
+    assert!(
+        output.contains("FAILED"),
+        "the failure output must mark the test as failed, got: {output}"
+    );
+    assert!(
+        output.contains("Location:") && output.contains("main_test.rb"),
+        "the failure output must point at the test file, got: {output}"
+    );
+    assert!(
+        output.contains("Error:"),
+        "the failure output must carry the assertion message, got: {output}"
+    );
+}
+
+/// Every failure is reported, not just the first one. A runner that stops at
+/// the first failure hides the rest of the suite behind a rerun loop.
+#[test]
+fn edge_rb_test_reports_every_failing_test_not_just_the_first() {
+    let parent = scratch("all-failures");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(created.status.success(), "{}", stderr(&created));
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("tests/main_test.rb"),
+        "test \"first failure\"\n    expect 1 to be 2\nend\n\n\
+         test \"second failure\"\n    expect 3 to be 4\nend\n",
+    )
+    .expect("fixture suite");
+
+    let ran = run_in(&root, &["test"]);
+    assert!(
+        !ran.status.success(),
+        "a suite with two failures must exit non-zero: {}{}",
+        stdout(&ran),
+        stderr(&ran)
+    );
+    let output = format!("{}{}", stdout(&ran), stderr(&ran));
+    for name in ["first failure", "second failure"] {
+        assert!(
+            output.contains(name),
+            "the failure report must name {name:?}, got: {output}"
+        );
+    }
+}
+
+/// An empty project name is refused before any directory is created.
+#[test]
+fn edge_create_project_refuses_an_empty_name() {
+    let parent = scratch("empty-project-name");
+    let result = redblue::project::create_project(&parent, "");
+    assert!(
+        result.is_err(),
+        "an empty project name must be an error, got: {:?}",
+        result
+    );
+    assert_eq!(
+        fs::read_dir(&parent).expect("scratch dir").count(),
+        0,
+        "a refused name must not leave a directory behind"
     );
 }

@@ -17,6 +17,7 @@ pub mod manifest;
 mod matrix;
 pub mod parser;
 pub mod path;
+pub mod project;
 pub mod repl;
 mod runtime;
 pub mod statistics;
@@ -151,23 +152,72 @@ pub fn run_repl() {
     repl.run();
 }
 
-pub fn run_test(path: Option<&str>) -> Result<(), Error> {
-    let mut harness = testing::TestHarness::new();
+/// Rejects a run that executed nothing, whichever form of `rb test` asked for
+/// it. A file or project that defines no `test` blocks has verified nothing, so
+/// a zero failure count must not let the process exit 0.
+fn reject_zero_test_run(total: usize, location: &str) -> Result<(), Error> {
+    if total == 0 {
+        return Err(Error::Io(format!(
+            "No tests were defined in '{}'",
+            location
+        )));
+    }
+    Ok(())
+}
 
+pub fn run_test(path: Option<&str>) -> Result<(), Error> {
     match path {
         Some(p) => {
+            let mut harness = testing::TestHarness::new();
             harness.run_file(p)?;
+            let results = harness.results();
+            // The explicit-path form shares the zero-execution guard with the
+            // project form: a file with no `test` blocks is not a passing suite.
+            reject_zero_test_run(results.total, p)?;
             // Report the failures and exit non-zero. Without this a failing
             // `expect` printed only a dot/F and still exited 0.
-            testing::PrettyReporter::new().report(&harness.results());
+            testing::PrettyReporter::new().report(&results);
         }
         None => {
-            let results = testing::run_all_tests()?;
+            // Bare `rb test` is about the project the caller is standing in,
+            // not about whichever `tests/` happens to be in the working
+            // directory. The walk finds the nearest manifest at or above the
+            // working directory, so `rb test` from `src/` still runs the
+            // project's own suite.
+            let cwd = env::current_dir().map_err(|error| {
+                Error::Io(format!("Cannot read the working directory: {error}"))
+            })?;
+            let root = project::find_project_root(&cwd).ok_or_else(|| {
+                Error::Runtime(
+                    "No Redblue project found here: run `rb new <name>` to create one".to_string(),
+                    Span::unknown(),
+                )
+            })?;
+            project::check_manifest(&root)?;
+
+            let tests = project::tests_dir(&root);
+            if testing::find_test_files(&tests)?.is_empty() {
+                return Err(Error::Io(format!(
+                    "No Redblue test files found in '{}'",
+                    tests.display()
+                )));
+            }
+
+            let results = testing::run_tests_in(&tests)?;
+            // A run that executed nothing is not a passing suite. A `tests/`
+            // holding only comment-only or empty `.rb` files passes the
+            // file-count check above but defines no `test` blocks, and a zero
+            // failure count would otherwise let the process exit 0 having
+            // verified nothing.
+            reject_zero_test_run(results.total, &tests.display().to_string())?;
             println!("Tests run: {}", results.total);
             println!("Passed: {}", results.passed);
             println!("Failed: {}", results.failed);
             if results.failed > 0 {
-                process::exit(1);
+                // The counts alone do not say which test failed or why. The
+                // same reporter the explicit-path form uses prints the failure
+                // detail and exits non-zero.
+                testing::PrettyReporter::new().report(&results);
             }
         }
     }
@@ -190,6 +240,12 @@ pub fn run_cli() {
                         eprintln!("Error: {}", e);
                         process::exit(1);
                     }
+                }
+                // Bare `rb new` names no project, and guessing one would create
+                // a directory the caller did not ask for.
+                "new" => {
+                    eprintln!("Error: `rb new` needs a project name, as in `rb new hello`");
+                    process::exit(1);
                 }
                 "grammar" => print!("{}", textmate_grammar()),
                 "keywords" => {
@@ -231,6 +287,22 @@ pub fn run_cli() {
             let cmd = &args[1];
             let path = &args[2];
             match cmd.as_str() {
+                "new" => {
+                    let cwd = match env::current_dir() {
+                        Ok(cwd) => cwd,
+                        Err(error) => {
+                            eprintln!("Error: Cannot read the working directory: {}", error);
+                            process::exit(1);
+                        }
+                    };
+                    match project::create_project(&cwd, path) {
+                        Ok(root) => println!("Created project {} at {}", path, root.display()),
+                        Err(error) => {
+                            eprintln!("Error: {}", error);
+                            process::exit(1);
+                        }
+                    }
+                }
                 "test" => {
                     if let Err(e) = run_test(Some(path)) {
                         eprintln!("Error: {}", e);
@@ -573,7 +645,8 @@ fn print_help() {
     println!("  rb              Start interactive REPL");
     println!("  rb <file>      Run a Redblue file");
     println!("  rb run <file>  Run a Redblue file");
-    println!("  rb test        Run all tests");
+    println!("  rb new <name>  Create a project with src/, tests/ and a manifest");
+    println!("  rb test        Run the current project's tests");
     println!("  rb test <file> Run specific test file");
     println!("  rb format <file>  Format a Redblue file");
     println!("  rb format --check <file>  Check if file needs formatting");

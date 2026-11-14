@@ -4,11 +4,13 @@ use crate::lexer::Lexer;
 use crate::parser::{Parser, Program, Stmt};
 use crate::testing::{TestError, TestFailure, TestResults};
 use std::collections::HashMap;
+use std::path::Path;
 
 pub struct TestHarness {
     results: TestResults,
     _globals: HashMap<String, crate::value::Value>,
     _test_context: HashMap<String, crate::value::Value>,
+    source_name: String,
 }
 
 impl TestHarness {
@@ -17,6 +19,7 @@ impl TestHarness {
             results: TestResults::new(),
             _globals: crate::stdlib::builtins(),
             _test_context: HashMap::new(),
+            source_name: "inline".to_string(),
         }
     }
 
@@ -59,11 +62,18 @@ impl TestHarness {
         Ok(())
     }
 
-    pub fn run_file(&mut self, path: &str) -> Result<()> {
+    pub fn run_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
         let source = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io(format!("Failed to read {}: {}", path, e)))?;
+            .map_err(|e| Error::Io(format!("Failed to read {}: {}", path.display(), e)))?;
 
-        self.run_source(&source)
+        // A failure in a file should name that file, not every file as
+        // "inline". The name is restored afterwards so one harness can run
+        // several files without the second inheriting the first's label.
+        let previous = std::mem::replace(&mut self.source_name, path.display().to_string());
+        let result = self.run_source(&source);
+        self.source_name = previous;
+        result
     }
 
     /// Runs every `test "..." ... end` block the parser found in `source`.
@@ -81,7 +91,7 @@ impl TestHarness {
                 // marker scan below owns that file. When a real block *was*
                 // asked for and cannot be read, that is a failure, not silence.
                 if declares_test_block(source) {
-                    self.add_error(e.to_string());
+                    self.add_source_error(&e);
                 }
                 return;
             }
@@ -136,7 +146,7 @@ impl TestHarness {
             Err(TestFailure::Assertion(failure)) => {
                 self.results.add_fail(TestError {
                     test_name: name.to_string(),
-                    file: "inline".to_string(),
+                    file: self.source_name.clone(),
                     line: Some(line),
                     message: failure.message.clone(),
                     expected: failure.expected.clone(),
@@ -147,7 +157,7 @@ impl TestHarness {
             Err(TestFailure::Error(e)) => {
                 self.results.add_fail(TestError {
                     test_name: name.to_string(),
-                    file: "inline".to_string(),
+                    file: self.source_name.clone(),
                     line: Some(line),
                     message: e.to_string(),
                     expected: None,
@@ -229,12 +239,30 @@ impl TestHarness {
         run.map(|_| ()).map_err(TestFailure::Error)
     }
 
-    pub fn add_error(&mut self, error: String) {
+    /// Records a whole-file lex/parse failure against the file it came from.
+    ///
+    /// The error still knows where it happened, so discarding its span would
+    /// turn a located syntax error into `Location: unknown` with no line.
+    fn add_source_error(&mut self, error: &Error) {
+        let file = self.source_name.clone();
+        self.add_located_error(&file, error);
+    }
+
+    /// Records an error raised while `run_file` was reading or running `path`.
+    ///
+    /// `run_file` restores the previous source label before returning, so the
+    /// caller cannot rely on `source_name` to name the file that failed. This
+    /// takes the path explicitly and keeps any span the error carried.
+    pub fn add_source_error_at(&mut self, path: &Path, error: &Error) {
+        self.add_located_error(&path.display().to_string(), error);
+    }
+
+    fn add_located_error(&mut self, file: &str, error: &Error) {
         self.results.add_fail(TestError {
             test_name: "File execution".to_string(),
-            file: "unknown".to_string(),
-            line: None,
-            message: error,
+            file: file.to_string(),
+            line: error.span().map(|span| span.line),
+            message: error.to_string(),
             expected: None,
             actual: None,
         });
