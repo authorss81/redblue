@@ -1920,6 +1920,129 @@ fn iteration_count(name: &str, count: f64, span: Span) -> Result<usize> {
     Ok(count.trunc() as usize)
 }
 
+/// The value `sort` compares for one item: the item itself, or the named field
+/// when a field was given.
+fn sort_key(span: Span, value: &Value, field: Option<&str>) -> Result<Value> {
+    let Some(field) = field else {
+        return Ok(value.clone());
+    };
+    match value {
+        Value::Record(fields) | Value::Object(_, fields) => {
+            fields.get(field).cloned().ok_or_else(|| {
+                Error::Runtime(
+                    format!("sort has no field '{field}' on a {}", value.type_name()),
+                    span,
+                )
+            })
+        }
+        _ => Err(Error::Runtime(
+            format!(
+                "sort with a field requires records, but was given a {}",
+                value.type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+/// Whether `sort` has a natural ascending order for a value of this kind.
+fn sortable_kind(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Number(_)
+            | Value::Text(_)
+            | Value::YesNo(_)
+            | Value::Decimal(_)
+            | Value::Date(_)
+            | Value::Duration(_)
+    )
+}
+
+/// The ascending order of two values of the same kind.
+///
+/// The caller has already refused a mixed list, so this compares like with
+/// like. `None` from `partial_cmp` cannot happen for a `Value::Number`, because
+/// `Value::number` refuses a non-finite number, but it is reported rather than
+/// treated as equal so a future value cannot sort by accident.
+fn sort_order(span: Span, left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
+    let ordering = match (left, right) {
+        (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
+        (Value::Text(a), Value::Text(b)) => Some(a.cmp(b)),
+        (Value::YesNo(a), Value::YesNo(b)) => Some(a.cmp(b)),
+        (Value::Decimal(a), Value::Decimal(b)) => Some(
+            a.compare(*b)
+                .map_err(|message| Error::Runtime(message, span))?,
+        ),
+        (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
+        (Value::Duration(a), Value::Duration(b)) => Some(a.cmp(b)),
+        _ => {
+            return Err(Error::Runtime(
+                format!("sort cannot order a {}", left.type_name()),
+                span,
+            ))
+        }
+    };
+    ordering.ok_or_else(|| Error::Runtime("sort cannot order these numbers".to_string(), span))
+}
+
+/// `sort(list)` and `sort(list, field)`, with a stable sort.
+///
+/// Rust's `sort_by` is stable, so two records sharing a field value keep the
+/// order they had in the input. A list that mixes kinds is refused by name
+/// instead of being ordered across kinds: there is no defensible answer to
+/// "is a text before a number", and inventing one would make the answer depend
+/// on the shape of the list rather than on its values.
+fn sorted_list(span: Span, items: &[Value], field: Option<&str>) -> Result<Value> {
+    if items.is_empty() {
+        return Ok(Value::list(Vec::new()));
+    }
+    let mut keyed: Vec<(Value, Value)> = items
+        .iter()
+        .map(|item| {
+            let key = sort_key(span, item, field)?;
+            Ok((key, item.clone()))
+        })
+        .collect::<Result<_>>()?;
+    let first_kind = keyed[0].0.type_name();
+    for (key, _) in &keyed {
+        if key.type_name() != first_kind {
+            return Err(Error::Runtime(
+                format!(
+                    "sort cannot order a {} and a {} together",
+                    first_kind,
+                    key.type_name()
+                ),
+                span,
+            ));
+        }
+    }
+    if !sortable_kind(&keyed[0].0) {
+        return Err(Error::Runtime(
+            format!("sort cannot order a {}", first_kind),
+            span,
+        ));
+    }
+    let mut failure = None;
+    keyed.sort_by(|(left, _), (right, _)| {
+        if failure.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match sort_order(span, left, right) {
+            Ok(ordering) => ordering,
+            Err(error) => {
+                failure = Some(error);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(Value::list(
+        keyed.into_iter().map(|(_, item)| item).collect(),
+    ))
+}
+
 /// The most pairs one `product` call may materialise.
 ///
 /// A builtin call is charged as one step, so the step budget cannot stop a
@@ -3349,6 +3472,26 @@ pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Option<Value>> 
             }
             _ => Err(Error::Runtime(
                 "skip requires a list and a number".to_string(),
+                span,
+            )),
+        },
+        // `sort` is stable, and a field name is the one-argument key selector:
+        // records that share a field value keep their input order. The list is
+        // copied, because Redblue lists are values and a sort returns a new one.
+        "sort" => match args {
+            [Value::List(items)] => sorted_list(span, items, None).map(Some),
+            [Value::List(items), Value::Text(field)] => {
+                sorted_list(span, items, Some(field)).map(Some)
+            }
+            _ => Err(Error::Runtime(
+                "sort requires a list and an optional field name".to_string(),
+                span,
+            )),
+        },
+        "reverse" => match args {
+            [Value::List(items)] => Ok(Some(Value::list(items.iter().rev().cloned().collect()))),
+            _ => Err(Error::Runtime(
+                "reverse requires one list".to_string(),
                 span,
             )),
         },

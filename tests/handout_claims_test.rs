@@ -3,8 +3,7 @@
 //! Every ```redblue block in HANDOUT.md used to name functions that do not
 //! exist: `formats.parse_json` and `list.filter`. `formats` was corrected away
 //! deliberately in phase-050 — JSON and CSV are their own modules — and
-//! `list.filter` has never been implemented. Both examples therefore could not
-//! run, and nothing noticed, because nothing executed them.
+//! `list.filter` was implemented by phase-077, so it is now ordinary surface.
 //!
 //! This test is the thing that notices. It asserts, for each function HANDOUT
 //! documents, that the call is actually answerable — and that a name which does
@@ -22,14 +21,13 @@ const DOCUMENTED: &[(&str, &str)] = &[
     ("list", "length"),
 ];
 
-/// The two that used to be documented and do not exist.
+/// The one that used to be documented and does not exist.
 ///
-/// Both are asserted to still be absent by
-/// `edge_the_wrongly_documented_names_stay_wrong`. That is the point of keeping
-/// them: a future phase that legitimately adds `list.filter` will fail this test,
-/// and that failure is the prompt to update the tutorial and delete the entry -
-/// not something to silence.
-const WRONGLY_DOCUMENTED: &[(&str, &str)] = &[("formats", "parse_json"), ("list", "filter")];
+/// It is asserted to still be absent by
+/// `edge_the_wrongly_documented_names_stay_wrong`. `list.filter` was the other
+/// entry: phase-077 implemented it, so it left this list and joined the
+/// documented surface the tests above check.
+const WRONGLY_DOCUMENTED: &[(&str, &str)] = &[("formats", "parse_json")];
 
 /// The registry as the rest of the suite sees it.
 fn module_members() -> Vec<(&'static str, &'static [&'static str])> {
@@ -152,21 +150,22 @@ fn a_module_that_does_not_exist_is_refused_rather_than_resolved() {
 
 #[test]
 fn a_member_that_does_not_exist_is_refused_rather_than_silently_accepted() {
-    // `list.filter` was documented and never implemented. This is the check
-    // that would have caught it: the call must fail rather than return nothing
-    // and leave the tutorial looking fine.
+    // `list.filter` was the name this test was written for; it now answers, so
+    // the same check uses a member the list surface still does not have. The
+    // call must fail rather than return nothing and leave a tutorial looking
+    // fine.
     must_be_refused(
-        r#"set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0)"#,
-        "`list.filter`, which HANDOUT.md used to document and was never implemented",
+        r#"set total to list.sum([1, 2, 3])"#,
+        "`list.sum`, which is not a member of `list`",
     );
 }
 
 #[test]
 fn edge_the_wrongly_documented_names_stay_wrong() {
-    // The correction to HANDOUT.md is only safe while these two really do not
-    // exist. If a later phase adds `list.filter` or reintroduces a `formats`
-    // namespace, this fails - which is the signal to put the example back in the
-    // tutorial and drop the entry, rather than to delete the test.
+    // The correction to HANDOUT.md is only safe while the entry really does not
+    // exist. If a later phase reintroduces a `formats` namespace, this fails -
+    // which is the signal to put the example back in the tutorial and drop the
+    // entry, rather than to delete the test.
     let registry = module_members();
     for (module, member) in WRONGLY_DOCUMENTED {
         if !MODULES.contains(module) {

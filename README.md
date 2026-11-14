@@ -421,6 +421,10 @@ timestamps are turned off for deterministic output.
 ```
 list.map(xs, to (x) give back x * 2)  // every member, through a function
 list.length([1, 2, 3])                 // 3
+list.filter(xs, to (x) give back x > 1 end)  // keep what the predicate accepts
+list.reduce([1, 2, 3], to (a, b) give back a + b end, 0)  // fold, with a start
+list.sort([3, 1, 2])                   // [1, 2, 3], stably
+list.reverse([1, 2, 3])                // [3, 2, 1]
 length(xs), push(xs, x)                // flat list builtins
 ```
 

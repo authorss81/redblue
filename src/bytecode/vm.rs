@@ -439,27 +439,39 @@ struct Frame {
     /// The decorated function this frame's eventual value belongs to, and the
     /// arguments it was called with. `None` for a call that is not decorated.
     cache: Option<(FunctionValue, Vec<Value>)>,
-    /// A `map` this frame started and has not finished.
+    /// A higher-order list call this frame started and has not finished.
     ///
-    /// The map's callee is always the frame directly above this one, because
-    /// the frame is blocked at the `CALL` until every element has been mapped —
-    /// so "is this frame mapping?" needs no index and no counter. A frame that
-    /// started a map and is then abandoned by a failure gives it up with
-    /// itself; see [`BytecodeVm::start_map`].
-    pending_map: Option<PendingMap>,
+    /// The call's callee is always the frame directly above this one, because
+    /// the frame is blocked at the `CALL` until every element has been handled
+    /// — so "is this frame running one?" needs no index and no counter. A frame
+    /// that started a call and is then abandoned by a failure gives it up with
+    /// itself; see [`BytecodeVm::start_list_call`].
+    pending_list_call: Option<PendingListCall>,
 }
 
-/// A `map` in progress: what is left to apply the function to, what it has
-/// answered so far, and the function itself.
+/// Which higher-order list call is in progress.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingListKind {
+    Map,
+    Filter,
+    Reduce,
+}
+
+/// A higher-order list call in progress: what is left to apply the function
+/// to, what it has answered so far, and the function itself.
 ///
 /// Held by the frame that wrote the `CALL` rather than by the callee, so the
-/// element that just finished hands over to the next one from where the map was
-/// started. See [`BytecodeVm::start_map`] for why that is not a Rust stack.
-struct PendingMap {
+/// element that just finished hands over to the next one from where the call
+/// was started. See [`BytecodeVm::start_list_call`] for why that is not a Rust
+/// stack.
+struct PendingListCall {
     items: Shared<Vec<Value>>,
     next: usize,
-    mapped: Vec<Value>,
+    results: Vec<Value>,
     function: FunctionValue,
+    kind: PendingListKind,
+    accumulator: Option<Value>,
+    current: Option<Value>,
 }
 
 /// A loop in a block, located from its backward jump.
@@ -1178,7 +1190,7 @@ impl BytecodeVm {
             globals_only: false,
             sites,
             cache: None,
-            pending_map: None,
+            pending_list_call: None,
         }
     }
 
@@ -1691,12 +1703,15 @@ impl BytecodeVm {
         }
         if self.frames.is_empty() {
             self.outcome = value;
-        } else if self.frames[self.frames.len() - 1].pending_map.is_some() {
+        } else if self.frames[self.frames.len() - 1]
+            .pending_list_call
+            .is_some()
+        {
             // The value is one element's answer to a `map` the caller started,
             // and the caller is waiting for the whole list rather than for this
-            // one call: `advance_map` has either called the next element or
-            // pushed the mapped list. See [`Self::start_map`].
-            self.advance_map(self.frames.len() - 1, value)?;
+            // one call: `advance_list_call` has either called the next element or
+            // pushed the mapped list. See [`Self::start_list_call`].
+            self.advance_list_call(self.frames.len() - 1, value)?;
         } else {
             self.stack.push(value);
         }
@@ -2694,7 +2709,7 @@ impl BytecodeVm {
         // the callee that has just gone, and a `break` out of a loop the map was
         // called from is the third way to take a frame away.
         if let Some(surviving) = self.frames.get_mut(keep) {
-            surviving.pending_map = None;
+            surviving.pending_list_call = None;
         }
         Ok(())
     }
@@ -2995,23 +3010,44 @@ impl BytecodeVm {
             self.advance(frame);
             return Ok(());
         }
-        // `map` has to *call* a Redblue function, which the shared resolver
-        // cannot do, so it is answered here and started on the frame — asked for
-        // before the resolver, which would otherwise claim the name and refuse it
-        // as one it cannot use, turning a working higher-order call into an
-        // error. The tree-walking VM excludes the same two names before its own
-        // call into `stdlib::builtin`; see [`crate::interpreter::Vm::call`].
-        if matches!(name, "map" | "list_map") {
+        // The higher-order list calls have to *call* a Redblue function, which
+        // the shared resolver cannot do, so they are answered here and started
+        // on the frame — asked for before the resolver, which would otherwise
+        // claim the name and refuse it as one it cannot use. The tree-walking
+        // VM asks the same `stdlib::list_operation` before its own call into
+        // `stdlib::builtin`; see [`crate::interpreter::Vm::call`].
+        if let Some(operation) = crate::stdlib::list_operation(name) {
             let [Value::List(items), rest @ ..] = args else {
                 return Err(Error::Runtime(
-                    "map requires a list and a function".to_string(),
+                    format!("{operation} requires a list and a function"),
                     self.span(),
                 ));
             };
-            let function = crate::stdlib::map_function(rest)
-                .map_err(|message| Error::Runtime(message, self.span()))?
-                .clone();
-            self.start_map(frame, items.clone(), function)?;
+            match operation {
+                "map" => {
+                    let function = crate::stdlib::map_function(rest)
+                        .map_err(|message| Error::Runtime(message, self.span()))?
+                        .clone();
+                    self.start_map(frame, items.clone(), function)?;
+                }
+                "filter" => {
+                    let function = crate::stdlib::list_function("filter", rest)
+                        .map_err(|message| Error::Runtime(message, self.span()))?
+                        .clone();
+                    self.start_filter(frame, items.clone(), function)?;
+                }
+                "reduce" => {
+                    let (function, initial) = crate::stdlib::reduce_parts(rest)
+                        .map_err(|message| Error::Runtime(message, self.span()))?;
+                    self.start_reduce(frame, items.clone(), function.clone(), initial.cloned())?;
+                }
+                _ => {
+                    return Err(Error::Runtime(
+                        format!("Unknown function '{name}'"),
+                        self.span(),
+                    ))
+                }
+            }
             self.advance(frame);
             return Ok(());
         }
@@ -3164,14 +3200,14 @@ impl BytecodeVm {
         Ok(())
     }
 
-    /// Starts `map(list, function)` in `frame`, the frame whose `CALL` is the
-    /// `map` and which is therefore blocked until every element has been mapped.
+    /// Starts a higher-order list call in `frame`, the frame whose `CALL` is
+    /// the call and which is therefore blocked until every element is handled.
     ///
-    /// The map is carried **by the frame that started it** rather than by a Rust
-    /// stack of nested runs. That is what keeps the two engines agreeing about
-    /// how deep a program may go: the tree-walking VM recurses per element and
-    /// is bounded by [`crate::MAX_CALL_DEPTH`], so a `map` that nests inside a
-    /// function that `map` calls reaches that limit as an ordinary
+    /// The call is carried **by the frame that started it** rather than by a
+    /// Rust stack of nested runs. That is what keeps the two engines agreeing
+    /// about how deep a program may go: the tree-walking VM recurses per element
+    /// and is bounded by [`crate::MAX_CALL_DEPTH`], so a `map` that nests inside
+    /// a function that `map` calls reaches that limit as an ordinary
     /// [`Error::Limit`]. A VM that drove each element with a nested
     /// [`Self::drive`] would put one Rust stack frame on the host per nesting
     /// level and overflow the thread long before the limit was reached — a
@@ -3186,68 +3222,173 @@ impl BytecodeVm {
         items: Shared<Vec<Value>>,
         function: FunctionValue,
     ) -> Result<()> {
-        if items.is_empty() {
-            self.push(Value::list(Vec::new()));
-            return Ok(());
+        self.start_list_call(frame, items, function, PendingListKind::Map, None, 0)
+    }
+
+    /// Starts `filter(list, predicate)`.
+    fn start_filter(
+        &mut self,
+        frame: usize,
+        items: Shared<Vec<Value>>,
+        function: FunctionValue,
+    ) -> Result<()> {
+        self.start_list_call(frame, items, function, PendingListKind::Filter, None, 0)
+    }
+
+    /// Starts `reduce(list, function)` or `reduce(list, function, start)`.
+    ///
+    /// Without a start value the first item is the accumulator and the fold
+    /// begins at the second; an empty list has no first item and is refused.
+    fn start_reduce(
+        &mut self,
+        frame: usize,
+        items: Shared<Vec<Value>>,
+        function: FunctionValue,
+        initial: Option<Value>,
+    ) -> Result<()> {
+        match initial {
+            Some(accumulator) => self.start_list_call(
+                frame,
+                items,
+                function,
+                PendingListKind::Reduce,
+                Some(accumulator),
+                0,
+            ),
+            None => {
+                let Some(first) = items.first().cloned() else {
+                    return Err(Error::Runtime(
+                        "reduce requires a non-empty list when no start value is given".to_string(),
+                        self.span(),
+                    ));
+                };
+                self.start_list_call(
+                    frame,
+                    items,
+                    function,
+                    PendingListKind::Reduce,
+                    Some(first),
+                    1,
+                )
+            }
+        }
+    }
+
+    fn start_list_call(
+        &mut self,
+        frame: usize,
+        items: Shared<Vec<Value>>,
+        function: FunctionValue,
+        kind: PendingListKind,
+        accumulator: Option<Value>,
+        start: usize,
+    ) -> Result<()> {
+        match kind {
+            PendingListKind::Map | PendingListKind::Filter if items.is_empty() => {
+                self.push(Value::list(Vec::new()));
+                return Ok(());
+            }
+            PendingListKind::Reduce if start >= items.len() => {
+                let Some(accumulator) = accumulator else {
+                    return Err(Error::Runtime(
+                        "reduce requires a non-empty list when no start value is given".to_string(),
+                        self.span(),
+                    ));
+                };
+                self.push(accumulator);
+                return Ok(());
+            }
+            _ => {}
         }
         // Every element is read from the list the caller handed over rather
-        // than copied out of it: a `map` reads its receiver, it does not take
-        // it, so the handle is shared for as long as the map lasts and each
-        // element is cloned on its own turn. See [`crate::value::Shared`].
-        self.frames[frame].pending_map = Some(PendingMap {
+        // than copied out of it: a higher-order call reads its receiver, it
+        // does not take it, so the handle is shared for as long as the call
+        // lasts and each element is cloned on its own turn. See
+        // [`crate::value::Shared`].
+        self.frames[frame].pending_list_call = Some(PendingListCall {
             items,
-            next: 0,
-            mapped: Vec::new(),
+            next: start,
+            results: Vec::new(),
             function,
+            kind,
+            accumulator,
+            current: None,
         });
-        self.run_map(frame)
+        self.run_list_call(frame)
     }
 
-    /// Carries the finished callee's `value` on to the `map` `frame` started.
-    fn advance_map(&mut self, frame: usize, value: Value) -> Result<()> {
-        let Some(map) = self.frames[frame].pending_map.as_mut() else {
-            return Ok(());
+    /// Carries the finished callee's `value` on to the call `frame` started.
+    fn advance_list_call(&mut self, frame: usize, value: Value) -> Result<()> {
+        self.record_list_answer(frame, value);
+        self.run_list_call(frame)
+    }
+
+    /// Folds one answer into the call's own state.
+    ///
+    /// A filter keeps the item it asked about rather than the predicate's
+    /// answer, so the current item is remembered beside the call. A reduce
+    /// replaces its accumulator; a map appends the answer.
+    fn record_list_answer(&mut self, frame: usize, value: Value) {
+        let Some(call) = self.frames[frame].pending_list_call.as_mut() else {
+            return;
         };
-        map.mapped.push(value);
-        self.run_map(frame)
+        let current = call.current.take();
+        match call.kind {
+            PendingListKind::Map => call.results.push(value),
+            PendingListKind::Filter => {
+                if value.is_truthy() {
+                    if let Some(item) = current {
+                        call.results.push(item);
+                    }
+                }
+            }
+            PendingListKind::Reduce => call.accumulator = Some(value),
+        }
     }
 
-    /// Runs the next element of `frame`'s `map`, looping over cache hits.
+    /// Runs the next element of `frame`'s higher-order call, looping over cache
+    /// hits.
     ///
     /// A hit does not enter a body, so it must not become a Rust stack frame.
     /// Recursing through [`Self::call_function`] for each consecutive hit made a
     /// large `map` of one repeated value overflow the host stack before the
     /// call-depth guard could report a limit. The driver loops over the hits
     /// itself and only calls into a body on a miss.
-    fn run_map(&mut self, frame: usize) -> Result<()> {
+    fn run_list_call(&mut self, frame: usize) -> Result<()> {
         loop {
-            let (item, function) = {
-                let Some(map) = self.frames[frame].pending_map.as_mut() else {
+            let (function, args) = {
+                let Some(call) = self.frames[frame].pending_list_call.as_mut() else {
                     return Ok(());
                 };
-                if map.next >= map.items.len() {
-                    let mapped = Value::list(std::mem::take(&mut map.mapped));
-                    self.frames[frame].pending_map = None;
-                    self.push(mapped);
+                if call.next >= call.items.len() {
+                    let kind = call.kind;
+                    let results = std::mem::take(&mut call.results);
+                    let accumulator = call.accumulator.take();
+                    self.frames[frame].pending_list_call = None;
+                    let value = match kind {
+                        PendingListKind::Map | PendingListKind::Filter => Value::list(results),
+                        PendingListKind::Reduce => accumulator.unwrap_or(Value::Nothing),
+                    };
+                    self.push(value);
                     return Ok(());
                 }
-                let item = map.items[map.next].clone();
-                map.next += 1;
-                (item, map.function.clone())
-            };
-            if let Some(answer) = function.cached(std::slice::from_ref(&item)) {
-                let Some(map) = self.frames[frame].pending_map.as_mut() else {
-                    return Ok(());
+                let item = call.items[call.next].clone();
+                call.next += 1;
+                call.current = Some(item.clone());
+                let function = call.function.clone();
+                let args = match call.kind {
+                    PendingListKind::Reduce => {
+                        vec![call.accumulator.clone().unwrap_or(Value::Nothing), item]
+                    }
+                    PendingListKind::Map | PendingListKind::Filter => vec![item],
                 };
-                map.mapped.push(answer);
+                (function, args)
+            };
+            if let Some(answer) = function.cached(&args) {
+                self.record_list_answer(frame, answer);
                 continue;
             }
-            return self.call_function(
-                &function.name,
-                &function,
-                std::slice::from_ref(&item),
-                None,
-            );
+            return self.call_function(&function.name, &function, &args, None);
         }
     }
 
@@ -3279,7 +3420,7 @@ impl BytecodeVm {
         // A hit does not enter the body, so it costs no frame and no call
         // depth. A `map` checks the cache itself before reaching here, so a hit
         // leaves the answer on the stack for the caller to advance over. See
-        // [`Self::run_map`] for why the map driver must not route hits through
+        // [`Self::run_list_call`] for why the map driver must not route hits through
         // this function one Rust frame at a time.
         if let Some(value) = function.cached(args) {
             self.stack.push(value);
@@ -3852,9 +3993,9 @@ impl BytecodeVm {
         // A `map` the surviving frame started has just lost its callee, so it is
         // given up: the frame's `CALL` is no longer waiting for a list, and a
         // `try` or a `might fail` around it is about to take the failure as the
-        // answer rather than as one element of a list. See [`Self::start_map`].
+        // answer rather than as one element of a list. See [`Self::start_list_call`].
         if let Some(surviving) = self.frames.get_mut(keep) {
-            surviving.pending_map = None;
+            surviving.pending_list_call = None;
         }
     }
 
