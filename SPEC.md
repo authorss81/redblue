@@ -1575,23 +1575,29 @@ two.
 ```redblue
 set doubled to list.map([1, 2, 3], to (x) give back x * 2)
 set size to list.length([1, 2, 3])  // 3
+set ordered to list.sort([3, 1, 2])                                    // [1, 2, 3]
+set backwards to list.reverse([1, 2, 3])                               // [3, 2, 1]
+set evens to list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0 end)
+set total to list.reduce([1, 2, 3], to (a, b) give back a + b end, 0)
 ```
 
-`filter` and `reduce` are registered as flat builtins and neither is
-implemented, so neither is a member of `list`: `list.filter(xs, f)` is
-`Module 'list' has no function 'filter'`, the same refusal as `math.random`
-above. A builtin that cannot answer is not a module member — the alternative is a
-spelling the analyzer accepts and the runtime can only refuse.
+`map`, `filter` and `reduce` are higher-order builtins, and each is a member
+of `list`. `sort(xs)` orders a homogeneous list ascending and
+`sort(xs, field)` orders records by one field; `sort` is stable and refuses a
+list that mixes kinds. `reverse(xs)` answers the list backwards, and
+`reduce(xs, f)` folds from the first item (an empty list is refused).
 
-`list.map` is the only higher-order builtin, and it works in three spellings:
-`map(xs, f)`, `list.map(xs, f)` and `[1, 2, 3].map(f)`. `list.length` is `length`
-under its module spelling, as § text writes it for a text.
+`map` works in three spellings: `map(xs, f)`, `list.map(xs, f)` and
+`[1, 2, 3].map(f)`. `list.length` is `length` under its module spelling, as
+§ text writes it for a text; `list.sort`, `list.reverse`, `list.filter` and
+`list.reduce` are the dotted spellings of those builtins. `reduce(xs, f, start)`
+folds from `start`, so an empty list answers `start`.
 
 The third spelling takes its receiver **literally**. A dotted call resolves its
-receiver against modules and objects, and a list held in a variable is a value
-rather than either of those, so `xs.map(f)` is refused as
-`Module 'xs' has no function 'map'` — the same refusal `list.filter` gives above.
-A list written out in full is the only one a `.` can be put in front of.
+receiver against modules and objects first, so a module or object named `xs`
+wins; when `xs` names no module or object but holds a list, `xs.map(f)` is the
+same call as `map(xs, f)`. The other higher-order members keep their `list`
+spelling; a variable receiver names a list method only for `map`.
 
 ### network
 

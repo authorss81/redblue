@@ -2503,3 +2503,285 @@ set b to matrix.from_lists([[5, 6], [7, 8]])
         assert_runtime_error("matrix.at(matrix.zeros(1, 1), -1, 0)", "out of bounds");
     }
 }
+
+mod list_surface {
+    use super::*;
+
+    /// The tree-walking engine's value for `source`.
+    #[track_caller]
+    fn tree(source: &str) -> Value {
+        run_source_value(source)
+            .unwrap_or_else(|error| panic!("tree-walker should run:\n{source}\n{error:?}"))
+    }
+
+    /// The bytecode engine's value for `source`.
+    #[track_caller]
+    fn bytecode(source: &str) -> Value {
+        let chunk = compile_source(source)
+            .unwrap_or_else(|error| panic!("source should compile:\n{source}\n{error:?}"));
+        let mut vm = BytecodeVm::new();
+        vm.run(&chunk)
+            .unwrap_or_else(|error| panic!("bytecode VM should run:\n{source}\n{error:?}"))
+    }
+
+    /// Runs `source` on both engines, asserts the answers are equal as data, and
+    /// returns the shared value.
+    #[track_caller]
+    fn both(source: &str) -> Value {
+        let walked = tree(source);
+        let compiled = bytecode(source);
+        assert_eq!(
+            walked.to_string(),
+            compiled.to_string(),
+            "the two engines disagree about the text of:\n{source}"
+        );
+        assert_eq!(
+            walked, compiled,
+            "the two engines disagree about the value of:\n{source}"
+        );
+        walked
+    }
+
+    /// Asserts both engines refuse `source`, and the refusal names `needle`.
+    #[track_caller]
+    fn both_refuse(source: &str, needle: &str) {
+        let walked = run_source_value(source)
+            .expect_err("the tree-walker should have refused the program")
+            .to_string();
+        assert!(
+            walked.contains(needle),
+            "the tree-walker's refusal does not mention '{needle}':\n{source}\n{walked}"
+        );
+
+        let chunk = compile_source(source)
+            .unwrap_or_else(|error| panic!("source should compile:\n{source}\n{error:?}"));
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should have refused the program")
+            .to_string();
+        assert!(
+            compiled.contains(needle),
+            "the bytecode VM's refusal does not mention '{needle}':\n{source}\n{compiled}"
+        );
+    }
+
+    #[test]
+    fn sort_answers_identically_on_both_engines() {
+        assert_eq!(
+            both("sort([3, 1, 2])").to_string(),
+            "[1, 2, 3]",
+            "sort must order numbers ascending"
+        );
+        assert_eq!(
+            both(r#"sort(["pear", "apple", "fig"])"#).to_string(),
+            "[apple, fig, pear]",
+            "sort must order text lexicographically"
+        );
+        assert_eq!(
+            both("sort([-0.0, 2, -1, 4])").to_string(),
+            "[-1, 0, 2, 4]",
+            "sort must keep negative and signed-zero numbers in order"
+        );
+    }
+
+    #[test]
+    fn reverse_answers_identically_on_both_engines() {
+        assert_eq!(both("reverse([1, 2, 3])").to_string(), "[3, 2, 1]");
+        assert_eq!(
+            both(r#"reverse(["é", "日本", ""])"#).to_string(),
+            "[, 日本, é]",
+            "reverse must keep every text, including the empty one, exactly once"
+        );
+    }
+
+    #[test]
+    fn filter_and_reduce_answer_identically_on_both_engines() {
+        assert_eq!(
+            both("filter([1, 2, 3, 4], to (x) give back x mod 2 is 0 end)").to_string(),
+            "[2, 4]",
+            "filter must keep the items the predicate accepts"
+        );
+        assert_eq!(
+            both("reduce([1, 2, 3], to (a, b) give back a + b end, 0)").to_string(),
+            "6",
+            "reduce must fold from the given start value"
+        );
+        assert_eq!(
+            both("reduce([1, 2, 3], to (a, b) give back a + b end)").to_string(),
+            "6",
+            "reduce without a start value must fold from the first item"
+        );
+    }
+
+    #[test]
+    fn edge_sort_is_stable_for_records_sharing_a_key() {
+        let value =
+            both(r#"sort([{key: 2, name: "a"}, {key: 1, name: "b"}, {key: 2, name: "c"}], "key")"#);
+        assert_eq!(
+            value.to_string(),
+            "[{key: 1, name: b}, {key: 2, name: a}, {key: 2, name: c}]",
+            "sort must be stable: the two records sharing key 2 keep their input order"
+        );
+    }
+
+    #[test]
+    fn edge_sort_refuses_a_mixed_type_list_by_name() {
+        both_refuse(
+            r#"sort([1, "two"])"#,
+            "sort cannot order a number and a text",
+        );
+    }
+
+    #[test]
+    fn edge_sort_of_empty_and_singleton_lists() {
+        assert_eq!(both("sort([])").to_string(), "[]");
+        assert_eq!(both("sort([7])").to_string(), "[7]");
+        assert_eq!(both("reverse([])").to_string(), "[]");
+        assert_eq!(both("reverse([7])").to_string(), "[7]");
+    }
+
+    #[test]
+    fn edge_zip_stops_at_the_shorter_list_and_enumerate_starts_at_zero() {
+        assert_eq!(
+            both("zip([1, 2, 3], [\"a\", \"b\"])").to_string(),
+            "[[1, a], [2, b]]",
+            "zip must stop at the shorter list rather than pad with nothing"
+        );
+        assert_eq!(
+            both("zip([], [1, 2])").to_string(),
+            "[]",
+            "zip with an empty input has no rows"
+        );
+        assert_eq!(
+            both("enumerate([\"a\", \"b\"])").to_string(),
+            "[[0, a], [1, b]]",
+            "enumerate must number from zero"
+        );
+        assert_eq!(both("enumerate([])").to_string(), "[]");
+    }
+
+    #[test]
+    fn edge_filter_calls_the_predicate_once_per_item_in_order() {
+        let value = both(
+            r#"
+    set calls to []
+    to record(x)
+        set calls to push(calls, x)
+        give back x > 1
+    end
+    set kept to filter([3, 1, 2], record)
+    [kept, calls]
+    "#,
+        );
+        assert_eq!(
+            value.to_string(),
+            "[[3, 2], [3, 1, 2]]",
+            "filter must call the predicate once for each item, in input order, and \
+             keep the accepted items in that order"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_calls_the_function_in_order_with_an_exact_count() {
+        let value = both(
+            r#"
+    set calls to []
+    to add(acc, x)
+        set calls to push(calls, x)
+        give back acc + x
+    end
+    set total to reduce([1, 2, 3], add, 0)
+    [total, calls]
+    "#,
+        );
+        assert_eq!(
+            value.to_string(),
+            "[6, [1, 2, 3]]",
+            "reduce with a start value must call the function exactly once per item, \
+             in input order, starting with the given accumulator"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_of_an_empty_list_needs_an_initial_value() {
+        assert_eq!(
+            both("reduce([], to (a, b) give back a + b end, 10)").to_string(),
+            "10",
+            "reduce of an empty list with a start value answers that start value"
+        );
+        both_refuse(
+            "reduce([], to (a, b) give back a + b end)",
+            "reduce requires a non-empty list when no start value is given",
+        );
+    }
+
+    #[test]
+    fn edge_filter_failure_mid_list_aborts_without_partial_results() {
+        let source = r#"
+    set seen to []
+    to explode(x)
+        set seen to push(seen, x)
+        if x is 2 then
+            give back 1 / 0
+        end
+        give back yes
+    end
+    filter([1, 2, 3], explode)
+    "#;
+        both_refuse(source, "Division by zero");
+    }
+
+    #[test]
+    fn edge_list_builtins_refuse_wrong_types_by_name() {
+        for (source, needle) in [
+            ("reverse(\"text\")", "reverse requires one list"),
+            (
+                "filter([1], 5)",
+                "filter requires a function, but was given 5",
+            ),
+            (
+                "reduce([1], 5)",
+                "reduce requires a function, but was given 5",
+            ),
+            (
+                "sort(\"text\")",
+                "sort requires a list and an optional field name",
+            ),
+        ] {
+            both_refuse(source, needle);
+        }
+    }
+
+    #[test]
+    fn edge_sort_refuses_a_missing_field_by_name() {
+        both_refuse(
+            r#"sort([{name: "a"}, {name: "b"}], "missing")"#,
+            "sort has no field 'missing'",
+        );
+    }
+
+    #[test]
+    fn edge_dotted_list_spellings_answer_like_the_flat_ones() {
+        assert_eq!(
+            both(r#"list.sort([3, 1, 2])"#).to_string(),
+            both("sort([3, 1, 2])").to_string(),
+            "list.sort must answer what sort answers"
+        );
+        assert_eq!(
+            both(r#"list.reverse([1, 2, 3])"#).to_string(),
+            both("reverse([1, 2, 3])").to_string(),
+            "list.reverse must answer what reverse answers"
+        );
+        assert_eq!(
+            both(r#"list.filter([1, 2, 3, 4], to (x) give back x mod 2 is 0 end)"#).to_string(),
+            both("filter([1, 2, 3, 4], to (x) give back x mod 2 is 0 end)").to_string(),
+            "list.filter must answer what filter answers"
+        );
+        assert_eq!(
+            both(r#"list.reduce([1, 2, 3], to (a, b) give back a + b end, 0)"#).to_string(),
+            both("reduce([1, 2, 3], to (a, b) give back a + b end, 0)").to_string(),
+            "list.reduce must answer what reduce answers"
+        );
+    }
+}

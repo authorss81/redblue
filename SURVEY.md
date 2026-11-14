@@ -5,21 +5,24 @@ every claim below carries the line that proves it. Rank 2 was closed by
 phase-095; rank 5 gained wrapping, dedenting, templates, padding, alignment
 and diffing in phase-101; rank 6 gained date arithmetic in phase-096 and text
 parsing and formatting in phase-097; rank 8 gained encodings, digests and UUIDs
-in phase-104; rank 10 gained the CSV writer, JSON Lines, TOML and archives in phase-105. The entries are kept so the ranking and its history stay readable.
+in phase-104; rank 10 gained the CSV writer, JSON Lines, TOML and archives in
+phase-105; rank 1 gained `filter` and `reduce` and rank 4 gained `sort` and
+`reverse` in phase-077. The entries are kept so the ranking and its history stay
+readable.
 
-- **Builtins in the registry**: 162 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:2082`,
-  which closes with `"input"` at `src/stdlib.rs:2244`. The six module-only
+- **Builtins in the registry**: 164 — `stdlib::BUILTIN_NAMES` at `src/stdlib.rs:2140`,
+  which closes with `"input"` at `src/stdlib.rs:2304`. The six module-only
   `text.wrap`, `text.diff`, `text.dedent`, `text.template`, `text.pad` and
   `text.align` utilities are deliberately not in this table, and neither is
   `sys.parse` nor the nine `logging` calls, whose only spellings are
   `sys.parse` and `logging.<member>`.
 - **Modules a dotted call may name**: 24 — `stdlib::MODULES` at `src/stdlib.rs:19`.
-- **Dotted members those modules accept**: 149 — `stdlib::MODULE_MEMBERS` at
+- **Dotted members those modules accept**: 153 — `stdlib::MODULE_MEMBERS` at
   `src/stdlib.rs:85`.
 
 The two tables are not a summary of what Redblue *could* do; they are the whole
 of what a dotted call is allowed to reach, because a name not in them is refused
-before a call happens (`src/stdlib.rs:292`, `module_has_member`). So the ceiling
+before a call happens (`src/stdlib.rs:291`, `module_has_member`). So the ceiling
 of the language is knowable by reading one file, and that is what this survey
 reads.
 
@@ -104,7 +107,7 @@ survey measures against, and it is short.
 | `hash` | `sha256`, `sha512` | `src/stdlib.rs:128` |
 | `hex` | `encode`, `decode` | `src/stdlib.rs:129` |
 | `json` | `parse`, `stringify`, `parse_lines`, `stringify_lines` | `src/stdlib.rs:130` |
-| `list` | `map`, `length` | `src/stdlib.rs:152` |
+| `list` | `map`, `length`, `filter`, `reduce`, `sort`, `reverse` | `src/stdlib.rs:149` |
 | `math` | `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `sin`, `cos`, `tan`, `log`, `exp`, `mean`, `median`, `mode`, `variance`, `standard_deviation`, `percentile`, `correlation` | `src/stdlib.rs:153` |
 | `matrix` | `zeros`, `ones`, `identity`, `from_lists`, `to_lists`, `shape`, `add`, `subtract`, `multiply`, `divide`, `scale`, `matmul`, `transpose`, `sum`, `mean`, `min`, `max`, `at`, `row`, `column` | `src/stdlib.rs:180` |
 | `network` | `get`, `post` | `src/stdlib.rs:205` |
@@ -148,34 +151,30 @@ Python prints.
   acceptance gate for any of these phases is the ```redblue``` block below it,
   executed and printing the Python answer.
 
-## 1. No higher-order list functions beyond `map`
+## 1. No higher-order list functions beyond `map` — closed by phase-077
 
-- **Blocked programs**: 6 — 1, 12, 14, 16, 17, 18
+- **Blocked programs**: 6 — 1, 12, 14, 16, 17, 18 (at survey time; 0 since phase-077)
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:151` — the `list` row is `map` and `length`, and
-  the comment above it at `src/stdlib.rs:140` records that `filter` and `reduce`
-  are registered at `src/stdlib.rs:485` and `src/stdlib.rs:486` and answer nothing. The two programs that
-  prove it are pinned as gaps at `tests/stdlib_module_docs_test.rs:1461`.
-- **Also missing**: `any`, `all`, `flatten`, `chunk`, `unique`, `group_by`,
-  `sort_by`, `reverse`.
-- **Why it ranks first**: six of the thirty-two. Anything that counts, selects,
-  folds, groups or pairs a collection needs one of these, and `map` alone cannot
-  produce a shorter list. The blocker is not expressive power — `map` already
-  calls a Redblue closure — it is that the two functions a reader reaches for
-  next are wired up and refuse.
+- **What phase-077 changed**: `filter` and `reduce` now call a Redblue function
+  once per item on both engines, and both are members of `list`. They left
+  `known_gaps()` and joined the answerable surface checked by
+  `tests/stdlib_module_docs_test.rs`.
+- **Still missing**: `any`, `all`, `flatten`, `chunk`, `unique`, `group_by`,
+  `sort_by`. These are separate helpers, not the two functions this entry
+  measured.
 
 ```redblue
 say filter([1, 2, 3], to (x) give back x > 1 end)
 ```
 
-Refused as `RuntimeError: filter was called with arguments it cannot use`.
+Answers `[2, 3]` since phase-077.
 
 ## 2. No regular expressions, anywhere in the language — closed by phase-095
 
 - **Blocked programs**: 4 — 1, 6, 7, 21 (at survey time; 0 since phase-095)
 - **Implementable**: binding-required
 - **Rust crate**: `regex`
-- **Evidence**: `src/stdlib.rs:1711` — `regex_builtin` binds the crate the ranking
+- **Evidence**: `src/stdlib.rs:1769` — `regex_builtin` binds the crate the ranking
   named. The crate is **already a dependency**, `Cargo.toml:31` (`regex = "1.10"`,
   and again at `Cargo.toml:38` as a dev-dependency), and it had been reachable
   **only** from the test harness: `src/testing/assertions.rs:130` builds a
@@ -227,25 +226,24 @@ end
 
 Prints nothing and exits 0. The same record answers `r.a` and refuses `length(r)`.
 
-## 4. No sorting, ordering, or min/max
+## 4. No sorting, ordering, or min/max — partly closed by phase-077
 
-- **Blocked programs**: 4 — 4, 8, 19, 26
+- **Blocked programs**: 4 — 4, 8, 19, 26 (at survey time; the plain sort cases
+  answer since phase-077)
 - **Implementable**: implementable-in-Redblue
-- **Evidence**: `src/stdlib.rs:151` — `map` and `length` are the whole `list`
-  surface, and `BUILTIN_NAMES` (`src/stdlib.rs:2040`) holds no `sort`, `sort_by`,
-  `reverse`, `min`, `max`, `sum`, `first` or `last`. The refusal for any of them
-  is `src/interpreter.rs:2411`, which formats `Unknown function '{}'`.
-- **What is missing**: `sort`, `sort_by`, `reverse`, `min`, `max`, `sum`,
-  `mean`, `median`, `any`, `all`.
-- **Why**: every report ends in an ordering. "Top five", "p90", "most common
-  word" and "sorted by name then by id" are the last line of the program, and the
-  language cannot write that line.
+- **What phase-077 changed**: `sort(list)` orders a homogeneous list ascending,
+  `sort(list, field)` orders records by one field, and both are stable.
+  `reverse(list)` answers the list backwards. Both are members of `list`.
+- **Still missing**: `sort_by`, `min`, `max`, `sum`, `first` and `last`.
+- **Why it mattered**: every report ends in an ordering. "Top five", "p90", "most
+  common word" and "sorted by name then by id" are the last line of the program,
+  and the plain ordering lines are writable now.
 
 ```redblue
 say sort([3, 1, 2])
 ```
 
-Refused as `RuntimeError: Unknown function 'sort'`.
+Answers `[1, 2, 3]` since phase-077.
 
 ## 5. No slicing or searching of text
 
