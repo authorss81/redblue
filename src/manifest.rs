@@ -120,7 +120,8 @@ impl Version {
     /// Exactly three components, each of them at least one digit. `1.0` and
     /// `1.0.0-beta` are refused rather than read as `1.0.0`: a version nobody
     /// can round-trip through [`Display`] is a version two manifests will
-    /// disagree about.
+    /// disagree about. A leading zero is refused for the same reason: `01.0.0`
+    /// would be read and displayed as `1.0.0`.
     pub fn parse(text: &str) -> Result<Version> {
         let refused = || {
             Error::Runtime(
@@ -128,20 +129,30 @@ impl Version {
                 Span::unknown(),
             )
         };
-        let mut parts = Vec::new();
-        for part in text.split('.') {
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(refused());
-            }
-            parts.push(part.parse::<u64>().map_err(|_| refused())?);
-        }
+        let parts: Vec<&str> = text.split('.').collect();
         if parts.len() != 3 {
             return Err(refused());
         }
+        let mut numbers = Vec::new();
+        for part in parts {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(refused());
+            }
+            if part.len() > 1 && part.starts_with('0') {
+                return Err(Error::Runtime(
+                    format!(
+                        "'{text}' is not a version: a component may not have a leading zero, \
+                         as in 1.0.0"
+                    ),
+                    Span::unknown(),
+                ));
+            }
+            numbers.push(part.parse::<u64>().map_err(|_| refused())?);
+        }
         Ok(Version {
-            major: parts[0],
-            minor: parts[1],
-            patch: parts[2],
+            major: numbers[0],
+            minor: numbers[1],
+            patch: numbers[2],
         })
     }
 }
@@ -583,6 +594,18 @@ pub trait Registry {
     /// The manifest the module `name` at `version` publishes, if it publishes
     /// one.
     fn module_manifest(&self, name: &str, version: &Version) -> Option<String>;
+
+    /// Directory entries under `name` that are shaped like a version but are
+    /// not one, so a resolve can name what it could not read instead of
+    /// silently treating the module as unpublished.
+    ///
+    /// The default is empty: a registry that enumerates versions rather than
+    /// reading a directory has no malformed entry to report. [`DirRegistry`]
+    /// answers with a leading-zero directory such as `01.0.0`, which
+    /// [`Version::parse`] refuses without normalizing.
+    fn malformed_versions(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// One module a resolution settled on.
@@ -802,10 +825,21 @@ fn resolve_with_language_checks(
             Requirement::Any => match available.iter().max() {
                 Some(version) => *version,
                 None => {
+                    if let Some(directory) = registry.malformed_versions(&dependency.name).first() {
+                        return Err(Error::Runtime(
+                            format!(
+                                "Module '{}' publishes a malformed version directory '{}': a \
+                                 version is three dot-separated numbers, and a component may \
+                                 not have a leading zero",
+                                dependency.name, directory
+                            ),
+                            Span::unknown(),
+                        ));
+                    }
                     return Err(Error::Runtime(
                         unpublished(&dependency.name, None, &[]),
                         Span::unknown(),
-                    ))
+                    ));
                 }
             },
         };
@@ -832,6 +866,19 @@ fn resolve_with_language_checks(
         }
 
         let Some(path) = registry.module_path(&dependency.name, &chosen) else {
+            if available.is_empty() {
+                if let Some(directory) = registry.malformed_versions(&dependency.name).first() {
+                    return Err(Error::Runtime(
+                        format!(
+                            "Module '{}' publishes a malformed version directory '{}': a \
+                             version is three dot-separated numbers, and a component may \
+                             not have a leading zero",
+                            dependency.name, directory
+                        ),
+                        Span::unknown(),
+                    ));
+                }
+            }
             return Err(Error::Runtime(
                 unpublished(&dependency.name, Some(&chosen), &available),
                 Span::unknown(),
@@ -1078,6 +1125,23 @@ impl DirRegistry {
     }
 }
 
+/// Whether `text` is three dot-separated decimal components with a leading
+/// zero in one of them.
+///
+/// This is the version-shaped name [`Version::parse`] used to normalize and
+/// now refuses. A directory holding one is a malformed version, not an
+/// unrelated directory that happens to live under `modules/<name>/`.
+fn has_leading_zero_component(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts
+            .iter()
+            .any(|part| part.len() > 1 && part.starts_with('0'))
+}
+
 impl Registry for DirRegistry {
     fn versions(&self, name: &str) -> Vec<Version> {
         let Ok(entries) = fs::read_dir(self.root.join("modules").join(name)) else {
@@ -1103,6 +1167,20 @@ impl Registry for DirRegistry {
 
     fn module_manifest(&self, name: &str, version: &Version) -> Option<String> {
         fs::read_to_string(self.module_dir(name, version).join(MANIFEST_FILE)).ok()
+    }
+
+    fn malformed_versions(&self, name: &str) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(self.root.join("modules").join(name)) else {
+            return Vec::new();
+        };
+        let mut found: Vec<String> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|directory| has_leading_zero_component(directory))
+            .collect();
+        found.sort();
+        found
     }
 }
 
@@ -1154,13 +1232,27 @@ pub fn resolve_in(root: &Path) -> Result<Resolution> {
 /// not be refused because a later module the program has not reached is out of
 /// range. [`Pins::module`] checks the module the import actually names.
 fn resolve_in_with(root: &Path, check_module_language: bool) -> Result<Resolution> {
+    resolve_in_with_language(root, true, check_module_language)
+}
+
+/// [`resolve_in_with`], with the program's own range decided by the caller.
+///
+/// A session's pins write the lockfile and leave each module's range to its
+/// `import`, just as a run does, but they do not own the working directory's
+/// program range: the line came from a REPL or an editor buffer, not from a
+/// file in that directory.
+fn resolve_in_with_language(
+    root: &Path,
+    check_program_language: bool,
+    check_module_language: bool,
+) -> Result<Resolution> {
     let Some(manifest) = manifest_in(root)? else {
         return Ok(Resolution::default());
     };
     let resolution = resolve_with_language_checks(
         &manifest,
         &DirRegistry::new(root),
-        true,
+        check_program_language,
         check_module_language,
         Some(root),
     )?;
@@ -1211,6 +1303,21 @@ pub fn resolve_for_reading(root: &Path) -> Result<Resolution> {
         return Ok(Resolution::default());
     };
     resolve_with_language_checks(&manifest, &DirRegistry::new(root), true, false, Some(root))
+}
+
+/// Resolves what the program in `root` depends on without checking either
+/// language range.
+///
+/// This is the path for a tree that was handed in from somewhere else than
+/// `root` — an editor buffer, a REPL line, a test body with no file — and only
+/// uses `root` to find the modules its imports name. A manifest in `root` may
+/// belong to another project, so its own range is not this program's. Pins and
+/// module conflicts are still resolved, from reads only.
+fn resolve_for_imports(root: &Path) -> Result<Resolution> {
+    let Some(manifest) = manifest_in(root)? else {
+        return Ok(Resolution::default());
+    };
+    resolve_with_language_checks(&manifest, &DirRegistry::new(root), false, false, Some(root))
 }
 
 /// Refuses a lockfile that says something other than what this resolve found.
@@ -1318,6 +1425,11 @@ pub struct Pins {
     /// be run is the resolution the lockfile records; a pass that is only looking
     /// — the analyzer, a linter, a formatter — creates nothing.
     writing: bool,
+    /// Whether loading these pins also checks the program manifest's own
+    /// language range. A program about to run, and a pass that knows the
+    /// program lives here, check it; a tree handed in from somewhere else only
+    /// resolves its imports from this directory.
+    check_program_language: bool,
     loaded: bool,
     /// Whether the program manifest's own language range has been checked
     /// without resolving the pins, which is what a program with no `import`
@@ -1330,7 +1442,7 @@ pub struct Pins {
 impl Pins {
     /// The pins of the manifest in `root`, for a program that is about to be run.
     pub fn for_running(root: &Path) -> Pins {
-        Pins::in_dir(root, true)
+        Pins::in_dir(root, true, true)
     }
 
     /// The pins of the manifest in `root`, for a pass that is only looking.
@@ -1343,13 +1455,48 @@ impl Pins {
     /// failure the program's own `try` could catch, so the runtime path is where
     /// an out-of-range module is refused.
     pub fn for_reading(root: &Path) -> Pins {
-        Pins::in_dir(root, false)
+        Pins::in_dir(root, false, true)
     }
 
-    fn in_dir(root: &Path, writing: bool) -> Pins {
+    /// The pins of the manifest in `root`, for a tree that came from somewhere
+    /// other than `root`: an editor buffer, a REPL line, or a test body with no
+    /// file of its own.
+    ///
+    /// Imports are still answered from `root`, as they always have been, but
+    /// the manifest's own language range is not checked. That manifest may
+    /// belong to an unrelated project, and a buffer must not be refused because
+    /// of a range it never declared. A caller that knows where the program
+    /// lives uses [`Pins::for_reading`] through
+    /// [`crate::analyzer::analyze_in`], which checks that directory's range.
+    pub(crate) fn for_analysis(root: &Path) -> Pins {
+        Pins::in_dir(root, false, false)
+    }
+
+    /// The pins of the manifest in `root`, for a program produced by a session
+    /// that lives somewhere else: a REPL line or an editor buffer.
+    ///
+    /// A session still runs its imports — it writes the lockfile and checks a
+    /// module's range at the `import` that names it — but the manifest in `root`
+    /// may belong to an unrelated project, so its own language range is not the
+    /// session's. That range belongs to a program found in the directory, which
+    /// is [`Pins::for_running`].
+    pub(crate) fn for_session(root: &Path) -> Pins {
+        Pins::in_dir(root, true, false)
+    }
+
+    /// The same mode as these pins, rooted somewhere else and not yet loaded.
+    ///
+    /// A fork of a VM inherits whether it is running a program found in its root
+    /// or a session line, because the same manifest is read the same way.
+    pub(crate) fn rebased(&self, root: &Path) -> Pins {
+        Pins::in_dir(root, self.writing, self.check_program_language)
+    }
+
+    fn in_dir(root: &Path, writing: bool, check_program_language: bool) -> Pins {
         Pins {
             root: root.to_path_buf(),
             writing,
+            check_program_language,
             loaded: false,
             language_checked: false,
             resolution: Resolution::default(),
@@ -1357,18 +1504,27 @@ impl Pins {
         }
     }
 
+    /// Reads the manifest and resolves its pins, remembering only a success.
+    ///
+    /// A failed load is retried on the next question, so pins handed to a long
+    /// lived VM do not keep reporting a dependency the manifest or registry has
+    /// since repaired. A successful load is answered from the cached resolution.
     fn load(&mut self) {
-        if self.loaded {
+        if self.loaded && self.failure.is_none() {
             return;
         }
         self.loaded = true;
+        self.failure = None;
         let outcome = if self.writing {
-            // The program's own range is checked here, but each module's range
-            // waits for the `import` that names it: a first import must not be
-            // refused for a later module the program has not reached.
-            resolve_in_with(&self.root, false)
-        } else {
+            // The program's own range is checked here when these pins own it,
+            // but each module's range waits for the `import` that names it: a
+            // first import must not be refused for a later module the program
+            // has not reached.
+            resolve_in_with_language(&self.root, self.check_program_language, false)
+        } else if self.check_program_language {
             resolve_for_reading(&self.root)
+        } else {
+            resolve_for_imports(&self.root)
         };
         match outcome {
             Ok(resolution) => self.resolution = resolution,
@@ -1464,11 +1620,32 @@ impl Pins {
     /// [`resolve_for_reading`]), but it does not mark this question answered:
     /// its failure is kept for [`Pins::failure`], and this check must still be
     /// able to answer after the manifest is repaired.
+    ///
+    /// This asks the strict question: a full-parse failure is reported here.
+    /// A running program with an `import` uses [`Pins::check_program_language_for`]
+    /// instead, so the parse error stays at the import that can surface it.
+    /// Pins that do not own the program's range — [`Pins::for_analysis`] and
+    /// [`Pins::for_session`] — answer `Ok`.
     pub fn check_program_language(&mut self) -> Result<()> {
-        if self.language_checked {
+        self.check_program_language_with(true)
+    }
+
+    /// [`Pins::check_program_language`] for a program that may have an `import`.
+    ///
+    /// An import-bearing program reports a malformed manifest at the import
+    /// that found it, where a `try` can catch the refusal, so this does not
+    /// report the saved full-parse error before the program runs. A
+    /// zero-import program has no such import, so it reports the parse error
+    /// here, exactly as [`Pins::check_program_language`] does.
+    pub(crate) fn check_program_language_for(&mut self, program_has_import: bool) -> Result<()> {
+        self.check_program_language_with(!program_has_import)
+    }
+
+    fn check_program_language_with(&mut self, report_unparseable: bool) -> Result<()> {
+        if !self.check_program_language || self.language_checked {
             return Ok(());
         }
-        check_program_language_in(&self.root, true)?;
+        check_program_language_in(&self.root, report_unparseable)?;
         self.language_checked = true;
         Ok(())
     }

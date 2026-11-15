@@ -17,13 +17,35 @@ malformed rather than as absent. The final review pass pins the bytecode
 engine's module refusal as catchable through the same `try` machinery the
 tree-walking engine uses, and makes an `analyze_in`-only pass report a malformed
 manifest for a zero-import program instead of silently accepting it. A final
-path fix removes the working directory from every manifest decision: `analyze`
-now analyzes without reading a manifest at all, and `rb lint`, `rb diagnostics`
-and the test harness use path-aware forms (`lint_in`, `diagnostics_in`,
-`analyze_in`) so a file is checked against the manifest in its own directory
-rather than the process CWD. A wrong-word-count `name` or `version` line is now
-recovered as malformed too, so an out-of-range refusal names it rather than
-claiming it was absent.
+path fix removes the working directory's manifest range from the program-level
+decision: `analyze` now analyzes an in-memory tree without enforcing the CWD
+manifest's language range (it still resolves imports from the working directory,
+as it always has), and `rb lint`, `rb diagnostics` and the test harness use
+path-aware forms (`lint_in`, `diagnostics_in`, `analyze_in`) so a file is
+checked against the manifest in its own directory rather than the process CWD.
+A wrong-word-count `name` or `version` line is now recovered as malformed too, so
+an out-of-range refusal names it rather than claiming it was absent. A
+continuation round hardened the version reader the range shares: a component
+with a leading zero (`01.0.0`) used to be normalized to `1.0.0`, so a manifest
+resolved against a version it never declared and a refusal could not name what
+the author wrote. `Version::parse` now refuses it, which also holds for both
+range endpoints and dependency pins; the restriction is stated in `SPEC.md`, and
+a published directory with such a name is reported as malformed rather than
+silently dropped. This is an intentional breaking change to the shared version
+reader, not only to language ranges: a pre-existing manifest that wrote
+`version 01.0.0` or pinned `dependency X =01.0.0` is now refused instead of
+being normalized to `1.0.0`, and must be rewritten without the leading zero.
+Existing manifests without a leading-zero component keep resolving unchanged. A review round also gave `Pins` an analysis-only read mode so
+`analyze`, the REPL and LSP buffers resolve imports from the working directory
+without inheriting its language range. A second review round made the runtime
+side match that claim: the session VMs (`Vm::new`, `BytecodeVm::new`, and the
+REPL's per-line bytecode VM) use a session pins mode that writes the lockfile and
+checks a module at its `import` but does not inherit the working directory's
+program range. Both engines now thread whether the program has an `import` into
+the pre-run check, so an import-bearing program leaves a malformed manifest whose
+`language` line is in range to that import instead of refusing it before the
+program runs, and `Version::parse` names the leading-zero reason rather than
+reusing the generic "three numbers" message.
 
 ## What changed
 
@@ -31,12 +53,16 @@ claiming it was absent.
 |---|---|---|
 | src/manifest.rs | +528 −38 | `LANGUAGE_VERSION`, `LanguageRange` (inclusive both ends), the `language <low> to <high>` manifest field, its validation, and the resolution-time refusal naming package, package version, declared range, manifest path and running language version; the shared `check_program_language_in` is used by the analyzer pre-check and the VM's strict pre-run check, so the bytecode engine also reads the `language` line past a malformed one; the runtime and range-free read-only paths are separated, and the public resolvers' eager module check is documented as uncatchable |
 | src/analyzer.rs | +57 −0 | the analyzer performs the program's own language check before it walks, so an analyzer error cannot hide the refusal; a zero-import program reports a manifest that has no usable `language` line at that pre-check, because there is no import at which the walk could find it |
+| src/analyzer.rs | +56 −6 | `analyze`, `Analyzer::new` and the REPL/LSP bound-name path use an analysis-only pins mode: imports still resolve from the working directory, but an unrelated manifest's language range no longer refuses an in-memory tree |
 | src/interpreter.rs | +8 −0 | the tree-walking engine checks the program's own manifest's range before its first statement, so no side effect runs first; an import-bearing program keeps the catchable refusal at its import |
 | src/bytecode/vm.rs | +7 −0 | the bytecode engine performs the same program-level check before it starts |
 | SPEC.md | +64 −0 | a "Packages, package versions and language versions" section stating that the two versions are independent and why, the inclusive range syntax, the backwards-compatible opt-in rule, that a malformed unrelated line does not hide the refusal in either engine, and that the public resolver API checks the graph eagerly while a running program checks each module at its import |
 | tests/linter_test.rs | +39 −0 | one test pinning that `rb lint` reads the manifest beside the file rather than the process working directory's |
 | tests/manifest_test.rs | +303 −0 | thirty-two tests: declaration and in-range resolution, both boundary ends, just-below/just-above range membership, out-of-range program with and without dependency lines, a zero-import program refused when run, refusal before any side effect and before an analyzer error, a malformed line that cannot hide the refusal, an unnamed program whose refusal names its manifest, program-checking read-only resolution with a deferred module range, out-of-range module, the version a module manifest declares, a catchable refusal in a real `.rb` program, a module's range checked at its own import, a transitive module's range checked at its own import, a failed read not remembered as a pass, both engines on zero-import and module imports, disk fixture, malformed ranges, numeric-extreme comparison, a component past `u64`, non-ASCII digits, the bytecode engine refusing language before a malformed line, the bytecode engine catching a module refusal in `try`, an in-range language line that cannot hide a malformed manifest, an `analyze_in`-only pass reporting a zero-import program's malformed manifest, a malformed declared version named as malformed, and a wrong-word-count name/version line named as malformed |
 | tests/unreviewed_work_ack_test.rs | +1 −0 | acknowledge this phase's `resume phase-108:` checkpoint subject in the delivery rule, which the history audit requires while the checkpoint is on `HEAD` |
+| src/manifest.rs | +99 −5 | `Version::parse` refuses a component with a leading zero instead of normalizing it, so a declared package version, a language-range endpoint and a dependency pin all round-trip through `Display`; a version-shaped directory with a leading zero is named as malformed; `Pins::for_analysis` resolves imports without checking either language range |
+| tests/manifest_test.rs | +95 −0 | five tests pinning the leading-zero refusal for the shared version reader, a declared version, a language-range endpoint and a dependency pin, plus a malformed leading-zero directory that is named rather than dropped |
+| SPEC.md | +6 −1 | state that version components have no leading zeros and that a version-shaped directory with one is reported as malformed |
 
 The `language` field is optional, so every manifest written before it keeps
 resolving. The program's own manifest is checked before the analyzer walks, so
@@ -108,6 +134,17 @@ manifest test was edited or removed.
 | edge_the_bytecode_engine_catches_an_out_of_range_module_at_its_import | failure / catchability — the bytecode engine's module refusal runs the program's `try` body |
 | a_fixture_package_inside_its_language_range_resolves | singleton fixture — real directory manifest and module manifest |
 | edge_malformed_language_ranges_are_refused_by_line | malformed input / failure — missing `to`, extra word, wrong word, malformed version, empty range, duplicate declaration |
+| edge_a_version_component_with_a_leading_zero_is_refused_not_normalized | numeric boundary / malformed input — `01.0.0`, `1.00.0` and `1.0.01` are refused, `0.0.0` still parses |
+| edge_a_declared_version_with_a_leading_zero_is_refused_by_line | malformed input / failure — a manifest's own `version 01.0.0` line is refused and named |
+| edge_a_language_line_with_a_leading_zero_endpoint_is_refused_by_line | malformed input / failure — a range endpoint is not normalized and the line is named |
+| edge_a_dependency_pin_with_a_leading_zero_is_refused_by_line | malformed input / failure — the shared reader refuses a pin like `=1.02.0` and names the line |
+| edge_a_published_leading_zero_version_directory_is_named_not_dropped | malformed input / registry — `modules/Fixture/01.0.0/` is reported as malformed instead of resolving to "no version published" when it is the only version there |
+| edge_an_unrelated_malformed_version_directory_does_not_block_a_valid_one | malformed input / registry — a valid `modules/Fixture/1.0.0/` still resolves beside an unrelated `modules/Fixture/01.0.0/`, for both `=1.0.0` and `*` |
+| edge_a_failed_module_resolution_is_retried_after_the_registry_is_repaired | failure / retry — the same pins resolve a module published after an earlier missing-module failure |
+| edge_a_version_with_the_wrong_component_count_names_its_shape | malformed input — `01`, `1.02` and `1.0.0.1` are refused for their shape before a leading-zero reason is named |
+| edge_an_in_memory_program_is_not_refused_by_the_import_directory_language | path handling — an in-memory tree resolves CWD imports but is not refused by an unrelated CWD manifest's range |
+| edge_an_import_bearing_program_reports_an_in_range_malformed_manifest_at_its_import | failure / ordering — both engines leave an in-range malformed manifest to the `import` that can report it |
+| edge_a_repl_session_does_not_inherit_the_working_directory_language_range | path handling / engine parity — a REPL session in an unrelated directory runs its line on both engines |
 | edge_language_range_at_the_numeric_extreme_includes_only_that_version | numeric boundary — the largest `u64` components compare exactly; one below the low end is outside |
 | edge_a_version_past_the_numeric_limit_is_refused_not_wrapped | numeric boundary / failure — a component past `u64` is refused, not wrapped |
 | edge_a_language_line_with_non_ascii_digits_is_refused_by_line | unicode / failure — non-ASCII digits are not a version and the line is named |
@@ -131,7 +168,7 @@ manifest test was edited or removed.
 | unicode | covered — `edge_a_language_line_with_non_ascii_digits_is_refused_by_line` pins the clean refusal for non-ASCII digits |
 | nesting_recursion | N/A — range checking is a single comparison and does not recurse; the existing dependency-depth rule is untouched |
 | duplicate_missing_keys | covered — a second `language` line is refused, as are missing/extra words (`edge_malformed_language_ranges_are_refused_by_line`) |
-| malformed_input | covered — missing `to`, extra trailing word, wrong separator word, malformed lowest version, reversed/empty range, duplicate declaration |
+| malformed_input | covered — missing `to`, extra trailing word, wrong separator word, malformed lowest version, reversed/empty range, duplicate declaration, a leading-zero version component at either endpoint, in a declared version or in a pin, and a malformed leading-zero published directory |
 | resource_limit | N/A — one range is a fixed two-version comparison; this change adds no loop, allocation or graph walk, and the existing resolution step/depth limits are unchanged |
 
 ## Gates
@@ -140,10 +177,10 @@ manifest test was edited or removed.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 3023 passed, 0 failed (85 test binaries) |
+| cargo test --all-targets | 3034 passed, 0 failed (85 test binaries) |
 | rbops/verify.sh phase-108 | pass |
 
-The targeted tests were run with `cargo test --test manifest_test` (89 passed)
+The targeted tests were run with `cargo test --test manifest_test` (96 passed)
 while iterating; the full suite above is the final run. The tests added for this
 phase are visible in the diff against `HEAD`, which is what the gate counts.
 

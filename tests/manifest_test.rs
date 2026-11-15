@@ -6,7 +6,9 @@
 //! two versions of one module. These tests pin the manifest schema, the
 //! resolver, and the bytes of the lockfile.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use redblue::bytecode::vm::BytecodeVm;
 use redblue::manifest::{self, Registry, Version, MAX_RESOLUTION_DEPTH, MAX_RESOLUTION_STEPS};
@@ -2770,6 +2772,192 @@ fn edge_the_bytecode_engine_catches_an_out_of_range_module_at_its_import() {
     );
 }
 
+/// A version component with a leading zero is refused rather than normalized.
+///
+/// `01.0.0` would otherwise parse to the same `Version` as `1.0.0` and display
+/// as `1.0.0`, so a manifest would resolve against a version it never declared
+/// and an error message could not name what the author actually wrote.
+#[test]
+fn edge_a_version_component_with_a_leading_zero_is_refused_not_normalized() {
+    assert!(
+        Version::parse("01.0.0").is_err(),
+        "a leading zero on the major component is not a version"
+    );
+    assert!(
+        Version::parse("1.00.0").is_err(),
+        "a leading zero on the minor component is not a version"
+    );
+    assert!(
+        Version::parse("1.0.01").is_err(),
+        "a leading zero on the patch component is not a version"
+    );
+    assert!(
+        Version::parse("0.0.0").is_ok(),
+        "zero itself is still a version"
+    );
+}
+
+/// A declared package version with a leading zero is refused by its own line,
+/// so the version a package says it is cannot be normalized into another one.
+#[test]
+fn edge_a_declared_version_with_a_leading_zero_is_refused_by_line() {
+    let message = parse_err("version 01.0.0\n");
+
+    assert!(
+        message.contains("is not a version") && message.contains("leading zero"),
+        "a leading zero on a declared version is refused and named, got: {message}"
+    );
+    assert!(
+        message.contains("line 1"),
+        "the refusal names the line it is on, got: {message}"
+    );
+}
+
+/// A language range endpoint with a leading zero is refused by line, so an
+/// out-of-range refusal cannot name a normalized version the author never wrote.
+#[test]
+fn edge_a_language_line_with_a_leading_zero_endpoint_is_refused_by_line() {
+    let message = parse_err("language 01.0.0 to 1.0.0\n");
+
+    assert!(
+        message.contains("is not a version") && message.contains("leading zero"),
+        "a leading zero on a language endpoint is refused and named, got: {message}"
+    );
+    assert!(
+        message.contains("line 1"),
+        "the refusal names the line it is on, got: {message}"
+    );
+}
+
+/// A published directory whose name is version-shaped but has a leading zero
+/// is named as malformed rather than silently treated as no published version.
+#[test]
+fn edge_a_published_leading_zero_version_directory_is_named_not_dropped() {
+    let root = scratch("manifest_leading_zero_directory");
+    manifest_file(&root, "name report\nversion 1.0.0\ndependency Fixture *\n");
+    publish(&root, "Fixture", "01.0.0", "set VALUE to 1\n");
+
+    let message = manifest::resolve_in(&root)
+        .expect_err("a malformed version directory is not silently unpublished")
+        .message()
+        .to_string();
+    assert!(
+        message.contains("'01.0.0'") && message.contains("leading zero"),
+        "the refusal names the malformed directory and why it is malformed, got: {message}"
+    );
+    assert!(
+        !message.contains("no version of 'Fixture' is published"),
+        "a malformed directory must not be reported as a module with no published version, got: {message}"
+    );
+
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Fixture =1.0.0\n",
+    );
+    let message = manifest::resolve_in(&root)
+        .expect_err("an exact pin with no valid published version is still refused")
+        .message()
+        .to_string();
+    assert!(
+        message.contains("'01.0.0'") && message.contains("leading zero"),
+        "an exact pin names the malformed directory when it is all there is, got: {message}"
+    );
+}
+
+/// An unrelated malformed directory does not hide a module version that really
+/// is published.
+///
+/// A stale `modules/Fixture/01.0.0/` beside a valid `modules/Fixture/1.0.0/`
+/// must not make every dependency on `Fixture` fail: the resolver asks for the
+/// version the requirement names, and a malformed directory is only the reason
+/// when no valid version can answer.
+#[test]
+fn edge_an_unrelated_malformed_version_directory_does_not_block_a_valid_one() {
+    let root = scratch("manifest_valid_and_leading_zero_directory");
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    publish(&root, "Fixture", "01.0.0", "set VALUE to 2\n");
+
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Fixture =1.0.0\n",
+    );
+    let exact = manifest::resolve_in(&root)
+        .expect("the exact valid version must still resolve beside a malformed one");
+    assert_eq!(version_of(&exact, "Fixture"), "1.0.0");
+
+    manifest_file(&root, "name report\nversion 1.0.0\ndependency Fixture *\n");
+    let newest = manifest::resolve_in(&root)
+        .expect("the highest valid version must still resolve beside a malformed one");
+    assert_eq!(version_of(&newest, "Fixture"), "1.0.0");
+}
+
+/// A resolution failure is not the last word if the module is published later.
+///
+/// The same pins may be asked again after the registry or manifest is repaired.
+/// Caching the first failure would turn a fixed dependency into a permanent
+/// error for the life of the VM.
+#[test]
+fn edge_a_failed_module_resolution_is_retried_after_the_registry_is_repaired() {
+    let root = scratch("manifest_failed_resolution_retry");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Fixture =1.0.0\n",
+    );
+
+    let mut pins = manifest::Pins::for_running(&root);
+    let message = pins
+        .module("Fixture")
+        .expect_err("a missing module cannot resolve")
+        .message()
+        .to_string();
+    assert!(
+        message.contains("no version of 'Fixture' is published"),
+        "the first ask names the missing module, got: {message}"
+    );
+
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    let path = pins
+        .module("Fixture")
+        .expect("the published module must be read after the first failure")
+        .expect("Fixture is still a dependency");
+    assert!(
+        path.ends_with("modules/Fixture/1.0.0/Fixture.rb"),
+        "the retry resolves the published module, got: {path}"
+    );
+}
+
+/// A version with the wrong component count is refused for its shape before a
+/// leading zero on one of its components is named.
+#[test]
+fn edge_a_version_with_the_wrong_component_count_names_its_shape() {
+    for text in ["01", "1.02", "1.0.0.1"] {
+        let message = Version::parse(text)
+            .expect_err("the component count is not three")
+            .message()
+            .to_string();
+        assert!(
+            message.contains("three numbers"),
+            "'{text}' is refused for its shape, not for a leading zero, got: {message}"
+        );
+    }
+}
+
+/// A dependency pin is parsed by the same version reader, so a leading zero is
+/// refused there too rather than resolving against a different version.
+#[test]
+fn edge_a_dependency_pin_with_a_leading_zero_is_refused_by_line() {
+    let message = parse_err("dependency MathUtils =1.02.0\n");
+
+    assert!(
+        message.contains("is not a version") && message.contains("leading zero"),
+        "a leading zero on a dependency pin is refused and named, got: {message}"
+    );
+    assert!(
+        message.contains("line 1"),
+        "the refusal names the line it is on, got: {message}"
+    );
+}
+
 /// A language line that is missing its `to`, carries an extra word, names
 /// something that is not a version, or gives an empty range is refused by line.
 #[test]
@@ -3030,4 +3218,112 @@ fn edge_the_test_harness_reads_the_manifest_beside_its_file() {
         results.passed, 0,
         "a body refused before it runs must not also count as a pass"
     );
+}
+
+/// An import-bearing program leaves an in-range malformed manifest to the
+/// import that can report it, in both engines.
+///
+/// The recovered `language` line answers the range question with "yes", so the
+/// saved full-parse error is not a language refusal and must not be raised
+/// before the program runs. The `import` raises it instead, where the program's
+/// own `try` can catch it — the same place `analyze_in` reports it.
+#[test]
+fn edge_an_import_bearing_program_reports_an_in_range_malformed_manifest_at_its_import() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_import_malformed_in_range");
+    manifest_file(
+        &root,
+        &format!("name report\nversion 1.0.0\nlanguage {actual} to {actual}\nnmae other\n"),
+    );
+
+    for (engine, marker_name) in [
+        ("walker", "caught_walker.txt"),
+        ("bytecode", "caught_bytecode.txt"),
+    ] {
+        let marker = root.join(marker_name);
+        let source = format!(
+            "try\n    import Fixture\ncatch error of Runtime failure\n    \
+             files.write(\"{}\", failure.message)\nend\n",
+            marker.display()
+        );
+
+        if engine == "walker" {
+            let mut vm = redblue::Vm::new_in(&root);
+            vm.run_quietly(&program(&source)).unwrap_or_else(|error| {
+                panic!("the tree-walking engine must leave the parse error to the import: {error}")
+            });
+        } else {
+            let chunk = redblue::bytecode::compile_program(&program(&source))
+                .expect("the program should compile to bytecode");
+            let mut vm = BytecodeVm::new_in(&root);
+            vm.set_echo(false);
+            vm.run(&chunk).unwrap_or_else(|error| {
+                panic!("the bytecode engine must leave the parse error to the import: {error}")
+            });
+        }
+
+        let caught = std::fs::read_to_string(&marker).unwrap_or_else(|error| {
+            panic!("the {engine} catch body must have run, not been refused before it: {error}")
+        });
+        assert!(
+            caught.contains("not a field a manifest has"),
+            "the {engine} import reports the malformed line, got: {caught}"
+        );
+    }
+}
+
+/// A REPL session does not inherit the working directory manifest's language
+/// range, on either engine.
+///
+/// The session VM is rooted at `.` so its imports resolve there, but a line
+/// typed at the prompt was not found in a file in that directory and must not
+/// be refused by a range that directory declared. The end-to-end run is the
+/// `Vm::new()` / `BytecodeVm::new()` path the REPL actually takes.
+#[test]
+fn edge_a_repl_session_does_not_inherit_the_working_directory_language_range() {
+    let root = scratch("manifest_language_repl_session");
+    manifest_file(
+        &root,
+        "name unrelated\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    );
+    std::fs::create_dir_all(root.join("modules"))
+        .expect("the modules directory should be creatable");
+    std::fs::write(root.join("modules").join("Fixture.rb"), "set VALUE to 41\n")
+        .expect("the module should be writable");
+
+    for engine in ["walker", "bytecode"] {
+        let prefix = if engine == "bytecode" {
+            ".vm bytecode\n"
+        } else {
+            ""
+        };
+        let input = format!("{prefix}import Fixture\nsay VALUE + 1\n:quit\n");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rb"))
+            .current_dir(&root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the rb binary should start");
+        let mut stdin = child.stdin.take().expect("stdin should be piped");
+        stdin
+            .write_all(input.as_bytes())
+            .expect("the session input should be writable");
+        drop(stdin);
+        let output = child.wait_with_output().expect("the session should finish");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "the {engine} session should exit 0\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("42"),
+            "the {engine} session runs its line instead of inheriting the directory range\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("9.0.0 to 9.9.9") && !stderr.contains("9.0.0 to 9.9.9"),
+            "the {engine} session must not report the unrelated directory range\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
 }

@@ -853,9 +853,21 @@ impl Default for BytecodeVm {
 }
 
 impl BytecodeVm {
-    /// Builds a VM with the configured limits and an empty program.
+    /// Builds a session VM rooted at the working directory.
+    ///
+    /// Its imports still resolve from `.`, but the `redblue.manifest` there may
+    /// belong to an unrelated project, so its language range is not inherited by
+    /// the line. A program found in a directory uses [`BytecodeVm::new_in`].
     pub fn new() -> Self {
-        Self::in_dir(std::path::Path::new("."))
+        Self::new_session_in(std::path::Path::new("."))
+    }
+
+    /// Builds a session VM that resolves its imports against `root` without
+    /// inheriting that directory's program language range.
+    pub(crate) fn new_session_in(root: &std::path::Path) -> Self {
+        let mut vm = Self::in_dir(root);
+        vm.pins = crate::manifest::Pins::for_session(root);
+        vm
     }
 
     /// Builds a VM that resolves its imports against `root`.
@@ -1113,7 +1125,9 @@ impl BytecodeVm {
         // failure that comes first, must not let an out-of-range program
         // execute and only be refused afterwards. A module's own range stays
         // deferred to the `import` that loads it, where a `try` can catch it.
-        self.pins.check_program_language()?;
+        // An import-bearing program leaves a malformed manifest to the import
+        // that can report it; a zero-import program reports it here.
+        self.pins.check_program_language_for(chunk.has_import())?;
 
         let chunk = Arc::new(chunk.clone());
         self.frames.push(self.frame_for(&chunk, Vec::new()));

@@ -2234,7 +2234,17 @@ dependency MathUtils =1.0.0
 `language <low> to <high>` is inclusive at both ends: a package declaring
 `0.2.0 to 0.4.0` runs on `0.2.0` and on `0.4.0`, and is refused on `0.1.9` or
 `0.4.1`. Both the package version and the language version are numbers of the
-same `major.minor.patch` shape, but they are never compared with each other.
+same `major.minor.patch` shape, but they are never compared with each other. A
+component is written without leading zeros: `1.0.0`, not `01.0.0`. Such a
+component is refused rather than normalized, so a version always reads back as
+the author wrote it. This applies to every version the manifest reader accepts,
+not only to the endpoints of `language`: a manifest that already says
+`version 01.0.0` or pins `dependency X =01.0.0` is now refused where an earlier
+compiler normalized it to `1.0.0`. Rewrite those components without the leading
+zero; that older spelling is intentionally invalidated. A directory under
+`modules/<name>/` that is version-shaped but has a leading-zero component is
+reported as malformed rather than silently treated as unpublished when no valid
+version answers the requirement.
 
 The field is optional. A manifest written before `language` existed keeps
 resolving, which is what makes the addition backwards compatible; the resolver
