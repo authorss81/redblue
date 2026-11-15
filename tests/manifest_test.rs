@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use redblue::bytecode::vm::BytecodeVm;
 use redblue::manifest::{self, Registry, Version, MAX_RESOLUTION_DEPTH, MAX_RESOLUTION_STEPS};
 
 /// A module published to a registry, with the manifest it publishes beside it.
@@ -1938,6 +1939,505 @@ fn edge_no_module_loader_reads_a_file_behind_the_filesystem_abstraction() {
         assert!(
             reader.contains("crate::vfs::read_to_string"),
             "the module reader must be the one `crate::vfs` re-exports per target"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A package declares which language versions it supports
+// ---------------------------------------------------------------------------
+
+/// A package's own version and the Redblue version that runs it are two
+/// different numbers, and the manifest carries the second as a range.
+#[test]
+fn edge_a_package_declares_the_language_range_it_supports() {
+    let current = manifest::LANGUAGE_VERSION.to_string();
+    let text = format!(
+        "name report\nversion 1.0.0\nlanguage {current} to {current}\ndependency MathUtils =1.0.0\n"
+    );
+    let parsed = manifest::parse_manifest(&text)
+        .expect("a manifest that declares its language range should parse");
+
+    let range = parsed
+        .language
+        .as_ref()
+        .expect("the range the manifest declared should be kept");
+    assert!(
+        range.supports(&manifest::LANGUAGE_VERSION),
+        "a package whose range is exactly this language version supports it"
+    );
+
+    let resolved = manifest::resolve(&parsed, &two_versions())
+        .expect("a package inside its declared range resolves");
+    assert_eq!(version_of(&resolved, "MathUtils"), "1.0.0");
+}
+
+/// Both ends of a declared range are included, and one version past either end
+/// is outside it.
+///
+/// The comparison is the whole question: a range that refuses its own upper
+/// bound is off by one, and one that accepts a version past it is not a range.
+#[test]
+fn edge_language_range_includes_both_ends_and_nothing_beyond() {
+    let range = manifest::LanguageRange {
+        low: Version::parse("1.2.3").unwrap(),
+        high: Version::parse("1.4.0").unwrap(),
+    };
+
+    assert!(
+        range.supports(&Version::parse("1.2.3").unwrap()),
+        "the low end is inside"
+    );
+    assert!(
+        !range.supports(&Version::parse("1.2.2").unwrap()),
+        "one below the low end is outside"
+    );
+    assert!(
+        range.supports(&Version::parse("1.4.0").unwrap()),
+        "the high end is inside"
+    );
+    assert!(
+        !range.supports(&Version::parse("1.4.1").unwrap()),
+        "one above the high end is outside"
+    );
+}
+
+/// The running language version is inside a range whose low end is exactly it,
+/// and inside one whose high end is exactly it.
+#[test]
+fn edge_a_package_at_either_boundary_of_its_range_resolves() {
+    let current = manifest::LANGUAGE_VERSION.to_string();
+    let registry = two_versions();
+    for range in [
+        format!("{current} to 999.999.999"),
+        format!("0.0.0 to {current}"),
+    ] {
+        let text =
+            format!("name report\nversion 1.0.0\nlanguage {range}\ndependency MathUtils =1.0.0\n");
+        let parsed = manifest::parse_manifest(&text)
+            .unwrap_or_else(|error| panic!("a {range} range should parse: {}", error.message()));
+        let resolved = manifest::resolve(&parsed, &registry).unwrap_or_else(|error| {
+            panic!("a package at {range} should resolve: {}", error.message())
+        });
+        assert_eq!(version_of(&resolved, "MathUtils"), "1.0.0");
+    }
+}
+
+/// A package that declares a range not containing this language version is
+/// refused, naming the package, its version, the range and the running version.
+#[test]
+fn edge_a_package_outside_its_language_range_is_refused_naming_both_versions() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let message = resolve_err(
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\ndependency MathUtils =1.0.0\n",
+        &two_versions(),
+    );
+
+    assert!(
+        message.contains("'report' 1.0.0"),
+        "the refusal has to name the package and its own version, got: {message}"
+    );
+    assert!(
+        message.contains("9.0.0 to 9.9.9"),
+        "the refusal has to name the range the package declared, got: {message}"
+    );
+    assert!(
+        message.contains(&actual),
+        "the refusal has to name the language version that is running, got: {message}"
+    );
+}
+
+/// The program-level check fires even when the manifest has no dependency
+/// lines, so an empty resolution is still a resolution that can refuse a
+/// package.
+#[test]
+fn edge_a_program_with_no_dependencies_outside_its_language_range_is_refused() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let message = resolve_err(
+        "name report
+version 1.0.0
+language 9.0.0 to 9.9.9
+",
+        &Memory::default(),
+    );
+
+    assert!(
+        message.contains("'report' 1.0.0"),
+        "the refusal names the package and its version even with nothing to resolve, got: {message}"
+    );
+    assert!(
+        message.contains("9.0.0 to 9.9.9") && message.contains(&actual),
+        "the refusal still names the range and the running language version, got: {message}"
+    );
+}
+
+/// A zero-import program with an out-of-range manifest is refused when it runs,
+/// not only when a resolution is asked for directly.
+///
+/// This is the runtime path: no `import` asks for the pins, so the check has to
+/// happen because the program is about to run rather than because a loader
+/// touched the manifest.
+#[test]
+fn edge_a_program_with_no_imports_outside_its_language_range_is_refused_when_run() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_no_import_run");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    );
+    let program_file = root.join("prog.rb");
+    std::fs::write(&program_file, "say \"hi\"\n").expect("the program should be written");
+
+    let error = redblue::run_file(
+        program_file
+            .to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .expect_err("a zero-import program outside its language range must be refused");
+
+    let message = error.message();
+    assert!(
+        message.contains("'report' 1.0.0"),
+        "the refusal names the package and its version, got: {message}"
+    );
+    assert!(
+        message.contains("9.0.0 to 9.9.9") && message.contains(&actual),
+        "the refusal names the range and the running language version, got: {message}"
+    );
+    assert!(
+        message.contains(&root.join(manifest::MANIFEST_FILE).display().to_string()),
+        "the refusal names the manifest that declared the range, got: {message}"
+    );
+}
+
+/// An unnamed program manifest is named by its path, and its missing version is
+/// stated rather than left as an unactionable `Package 'this program'`.
+#[test]
+fn edge_an_unnamed_program_refusal_names_its_manifest_and_missing_version() {
+    let root = scratch("manifest_language_unnamed_program");
+    manifest_file(&root, "language 9.0.0 to 9.9.9\n");
+    let program_file = root.join("prog.rb");
+    std::fs::write(&program_file, "say \"hi\"\n").expect("the program should be written");
+
+    let error = redblue::run_file(
+        program_file
+            .to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .expect_err("an unnamed program outside its language range must still be refused");
+
+    let message = error.message();
+    assert!(
+        message.contains("no name declared") && message.contains("no version declared"),
+        "the refusal says what the manifest did not declare, got: {message}"
+    );
+    assert!(
+        message.contains(&root.join(manifest::MANIFEST_FILE).display().to_string()),
+        "the refusal names the manifest that declared the range, got: {message}"
+    );
+}
+
+/// A module pulled in by a program is checked against its own declared range,
+/// not against the program's.
+#[test]
+fn edge_a_module_outside_its_language_range_is_refused() {
+    let registry = Memory::default().publish("Report", "1.0.0").with_manifest(
+        "Report",
+        "1.0.0",
+        "name Report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    );
+
+    let message = resolve_err("dependency Report =1.0.0\n", &registry);
+    assert!(
+        message.contains("'Report' 1.0.0") && message.contains("9.0.0 to 9.9.9"),
+        "the module's own range and version are what the refusal names, got: {message}"
+    );
+}
+
+/// The refusal names the version the module's own manifest declares, not the
+/// directory version the registry happened to choose.
+#[test]
+fn edge_a_module_refusal_names_the_version_its_manifest_declares() {
+    let registry = Memory::default().publish("Report", "1.0.0").with_manifest(
+        "Report",
+        "1.0.0",
+        "name Report
+version 2.0.0
+language 9.0.0 to 9.9.9
+",
+    );
+
+    let message = resolve_err(
+        "dependency Report =1.0.0
+",
+        &registry,
+    );
+    assert!(
+        message.contains("'Report' 2.0.0"),
+        "the manifest says 2.0.0, so that is the version the refusal names, got: {message}"
+    );
+    assert!(
+        !message.contains("'Report' 1.0.0"),
+        "the directory version is not the package version when the manifest states one, got: {message}"
+    );
+}
+
+/// A package inside its declared range resolves from a real directory fixture,
+/// with the module's own manifest declaring the range too.
+#[test]
+fn a_fixture_package_inside_its_language_range_resolves() {
+    let root = scratch("manifest_language_fixture");
+    let current = manifest::LANGUAGE_VERSION.to_string();
+    manifest_file(
+        &root,
+        &format!("name report\nversion 1.0.0\nlanguage {current} to {current}\ndependency Fixture =1.0.0\n"),
+    );
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    std::fs::write(
+        root.join("modules/Fixture/1.0.0")
+            .join(manifest::MANIFEST_FILE),
+        format!("name Fixture\nversion 1.0.0\nlanguage {current} to {current}\n"),
+    )
+    .expect("the module manifest should be written");
+
+    let resolved = manifest::resolve_in(&root).expect("both packages are inside their range");
+    assert_eq!(version_of(&resolved, "Fixture"), "1.0.0");
+}
+
+/// The range-free read-only path serves a static pass, while the runtime
+/// read-only path still refuses an out-of-range package.
+///
+/// The two differ only in who runs them: a linter or analyzer has no `try` to
+/// catch a failure with, so it resolves without the range; a program about to
+/// run has an `import` and gets the refusal there.
+#[test]
+fn edge_reading_a_manifest_leaves_the_language_range_to_the_runtime() {
+    let root = scratch("manifest_language_read_only");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    );
+
+    let resolved = manifest::resolve_for_reading(&root)
+        .expect("a static pass binds names without enforcing the runtime range");
+    assert_eq!(resolved.modules().count(), 0);
+
+    let message = manifest::resolve_without_writing(&root)
+        .expect_err("the runtime read-only path still refuses the range")
+        .message()
+        .to_string();
+    assert!(
+        message.contains("'report' 1.0.0") && message.contains("9.0.0 to 9.9.9"),
+        "the runtime read-only refusal names the package, got: {message}"
+    );
+}
+
+/// A module outside its language range is refused at the `import` that loads
+/// it, as a runtime failure a `try` around that import can catch, rather than
+/// as an analyzer error before the program has a chance to.
+///
+/// The fixture is a real `.rb` program run from disk, so this pins the whole
+/// path `rb run` takes: analyzer, pins, and the catch handler.
+#[test]
+fn edge_an_out_of_range_module_is_a_catchable_runtime_error_at_its_import() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_catch_module");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Fixture =1.0.0\n",
+    );
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    std::fs::write(
+        root.join("modules/Fixture/1.0.0")
+            .join(manifest::MANIFEST_FILE),
+        "name Fixture\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    )
+    .expect("the module manifest should be written");
+
+    let marker = root.join("caught.txt");
+    let source = format!(
+        "try\n    import Fixture\ncatch error of Runtime failure\n    \
+         files.write(\"{}\", failure.message)\nend\n",
+        marker.display()
+    );
+    let program_file = root.join("prog.rb");
+    std::fs::write(&program_file, source).expect("the program should be written");
+
+    redblue::run_file(
+        program_file
+            .to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .unwrap_or_else(|error| panic!("the program should catch the refusal at its import: {error}"));
+
+    let caught = std::fs::read_to_string(&marker)
+        .expect("the catch body should have run and recorded the failure");
+    assert!(
+        caught.contains("'Fixture' 1.0.0"),
+        "the caught failure names the package and its version, got: {caught}"
+    );
+    assert!(
+        caught.contains("9.0.0 to 9.9.9") && caught.contains(&actual),
+        "the caught failure names the range and the running language version, got: {caught}"
+    );
+}
+
+/// The program's own range is checked before its first statement, so no side
+/// effect happens and a `try` cannot turn the refusal into a caught failure.
+///
+/// The program writes a marker first and then imports inside a `try`: an
+/// implementation that waited until the import (or until the end of the run)
+/// would leave both markers behind, or would let the catch swallow the refusal.
+#[test]
+fn edge_a_program_outside_its_language_range_is_refused_before_it_runs() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_program_before_run");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\ndependency Fixture =1.0.0\n",
+    );
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    std::fs::write(
+        root.join("modules/Fixture/1.0.0")
+            .join(manifest::MANIFEST_FILE),
+        format!("name Fixture\nversion 1.0.0\nlanguage {actual} to {actual}\n"),
+    )
+    .expect("the module manifest should be written");
+
+    let ran = root.join("ran.txt");
+    let caught = root.join("caught.txt");
+    let source = format!(
+        "files.write(\"{}\", \"ran\")\ntry\n    import Fixture\ncatch error of Runtime failure\n    \
+         files.write(\"{}\", \"caught\")\nend\n",
+        ran.display(),
+        caught.display()
+    );
+    let program_file = root.join("prog.rb");
+    std::fs::write(&program_file, source).expect("the program should be written");
+
+    let error = redblue::run_file(
+        program_file
+            .to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .expect_err("a program outside its language range must be refused before it runs");
+    let message = error.message();
+    assert!(
+        message.contains("'report' 1.0.0"),
+        "the refusal names the package and its version, got: {message}"
+    );
+    assert!(
+        message.contains("9.0.0 to 9.9.9") && message.contains(&actual),
+        "the refusal names the range and the running language version, got: {message}"
+    );
+    assert!(
+        !ran.exists(),
+        "the program must not execute any statement before its range is checked"
+    );
+    assert!(
+        !caught.exists(),
+        "the program's own range is refused before its `try`, so it cannot be caught"
+    );
+}
+
+/// The bytecode engine refuses a zero-import program outside its language
+/// range, just as the tree-walking engine does.
+///
+/// The two engines are expected to agree about one program; without this the
+/// bytecode path silently runs what `rb run` refuses.
+#[test]
+fn edge_the_bytecode_engine_refuses_a_zero_import_program_outside_its_language_range() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_bytecode_no_import");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    );
+
+    let parsed = program("say \"hi\"\n");
+    let chunk = redblue::bytecode::compile_program(&parsed)
+        .expect("the program should compile to bytecode");
+    let error = BytecodeVm::new_in(&root)
+        .run(&chunk)
+        .expect_err("a zero-import program outside its language range must be refused");
+
+    let message = error.message();
+    assert!(
+        message.contains("'report' 1.0.0"),
+        "the refusal names the package and its version, got: {message}"
+    );
+    assert!(
+        message.contains("9.0.0 to 9.9.9") && message.contains(&actual),
+        "the refusal names the range and the running language version, got: {message}"
+    );
+    assert!(
+        message.contains(&root.join(manifest::MANIFEST_FILE).display().to_string()),
+        "the refusal names the manifest that declared the range, got: {message}"
+    );
+}
+
+/// The bytecode engine refuses an out-of-range module at its `import`, with the
+/// module's own range rather than the program's.
+///
+/// This is the bytecode counterpart of the tree-walking import test, so both
+/// engines are pinned to the same answer for a module.
+#[test]
+fn edge_the_bytecode_engine_refuses_an_out_of_range_module_at_its_import() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_bytecode_module");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Fixture =1.0.0\n",
+    );
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    std::fs::write(
+        root.join("modules/Fixture/1.0.0")
+            .join(manifest::MANIFEST_FILE),
+        "name Fixture\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    )
+    .expect("the module manifest should be written");
+
+    let parsed = program("import Fixture\n");
+    let chunk = redblue::bytecode::compile_program(&parsed)
+        .expect("the program should compile to bytecode");
+    let error = BytecodeVm::new_in(&root)
+        .run(&chunk)
+        .expect_err("an out-of-range module must be refused at its import");
+
+    let message = error.message();
+    assert!(
+        message.contains("'Fixture' 1.0.0"),
+        "the refusal names the module and its version, got: {message}"
+    );
+    assert!(
+        message.contains("9.0.0 to 9.9.9") && message.contains(&actual),
+        "the refusal names the module's range and the running language version, got: {message}"
+    );
+}
+
+/// A language line that is missing its `to`, carries an extra word, names
+/// something that is not a version, or gives an empty range is refused by line.
+#[test]
+fn edge_malformed_language_ranges_are_refused_by_line() {
+    for (text, expected) in [
+        ("language 0.2.0\n", "is not a language line"),
+        ("language 0.2.0 until 0.4.0\n", "is not a language line"),
+        ("language 0.2.0 to 0.4.0 extra\n", "is not a language line"),
+        ("language 0.2 to 0.4.0\n", "is not a version"),
+        ("language 0.4.0 to 0.2.0\n", "is empty"),
+        (
+            "language 0.2.0 to 0.4.0\nlanguage 0.2.0 to 0.4.0\n",
+            "declared twice",
+        ),
+    ] {
+        let message = parse_err(text);
+        assert!(
+            message.contains(expected),
+            "'{text}' should be refused saying '{expected}', got: {message}"
+        );
+        assert!(
+            message.contains("line"),
+            "'{text}' should say which line, got: {message}"
         );
     }
 }

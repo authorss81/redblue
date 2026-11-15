@@ -1108,11 +1108,25 @@ impl BytecodeVm {
         self.outcome = Value::Nothing;
         self.abrupt_exit = false;
 
+        // The program's own manifest is checked before it runs, whatever its
+        // instructions are: an `import` in a branch that is never taken, or a
+        // failure that comes first, must not let an out-of-range program
+        // execute and only be refused afterwards. A module's own range stays
+        // deferred to the `import` that loads it, where a `try` can catch it.
+        self.pins.check_program_language()?;
+
         let chunk = Arc::new(chunk.clone());
         self.frames.push(self.frame_for(&chunk, Vec::new()));
         // `Exit` is not read here: a `break` in the program's outermost block is
         // refused, so no loop is left for this body to have been written inside.
         let result = self.drive(0).map(|_| ());
+        // An `import` that was written but never executed loaded no pins. The
+        // check above already covered the program's own range, so this is a
+        // no-op after it, but asking at the end keeps the run's guarantee
+        // explicit for any future path that reaches `drive` without the check.
+        if result.is_ok() {
+            self.pins.check_program_language()?;
+        }
         if result.is_ok() && self.echo {
             for line in &self.output {
                 crate::wasm::emit(&format!("{}\n", line));

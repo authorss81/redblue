@@ -19,6 +19,11 @@
 //! - `name` and `version` say what the program itself is. Both are optional in a
 //!   program manifest and *required* in a module's own manifest, where they are
 //!   checked against the directory the module was found in.
+//! - `language <low> to <high>` says which Redblue language versions the package
+//!   runs on, both ends inclusive. A package's own `version` and the language
+//!   version that runs it are independent numbers: a bug-fix release of a
+//!   package is not a language change, and a language release is not a package
+//!   change.
 //! - `dependency <name> <requirement>` is one pin. The requirement is `*` for
 //!   the highest published version, or `=x.y.z` for exactly one.
 //!
@@ -147,6 +152,47 @@ impl std::fmt::Display for Version {
     }
 }
 
+/// The version of the Redblue *language* this compiler implements.
+///
+/// This is deliberately not a package's version. A package's `version` says
+/// what release of *that package* this is; this says which release of the
+/// *language* can run it. They move for different reasons — fixing a package
+/// bug changes the package version and not the language, and adding syntax
+/// changes the language version and not every package — so a package that
+/// needs a particular language declares [`Manifest::language`] rather than
+/// encoding the language in its own version number.
+///
+/// Bump this when the language's semantics change, not when the compiler's
+/// implementation or its packaging changes.
+pub const LANGUAGE_VERSION: Version = Version {
+    major: 0,
+    minor: 2,
+    patch: 0,
+};
+
+/// The range of Redblue language versions a package runs on, both ends
+/// inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanguageRange {
+    /// The oldest language version the package supports.
+    pub low: Version,
+    /// The newest language version the package supports.
+    pub high: Version,
+}
+
+impl LanguageRange {
+    /// Whether `version` is inside this range, counting both ends.
+    pub fn supports(&self, version: &Version) -> bool {
+        self.low <= *version && *version <= self.high
+    }
+}
+
+impl std::fmt::Display for LanguageRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} to {}", self.low, self.high)
+    }
+}
+
 /// What a manifest asks for of one module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Requirement {
@@ -205,6 +251,12 @@ pub struct Manifest {
     pub name: Option<String>,
     /// What version of itself it is.
     pub version: Option<Version>,
+    /// The Redblue language versions it runs on, when it states them.
+    ///
+    /// Optional like `name` and `version`: a manifest written before the field
+    /// existed keeps resolving, and the resolver only refuses a package that
+    /// declared a range and is outside it.
+    pub language: Option<LanguageRange>,
     /// What it depends on, in the order the manifest wrote it.
     pub dependencies: Vec<Dependency>,
 }
@@ -241,11 +293,11 @@ impl Manifest {
                 continue;
             }
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if !matches!(fields[0], "name" | "version" | "dependency") {
+            if !matches!(fields[0], "name" | "version" | "language" | "dependency") {
                 return Err(Error::Runtime(
                     format!(
                         "{label} line {number}: '{}' is not a field a manifest has; it holds \
-                         'name', 'version' and 'dependency' lines",
+                         'name', 'version', 'language' and 'dependency' lines",
                         fields[0]
                     ),
                     Span::unknown(),
@@ -275,6 +327,45 @@ impl Manifest {
                             Span::unknown(),
                         )
                     })?);
+                }
+                "language" => {
+                    if manifest.language.is_some() {
+                        return Err(Error::Runtime(
+                            format!("{label} line {number}: 'language' is declared twice"),
+                            Span::unknown(),
+                        ));
+                    }
+                    if fields.len() != 4 || fields[2] != "to" {
+                        return Err(Error::Runtime(
+                            format!(
+                                "{label} line {number}: '{line}' is not a language line: it takes \
+                                 two versions separated by 'to', as in 'language 0.2.0 to 0.4.0'"
+                            ),
+                            Span::unknown(),
+                        ));
+                    }
+                    let low = Version::parse(fields[1]).map_err(|error| {
+                        Error::Runtime(
+                            format!("{label} line {number}: {}", error.message()),
+                            Span::unknown(),
+                        )
+                    })?;
+                    let high = Version::parse(fields[3]).map_err(|error| {
+                        Error::Runtime(
+                            format!("{label} line {number}: {}", error.message()),
+                            Span::unknown(),
+                        )
+                    })?;
+                    if low > high {
+                        return Err(Error::Runtime(
+                            format!(
+                                "{label} line {number}: the language range {low} to {high} is \
+                                 empty: {low} is above {high}"
+                            ),
+                            Span::unknown(),
+                        ));
+                    }
+                    manifest.language = Some(LanguageRange { low, high });
                 }
                 "dependency" if fields.len() == 3 => {
                     check_module_name(fields[1], label, number)?;
@@ -530,6 +621,36 @@ pub fn parse_lockfile(text: &str) -> Result<Vec<LockedModule>> {
 /// so a dependency that arrives too deep is refused by the chain it is in
 /// rather than by how wide the graph around it happens to be.
 pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resolution> {
+    resolve_with_language_checks(manifest, registry, true, None)
+}
+
+/// Resolves `manifest`, optionally enforcing the language range each package
+/// declares.
+///
+/// The public [`resolve`] always enforces the range. A read-only pass that only
+/// wants the module paths an `import` binds — the analyzer — calls this with
+/// `check_language` false, so the refusal is raised by the runtime [`Pins`] at
+/// the import instead of before the program runs, where a `try` can catch it.
+///
+/// `location` is the directory the program manifest was read from, when the
+/// caller has one. It is named in a refusal for an unnamed program, where the
+/// manifest itself is the only thing that says which package the range belongs
+/// to.
+fn resolve_with_language_checks(
+    manifest: &Manifest,
+    registry: &impl Registry,
+    check_language: bool,
+    location: Option<&Path>,
+) -> Result<Resolution> {
+    if check_language {
+        check_language_support(
+            manifest,
+            "this program",
+            manifest.version.as_ref(),
+            location,
+        )?;
+    }
+
     let mut resolution = Resolution::default();
     let mut pending: VecDeque<(Dependency, String, usize)> = manifest
         .dependencies
@@ -628,6 +749,14 @@ pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resoluti
         if let Some(text) = registry.module_manifest(&dependency.name, &chosen) {
             let label = format!("{} {}", dependency.name, chosen);
             let module_manifest = Manifest::parse(&text, &label)?;
+            if check_language {
+                check_language_support(
+                    &module_manifest,
+                    &dependency.name,
+                    module_manifest.version.as_ref().or(Some(&chosen)),
+                    None,
+                )?;
+            }
             for dependency in module_manifest.dependencies {
                 pending.push_back((dependency, label.clone(), depth + 1));
             }
@@ -635,6 +764,45 @@ pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resoluti
     }
 
     Ok(resolution)
+}
+
+/// Refuses `manifest` when the language version running it is outside the range
+/// the package declared.
+///
+/// The package's own version is named beside the range and the running language
+/// version, because "this package does not support this language" without the
+/// two numbers is a sentence the reader cannot act on. A manifest that states no
+/// range supports every language version: the field is opt-in so that packages
+/// written before it keep resolving.
+fn check_language_support(
+    manifest: &Manifest,
+    package: &str,
+    version: Option<&Version>,
+    location: Option<&Path>,
+) -> Result<()> {
+    let Some(range) = &manifest.language else {
+        return Ok(());
+    };
+    if range.supports(&LANGUAGE_VERSION) {
+        return Ok(());
+    }
+    let named = match (manifest.name.as_deref(), version) {
+        (Some(name), Some(version)) => format!("'{name}' {version}"),
+        (Some(name), None) => format!("'{name}' (no version declared)"),
+        (None, Some(version)) => format!("'{package}' {version} (no name declared)"),
+        (None, None) => format!("'{package}' (no name declared, no version declared)"),
+    };
+    let located = match location {
+        Some(root) => format!(" in {}", root.join(MANIFEST_FILE).display()),
+        None => String::new(),
+    };
+    Err(Error::Runtime(
+        format!(
+            "Package {named}{located} supports Redblue {range}, but this is Redblue \
+             {LANGUAGE_VERSION}: the package cannot run on this language version"
+        ),
+        Span::unknown(),
+    ))
 }
 
 /// The message for a pin nothing satisfies.
@@ -746,32 +914,55 @@ fn manifest_in(root: &Path) -> Result<Option<Manifest>> {
 ///
 /// This is the *resolving* path — it is what writes `redblue.lock`, and what a
 /// program that is about to be run wants. A pass that only answers questions
-/// about the program wants [`resolve_without_writing`] instead, which resolves
-/// the same pins and touches nothing on disk.
+/// about the program wants [`resolve_for_reading`] instead, which resolves the
+/// same pins, touches nothing on disk, and leaves the language-range refusal to
+/// the runtime `import`.
 pub fn resolve_in(root: &Path) -> Result<Resolution> {
     let Some(manifest) = manifest_in(root)? else {
         return Ok(Resolution::default());
     };
-    let resolution = resolve(&manifest, &DirRegistry::new(root))?;
+    let resolution =
+        resolve_with_language_checks(&manifest, &DirRegistry::new(root), true, Some(root))?;
     check_lockfile(root, &resolution)?;
     write_lockfile(root, &resolution)?;
     Ok(resolution)
 }
 
-/// Resolves what the program in `root` depends on, writing nothing.
+/// Resolves what the program in `root` depends on, writing nothing, for a
+/// program that is about to run.
 ///
 /// The same answers as [`resolve_in`] — a pin nothing publishes is still an
-/// error, a module needed at two versions is still a conflict — from reads
-/// only. A static pass (the analyzer, a linter, a formatter) asks what a
-/// program's pins bind and has no reason to create a file to answer it:
-/// without this, `rb lint` in a directory holding a `redblue.manifest` left a
-/// `redblue.lock` beside it, which is what `cargo check` does with a
-/// `Cargo.lock` and is still a write a reader of `lint` did not ask for.
+/// error, a module needed at two versions is still a conflict, and a package
+/// outside its declared language range is still refused — from reads only.
+/// This is the runtime read-only path. A pass that runs *before* the program
+/// and only asks what its pins bind wants [`resolve_for_reading`] instead,
+/// which is the same resolve without the language-range refusal.
+///
+/// Writing nothing is what a caller that is only looking needs: without this,
+/// `rb lint` in a directory holding a `redblue.manifest` left a `redblue.lock`
+/// beside it, which is what `cargo check` does with a `Cargo.lock` and is still
+/// a write a reader of `lint` did not ask for.
 pub fn resolve_without_writing(root: &Path) -> Result<Resolution> {
     let Some(manifest) = manifest_in(root)? else {
         return Ok(Resolution::default());
     };
-    resolve(&manifest, &DirRegistry::new(root))
+    resolve_with_language_checks(&manifest, &DirRegistry::new(root), true, Some(root))
+}
+
+/// Resolves what the program in `root` depends on for a pass that only asks
+/// which names an `import` binds.
+///
+/// This is [`resolve_without_writing`] without the language-range refusal. The
+/// analyzer runs before the program, so a range failure raised here would be an
+/// `Analyzer` error no `try` can catch; leaving it to the runtime [`Pins`] keeps
+/// the failure at the `import` that loads the package, where the program can
+/// catch it. A pin nothing publishes is still refused here, because the
+/// analyzer has no names to bind for it either way.
+pub fn resolve_for_reading(root: &Path) -> Result<Resolution> {
+    let Some(manifest) = manifest_in(root)? else {
+        return Ok(Resolution::default());
+    };
+    resolve_with_language_checks(&manifest, &DirRegistry::new(root), false, Some(root))
 }
 
 /// Refuses a lockfile that says something other than what this resolve found.
@@ -868,8 +1059,10 @@ fn write_lockfile(root: &Path, resolution: &Resolution) -> Result<()> {
 /// which is the only thing that knows which program it is.
 ///
 /// Read on first question, not on construction: a VM built for a program with no
-/// `import` reads no manifest and writes no lockfile, which is what every
-/// program written before there was a manifest must keep doing.
+/// `import` resolves no dependencies and writes no lockfile, which is what every
+/// program written before there was a manifest must keep doing. Its own manifest
+/// is still read once for the language range, because that is a fact about
+/// running the program rather than about an import.
 #[derive(Debug)]
 pub struct Pins {
     root: PathBuf,
@@ -878,6 +1071,10 @@ pub struct Pins {
     /// — the analyzer, a linter, a formatter — creates nothing.
     writing: bool,
     loaded: bool,
+    /// Whether the program manifest's own language range has been checked
+    /// without resolving the pins, which is what a program with no `import`
+    /// asks for.
+    language_checked: bool,
     resolution: Resolution,
     failure: Option<Error>,
 }
@@ -890,8 +1087,13 @@ impl Pins {
 
     /// The pins of the manifest in `root`, for a pass that is only looking.
     ///
-    /// The same answers — a pin nothing publishes is still a failure, a module
-    /// needed at two versions is still a conflict — from reads only.
+    /// The same dependency answers — a pin nothing publishes is still a failure,
+    /// a module needed at two versions is still a conflict — from reads only. A
+    /// module's declared language range is deliberately left to
+    /// [`Pins::for_running`]: a pass that runs before the program cannot raise a
+    /// failure the program's own `try` could catch, so the runtime path is where
+    /// an out-of-range module is refused. A program's own range is checked by
+    /// the runtime before its first statement.
     pub fn for_reading(root: &Path) -> Pins {
         Pins::in_dir(root, false)
     }
@@ -901,6 +1103,7 @@ impl Pins {
             root: root.to_path_buf(),
             writing,
             loaded: false,
+            language_checked: false,
             resolution: Resolution::default(),
             failure: None,
         }
@@ -914,7 +1117,7 @@ impl Pins {
         let outcome = if self.writing {
             resolve_in(&self.root)
         } else {
-            resolve_without_writing(&self.root)
+            resolve_for_reading(&self.root)
         };
         match outcome {
             Ok(resolution) => self.resolution = resolution,
@@ -971,6 +1174,32 @@ impl Pins {
             None => Ok(self.resolution.module(name).map(|m| m.path.clone())),
         }
     }
+
+    /// Refuses the program's own manifest when its language range excludes this
+    /// language version, without resolving its dependencies or writing a
+    /// lockfile.
+    ///
+    /// The VM asks this before the first statement of every run, so an
+    /// out-of-range program cannot execute any of its side effects first. A
+    /// module's own range stays deferred to the `import` that loads it, where
+    /// the program's `try` can catch that refusal. Once the pins have loaded,
+    /// their resolution already answered this question — including a failure a
+    /// `catch` handled — so this does nothing.
+    pub fn check_program_language(&mut self) -> Result<()> {
+        if self.loaded || self.language_checked {
+            return Ok(());
+        }
+        self.language_checked = true;
+        let Some(manifest) = manifest_in(&self.root)? else {
+            return Ok(());
+        };
+        check_language_support(
+            &manifest,
+            "this program",
+            manifest.version.as_ref(),
+            Some(&self.root),
+        )
+    }
 }
 
 /// The path the module `name` is pinned to by the manifest in the working
@@ -983,7 +1212,8 @@ impl Pins {
 /// This is the *resolving* path and it writes the lockfile, because it is called
 /// by a loader — a program is about to be run, and running it is the resolution
 /// that the lockfile records. A pass that only asks what the pins bind uses
-/// [`resolve_without_writing`] instead and creates nothing; see
+/// [`resolve_for_reading`] instead, which creates nothing and leaves the
+/// language-range refusal to the runtime import; see
 /// [`crate::analyzer::analyze_in`], which reads once per program and hands its
 /// pins to every import rather than resolving per import.
 pub fn pinned_module_path(name: &str) -> Result<Option<String>> {
