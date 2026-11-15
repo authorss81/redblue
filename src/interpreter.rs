@@ -1713,6 +1713,14 @@ impl Vm {
     /// *does* — a failure returns here in both, before any output is emitted,
     /// exactly as it did when [`Vm::run`] returned straight from the loop.
     fn run_statements(&mut self, program: &Program) -> Result<Value> {
+        // The program's own manifest is checked before it runs, whatever its
+        // statements are. An import in a branch that is never taken, or a
+        // statement that fails first, must not let an out-of-range program
+        // execute and only be refused afterwards. A module's own range stays
+        // deferred to the `import` that loads it, where the program's `try` can
+        // catch that refusal.
+        self.pins.check_program_language()?;
+
         for value in self.globals.values() {
             reset_caches(value);
         }

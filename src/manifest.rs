@@ -19,6 +19,11 @@
 //! - `name` and `version` say what the program itself is. Both are optional in a
 //!   program manifest and *required* in a module's own manifest, where they are
 //!   checked against the directory the module was found in.
+//! - `language <low> to <high>` says which Redblue language versions the package
+//!   runs on, both ends inclusive. A package's own `version` and the language
+//!   version that runs it are independent numbers: a bug-fix release of a
+//!   package is not a language change, and a language release is not a package
+//!   change.
 //! - `dependency <name> <requirement>` is one pin. The requirement is `*` for
 //!   the highest published version, or `=x.y.z` for exactly one.
 //!
@@ -147,6 +152,47 @@ impl std::fmt::Display for Version {
     }
 }
 
+/// The version of the Redblue *language* this compiler implements.
+///
+/// This is deliberately not a package's version. A package's `version` says
+/// what release of *that package* this is; this says which release of the
+/// *language* can run it. They move for different reasons — fixing a package
+/// bug changes the package version and not the language, and adding syntax
+/// changes the language version and not every package — so a package that
+/// needs a particular language declares [`Manifest::language`] rather than
+/// encoding the language in its own version number.
+///
+/// Bump this when the language's semantics change, not when the compiler's
+/// implementation or its packaging changes.
+pub const LANGUAGE_VERSION: Version = Version {
+    major: 0,
+    minor: 2,
+    patch: 0,
+};
+
+/// The range of Redblue language versions a package runs on, both ends
+/// inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanguageRange {
+    /// The oldest language version the package supports.
+    pub low: Version,
+    /// The newest language version the package supports.
+    pub high: Version,
+}
+
+impl LanguageRange {
+    /// Whether `version` is inside this range, counting both ends.
+    pub fn supports(&self, version: &Version) -> bool {
+        self.low <= *version && *version <= self.high
+    }
+}
+
+impl std::fmt::Display for LanguageRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} to {}", self.low, self.high)
+    }
+}
+
 /// What a manifest asks for of one module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Requirement {
@@ -205,6 +251,12 @@ pub struct Manifest {
     pub name: Option<String>,
     /// What version of itself it is.
     pub version: Option<Version>,
+    /// The Redblue language versions it runs on, when it states them.
+    ///
+    /// Optional like `name` and `version`: a manifest written before the field
+    /// existed keeps resolving, and the resolver only refuses a package that
+    /// declared a range and is outside it.
+    pub language: Option<LanguageRange>,
     /// What it depends on, in the order the manifest wrote it.
     pub dependencies: Vec<Dependency>,
 }
@@ -241,11 +293,11 @@ impl Manifest {
                 continue;
             }
             let fields: Vec<&str> = line.split_whitespace().collect();
-            if !matches!(fields[0], "name" | "version" | "dependency") {
+            if !matches!(fields[0], "name" | "version" | "language" | "dependency") {
                 return Err(Error::Runtime(
                     format!(
                         "{label} line {number}: '{}' is not a field a manifest has; it holds \
-                         'name', 'version' and 'dependency' lines",
+                         'name', 'version', 'language' and 'dependency' lines",
                         fields[0]
                     ),
                     Span::unknown(),
@@ -275,6 +327,15 @@ impl Manifest {
                             Span::unknown(),
                         )
                     })?);
+                }
+                "language" => {
+                    if manifest.language.is_some() {
+                        return Err(Error::Runtime(
+                            format!("{label} line {number}: 'language' is declared twice"),
+                            Span::unknown(),
+                        ));
+                    }
+                    manifest.language = Some(language_range_in(&fields, line, label, number)?);
                 }
                 "dependency" if fields.len() == 3 => {
                     check_module_name(fields[1], label, number)?;
@@ -322,6 +383,133 @@ impl Manifest {
         }
         Ok(manifest)
     }
+}
+
+/// The range a `language` line declares.
+///
+/// Shared by [`Manifest::parse`] and the partial read that recovers a range
+/// from a manifest another line makes unparseable, so both refuse the same
+/// malformed lines with the same words.
+fn language_range_in(
+    fields: &[&str],
+    line: &str,
+    label: &str,
+    number: usize,
+) -> Result<LanguageRange> {
+    if fields.len() != 4 || fields[2] != "to" {
+        return Err(Error::Runtime(
+            format!(
+                "{label} line {number}: '{line}' is not a language line: it takes two versions \
+                 separated by 'to', as in 'language 0.2.0 to 0.4.0'"
+            ),
+            Span::unknown(),
+        ));
+    }
+    let low = Version::parse(fields[1]).map_err(|error| {
+        Error::Runtime(
+            format!("{label} line {number}: {}", error.message()),
+            Span::unknown(),
+        )
+    })?;
+    let high = Version::parse(fields[3]).map_err(|error| {
+        Error::Runtime(
+            format!("{label} line {number}: {}", error.message()),
+            Span::unknown(),
+        )
+    })?;
+    if low > high {
+        return Err(Error::Runtime(
+            format!(
+                "{label} line {number}: the language range {low} to {high} is empty: {low} is \
+                 above {high}"
+            ),
+            Span::unknown(),
+        ));
+    }
+    Ok(LanguageRange { low, high })
+}
+
+/// What the partial read recovered: the range the refusal needs, the
+/// self-description that names it, and the self-description exactly as written
+/// when it was malformed.
+///
+/// A malformed `name` or `version` line is kept as its raw token rather than
+/// dropped, so an out-of-range refusal says that the package declared a
+/// malformed value instead of claiming it declared none.
+struct RecoveredManifest {
+    manifest: Manifest,
+    /// A `name` line was present but could not name a module, as written.
+    malformed_name: Option<String>,
+    /// A `version` line was present but was not a version, as written.
+    malformed_version: Option<String>,
+}
+
+/// The language range and self-description a manifest holds, read without
+/// requiring every other line to parse.
+///
+/// [`Manifest::parse`] refuses the whole file at the first wrong line, which is
+/// right for resolution but wrong for the pre-analysis language check: a valid
+/// out-of-range `language` line beside a typo in some other line must still
+/// refuse the program for its language before the analyzer reports the typo.
+/// This keeps only what the refusal needs — the range, and the name and version
+/// it should name — and answers `None` when there is no usable language line,
+/// leaving the full parse error to the analyzer at the import.
+fn manifest_language_without_full_parse(text: &str, label: &str) -> Option<RecoveredManifest> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut language = None;
+    let mut seen_language = false;
+    let mut name = None;
+    let mut version = None;
+    let mut malformed_name = None;
+    let mut malformed_version = None;
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields[0] {
+            "language" => {
+                if seen_language {
+                    return None;
+                }
+                seen_language = true;
+                language = Some(language_range_in(&fields, line, label, number).ok()?);
+            }
+            "name" if name.is_none() && malformed_name.is_none() => {
+                if fields.len() == 2 {
+                    match check_module_name(fields[1], label, number) {
+                        Ok(()) => name = Some(fields[1].to_string()),
+                        Err(_) => malformed_name = Some(fields[1].to_string()),
+                    }
+                } else {
+                    malformed_name = Some(fields[1..].join(" "));
+                }
+            }
+            "version" if version.is_none() && malformed_version.is_none() => {
+                if fields.len() == 2 {
+                    match Version::parse(fields[1]) {
+                        Ok(parsed) => version = Some(parsed),
+                        Err(_) => malformed_version = Some(fields[1].to_string()),
+                    }
+                } else {
+                    malformed_version = Some(fields[1..].join(" "));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(RecoveredManifest {
+        manifest: Manifest {
+            name,
+            version,
+            language: Some(language?),
+            dependencies: Vec::new(),
+        },
+        malformed_name,
+        malformed_version,
+    })
 }
 
 /// How many words a line of `field` is written in, counting the field itself.
@@ -409,6 +597,11 @@ pub struct ResolvedModule {
     /// What asked for it, for the message when two things asked for different
     /// versions of it.
     pub required_by: String,
+    /// The manifest the module publishes, when it publishes one.
+    ///
+    /// Kept beside the pin so the module's own language range can be checked at
+    /// the `import` that names it rather than while the whole graph is resolved.
+    pub manifest: Option<Manifest>,
 }
 
 /// Everything one resolution settled, ordered by module name.
@@ -530,6 +723,43 @@ pub fn parse_lockfile(text: &str) -> Result<Vec<LockedModule>> {
 /// so a dependency that arrives too deep is refused by the chain it is in
 /// rather than by how wide the graph around it happens to be.
 pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resolution> {
+    resolve_with_language_checks(manifest, registry, true, true, None)
+}
+
+/// Resolves `manifest`, optionally enforcing the language ranges it and its
+/// modules declare.
+///
+/// The public [`resolve`] always enforces both, and it enforces a module's
+/// range while it resolves the graph. A host that calls the resolver directly
+/// therefore gets that refusal before any program runs, where no `try` can
+/// reach it; that is the API's eager check, not the path a running program
+/// takes. A read-only pass that only wants the module paths an `import` binds —
+/// the analyzer — calls this with both flags false, so the refusal is raised by
+/// the runtime [`Pins`] at the import instead of before the program runs, where
+/// a `try` can catch it. A program about to run checks its own range
+/// immediately but leaves each module's range to the import that names it, so a
+/// healthy first import is not refused for a later module's range.
+///
+/// `location` is the directory the program manifest was read from, when the
+/// caller has one. It is named in a refusal for an unnamed program, where the
+/// manifest itself is the only thing that says which package the range belongs
+/// to.
+fn resolve_with_language_checks(
+    manifest: &Manifest,
+    registry: &impl Registry,
+    check_program_language: bool,
+    check_module_language: bool,
+    location: Option<&Path>,
+) -> Result<Resolution> {
+    if check_program_language {
+        check_language_support(
+            manifest,
+            "this program",
+            manifest.version.as_ref(),
+            location,
+        )?;
+    }
+
     let mut resolution = Resolution::default();
     let mut pending: VecDeque<(Dependency, String, usize)> = manifest
         .dependencies
@@ -608,19 +838,17 @@ pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resoluti
             ));
         };
 
-        resolution.modules.insert(
-            dependency.name.clone(),
-            ResolvedModule {
-                name: dependency.name.clone(),
-                version: chosen,
-                path,
-                required_by: format!(
-                    "{} (required by {})",
-                    dependency.requirement.describe(),
-                    required_by
-                ),
-            },
-        );
+        let mut resolved = ResolvedModule {
+            name: dependency.name.clone(),
+            version: chosen,
+            path,
+            required_by: format!(
+                "{} (required by {})",
+                dependency.requirement.describe(),
+                required_by
+            ),
+            manifest: None,
+        };
 
         // A module brings its own dependencies in with it, and they are
         // resolved by the same loop, so they are checked against everything
@@ -628,13 +856,174 @@ pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resoluti
         if let Some(text) = registry.module_manifest(&dependency.name, &chosen) {
             let label = format!("{} {}", dependency.name, chosen);
             let module_manifest = Manifest::parse(&text, &label)?;
-            for dependency in module_manifest.dependencies {
-                pending.push_back((dependency, label.clone(), depth + 1));
+            if check_module_language {
+                check_language_support(
+                    &module_manifest,
+                    &dependency.name,
+                    module_manifest.version.as_ref().or(Some(&chosen)),
+                    None,
+                )?;
             }
+            for dependency in &module_manifest.dependencies {
+                pending.push_back((dependency.clone(), label.clone(), depth + 1));
+            }
+            resolved.manifest = Some(module_manifest);
         }
+
+        resolution.modules.insert(dependency.name.clone(), resolved);
     }
 
     Ok(resolution)
+}
+
+/// Refuses the program in `root` before the analyzer walks it.
+///
+/// The refusal this adds is the program's language range: it must precede an
+/// analyzer error, so an out-of-range program with an unknown variable is
+/// refused for its language rather than for the variable. A manifest whose
+/// other lines are malformed still carries its `language` line, so that line is
+/// read on its own when the full parse fails; otherwise a typo elsewhere would
+/// hide the refusal. A manifest that cannot be read at all has no line to
+/// recover, so its read error is passed on rather than treated as a pass.
+///
+/// `report_unparseable` says what happens when the full parse fails and no
+/// usable `language` line was recovered. A program with an `import` reports the
+/// typo at that import, so its caller passes `false`. A zero-import program has
+/// no import at which the analyzer walk would find the manifest, so its caller
+/// passes `true` and the saved parse error is reported here rather than
+/// silently accepted by an analyzer-only pass such as a linter or language
+/// server.
+pub(crate) fn check_program_language_before_analysis(
+    root: &Path,
+    report_unparseable: bool,
+) -> Result<()> {
+    check_program_language_in(root, report_unparseable)
+}
+
+/// The program-language check itself.
+///
+/// `report_unparseable` decides what a manifest that fails its full parse does
+/// after the language question is answered. The analyzer wants the typo
+/// reported at the `import` that found it, so it passes `false` for a program
+/// with an import and leaves the file to the analyzer. A caller with no
+/// analyzer behind it — the VM's pre-run check, or an analyzer whose program
+/// has no import — passes `true`, because otherwise a zero-import program with
+/// a malformed manifest would run or analyze with no one ever reporting the
+/// file.
+///
+/// The language refusal always comes first: a recovered, out-of-range range
+/// errors in `check_language_support` before the saved parse error is reached.
+/// Only an in-range range (or no usable range at all) lets the parse error
+/// surface.
+fn check_program_language_in(root: &Path, report_unparseable: bool) -> Result<()> {
+    let (manifest, malformed_name, malformed_version, parse_error) = match manifest_in(root) {
+        Ok(manifest) => (manifest, None, None, None::<Error>),
+        Err(error) => {
+            let text = match fs::read_to_string(root.join(MANIFEST_FILE)) {
+                Ok(text) => text,
+                Err(_) => return Err(error),
+            };
+            match manifest_language_without_full_parse(&text, MANIFEST_FILE) {
+                Some(partial) => (
+                    Some(partial.manifest),
+                    partial.malformed_name,
+                    partial.malformed_version,
+                    Some(error),
+                ),
+                None if report_unparseable => return Err(error),
+                None => (None, None, None, None),
+            }
+        }
+    };
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
+    check_language_support_with(
+        &manifest,
+        "this program",
+        manifest.version.as_ref(),
+        Some(root),
+        malformed_name.as_deref(),
+        malformed_version.as_deref(),
+    )?;
+    if report_unparseable {
+        if let Some(error) = parse_error {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Refuses `manifest` when the language version running it is outside the range
+/// the package declared.
+///
+/// The package's own version is named beside the range and the running language
+/// version, because "this package does not support this language" without the
+/// two numbers is a sentence the reader cannot act on. A manifest that states no
+/// range supports every language version: the field is opt-in so that packages
+/// written before it keep resolving.
+fn check_language_support(
+    manifest: &Manifest,
+    package: &str,
+    version: Option<&Version>,
+    location: Option<&Path>,
+) -> Result<()> {
+    check_language_support_with(manifest, package, version, location, None, None)
+}
+
+/// [`check_language_support`], with the raw text of a malformed `name` or
+/// `version` line so the refusal can name it as malformed rather than absent.
+fn check_language_support_with(
+    manifest: &Manifest,
+    package: &str,
+    version: Option<&Version>,
+    location: Option<&Path>,
+    malformed_name: Option<&str>,
+    malformed_version: Option<&str>,
+) -> Result<()> {
+    let Some(range) = &manifest.language else {
+        return Ok(());
+    };
+    if range.supports(&LANGUAGE_VERSION) {
+        return Ok(());
+    }
+    let named = match (
+        manifest.name.as_deref(),
+        version,
+        malformed_name,
+        malformed_version,
+    ) {
+        (Some(name), Some(version), _, _) => format!("'{name}' {version}"),
+        (Some(name), None, _, Some(raw)) => format!("'{name}' (version '{raw}' is malformed)"),
+        (Some(name), None, _, None) => format!("'{name}' (no version declared)"),
+        (None, Some(version), Some(raw), _) => {
+            format!("'{package}' {version} (name '{raw}' is malformed)")
+        }
+        (None, Some(version), None, _) => format!("'{package}' {version} (no name declared)"),
+        (None, None, Some(raw_name), Some(raw_version)) => format!(
+            "'{package}' (name '{raw_name}' is malformed, version '{raw_version}' is malformed)"
+        ),
+        (None, None, Some(raw_name), None) => {
+            format!("'{package}' (name '{raw_name}' is malformed, no version declared)")
+        }
+        (None, None, None, Some(raw_version)) => {
+            format!("'{package}' (no name declared, version '{raw_version}' is malformed)")
+        }
+        (None, None, None, None) => {
+            format!("'{package}' (no name declared, no version declared)")
+        }
+    };
+    let located = match location {
+        Some(root) => format!(" in {}", root.join(MANIFEST_FILE).display()),
+        None => String::new(),
+    };
+    Err(Error::Runtime(
+        format!(
+            "Package {named}{located} supports Redblue {range}, but this is Redblue \
+             {LANGUAGE_VERSION}: the package cannot run on this language version"
+        ),
+        Span::unknown(),
+    ))
 }
 
 /// The message for a pin nothing satisfies.
@@ -744,34 +1133,84 @@ fn manifest_in(root: &Path) -> Result<Option<Manifest>> {
 /// what every program written before there was a manifest must keep doing, and
 /// a missing manifest is not an error because the pins are all optional.
 ///
-/// This is the *resolving* path — it is what writes `redblue.lock`, and what a
-/// program that is about to be run wants. A pass that only answers questions
-/// about the program wants [`resolve_without_writing`] instead, which resolves
-/// the same pins and touches nothing on disk.
+/// This is the eager resolver API: it writes `redblue.lock` and validates every
+/// module's language range while it resolves the graph, so an out-of-range
+/// module is refused here, before any program runs, where the program's own
+/// `try` cannot reach it. It is not the path a running program takes; that is
+/// [`Pins::for_running`], which leaves each module's range to the `import` that
+/// names it. A pass that only answers questions about the program wants
+/// [`resolve_for_reading`] instead, which resolves the same pins, touches
+/// nothing on disk, and leaves the language-range refusal to the runtime
+/// `import`.
 pub fn resolve_in(root: &Path) -> Result<Resolution> {
+    resolve_in_with(root, true)
+}
+
+/// [`resolve_in`] for a program about to run, leaving each module's own range
+/// to the `import` that names it.
+///
+/// The program's own range is still checked here, so a run cannot resolve past
+/// an out-of-range program. A module's range is not: a healthy first import must
+/// not be refused because a later module the program has not reached is out of
+/// range. [`Pins::module`] checks the module the import actually names.
+fn resolve_in_with(root: &Path, check_module_language: bool) -> Result<Resolution> {
     let Some(manifest) = manifest_in(root)? else {
         return Ok(Resolution::default());
     };
-    let resolution = resolve(&manifest, &DirRegistry::new(root))?;
+    let resolution = resolve_with_language_checks(
+        &manifest,
+        &DirRegistry::new(root),
+        true,
+        check_module_language,
+        Some(root),
+    )?;
     check_lockfile(root, &resolution)?;
     write_lockfile(root, &resolution)?;
     Ok(resolution)
 }
 
-/// Resolves what the program in `root` depends on, writing nothing.
+/// Resolves what the program in `root` depends on, writing nothing, for a
+/// program that is about to run.
 ///
 /// The same answers as [`resolve_in`] — a pin nothing publishes is still an
-/// error, a module needed at two versions is still a conflict — from reads
-/// only. A static pass (the analyzer, a linter, a formatter) asks what a
-/// program's pins bind and has no reason to create a file to answer it:
-/// without this, `rb lint` in a directory holding a `redblue.manifest` left a
-/// `redblue.lock` beside it, which is what `cargo check` does with a
-/// `Cargo.lock` and is still a write a reader of `lint` did not ask for.
+/// error, a module needed at two versions is still a conflict, and a package
+/// outside its declared language range is still refused — from reads only.
+/// This is the runtime read-only path, and it checks a module's range while it
+/// resolves: a host calling it directly gets that refusal before the program
+/// runs, where no `try` can reach it. A pass that runs *before* the program
+/// and only asks what its pins bind wants [`resolve_for_reading`] instead,
+/// which is the same resolve without the module language-range refusal and
+/// leaves that failure to the runtime import.
+///
+/// Writing nothing is what a caller that is only looking needs: without this,
+/// `rb lint` in a directory holding a `redblue.manifest` left a `redblue.lock`
+/// beside it, which is what `cargo check` does with a `Cargo.lock` and is still
+/// a write a reader of `lint` did not ask for.
 pub fn resolve_without_writing(root: &Path) -> Result<Resolution> {
     let Some(manifest) = manifest_in(root)? else {
         return Ok(Resolution::default());
     };
-    resolve(&manifest, &DirRegistry::new(root))
+    resolve_with_language_checks(&manifest, &DirRegistry::new(root), true, true, Some(root))
+}
+
+/// Resolves what the program in `root` depends on for a pass that only asks
+/// which names an `import` binds.
+///
+/// This is [`resolve_without_writing`] without the *module* language-range
+/// refusal. The program's own range is still checked, because that refusal is
+/// the program's and is uncatchable by design; deferring it as well would make
+/// this public helper a silent pass for a linter or language server that uses
+/// it without the analyzer's separate pre-check. A module's range is deferred:
+/// the analyzer runs before the program, so a module refusal raised here would
+/// be an `Analyzer` error no `try` can catch. Leaving it to the runtime [`Pins`]
+/// keeps that failure at the `import` that loads the package, where the program
+/// can catch it. A pin nothing publishes is still refused here, because the
+/// analyzer has no names to bind for it either way.
+pub fn resolve_for_reading(root: &Path) -> Result<Resolution> {
+    let Some(manifest) = manifest_in(root)? else {
+        return Ok(Resolution::default());
+    };
+    resolve_with_language_checks(&manifest, &DirRegistry::new(root), true, false, Some(root))
 }
 
 /// Refuses a lockfile that says something other than what this resolve found.
@@ -868,8 +1307,10 @@ fn write_lockfile(root: &Path, resolution: &Resolution) -> Result<()> {
 /// which is the only thing that knows which program it is.
 ///
 /// Read on first question, not on construction: a VM built for a program with no
-/// `import` reads no manifest and writes no lockfile, which is what every
-/// program written before there was a manifest must keep doing.
+/// `import` resolves no dependencies and writes no lockfile, which is what every
+/// program written before there was a manifest must keep doing. Its own manifest
+/// is still read once for the language range, because that is a fact about
+/// running the program rather than about an import.
 #[derive(Debug)]
 pub struct Pins {
     root: PathBuf,
@@ -878,6 +1319,10 @@ pub struct Pins {
     /// — the analyzer, a linter, a formatter — creates nothing.
     writing: bool,
     loaded: bool,
+    /// Whether the program manifest's own language range has been checked
+    /// without resolving the pins, which is what a program with no `import`
+    /// asks for.
+    language_checked: bool,
     resolution: Resolution,
     failure: Option<Error>,
 }
@@ -890,8 +1335,13 @@ impl Pins {
 
     /// The pins of the manifest in `root`, for a pass that is only looking.
     ///
-    /// The same answers — a pin nothing publishes is still a failure, a module
-    /// needed at two versions is still a conflict — from reads only.
+    /// The same dependency answers — a pin nothing publishes is still a failure,
+    /// a module needed at two versions is still a conflict — from reads only. A
+    /// program's own range is checked here as well, so no caller can silently
+    /// skip it. A module's declared language range is deliberately left to
+    /// [`Pins::for_running`]: a pass that runs before the program cannot raise a
+    /// failure the program's own `try` could catch, so the runtime path is where
+    /// an out-of-range module is refused.
     pub fn for_reading(root: &Path) -> Pins {
         Pins::in_dir(root, false)
     }
@@ -901,6 +1351,7 @@ impl Pins {
             root: root.to_path_buf(),
             writing,
             loaded: false,
+            language_checked: false,
             resolution: Resolution::default(),
             failure: None,
         }
@@ -912,9 +1363,12 @@ impl Pins {
         }
         self.loaded = true;
         let outcome = if self.writing {
-            resolve_in(&self.root)
+            // The program's own range is checked here, but each module's range
+            // waits for the `import` that names it: a first import must not be
+            // refused for a later module the program has not reached.
+            resolve_in_with(&self.root, false)
         } else {
-            resolve_without_writing(&self.root)
+            resolve_for_reading(&self.root)
         };
         match outcome {
             Ok(resolution) => self.resolution = resolution,
@@ -964,12 +1418,59 @@ impl Pins {
     /// `Err` is a manifest this program cannot be resolved from, and is passed
     /// on rather than swallowed: a pin nothing publishes must not turn into an
     /// import of whichever file happens to be at `modules/<name>.rb`.
+    ///
+    /// The module's own language range is checked here, when the import names
+    /// it, rather than while the graph was resolved. That is what makes the
+    /// refusal the import's own: a `try` around this import can catch it, and a
+    /// healthy earlier import is unaffected by a later module's range.
     pub fn module(&mut self, name: &str) -> Result<Option<String>> {
         self.load();
-        match &self.failure {
-            Some(error) => Err(error.clone()),
-            None => Ok(self.resolution.module(name).map(|m| m.path.clone())),
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
         }
+        let Some(module) = self.resolution.module(name) else {
+            return Ok(None);
+        };
+        // A read-only pass runs before the program, where its own `try` cannot
+        // catch a module refusal, so it binds names without enforcing a
+        // module's range. The runtime pins check it here, at the import that
+        // names the module.
+        if self.writing {
+            if let Some(manifest) = &module.manifest {
+                check_language_support(
+                    manifest,
+                    &module.name,
+                    manifest.version.as_ref().or(Some(&module.version)),
+                    None,
+                )?;
+            }
+        }
+        Ok(Some(module.path.clone()))
+    }
+
+    /// Refuses the program's own manifest when its language range excludes this
+    /// language version, without resolving its dependencies or writing a
+    /// lockfile.
+    ///
+    /// The VM asks this before the first statement of every run, so an
+    /// out-of-range program cannot execute any of its side effects first. A
+    /// module's own range stays deferred to the `import` that loads it, where
+    /// the program's `try` can catch that refusal.
+    ///
+    /// A successful check is the only thing that marks the question answered. A
+    /// manifest that cannot be read is not a pass: the next call asks again, so
+    /// a reused VM cannot turn a broken manifest into a silent success. A
+    /// read-only load enforces the program's range too (see
+    /// [`resolve_for_reading`]), but it does not mark this question answered:
+    /// its failure is kept for [`Pins::failure`], and this check must still be
+    /// able to answer after the manifest is repaired.
+    pub fn check_program_language(&mut self) -> Result<()> {
+        if self.language_checked {
+            return Ok(());
+        }
+        check_program_language_in(&self.root, true)?;
+        self.language_checked = true;
+        Ok(())
     }
 }
 
@@ -983,7 +1484,8 @@ impl Pins {
 /// This is the *resolving* path and it writes the lockfile, because it is called
 /// by a loader — a program is about to be run, and running it is the resolution
 /// that the lockfile records. A pass that only asks what the pins bind uses
-/// [`resolve_without_writing`] instead and creates nothing; see
+/// [`resolve_for_reading`] instead, which creates nothing and leaves the
+/// language-range refusal to the runtime import; see
 /// [`crate::analyzer::analyze_in`], which reads once per program and hands its
 /// pins to every import rather than resolving per import.
 pub fn pinned_module_path(name: &str) -> Result<Option<String>> {

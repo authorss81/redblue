@@ -4,13 +4,17 @@ use crate::lexer::Lexer;
 use crate::parser::{Parser, Program, Stmt};
 use crate::testing::{TestError, TestFailure, TestResults};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct TestHarness {
     results: TestResults,
     _globals: HashMap<String, crate::value::Value>,
     _test_context: HashMap<String, crate::value::Value>,
     source_name: String,
+    /// The directory the source came from, when it came from a file. A test
+    /// body with a directory is analyzed against that directory's manifest; an
+    /// inline body with none is analyzed without consulting a manifest at all.
+    root: Option<PathBuf>,
 }
 
 impl TestHarness {
@@ -20,6 +24,7 @@ impl TestHarness {
             _globals: crate::stdlib::builtins(),
             _test_context: HashMap::new(),
             source_name: "inline".to_string(),
+            root: None,
         }
     }
 
@@ -70,9 +75,15 @@ impl TestHarness {
         // A failure in a file should name that file, not every file as
         // "inline". The name is restored afterwards so one harness can run
         // several files without the second inheriting the first's label.
-        let previous = std::mem::replace(&mut self.source_name, path.display().to_string());
+        let previous_name = std::mem::replace(&mut self.source_name, path.display().to_string());
+        let root = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let previous_root = self.root.replace(root.to_path_buf());
         let result = self.run_source(&source);
-        self.source_name = previous;
+        self.source_name = previous_name;
+        self.root = previous_root;
         result
     }
 
@@ -233,7 +244,7 @@ impl TestHarness {
         let program = Lexer::tokenize(code)
             .and_then(|tokens| Parser::new(tokens).parse())
             .and_then(|program| {
-                analyzer::analyze(&program)?;
+                self.analyze(&program)?;
                 Ok(program)
             })
             .map_err(TestFailure::Error)?;
@@ -246,9 +257,22 @@ impl TestHarness {
     fn execute_test_statements(&self, body: Vec<Stmt>) -> std::result::Result<(), TestFailure> {
         let program = Program { statements: body };
 
-        analyzer::analyze(&program).map_err(TestFailure::Error)?;
+        self.analyze(&program).map_err(TestFailure::Error)?;
 
         self.execute_test_program(&program)
+    }
+
+    /// Analyzes a test body against the directory its file came from.
+    ///
+    /// The manifest check follows the file, not the process working directory.
+    /// An inline body has no directory, so it is analyzed without a manifest
+    /// check rather than against whatever manifest the caller happens to stand
+    /// in.
+    fn analyze(&self, program: &Program) -> Result<()> {
+        match &self.root {
+            Some(root) => analyzer::analyze_in(program, root),
+            None => analyzer::analyze(program),
+        }
     }
 
     fn execute_test_program(&self, program: &Program) -> std::result::Result<(), TestFailure> {
