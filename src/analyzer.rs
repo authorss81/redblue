@@ -708,6 +708,55 @@ impl LaterNames {
     }
 }
 
+/// Whether any statement, at any depth, is an `import`.
+///
+/// A program with an import reports a malformed manifest at that import, where
+/// the walk finds pins it cannot read. A zero-import program has no such place,
+/// so its pre-analysis language check reports the saved parse error itself.
+fn program_has_import(statements: &[Stmt]) -> bool {
+    statements.iter().any(|stmt| match &stmt.statement {
+        Statement::Import(_) => true,
+        Statement::If {
+            then_branch,
+            else_branch,
+            ..
+        } => program_has_import(then_branch) || program_has_import(else_branch),
+        Statement::Unless { body, .. }
+        | Statement::ForEach { body, .. }
+        | Statement::ForRange { body, .. }
+        | Statement::Repeat { body, .. }
+        | Statement::RepeatUntil { body, .. }
+        | Statement::While { body, .. }
+        | Statement::Function { body, .. }
+        | Statement::Method { body, .. }
+        | Statement::Object { body, .. }
+        | Statement::Module { body, .. }
+        | Statement::Test { body, .. } => program_has_import(body),
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            program_has_import(body)
+                || program_has_import(catch_body)
+                || program_has_import(finally_body)
+        }
+        Statement::Constant { .. }
+        | Statement::Say(_)
+        | Statement::Print(_)
+        | Statement::Set { .. }
+        | Statement::SetProperty { .. }
+        | Statement::Return(_)
+        | Statement::GiveBack(_)
+        | Statement::Break
+        | Statement::Skip
+        | Statement::Has { .. }
+        | Statement::Export { .. }
+        | Statement::Expr(_) => false,
+    })
+}
+
 fn collect_later_names(
     statements: &[Stmt],
     root: &std::path::Path,
@@ -780,23 +829,37 @@ fn collect_later_names(
     }
 }
 
+/// Analyzes `program` without a program-level language check.
+///
+/// This is the entry point for a caller that has a tree but no directory: an
+/// editor's in-memory buffer, a REPL line, or a test body. It must not read the
+/// process working directory's `redblue.manifest` to decide whether the
+/// program's language is supported, because that file may belong to an
+/// unrelated project. Imports still resolve from the working directory, as they
+/// always have. A caller that knows where the program lives uses [`analyze_in`],
+/// which performs the language check for that directory.
 pub fn analyze(program: &Program) -> Result<()> {
-    analyze_in(program, std::path::Path::new("."))
+    let mut analyzer = Analyzer::in_dir(std::path::Path::new("."));
+    analyzer.analyze(program)
 }
 
 /// Analyzes `program` as the program in `root` resolves its dependencies from.
 ///
-/// `analyze` is this against the working directory. A `root` of its own is what
-/// lets the pins that decide what an `import` binds be the pins of the directory
-/// the program was found beside — and, when those pins cannot be resolved, what
-/// lets the conflict be reported here rather than surfacing later as an unknown
-/// variable with nothing in it saying why.
+/// A `root` of its own is what lets the pins that decide what an `import` binds
+/// be the pins of the directory the program was found beside — and, when those
+/// pins cannot be resolved, what lets the conflict be reported here rather than
+/// surfacing later as an unknown variable with nothing in it saying why. It is
+/// also the directory whose `redblue.manifest` supplies the program's own
+/// language range.
 pub fn analyze_in(program: &Program, root: &std::path::Path) -> Result<()> {
     // The program's own language range is refused before the walk, so an
     // analyzer error cannot hide it. The refusal is the program's and is not
     // catchable by the program's `try`; a module's range is still left to the
-    // `import` that names it.
-    crate::manifest::check_program_language_before_analysis(root)?;
+    // `import` that names it. A manifest with no usable language line is left
+    // to the import that finds it, unless there is no import: an analyzer-only
+    // pass has no runtime engine behind it to report the malformed file later.
+    let report_unparseable = !program_has_import(&program.statements);
+    crate::manifest::check_program_language_before_analysis(root, report_unparseable)?;
     let mut analyzer = Analyzer::in_dir(root);
     analyzer.analyze(program)
 }

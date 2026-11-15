@@ -429,6 +429,21 @@ fn language_range_in(
     Ok(LanguageRange { low, high })
 }
 
+/// What the partial read recovered: the range the refusal needs, the
+/// self-description that names it, and the self-description exactly as written
+/// when it was malformed.
+///
+/// A malformed `name` or `version` line is kept as its raw token rather than
+/// dropped, so an out-of-range refusal says that the package declared a
+/// malformed value instead of claiming it declared none.
+struct RecoveredManifest {
+    manifest: Manifest,
+    /// A `name` line was present but could not name a module, as written.
+    malformed_name: Option<String>,
+    /// A `version` line was present but was not a version, as written.
+    malformed_version: Option<String>,
+}
+
 /// The language range and self-description a manifest holds, read without
 /// requiring every other line to parse.
 ///
@@ -439,12 +454,14 @@ fn language_range_in(
 /// This keeps only what the refusal needs — the range, and the name and version
 /// it should name — and answers `None` when there is no usable language line,
 /// leaving the full parse error to the analyzer at the import.
-fn manifest_language_without_full_parse(text: &str, label: &str) -> Option<Manifest> {
+fn manifest_language_without_full_parse(text: &str, label: &str) -> Option<RecoveredManifest> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut language = None;
     let mut seen_language = false;
     let mut name = None;
     let mut version = None;
+    let mut malformed_name = None;
+    let mut malformed_version = None;
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
         let line = line.trim();
@@ -460,22 +477,38 @@ fn manifest_language_without_full_parse(text: &str, label: &str) -> Option<Manif
                 seen_language = true;
                 language = Some(language_range_in(&fields, line, label, number).ok()?);
             }
-            "name" if fields.len() == 2 && name.is_none() => {
-                name = Some(fields[1].to_string());
+            "name" if name.is_none() && malformed_name.is_none() => {
+                if fields.len() == 2 {
+                    match check_module_name(fields[1], label, number) {
+                        Ok(()) => name = Some(fields[1].to_string()),
+                        Err(_) => malformed_name = Some(fields[1].to_string()),
+                    }
+                } else {
+                    malformed_name = Some(fields[1..].join(" "));
+                }
             }
-            "version" if fields.len() == 2 && version.is_none() => {
-                if let Ok(parsed) = Version::parse(fields[1]) {
-                    version = Some(parsed);
+            "version" if version.is_none() && malformed_version.is_none() => {
+                if fields.len() == 2 {
+                    match Version::parse(fields[1]) {
+                        Ok(parsed) => version = Some(parsed),
+                        Err(_) => malformed_version = Some(fields[1].to_string()),
+                    }
+                } else {
+                    malformed_version = Some(fields[1..].join(" "));
                 }
             }
             _ => {}
         }
     }
-    Some(Manifest {
-        name,
-        version,
-        language: Some(language?),
-        dependencies: Vec::new(),
+    Some(RecoveredManifest {
+        manifest: Manifest {
+            name,
+            version,
+            language: Some(language?),
+            dependencies: Vec::new(),
+        },
+        malformed_name,
+        malformed_version,
     })
 }
 
@@ -696,13 +729,16 @@ pub fn resolve(manifest: &Manifest, registry: &impl Registry) -> Result<Resoluti
 /// Resolves `manifest`, optionally enforcing the language ranges it and its
 /// modules declare.
 ///
-/// The public [`resolve`] always enforces both. A read-only pass that only
-/// wants the module paths an `import` binds — the analyzer — calls this with
-/// both flags false, so the refusal is raised by the runtime [`Pins`] at the
-/// import instead of before the program runs, where a `try` can catch it. A
-/// program about to run checks its own range immediately but leaves each
-/// module's range to the import that names it, so a healthy first import is not
-/// refused for a later module's range.
+/// The public [`resolve`] always enforces both, and it enforces a module's
+/// range while it resolves the graph. A host that calls the resolver directly
+/// therefore gets that refusal before any program runs, where no `try` can
+/// reach it; that is the API's eager check, not the path a running program
+/// takes. A read-only pass that only wants the module paths an `import` binds —
+/// the analyzer — calls this with both flags false, so the refusal is raised by
+/// the runtime [`Pins`] at the import instead of before the program runs, where
+/// a `try` can catch it. A program about to run checks its own range
+/// immediately but leaves each module's range to the import that names it, so a
+/// healthy first import is not refused for a later module's range.
 ///
 /// `location` is the directory the program manifest was read from, when the
 /// caller has one. It is named in a refusal for an unnamed program, where the
@@ -849,27 +885,73 @@ fn resolve_with_language_checks(
 /// read on its own when the full parse fails; otherwise a typo elsewhere would
 /// hide the refusal. A manifest that cannot be read at all has no line to
 /// recover, so its read error is passed on rather than treated as a pass.
-pub(crate) fn check_program_language_before_analysis(root: &Path) -> Result<()> {
-    let manifest = match manifest_in(root) {
-        Ok(Some(manifest)) => manifest,
-        Ok(None) => return Ok(()),
+///
+/// `report_unparseable` says what happens when the full parse fails and no
+/// usable `language` line was recovered. A program with an `import` reports the
+/// typo at that import, so its caller passes `false`. A zero-import program has
+/// no import at which the analyzer walk would find the manifest, so its caller
+/// passes `true` and the saved parse error is reported here rather than
+/// silently accepted by an analyzer-only pass such as a linter or language
+/// server.
+pub(crate) fn check_program_language_before_analysis(
+    root: &Path,
+    report_unparseable: bool,
+) -> Result<()> {
+    check_program_language_in(root, report_unparseable)
+}
+
+/// The program-language check itself.
+///
+/// `report_unparseable` decides what a manifest that fails its full parse does
+/// after the language question is answered. The analyzer wants the typo
+/// reported at the `import` that found it, so it passes `false` for a program
+/// with an import and leaves the file to the analyzer. A caller with no
+/// analyzer behind it — the VM's pre-run check, or an analyzer whose program
+/// has no import — passes `true`, because otherwise a zero-import program with
+/// a malformed manifest would run or analyze with no one ever reporting the
+/// file.
+///
+/// The language refusal always comes first: a recovered, out-of-range range
+/// errors in `check_language_support` before the saved parse error is reached.
+/// Only an in-range range (or no usable range at all) lets the parse error
+/// surface.
+fn check_program_language_in(root: &Path, report_unparseable: bool) -> Result<()> {
+    let (manifest, malformed_name, malformed_version, parse_error) = match manifest_in(root) {
+        Ok(manifest) => (manifest, None, None, None::<Error>),
         Err(error) => {
             let text = match fs::read_to_string(root.join(MANIFEST_FILE)) {
                 Ok(text) => text,
                 Err(_) => return Err(error),
             };
             match manifest_language_without_full_parse(&text, MANIFEST_FILE) {
-                Some(manifest) => manifest,
-                None => return Ok(()),
+                Some(partial) => (
+                    Some(partial.manifest),
+                    partial.malformed_name,
+                    partial.malformed_version,
+                    Some(error),
+                ),
+                None if report_unparseable => return Err(error),
+                None => (None, None, None, None),
             }
         }
     };
-    check_language_support(
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
+    check_language_support_with(
         &manifest,
         "this program",
         manifest.version.as_ref(),
         Some(root),
-    )
+        malformed_name.as_deref(),
+        malformed_version.as_deref(),
+    )?;
+    if report_unparseable {
+        if let Some(error) = parse_error {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 /// Refuses `manifest` when the language version running it is outside the range
@@ -886,17 +968,50 @@ fn check_language_support(
     version: Option<&Version>,
     location: Option<&Path>,
 ) -> Result<()> {
+    check_language_support_with(manifest, package, version, location, None, None)
+}
+
+/// [`check_language_support`], with the raw text of a malformed `name` or
+/// `version` line so the refusal can name it as malformed rather than absent.
+fn check_language_support_with(
+    manifest: &Manifest,
+    package: &str,
+    version: Option<&Version>,
+    location: Option<&Path>,
+    malformed_name: Option<&str>,
+    malformed_version: Option<&str>,
+) -> Result<()> {
     let Some(range) = &manifest.language else {
         return Ok(());
     };
     if range.supports(&LANGUAGE_VERSION) {
         return Ok(());
     }
-    let named = match (manifest.name.as_deref(), version) {
-        (Some(name), Some(version)) => format!("'{name}' {version}"),
-        (Some(name), None) => format!("'{name}' (no version declared)"),
-        (None, Some(version)) => format!("'{package}' {version} (no name declared)"),
-        (None, None) => format!("'{package}' (no name declared, no version declared)"),
+    let named = match (
+        manifest.name.as_deref(),
+        version,
+        malformed_name,
+        malformed_version,
+    ) {
+        (Some(name), Some(version), _, _) => format!("'{name}' {version}"),
+        (Some(name), None, _, Some(raw)) => format!("'{name}' (version '{raw}' is malformed)"),
+        (Some(name), None, _, None) => format!("'{name}' (no version declared)"),
+        (None, Some(version), Some(raw), _) => {
+            format!("'{package}' {version} (name '{raw}' is malformed)")
+        }
+        (None, Some(version), None, _) => format!("'{package}' {version} (no name declared)"),
+        (None, None, Some(raw_name), Some(raw_version)) => format!(
+            "'{package}' (name '{raw_name}' is malformed, version '{raw_version}' is malformed)"
+        ),
+        (None, None, Some(raw_name), None) => {
+            format!("'{package}' (name '{raw_name}' is malformed, no version declared)")
+        }
+        (None, None, None, Some(raw_version)) => {
+            format!("'{package}' (no name declared, version '{raw_version}' is malformed)")
+        }
+        (None, None, None, None) => {
+            format!("'{package}' (no name declared, no version declared)")
+        }
     };
     let located = match location {
         Some(root) => format!(" in {}", root.join(MANIFEST_FILE).display()),
@@ -1018,11 +1133,15 @@ fn manifest_in(root: &Path) -> Result<Option<Manifest>> {
 /// what every program written before there was a manifest must keep doing, and
 /// a missing manifest is not an error because the pins are all optional.
 ///
-/// This is the *resolving* path — it is what writes `redblue.lock`, and what a
-/// program that is about to be run wants. A pass that only answers questions
-/// about the program wants [`resolve_for_reading`] instead, which resolves the
-/// same pins, touches nothing on disk, and leaves the language-range refusal to
-/// the runtime `import`.
+/// This is the eager resolver API: it writes `redblue.lock` and validates every
+/// module's language range while it resolves the graph, so an out-of-range
+/// module is refused here, before any program runs, where the program's own
+/// `try` cannot reach it. It is not the path a running program takes; that is
+/// [`Pins::for_running`], which leaves each module's range to the `import` that
+/// names it. A pass that only answers questions about the program wants
+/// [`resolve_for_reading`] instead, which resolves the same pins, touches
+/// nothing on disk, and leaves the language-range refusal to the runtime
+/// `import`.
 pub fn resolve_in(root: &Path) -> Result<Resolution> {
     resolve_in_with(root, true)
 }
@@ -1056,9 +1175,12 @@ fn resolve_in_with(root: &Path, check_module_language: bool) -> Result<Resolutio
 /// The same answers as [`resolve_in`] — a pin nothing publishes is still an
 /// error, a module needed at two versions is still a conflict, and a package
 /// outside its declared language range is still refused — from reads only.
-/// This is the runtime read-only path. A pass that runs *before* the program
+/// This is the runtime read-only path, and it checks a module's range while it
+/// resolves: a host calling it directly gets that refusal before the program
+/// runs, where no `try` can reach it. A pass that runs *before* the program
 /// and only asks what its pins bind wants [`resolve_for_reading`] instead,
-/// which is the same resolve without the language-range refusal.
+/// which is the same resolve without the module language-range refusal and
+/// leaves that failure to the runtime import.
 ///
 /// Writing nothing is what a caller that is only looking needs: without this,
 /// `rb lint` in a directory holding a `redblue.manifest` left a `redblue.lock`
@@ -1338,22 +1460,15 @@ impl Pins {
     /// A successful check is the only thing that marks the question answered. A
     /// manifest that cannot be read is not a pass: the next call asks again, so
     /// a reused VM cannot turn a broken manifest into a silent success. A
-    /// read-only load does not answer this either, because it deliberately does
-    /// not enforce the program's range.
+    /// read-only load enforces the program's range too (see
+    /// [`resolve_for_reading`]), but it does not mark this question answered:
+    /// its failure is kept for [`Pins::failure`], and this check must still be
+    /// able to answer after the manifest is repaired.
     pub fn check_program_language(&mut self) -> Result<()> {
         if self.language_checked {
             return Ok(());
         }
-        let Some(manifest) = manifest_in(&self.root)? else {
-            self.language_checked = true;
-            return Ok(());
-        };
-        check_language_support(
-            &manifest,
-            "this program",
-            manifest.version.as_ref(),
-            Some(&self.root),
-        )?;
+        check_program_language_in(&self.root, true)?;
         self.language_checked = true;
         Ok(())
     }

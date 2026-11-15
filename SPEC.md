@@ -2245,13 +2245,28 @@ an `import`: an out-of-range program is refused before any of its `say`,
 language refusal. That refusal is a `Runtime` error naming the package, the
 package's version, the range it declared, and the language version running it.
 
-Every module manifest is checked at the `import` that settles it, so a module's
-range is its own, not the importing program's, and because that check happens at
-the import, a `try` around that import can catch the failure. A read-only pass
-that only asks which names an import binds does not enforce a module's range: it
-runs before the program, where a failure could not be caught by the program's
-own `try`. The ordering is deliberate — the program is refused first, then its
-imports as they execute — and both engines use it.
+When a program runs, every module manifest is checked at the `import` that
+settles it, so a module's range is its own, not the importing program's, and
+because that check happens at the import, a `try` around that import can catch
+the failure. A read-only pass that only asks which names an import binds does
+not enforce a module's range: it runs before the program, where a failure could
+not be caught by the program's own `try`. The ordering is deliberate — the
+program is refused first, then its imports as they execute — and both engines
+use it.
+
+A host that embeds the resolver and calls `resolve`, `resolve_in` or
+`resolve_without_writing` directly asks for the whole dependency graph up front.
+Those calls validate every module's range while they resolve, so their refusal
+comes before any program runs and cannot be caught by a `try`. That eager
+validation is the resolver API's own contract, not the path `rb run` takes;
+a running program uses the per-import check above.
+
+A malformed line elsewhere in the manifest does not hide the language refusal:
+the `language` line is read on its own, so the package is still refused for its
+range rather than for the typo. When no usable `language` line is present the
+malformed file is reported instead — by the analyzer at the import that found
+it, by the analyzer's pre-analysis check when a zero-import program has no
+import at which to report it, or by the bytecode engine's pre-run check.
 
 `rb version` prints the compiler's release; the language version is the version
 of the language it implements, and a package states the latter in its manifest.

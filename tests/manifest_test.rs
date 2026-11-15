@@ -1224,6 +1224,29 @@ fn edge_a_malformed_manifest_keeps_its_line_and_the_import_keeps_the_caret() {
     );
 }
 
+/// A zero-import program is analyzed against a malformed manifest with no usable
+/// `language` line, and the analyzer must report the malformed file.
+///
+/// `analyze_in` alone is what a linter or language server calls; it has no
+/// runtime engine behind it to surface the parse error later. The pre-analysis
+/// language check therefore reports the saved parse error when the program has
+/// no import at which the walk could find the manifest.
+#[test]
+fn edge_analyzing_a_zero_import_program_reports_a_malformed_manifest() {
+    let root = scratch("manifest_analyze_zero_import_malformed");
+    manifest_file(&root, "name report\nnmae other\n");
+
+    let error = redblue::analyzer::analyze_in(&program("say \"hi\"\n"), &root)
+        .expect_err("a malformed manifest must not be a silent pass for analyze_in alone");
+
+    assert!(
+        error.message().contains("redblue.manifest line 2")
+            && error.message().contains("'nmae' is not a field"),
+        "the analyzer reports the manifest line it could not parse, got: {}",
+        error.message()
+    );
+}
+
 /// Two roots resolved in one process keep their own pins, in either order and on
 /// either side of a repeat.
 ///
@@ -2702,6 +2725,51 @@ fn edge_the_bytecode_engine_refuses_an_out_of_range_module_at_its_import() {
     );
 }
 
+/// The bytecode engine's out-of-range module refusal is a runtime failure the
+/// program's own `try` can catch, just as the tree-walking engine's is.
+///
+/// The refusal test above pins that the import fails; this pins that the
+/// failure travels through the bytecode catch machinery rather than leaving the
+/// VM as an uncatchable error before or outside the `try`.
+#[test]
+fn edge_the_bytecode_engine_catches_an_out_of_range_module_at_its_import() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_bytecode_catch_module");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\ndependency Fixture =1.0.0\n",
+    );
+    publish(&root, "Fixture", "1.0.0", "set VALUE to 1\n");
+    std::fs::write(
+        root.join("modules/Fixture/1.0.0")
+            .join(manifest::MANIFEST_FILE),
+        "name Fixture\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    )
+    .expect("the module manifest should be written");
+
+    let marker = root.join("caught.txt");
+    let source = format!(
+        "try\n    import Fixture\ncatch error of Runtime failure\n    \
+         files.write(\"{}\", failure.message)\n    say \"caught\"\nend\n",
+        marker.display()
+    );
+    let output = run_on_bytecode_vm(&root, &source);
+    assert_eq!(
+        output,
+        vec!["caught".to_string()],
+        "the bytecode catch body ran instead of the refusal leaving the VM"
+    );
+
+    let caught = std::fs::read_to_string(&marker)
+        .expect("the catch body should have run and recorded the refusal");
+    assert!(
+        caught.contains("'Fixture' 1.0.0")
+            && caught.contains("9.0.0 to 9.9.9")
+            && caught.contains(&actual),
+        "the bytecode catch names the module, its range and the running language, got: {caught}"
+    );
+}
+
 /// A language line that is missing its `to`, carries an extra word, names
 /// something that is not a version, or gives an empty range is refused by line.
 #[test]
@@ -2727,4 +2795,239 @@ fn edge_malformed_language_ranges_are_refused_by_line() {
             "'{text}' should say which line, got: {message}"
         );
     }
+}
+
+/// A range whose ends are the largest version components `u64` holds is
+/// compared exactly: the upper end is inside, and one below it is outside.
+///
+/// A version is three `u64`s, so a comparison that widened, wrapped or added
+/// one to reach the high end would be wrong at exactly this boundary.
+#[test]
+fn edge_language_range_at_the_numeric_extreme_includes_only_that_version() {
+    let max = Version::parse("18446744073709551615.18446744073709551615.18446744073709551615")
+        .expect("the largest three-component version should parse");
+    let range = manifest::LanguageRange {
+        low: max,
+        high: max,
+    };
+
+    assert!(
+        range.supports(&max),
+        "a range from the largest version to itself contains that version"
+    );
+
+    let below = Version::parse("18446744073709551615.18446744073709551615.18446744073709551614")
+        .expect("one below the largest patch should parse");
+    assert!(
+        !range.supports(&below),
+        "one below the low end of the largest range is outside it"
+    );
+}
+
+/// A version component past `u64` is refused instead of wrapping or being read
+/// as a smaller number, and the refusal names the line.
+#[test]
+fn edge_a_version_past_the_numeric_limit_is_refused_not_wrapped() {
+    let message = parse_err("language 0.2.0 to 18446744073709551616.0.0\n");
+
+    assert!(
+        message.contains("is not a version"),
+        "a version past the numeric limit is refused, got: {message}"
+    );
+    assert!(
+        message.contains("line 1"),
+        "the refusal names the line it is on, got: {message}"
+    );
+}
+
+/// A language line written with non-ASCII digits is refused as a bad version
+/// rather than being accepted or read as a number.
+#[test]
+fn edge_a_language_line_with_non_ascii_digits_is_refused_by_line() {
+    let message = parse_err("language 0.2.0 to ٠.٤.٠\n");
+
+    assert!(
+        message.contains("is not a version"),
+        "non-ASCII digits are not a version, got: {message}"
+    );
+    assert!(
+        message.contains("line 1"),
+        "the refusal names the line it is on, got: {message}"
+    );
+}
+
+/// The bytecode engine refuses an out-of-range program even when another line
+/// of its manifest is malformed.
+///
+/// The VM has no analyzer behind it to report the malformed file later, so its
+/// pre-run check reads the `language` line on its own. A typo on another line
+/// must not replace the language refusal with a field error.
+#[test]
+fn edge_the_bytecode_engine_refuses_the_language_before_a_malformed_manifest_line() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_bytecode_malformed");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\nnmae other\n",
+    );
+
+    let parsed = program("say \"hi\"\n");
+    let chunk = redblue::bytecode::compile_program(&parsed)
+        .expect("the program should compile to bytecode");
+    let error = BytecodeVm::new_in(&root)
+        .run(&chunk)
+        .expect_err("an out-of-range program must be refused even with a malformed line");
+
+    let message = error.message();
+    assert!(
+        message.contains("'report' 1.0.0")
+            && message.contains("9.0.0 to 9.9.9")
+            && message.contains(&actual),
+        "the refusal names the package, its range and the running language, got: {message}"
+    );
+    assert!(
+        !message.contains("not a field a manifest has"),
+        "the malformed line must not replace the language refusal, got: {message}"
+    );
+}
+
+/// A malformed manifest is refused even when its `language` line is in range.
+///
+/// The recovered range answers the language question with "yes", so the full
+/// parse error is the only thing left to report. A zero-import program has no
+/// `import` at which the analyzer would otherwise surface the typo, so both
+/// engines must refuse it rather than run it silently.
+#[test]
+fn edge_a_malformed_manifest_is_reported_even_when_its_language_line_is_in_range() {
+    let actual = manifest::LANGUAGE_VERSION.to_string();
+    let root = scratch("manifest_language_in_range_malformed");
+    manifest_file(
+        &root,
+        &format!("name report\nversion 1.0.0\nlanguage {actual} to {actual}\nnmae other\n"),
+    );
+
+    let program_file = root.join("prog.rb");
+    std::fs::write(&program_file, "say \"hi\"\n").expect("the program should be written");
+    let message = redblue::run_file(
+        program_file
+            .to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .expect_err("an in-range language line must not hide a malformed manifest line")
+    .message()
+    .to_string();
+    assert!(
+        message.contains("not a field a manifest has"),
+        "the tree-walking engine reports the malformed line, got: {message}"
+    );
+
+    let parsed = program("say \"hi\"\n");
+    let chunk = redblue::bytecode::compile_program(&parsed)
+        .expect("the program should compile to bytecode");
+    let message = BytecodeVm::new_in(&root)
+        .run(&chunk)
+        .expect_err("the bytecode engine must refuse the same malformed manifest")
+        .message()
+        .to_string();
+    assert!(
+        message.contains("not a field a manifest has"),
+        "the bytecode engine reports the malformed line, got: {message}"
+    );
+}
+
+/// An out-of-range refusal names a malformed `version` line as malformed rather
+/// than claiming the manifest declared no version at all.
+#[test]
+fn edge_an_out_of_range_refusal_names_a_malformed_version_as_malformed() {
+    let root = scratch("manifest_language_malformed_version");
+    manifest_file(
+        &root,
+        "name report\nversion not-a-version\nlanguage 9.0.0 to 9.9.9\n",
+    );
+    let program_file = root.join("prog.rb");
+    std::fs::write(&program_file, "say \"hi\"\n").expect("the program should be written");
+
+    let message = redblue::run_file(
+        program_file
+            .to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .expect_err("an out-of-range program must still be refused")
+    .message()
+    .to_string();
+    assert!(
+        message.contains("version 'not-a-version' is malformed"),
+        "the refusal names the malformed version as written, got: {message}"
+    );
+    assert!(
+        !message.contains("no version declared"),
+        "a declared but malformed version must not be reported as absent, got: {message}"
+    );
+}
+
+/// An out-of-range refusal names a `name` or `version` line with the wrong
+/// number of words as malformed rather than claiming it declared neither.
+///
+/// The partial read sees the line was present, so dropping it would make the
+/// refusal say "no version declared" about a manifest that did declare one, just
+/// in a shape the full parser refuses.
+#[test]
+fn edge_an_out_of_range_refusal_names_a_wrong_word_count_name_and_version_as_malformed() {
+    let root = scratch("manifest_language_wrong_word_count");
+    manifest_file(
+        &root,
+        "name report extra\nversion 1 2\nlanguage 9.0.0 to 9.9.9\n",
+    );
+    let program_file = root.join("prog.rb");
+    std::fs::write(&program_file, "say \"hi\"\n").expect("the program should be written");
+
+    let message = redblue::run_file(
+        program_file
+            .to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .expect_err("an out-of-range program must still be refused")
+    .message()
+    .to_string();
+    assert!(
+        message.contains("name 'report extra' is malformed")
+            && message.contains("version '1 2' is malformed"),
+        "the refusal names the wrong-word-count lines as written, got: {message}"
+    );
+    assert!(
+        !message.contains("no name declared") && !message.contains("no version declared"),
+        "a declared but malformed line must not be reported as absent, got: {message}"
+    );
+}
+/// The test harness analyzes a test body against the manifest beside its file,
+/// not the process working directory's.
+///
+/// This file sits in a directory whose manifest is out of range. A run that
+/// consulted the repository's own manifest would pass the test; the file's own
+/// manifest refuses it before the body executes.
+#[test]
+fn edge_the_test_harness_reads_the_manifest_beside_its_file() {
+    let root = scratch("manifest_test_harness_file_root");
+    manifest_file(
+        &root,
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    );
+    let file = root.join("suite.rb");
+    std::fs::write(&file, "test \"passing\"\n    expect 1 to be 1\nend\n")
+        .expect("the test file should be written");
+
+    let results = redblue::testing::run_test_file(
+        file.to_str()
+            .expect("the scratch path should be valid UTF-8"),
+    )
+    .expect("the test file should be readable");
+
+    assert_eq!(
+        results.failed, 1,
+        "the file's own out-of-range manifest must fail the test body"
+    );
+    assert_eq!(
+        results.passed, 0,
+        "a body refused before it runs must not also count as a pass"
+    );
 }

@@ -760,6 +760,45 @@ fn lint_on_the_binary(source: &str) -> (i32, String) {
     )
 }
 
+/// `rb lint` reads the manifest beside the file, not the process working
+/// directory's.
+///
+/// The scratch file lives in a directory whose manifest is out of range while
+/// the working directory the test runs in has the repository's own valid
+/// manifest. Reading the CWD's manifest would make this file lint clean, which
+/// is the silent pass the language check exists to close.
+#[test]
+fn edge_rb_lint_reads_the_manifest_beside_the_file_not_the_working_directory() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp/linter_manifest");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("scratch directory should be creatable");
+    fs::write(
+        dir.join("redblue.manifest"),
+        "name report\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+    )
+    .expect("the manifest should be written");
+    let path = dir.join("prog.rb");
+    fs::write(&path, "say \"hi\"\n").expect("lint target should be writable");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rb"))
+        .arg("lint")
+        .arg(&path)
+        .output()
+        .expect("the rb binary should run");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an out-of-range file must not lint clean: {stderr}"
+    );
+    assert!(
+        stderr.contains("9.0.0 to 9.9.9")
+            && stderr.contains(&redblue::manifest::LANGUAGE_VERSION.to_string()),
+        "the refusal names the range beside the file and the running language, got: {stderr}"
+    );
+}
+
 #[test]
 fn edge_rb_lint_prints_the_line_of_every_warning() {
     let source = "set a to 1\nset b to 2\nset c to 3\nsay \"hi\"\n";
