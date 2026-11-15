@@ -39,9 +39,10 @@ use testing::reporter::Reporter;
 pub use error::{Error, Span};
 pub use failure::{value_of as failure_value, FailureKind};
 pub use lsp::{
-    completions, completions_json, diagnostics, diagnostics_json, diagnostics_to_json,
-    find_references, find_references_json, goto_definition, goto_definition_json, textmate_grammar,
-    Definition, DefinitionKind, Diagnostic, Location, Severity, GRAMMAR_PATH, LANGUAGE_CONFIG_PATH,
+    completions, completions_json, diagnostics, diagnostics_in, diagnostics_json,
+    diagnostics_to_json, find_references, find_references_json, goto_definition,
+    goto_definition_json, textmate_grammar, Definition, DefinitionKind, Diagnostic, Location,
+    Severity, GRAMMAR_PATH, LANGUAGE_CONFIG_PATH,
 };
 // `FunctionValue` is re-exported because it is the payload of the public
 // `Value::Function` variant: a caller that matches that variant has to be able
@@ -360,7 +361,7 @@ pub fn run_cli() {
                 },
                 "lint" => match fs::read_to_string(path) {
                     Ok(source) => {
-                        let (errors, warnings) = linter::lint(&source);
+                        let (errors, warnings) = linter::lint_in(&source, root_of(path));
                         // The line is printed with every finding: a file with
                         // five unused variables says nothing about which `set`
                         // each one names, and a reader cannot act on that. The
@@ -382,7 +383,7 @@ pub fn run_cli() {
                 },
                 "diagnostics" => match fs::read_to_string(path) {
                     Ok(source) => {
-                        let found = diagnostics(&source);
+                        let found = diagnostics_in(&source, root_of(path));
                         // Rendered from the findings just computed: re-running
                         // the frontend to format them would lex, parse and
                         // analyze the file a second time.

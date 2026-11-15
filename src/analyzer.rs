@@ -29,8 +29,9 @@ pub struct Analyzer {
     /// three read one manifest the one way and there is no second answer to drift
     /// from the first.
     ///
-    /// Read-only — [`crate::manifest::Pins::for_reading`] — because an analysis
-    /// is a question, and a question has no reason to create a `redblue.lock`.
+    /// Read-only — [`crate::manifest::Pins::for_reading`] or
+    /// [`crate::manifest::Pins::for_analysis`] — because an analysis is a
+    /// question, and a question has no reason to create a `redblue.lock`.
     pins: crate::manifest::Pins,
     /// Whether the manifest conflict has been reported, and so the walk stops
     /// where it found the import that found it.
@@ -56,18 +57,37 @@ pub struct Analyzer {
 
 impl Analyzer {
     pub fn new() -> Self {
-        Self::in_dir(std::path::Path::new("."))
+        Self::for_analysis(std::path::Path::new("."))
     }
 
-    /// An analyzer that resolves the program's imports against `root`.
+    /// An analyzer that resolves the program's imports against `root` and
+    /// treats the program as the one `root` describes.
+    ///
+    /// Its pre-analysis check has already refused an out-of-range program, so
+    /// the pins may check that range again when an import is reached.
     fn in_dir(root: &std::path::Path) -> Self {
+        Self::with_pins(root, crate::manifest::Pins::for_reading(root))
+    }
+
+    /// An analyzer that resolves the program's imports against `root` without
+    /// checking `root`'s manifest language range.
+    ///
+    /// This is for a tree with no directory of its own — [`analyze`], and a
+    /// REPL line through [`Analyzer::with_bound_names`]. The directory is still
+    /// where its imports are found, as it always has been, but the manifest
+    /// there may belong to an unrelated project.
+    fn for_analysis(root: &std::path::Path) -> Self {
+        Self::with_pins(root, crate::manifest::Pins::for_analysis(root))
+    }
+
+    fn with_pins(root: &std::path::Path, pins: crate::manifest::Pins) -> Self {
         Self {
             scopes: vec![HashSet::new()],
             functions: HashMap::new(),
             errors: Vec::new(),
             later: LaterNames::default(),
             root: root.to_path_buf(),
-            pins: crate::manifest::Pins::for_reading(root),
+            pins,
             manifest_failed: false,
             deferred_depth: 0,
         }
@@ -708,6 +728,55 @@ impl LaterNames {
     }
 }
 
+/// Whether any statement, at any depth, is an `import`.
+///
+/// A program with an import reports a malformed manifest at that import, where
+/// the walk finds pins it cannot read. A zero-import program has no such place,
+/// so its pre-analysis language check reports the saved parse error itself.
+pub(crate) fn program_has_import(statements: &[Stmt]) -> bool {
+    statements.iter().any(|stmt| match &stmt.statement {
+        Statement::Import(_) => true,
+        Statement::If {
+            then_branch,
+            else_branch,
+            ..
+        } => program_has_import(then_branch) || program_has_import(else_branch),
+        Statement::Unless { body, .. }
+        | Statement::ForEach { body, .. }
+        | Statement::ForRange { body, .. }
+        | Statement::Repeat { body, .. }
+        | Statement::RepeatUntil { body, .. }
+        | Statement::While { body, .. }
+        | Statement::Function { body, .. }
+        | Statement::Method { body, .. }
+        | Statement::Object { body, .. }
+        | Statement::Module { body, .. }
+        | Statement::Test { body, .. } => program_has_import(body),
+        Statement::Try {
+            body,
+            catch_body,
+            finally_body,
+            ..
+        } => {
+            program_has_import(body)
+                || program_has_import(catch_body)
+                || program_has_import(finally_body)
+        }
+        Statement::Constant { .. }
+        | Statement::Say(_)
+        | Statement::Print(_)
+        | Statement::Set { .. }
+        | Statement::SetProperty { .. }
+        | Statement::Return(_)
+        | Statement::GiveBack(_)
+        | Statement::Break
+        | Statement::Skip
+        | Statement::Has { .. }
+        | Statement::Export { .. }
+        | Statement::Expr(_) => false,
+    })
+}
+
 fn collect_later_names(
     statements: &[Stmt],
     root: &std::path::Path,
@@ -780,18 +849,37 @@ fn collect_later_names(
     }
 }
 
+/// Analyzes `program` without a program-level language check.
+///
+/// This is the entry point for a caller that has a tree but no directory: an
+/// editor's in-memory buffer, a REPL line, or a test body. It must not read the
+/// process working directory's `redblue.manifest` to decide whether the
+/// program's language is supported, because that file may belong to an
+/// unrelated project. Imports still resolve from the working directory, as they
+/// always have. A caller that knows where the program lives uses [`analyze_in`],
+/// which performs the language check for that directory.
 pub fn analyze(program: &Program) -> Result<()> {
-    analyze_in(program, std::path::Path::new("."))
+    let mut analyzer = Analyzer::for_analysis(std::path::Path::new("."));
+    analyzer.analyze(program)
 }
 
 /// Analyzes `program` as the program in `root` resolves its dependencies from.
 ///
-/// `analyze` is this against the working directory. A `root` of its own is what
-/// lets the pins that decide what an `import` binds be the pins of the directory
-/// the program was found beside — and, when those pins cannot be resolved, what
-/// lets the conflict be reported here rather than surfacing later as an unknown
-/// variable with nothing in it saying why.
+/// A `root` of its own is what lets the pins that decide what an `import` binds
+/// be the pins of the directory the program was found beside — and, when those
+/// pins cannot be resolved, what lets the conflict be reported here rather than
+/// surfacing later as an unknown variable with nothing in it saying why. It is
+/// also the directory whose `redblue.manifest` supplies the program's own
+/// language range.
 pub fn analyze_in(program: &Program, root: &std::path::Path) -> Result<()> {
+    // The program's own language range is refused before the walk, so an
+    // analyzer error cannot hide it. The refusal is the program's and is not
+    // catchable by the program's `try`; a module's range is still left to the
+    // `import` that names it. A manifest with no usable language line is left
+    // to the import that finds it, unless there is no import: an analyzer-only
+    // pass has no runtime engine behind it to report the malformed file later.
+    let report_unparseable = !program_has_import(&program.statements);
+    crate::manifest::check_program_language_before_analysis(root, report_unparseable)?;
     let mut analyzer = Analyzer::in_dir(root);
     analyzer.analyze(program)
 }
@@ -876,5 +964,35 @@ mod tests {
             analyze_with_bound_names(&second, &names(&["x"])).is_ok(),
             "and the line that reads it is the next one"
         );
+    }
+
+    /// A tree analyzed without a directory of its own still resolves its
+    /// imports from the working directory, but never enforces that directory's
+    /// language range: the manifest may belong to an unrelated project.
+    #[test]
+    fn edge_an_in_memory_program_is_not_refused_by_the_import_directory_language() {
+        use std::path::Path;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("tmp")
+            .join("analyzer_import_directory_language");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("modules"))
+            .expect("the modules directory should be creatable");
+        std::fs::write(root.join("modules").join("Fixture.rb"), "set VALUE to 1\n")
+            .expect("the module should be writable");
+        std::fs::write(
+            root.join("redblue.manifest"),
+            "name unrelated\nversion 1.0.0\nlanguage 9.0.0 to 9.9.9\n",
+        )
+        .expect("the unrelated manifest should be writable");
+
+        let source = program("import Fixture\nsay VALUE\n");
+        super::Analyzer::for_analysis(&root)
+            .analyze(&source)
+            .expect("an in-memory tree is not refused by an unrelated manifest's range");
+        super::analyze_in(&source, &root)
+            .expect_err("a program found in the directory is refused by its own manifest's range");
     }
 }

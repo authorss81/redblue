@@ -40,11 +40,8 @@ impl std::fmt::Display for TestFailure {
 }
 
 pub fn run_test_file(path: &str) -> Result<TestResults> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| crate::error::Error::Io(format!("Failed to read test file: {}", e)))?;
-
     let mut harness = TestHarness::new();
-    harness.run_source(&source)?;
+    harness.run_file(path)?;
 
     Ok(harness.results())
 }

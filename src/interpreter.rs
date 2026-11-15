@@ -684,8 +684,22 @@ pub(crate) fn module_bound_names(root: &Path, pinned: Option<&str>, name: &str) 
 }
 
 impl Vm {
+    /// A VM for a session rooted at the working directory: a REPL line or an
+    /// editor buffer.
+    ///
+    /// Its imports still resolve from `.`, but the `redblue.manifest` there may
+    /// belong to an unrelated project, so its language range is not inherited by
+    /// the line. A program found in a directory uses [`Vm::new_in`].
     pub fn new() -> Self {
-        Self::new_in(std::path::Path::new("."))
+        Self::new_session_in(std::path::Path::new("."))
+    }
+
+    /// A session VM that resolves its imports against `root` without inheriting
+    /// that directory's program language range.
+    pub(crate) fn new_session_in(root: &std::path::Path) -> Self {
+        let mut vm = Self::new_in(root);
+        vm.pins = crate::manifest::Pins::for_session(root);
+        vm
     }
 
     /// A VM that resolves its imports against `root`.
@@ -761,6 +775,7 @@ impl Vm {
     /// the VM it was made from.
     pub fn fork(&self) -> Vm {
         let mut forked = Vm::new_in(&self.root);
+        forked.pins = self.pins.rebased(&self.root);
         forked.globals = self.globals.clone();
         forked.constants = self.constants.clone();
         forked.locals = self.locals.clone();
@@ -1713,6 +1728,17 @@ impl Vm {
     /// *does* — a failure returns here in both, before any output is emitted,
     /// exactly as it did when [`Vm::run`] returned straight from the loop.
     fn run_statements(&mut self, program: &Program) -> Result<Value> {
+        // The program's own manifest is checked before it runs, whatever its
+        // statements are. An import in a branch that is never taken, or a
+        // statement that fails first, must not let an out-of-range program
+        // execute and only be refused afterwards. A module's own range stays
+        // deferred to the `import` that loads it, where the program's `try` can
+        // catch that refusal. An import-bearing program leaves a malformed
+        // manifest to the import that can report it, exactly as the analyzer
+        // does; a zero-import program has no such import and reports it here.
+        self.pins
+            .check_program_language_for(crate::analyzer::program_has_import(&program.statements))?;
+
         for value in self.globals.values() {
             reset_caches(value);
         }

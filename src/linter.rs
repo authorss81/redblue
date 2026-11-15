@@ -3,6 +3,7 @@ use crate::lexer::Lexer;
 use crate::parser::{Expr, Program, Statement, Stmt};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 
 /// The linter walks a parsed program and reports what a reader would already
 /// suspect: a variable that is never read, a file-level import that the file
@@ -444,6 +445,18 @@ impl Default for Linter {
 /// tree to hand on: a source that does not lex or does not parse is reported
 /// here and nowhere else.
 pub fn lint(source: &str) -> (Vec<LintError>, Vec<LintWarning>) {
+    lint_with(source, None)
+}
+
+/// [`lint`] for source found in `root`.
+///
+/// The analyzer reads the `redblue.manifest` beside the file, not the process
+/// working directory's. A caller that has a path must use this form.
+pub fn lint_in(source: &str, root: &Path) -> (Vec<LintError>, Vec<LintWarning>) {
+    lint_with(source, Some(root))
+}
+
+fn lint_with(source: &str, root: Option<&Path>) -> (Vec<LintError>, Vec<LintWarning>) {
     let tokens = match Lexer::tokenize(source) {
         Ok(t) => t,
         Err(e) => return (vec![stage_error("Syntax error", &e)], Vec::new()),
@@ -455,7 +468,10 @@ pub fn lint(source: &str) -> (Vec<LintError>, Vec<LintWarning>) {
         Err(e) => return (vec![stage_error("Syntax error", &e)], Vec::new()),
     };
 
-    lint_program(&program)
+    match root {
+        Some(root) => lint_program_in(&program, root),
+        None => lint_program(&program),
+    }
 }
 
 /// Lints an already-parsed [`Program`], for a caller that has the AST in hand —
@@ -493,11 +509,28 @@ pub fn lint(source: &str) -> (Vec<LintError>, Vec<LintWarning>) {
 /// reported is dropped, and a file that cannot run is reported whether or not
 /// the tree walk had anything of its own to say.
 pub fn lint_program(program: &Program) -> (Vec<LintError>, Vec<LintWarning>) {
+    lint_program_with(program, None)
+}
+
+/// [`lint_program`] for a program found in `root`.
+///
+/// This is the path-aware form [`crate::lsp::diagnostics_in`] and `rb lint` use
+/// so the analyzer reads the manifest beside the file rather than the process
+/// working directory's.
+pub fn lint_program_in(program: &Program, root: &Path) -> (Vec<LintError>, Vec<LintWarning>) {
+    lint_program_with(program, Some(root))
+}
+
+fn lint_program_with(program: &Program, root: Option<&Path>) -> (Vec<LintError>, Vec<LintWarning>) {
     let mut linter = Linter::new();
     linter.lint(program);
 
     let mut errors = linter.get_errors();
-    if let Err(e) = crate::analyzer::analyze(program) {
+    let analyzed = match root {
+        Some(root) => crate::analyzer::analyze_in(program, root),
+        None => crate::analyzer::analyze(program),
+    };
+    if let Err(e) = analyzed {
         errors.push(stage_error("Analysis error", &e));
     }
 

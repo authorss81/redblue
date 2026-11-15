@@ -384,6 +384,20 @@ impl Chunk {
         }
         all
     }
+
+    /// Whether any block contains an `import`.
+    ///
+    /// The bytecode VM has no syntax tree, so this is how its pre-run manifest
+    /// check knows whether a malformed manifest has an `import` at which to be
+    /// reported, exactly as the tree-walking VM asks the program.
+    pub fn has_import(&self) -> bool {
+        self.all_blocks().iter().any(|block| {
+            block
+                .code
+                .iter()
+                .any(|instruction| instruction.opcode == Opcode::Import)
+        })
+    }
 }
 
 /// Compiles Redblue source to bytecode: the whole frontend, then codegen.

@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::Path;
 
 use crate::error::Error;
 use crate::lexer::{Lexer, Token, TokenKind, KEYWORDS};
@@ -133,6 +134,18 @@ impl Diagnostic {
 /// same shared step `rb lint` uses, and it arrives first among the errors,
 /// because the linter's own tree walk produces warnings only.
 pub fn diagnostics(source: &str) -> Vec<Diagnostic> {
+    diagnostics_with(source, None)
+}
+
+/// [`diagnostics`] for source found in `root`.
+///
+/// The analyzer reads the `redblue.manifest` beside the file, not the process
+/// working directory's. A caller that has a path must use this form.
+pub fn diagnostics_in(source: &str, root: &Path) -> Vec<Diagnostic> {
+    diagnostics_with(source, Some(root))
+}
+
+fn diagnostics_with(source: &str, root: Option<&Path>) -> Vec<Diagnostic> {
     let mut found = Vec::new();
 
     let tokens = match crate::lexer::Lexer::tokenize(source) {
@@ -151,7 +164,10 @@ pub fn diagnostics(source: &str) -> Vec<Diagnostic> {
         }
     };
 
-    let (errors, warnings) = crate::linter::lint_program(&ast);
+    let (errors, warnings) = match root {
+        Some(root) => crate::linter::lint_program_in(&ast, root),
+        None => crate::linter::lint_program(&ast),
+    };
     for error in errors {
         let (line, column) = known_position(error.line, error.column);
         found.push(Diagnostic::new(

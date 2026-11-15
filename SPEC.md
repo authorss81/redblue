@@ -2209,6 +2209,80 @@ declaration, including `to can`, and a variable of that name still works.
 
 ---
 
+## Packages, package versions and language versions
+
+A package's own version and the version of the Redblue language that runs it
+are independent numbers with different reasons to move.
+
+- A package's `version` says what release of *that package* it is. Fixing a bug
+  in a package changes this number and changes nothing about the language.
+- The *language version* says which release of Redblue can run the package.
+  Adding syntax, changing a rule, or removing a form changes the language
+  version and changes nothing about any package's own version.
+
+A package therefore does not encode the language version in its own version
+number, and does not mirror the language's version. It declares the range of
+language versions it supports in its manifest:
+
+```text
+name report
+version 1.4.2
+language 0.2.0 to 0.4.0
+dependency MathUtils =1.0.0
+```
+
+`language <low> to <high>` is inclusive at both ends: a package declaring
+`0.2.0 to 0.4.0` runs on `0.2.0` and on `0.4.0`, and is refused on `0.1.9` or
+`0.4.1`. Both the package version and the language version are numbers of the
+same `major.minor.patch` shape, but they are never compared with each other. A
+component is written without leading zeros: `1.0.0`, not `01.0.0`. Such a
+component is refused rather than normalized, so a version always reads back as
+the author wrote it. This applies to every version the manifest reader accepts,
+not only to the endpoints of `language`: a manifest that already says
+`version 01.0.0` or pins `dependency X =01.0.0` is now refused where an earlier
+compiler normalized it to `1.0.0`. Rewrite those components without the leading
+zero; that older spelling is intentionally invalidated. A directory under
+`modules/<name>/` that is version-shaped but has a leading-zero component is
+reported as malformed rather than silently treated as unpublished when no valid
+version answers the requirement.
+
+The field is optional. A manifest written before `language` existed keeps
+resolving, which is what makes the addition backwards compatible; the resolver
+refuses only a package that declared a range and is outside it. The program's
+own manifest is checked before its first statement runs, whether or not it has
+an `import`: an out-of-range program is refused before any of its `say`,
+`files.write` or other side effects, and before any other failure can hide the
+language refusal. That refusal is a `Runtime` error naming the package, the
+package's version, the range it declared, and the language version running it.
+
+When a program runs, every module manifest is checked at the `import` that
+settles it, so a module's range is its own, not the importing program's, and
+because that check happens at the import, a `try` around that import can catch
+the failure. A read-only pass that only asks which names an import binds does
+not enforce a module's range: it runs before the program, where a failure could
+not be caught by the program's own `try`. The ordering is deliberate — the
+program is refused first, then its imports as they execute — and both engines
+use it.
+
+A host that embeds the resolver and calls `resolve`, `resolve_in` or
+`resolve_without_writing` directly asks for the whole dependency graph up front.
+Those calls validate every module's range while they resolve, so their refusal
+comes before any program runs and cannot be caught by a `try`. That eager
+validation is the resolver API's own contract, not the path `rb run` takes;
+a running program uses the per-import check above.
+
+A malformed line elsewhere in the manifest does not hide the language refusal:
+the `language` line is read on its own, so the package is still refused for its
+range rather than for the typo. When no usable `language` line is present the
+malformed file is reported instead — by the analyzer at the import that found
+it, by the analyzer's pre-analysis check when a zero-import program has no
+import at which to report it, or by the bytecode engine's pre-run check.
+
+`rb version` prints the compiler's release; the language version is the version
+of the language it implements, and a package states the latter in its manifest.
+
+---
+
 ## Grammar
 
 See [GRAMMAR.md](GRAMMAR.md) for the complete EBNF grammar specification.

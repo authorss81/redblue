@@ -2945,7 +2945,7 @@ impl Repl {
             Ok(chunk) => chunk,
             Err(error) => return (Err(error), Vec::new()),
         };
-        let mut compiled = BytecodeVm::new_in(self.vm.root());
+        let mut compiled = BytecodeVm::new_session_in(self.vm.root());
         compiled.set_echo(false);
         compiled.observe_context(self.vm.call_context());
         for (name, value) in self.session_bindings() {
@@ -4808,7 +4808,7 @@ impl Repl {
         let walked_result = walked.run_quietly(&program);
         let walked_said = walked.take_output();
 
-        let mut compiled = crate::bytecode::vm::BytecodeVm::new_in(self.vm.root());
+        let mut compiled = crate::bytecode::vm::BytecodeVm::new_session_in(self.vm.root());
         compiled.set_echo(false);
         for (name, value) in self.session_bindings() {
             compiled.seed_binding(&name, value);
