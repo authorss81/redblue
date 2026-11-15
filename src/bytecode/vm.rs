@@ -1108,6 +1108,13 @@ impl BytecodeVm {
         self.outcome = Value::Nothing;
         self.abrupt_exit = false;
 
+        // The program's own manifest is checked before it runs, whatever its
+        // instructions are: an `import` in a branch that is never taken, or a
+        // failure that comes first, must not let an out-of-range program
+        // execute and only be refused afterwards. A module's own range stays
+        // deferred to the `import` that loads it, where a `try` can catch it.
+        self.pins.check_program_language()?;
+
         let chunk = Arc::new(chunk.clone());
         self.frames.push(self.frame_for(&chunk, Vec::new()));
         // `Exit` is not read here: a `break` in the program's outermost block is

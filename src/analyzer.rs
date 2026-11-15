@@ -792,6 +792,11 @@ pub fn analyze(program: &Program) -> Result<()> {
 /// lets the conflict be reported here rather than surfacing later as an unknown
 /// variable with nothing in it saying why.
 pub fn analyze_in(program: &Program, root: &std::path::Path) -> Result<()> {
+    // The program's own language range is refused before the walk, so an
+    // analyzer error cannot hide it. The refusal is the program's and is not
+    // catchable by the program's `try`; a module's range is still left to the
+    // `import` that names it.
+    crate::manifest::check_program_language_before_analysis(root)?;
     let mut analyzer = Analyzer::in_dir(root);
     analyzer.analyze(program)
 }
