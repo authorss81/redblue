@@ -612,9 +612,9 @@ A major historical failure mode in autonomous coding pipelines is the **"Open-En
 - **Goal**: Formalize the numeric threshold where numbers transition past $2^{53}$ (`MAX_EXACT_INT`).
 - **Behavior**: Refuse silent float roundoff of integers past $2^{53}$ unless explicitly converted, or seamlessly promote large whole numbers to an exact arbitrary-precision integer (`BigInt`) representation.
 
-### Phase 170: Parameter Order & Standard Library Consistency Normalization
-- **Goal**: Strict audit of all 24+ standard library modules to guarantee standard parameter order (`target, pattern` or `collection, predicate`) across all methods.
-- **Why**: Completely avoids the PHP/C "argument order lottery" where developers must constantly look up whether `needle` or `haystack` comes first.
+### Phase 170: Documentation Drift, Parameter Order & Standard Library Consistency Normalization
+- **Goal**: Strict audit of all 24+ standard library modules to guarantee standard parameter order (`target, pattern` or `collection, predicate`) across all methods, and correct normative documentation drift recorded in the master ledger (starting with the stale `docs/BYTECODE.md` format version).
+- **Why**: Completely avoids the PHP/C "argument order lottery" where developers must constantly look up whether `needle` or `haystack` comes first, and prevents readers of normative documents from following an obsolete specification.
 
 ---
 

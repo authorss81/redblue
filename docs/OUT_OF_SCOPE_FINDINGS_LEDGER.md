@@ -88,6 +88,12 @@ Historically, this produced over **416 individual findings scattered across 67 s
 | **F-073-02** | `phase-075/FINDINGS.md` §1 (owner: phase-073) | `tests/bench/mod.rs:408-452` | The `rb-bench` binary's own unit tests live under `target/<profile>/build/…`, where the old sibling lookup could not find the runner, so `edge_child_measurement_accepts_an_explicit_environment` failed with `Load("cannot locate the rb-bench worker binary …")`. Phase 075 resolves only `target/<profile>/rb-bench` (and `target/<triple>/<profile>/rb-bench` for a cross-target build) for the current Cargo profile, so a stale binary elsewhere on the ancestor path is never measured. | **Phase 073** | `[RESOLVED — verify in owner phase]` |
 | **F-088-01** | `phase-075/FINDINGS.md` §2 (owner: phase-088) | `phases/phase-088/scan.rs:524` | `is_reachability_check` returned a bool literal after an `if`, which clippy rejects as `needless_bool` under `-D warnings`. Phase 075 returns `!negates_an_is_ok_call(argument)`; behaviour is unchanged. | **Phase 088** | `[RESOLVED — verify in owner phase]` |
 
+### G. Documentation & Specification Drift (Assigned to Phase 170 — Documentation Consistency)
+
+| Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **F-109-01** | `phase-109/FINDINGS.md` §1 | `docs/BYTECODE.md:3` | The normative bytecode document's opening line says "Format version: 4", while `docs/BYTECODE.md:56` and `src/bytecode/format.rs:81` say version 6 and the decoder refuses any other version. A reader can believe version 4 is current while the encoder writes 6. Phase 109 records the drift rather than changing the format or its normative documentation. | **Phase 170** | `[OPEN]` |
+
 ---
 
 ## 4. Complete Remediation Workflow (Phases 162–170)
@@ -114,7 +120,7 @@ flowchart TD
         P167["Phase 167: Streaming I/O & Iterators"]
         P168["Phase 168: Structural Deep Equality & Cycles"]
         P169["Phase 169: BigInt Promotion & Arithmetic Safety"]
-        P170["Phase 170: Stdlib Consistency & Param Order"]
+        P170["Phase 170: Documentation Consistency & Stdlib Param Order"]
     end
 
     MasterLedger --> AuditTracks
