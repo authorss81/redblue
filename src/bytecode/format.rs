@@ -642,3 +642,246 @@ fn annotate(what: &str, index: u32, error: Error) -> Error {
         other => other,
     }
 }
+
+#[cfg(test)]
+mod native_study_tests {
+    use std::fs;
+    use std::path::Path;
+
+    use super::{compile_source, Chunk, FORMAT_VERSION, INSTRUCTION_SIZE, MAGIC};
+
+    const RECOMMENDATION: &str = "## Recommendation
+
+**Defer it.**
+
+Build the native backend after the bytecode VM has slot-resolved names and some
+form of type or shape feedback, and use Cranelift for the first implementation.
+Do not build an LLVM AOT backend now, and do not describe the native backend as
+the next step merely because it is the only remaining way to improve speed.
+
+The deferral is not a rejection. The existing pipeline has already reached the
+point where a backend is technically possible: the tree-walking frontend,
+bytecode compiler, stable file format, disassembler, bytecode VM and
+self-hosted fixed point all exist. What is missing is not a code generator
+framework. It is the semantic layer a code generator needs to produce code that
+is actually faster than the interpreter: resolved variables, closure layout,
+object shape feedback, and a runtime ABI that preserves Redblue's visible
+behaviour. Building machine-code emission before those exists would produce a
+faster instruction decoder attached to the same dynamic hash lookups.
+
+The concrete trigger for reversing the deferral is in
+[When the recommendation would be wrong](#when-the-recommendation-would-be-wrong).";
+
+    fn native_document() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("NATIVE.md");
+        let raw = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "NATIVE.md should be readable at {}: {error}",
+                path.display()
+            )
+        });
+        raw.replace("\r\n", "\n")
+    }
+
+    #[test]
+    fn native_study_records_a_recommendation_and_the_components_it_cites() {
+        let document = native_document();
+
+        let start = document
+            .find("## Recommendation")
+            .expect("NATIVE.md has no Recommendation section");
+        let end = document
+            .find("## What already exists")
+            .expect("NATIVE.md has no section after Recommendation");
+        assert!(
+            start < end,
+            "the Recommendation section should precede What already exists"
+        );
+        assert_eq!(
+            document[start..end].trim_end(),
+            RECOMMENDATION,
+            "NATIVE.md's Recommendation section changed; update the study and this test together"
+        );
+
+        for (path, line, symbol) in [
+            ("src/lib.rs", 114, "run_source_in"),
+            ("src/bytecode/format.rs", 275, "compile"),
+            ("src/bytecode/codegen.rs", 32, "compile"),
+            ("src/bytecode/codegen.rs", 7, "Names"),
+            ("src/bytecode/opcode.rs", 60, "Opcode"),
+            ("src/bytecode/opcode.rs", 294, "from_byte"),
+            ("src/bytecode/opcode.rs", 305, "name"),
+            ("src/bytecode/format.rs", 244, "Chunk"),
+            ("src/bytecode/format.rs", 222, "Block"),
+            ("src/bytecode/format.rs", 158, "Instruction"),
+            ("src/bytecode/format.rs", 111, "Constant"),
+            ("src/bytecode/format.rs", 290, "encode"),
+            ("src/bytecode/format.rs", 308, "decode"),
+            ("src/bytecode/format.rs", 81, "FORMAT_VERSION"),
+            ("src/bytecode/disasm.rs", 102, "render"),
+            ("src/bytecode/disasm.rs", 35, "render_compact"),
+            ("src/bytecode/disasm.rs", 107, "redblue bytecode"),
+            ("src/bytecode/vm.rs", 685, "BytecodeVm"),
+            ("src/bytecode/vm.rs", 1094, "run"),
+            ("src/bytecode/vm.rs", 1304, "charge_step"),
+            ("src/bytecode/vm.rs", 3427, "call_function"),
+            ("src/interpreter.rs", 333, "Vm"),
+            ("src/interpreter.rs", 1695, "run"),
+            ("src/interpreter.rs", 1786, "captured"),
+            ("src/runtime.rs", 199, "binary_op"),
+            ("src/runtime.rs", 146, "index"),
+            ("src/runtime.rs", 87, "property"),
+            ("src/runtime.rs", 3251, "builtin"),
+            ("src/value.rs", 387, "Value"),
+            ("src/value.rs", 21, "Fields"),
+            ("src/value.rs", 37, "Captured"),
+            ("src/value.rs", 48, "FunctionBody"),
+            ("src/value.rs", 85, "FunctionValue"),
+            ("src/value.rs", 470, "Shared"),
+            ("src/stdlib.rs", 520, "builtins"),
+            ("docs/BOOTSTRAP.md", 16, "S3"),
+            ("docs/BOOTSTRAP.md", 17, "S4"),
+            ("docs/BOOTSTRAP.md", 87, "Rust fast path"),
+            ("src/lib.rs", 331, "compile"),
+            ("src/lib.rs", 337, "dis"),
+            ("src/lib.rs", 343, "vm"),
+            ("src/lib.rs", 608, "compile_command"),
+            ("src/lib.rs", 622, "dis_command"),
+            ("src/lib.rs", 641, "vm_command"),
+            ("docs/BYTECODE.md", 22, "A byte value already written"),
+            ("docs/BYTECODE.md", 56, "reads and writes"),
+            ("Cargo.toml", 38, "[dependencies]"),
+            ("docs/PERFORMANCE_HISTORY.md", 28, "Cranelift"),
+            ("docs/FUTURE_ROADMAP_AND_DEFERRED.md", 112, "Rust"),
+            ("docs/FUTURE_ROADMAP_AND_DEFERRED.md", 115, "LuaJIT"),
+            ("LIBRARIES.md", 15, "readability"),
+            ("LIBRARIES.md", 13, "The rule"),
+            ("LIBRARIES.md", 29, "native backend"),
+        ] {
+            let reference = format!("{path}:{line}");
+            assert!(
+                document.contains(reference.as_str()),
+                "NATIVE.md does not cite {reference}"
+            );
+            let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+            let source = fs::read_to_string(&source_path).unwrap_or_else(|error| {
+                panic!(
+                    "the cited file should be readable at {}: {error}",
+                    source_path.display()
+                )
+            });
+            let cited = source.lines().nth(line - 1).unwrap_or_else(|| {
+                panic!(
+                    "{reference} is past the end of {path} ({} lines)",
+                    source.lines().count()
+                )
+            });
+            assert!(
+                cited.contains(symbol),
+                "NATIVE.md cites {reference} for `{symbol}`, but that line is {cited:?}"
+            );
+        }
+
+        let value_source =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/value.rs"))
+                .expect("src/value.rs should be readable");
+        let enum_start = value_source
+            .find("pub enum Value {")
+            .expect("src/value.rs should define the Value enum");
+        let enum_body = &value_source[enum_start..];
+        let enum_body = &enum_body[..enum_body
+            .find("\n}")
+            .expect("the Value enum should close at column zero")];
+        let variant_count = enum_body
+            .lines()
+            .skip(1)
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty()
+                    && !trimmed.starts_with("///")
+                    && !trimmed.starts_with("#[")
+                    && line.starts_with("    ")
+                    && !line.starts_with("     ")
+                    && trimmed
+                        .chars()
+                        .next()
+                        .is_some_and(|character| character.is_ascii_uppercase())
+            })
+            .count();
+        assert_eq!(
+            variant_count, 12,
+            "the Value enum should have exactly twelve variants"
+        );
+        assert!(
+            document.contains("`Value` is a Rust enum with twelve variants"),
+            "NATIVE.md should say Value has twelve variants"
+        );
+        assert!(
+            document.contains("`Value` is an enum of twelve\n  variants"),
+            "NATIVE.md should repeat the twelve-variant count in its speedup analysis"
+        );
+    }
+
+    #[test]
+    fn native_study_pins_the_bytecode_surface_a_backend_would_consume() {
+        let document = native_document();
+        let marker = "## Effect on `.rbc` version ";
+        let version_at = document
+            .find(marker)
+            .map(|index| index + marker.len())
+            .expect("NATIVE.md should describe the .rbc version a backend consumes");
+        let documented_version: String = document[version_at..]
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        let documented_version: u16 = documented_version
+            .parse()
+            .expect("the .rbc version heading should start with a number");
+        assert_eq!(
+            FORMAT_VERSION, documented_version,
+            "the build must implement the .rbc version the study documents"
+        );
+        assert_eq!(INSTRUCTION_SIZE, 13);
+        assert_eq!(MAGIC, *b"RED\x1a");
+
+        let chunk =
+            compile_source("set x to 2 + 3\nsay x\n").expect("the sample program should compile");
+        assert!(!chunk.main.code.is_empty());
+
+        let bytes = chunk.encode();
+        let decoded = Chunk::decode(&bytes).expect("a chunk this module wrote should decode");
+        assert_eq!(decoded, chunk);
+
+        let listing = decoded.disassemble();
+        assert!(
+            listing.contains("SAY"),
+            "the disassembly should name the SAY instruction, got:\n{listing}"
+        );
+        assert!(
+            listing.contains(&format!("v{FORMAT_VERSION}")),
+            "the disassembly should name format version {FORMAT_VERSION}, got:\n{listing}"
+        );
+    }
+
+    #[test]
+    fn edge_native_study_rejects_an_unknown_future_bytecode_version() {
+        let chunk = compile_source("say 1\n").expect("the sample program should compile");
+        let mut bytes = chunk.encode();
+        let version_at = MAGIC.len();
+        let future = FORMAT_VERSION + 1;
+        bytes[version_at..version_at + 2].copy_from_slice(&future.to_le_bytes());
+
+        let error = Chunk::decode(&bytes)
+            .expect_err("a bytecode file from a future format version must be refused");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("unknown bytecode format version"),
+            "the refusal should name the version problem, got: {message}"
+        );
+        assert!(
+            message.contains(&future.to_string()),
+            "the refusal should name version {future}, got: {message}"
+        );
+    }
+}
