@@ -884,4 +884,59 @@ The concrete trigger for reversing the deferral is in
             "the refusal should name version {future}, got: {message}"
         );
     }
+
+    #[test]
+    fn edge_native_study_rejects_a_truncated_chunk() {
+        let chunk = compile_source("say 1\n").expect("the sample program should compile");
+        let bytes = chunk.encode();
+        let truncated = &bytes[..bytes.len() - 1];
+
+        let result = Chunk::decode(truncated);
+        assert!(
+            result.is_err(),
+            "a chunk that ends one byte early must be refused, not decoded"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("truncated bytecode file"),
+            "the refusal should name the truncation, got: {message}"
+        );
+    }
+
+    #[test]
+    fn edge_native_study_rejects_a_foreign_magic() {
+        let chunk = compile_source("say 1\n").expect("the sample program should compile");
+        let mut bytes = chunk.encode();
+        bytes[0] = b'X';
+
+        let result = Chunk::decode(&bytes);
+        assert!(
+            result.is_err(),
+            "a file whose magic is not RED\\x1a must be refused"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("not a Redblue bytecode file"),
+            "the refusal should name the bad magic, got: {message}"
+        );
+    }
+
+    #[test]
+    fn edge_native_study_empty_source_compiles_to_an_empty_chunk() {
+        let chunk = compile_source("").expect("an empty program should compile");
+        assert!(
+            chunk.main.code.is_empty(),
+            "an empty program should emit no instructions, got {:?}",
+            chunk.main.code
+        );
+
+        let decoded = Chunk::decode(&chunk.encode()).expect("an empty chunk should round trip");
+        assert_eq!(decoded, chunk);
+        assert!(
+            decoded
+                .disassemble()
+                .contains(&format!("v{FORMAT_VERSION}")),
+            "the empty chunk should still disassemble with the format version"
+        );
+    }
 }
