@@ -59,6 +59,9 @@ reusing the generic "three numbers" message.
 | SPEC.md | +64 −0 | a "Packages, package versions and language versions" section stating that the two versions are independent and why, the inclusive range syntax, the backwards-compatible opt-in rule, that a malformed unrelated line does not hide the refusal in either engine, and that the public resolver API checks the graph eagerly while a running program checks each module at its import |
 | tests/linter_test.rs | +39 −0 | one test pinning that `rb lint` reads the manifest beside the file rather than the process working directory's |
 | tests/manifest_test.rs | +303 −0 | thirty-two tests: declaration and in-range resolution, both boundary ends, just-below/just-above range membership, out-of-range program with and without dependency lines, a zero-import program refused when run, refusal before any side effect and before an analyzer error, a malformed line that cannot hide the refusal, an unnamed program whose refusal names its manifest, program-checking read-only resolution with a deferred module range, out-of-range module, the version a module manifest declares, a catchable refusal in a real `.rb` program, a module's range checked at its own import, a transitive module's range checked at its own import, a failed read not remembered as a pass, both engines on zero-import and module imports, disk fixture, malformed ranges, numeric-extreme comparison, a component past `u64`, non-ASCII digits, the bytecode engine refusing language before a malformed line, the bytecode engine catching a module refusal in `try`, an in-range language line that cannot hide a malformed manifest, an `analyze_in`-only pass reporting a zero-import program's malformed manifest, a malformed declared version named as malformed, and a wrong-word-count name/version line named as malformed |
+| src/project.rs | +12 −1 | `rb new` writes `language {LANGUAGE_VERSION} to {LANGUAGE_VERSION}` into the fresh manifest, so a new package states the language range it targets and keeps that number separate from its own `version` |
+| tests/discovery_test.rs | +114 −0 | four scaffold tests: the fresh manifest declares the current range and resolves, an out-of-range scaffold is refused naming both versions, an inverted range is refused by line, and a scaffold with no `language` line still resolves |
+| SPEC.md | +3 −0 | state that `rb new` writes the running compiler's language version as the declared range of a fresh project |
 | tests/unreviewed_work_ack_test.rs | +1 −0 | acknowledge this phase's `resume phase-108:` checkpoint subject in the delivery rule, which the history audit requires while the checkpoint is on `HEAD` |
 | src/manifest.rs | +99 −5 | `Version::parse` refuses a component with a leading zero instead of normalizing it, so a declared package version, a language-range endpoint and a dependency pin all round-trip through `Display`; a version-shaped directory with a leading zero is named as malformed; `Pins::for_analysis` resolves imports without checking either language range |
 | tests/manifest_test.rs | +95 −0 | five tests pinning the leading-zero refusal for the shared version reader, a declared version, a language-range endpoint and a dependency pin, plus a malformed leading-zero directory that is named rather than dropped |
@@ -98,13 +101,18 @@ only its own `version`, so the obvious place to record a required language was
 that number or a comment. The only manifest-shaped fixtures are the repository
 root `redblue.manifest` (`name redblue`, `version 0.2.0`, no language line) and
 the module fixtures written by tests; none encoded the opposite assumption, so
-none needed changing. The dependency-depth rule (`MAX_RESOLUTION_DEPTH`,
+none needed changing. The one place that produced new manifests, `rb new`,
+wrote only `name` and `version`, so every future scaffold was silent about the
+language it needed; it now writes the running compiler's language version as
+both ends of the declared range, while the package's own `version` stays
+`0.1.0`. The dependency-depth rule (`MAX_RESOLUTION_DEPTH`,
 `src/manifest.rs:674`) and its tests
 (`edge_a_chain_deeper_than_the_limit_is_refused`,
 `edge_a_chain_exactly_at_the_depth_limit_resolves`) were not modified and still
-pass. The only existing test file this phase changes is the history audit,
-which needs the phase-108 checkpoint subject added to its delivery rule; no
-manifest test was edited or removed.
+pass. The only existing test file this phase changes beyond adding tests is the
+history audit, which needs the phase-108 checkpoint subject added to its
+delivery rule; no manifest test was edited or removed, and `tests/discovery_test.rs`
+gains four new scaffold tests without changing any test that was already there.
 
 ## Tests added
 
@@ -154,6 +162,10 @@ manifest test was edited or removed.
 | edge_an_out_of_range_refusal_names_a_wrong_word_count_name_and_version_as_malformed | malformed input / refused keys — a `name` or `version` line with the wrong word count is named as malformed, not as absent |
 | edge_the_test_harness_reads_the_manifest_beside_its_file | path handling — the harness analyzes a test body against the manifest beside its file, not the CWD |
 | edge_rb_lint_reads_the_manifest_beside_the_file_not_the_working_directory | path handling — `rb lint` reads the manifest beside the linted file, not the CWD |
+| edge_a_scaffolded_project_declares_its_language_range | singleton / scaffold — `rb new` writes the current language range beside an independent package version, and the fresh project resolves |
+| edge_a_scaffolded_project_outside_its_language_range_is_refused | failure / out of bounds — a scaffold whose range excludes the running language is refused, naming package, package version, range and language version |
+| edge_a_scaffolded_project_with_an_inverted_language_range_is_refused_by_line | boundary / malformed input — a low end above the high end is refused by line rather than treated as an empty range |
+| edge_a_scaffolded_project_without_a_language_line_still_resolves | empty / backwards compatibility — removing `language` leaves the scaffold resolving |
 
 ### Test matrix
 
@@ -177,7 +189,7 @@ manifest test was edited or removed.
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 3034 passed, 0 failed (85 test binaries) |
+| cargo test --all-targets | 3038 passed, 0 failed (85 test binaries) |
 | rbops/verify.sh phase-108 | pass |
 
 The targeted tests were run with `cargo test --test manifest_test` (96 passed)
@@ -196,3 +208,8 @@ phase are visible in the diff against `HEAD`, which is what the gate counts.
   manifest, or add a one-sided form such as `language 0.2.0 or newer`, but this
   phase deliberately keeps the smallest inclusive two-ended range that meets
   the acceptance criteria.
+- `verify.sh` reads its own copy of this report from pipeline state rather than
+  the tracked copy in this checkout; that copy still records 3034, so the
+  report-honesty step prints an under-claimed warning. The tracked report here
+  records 3038, the actual full-suite count. The pipeline copy is outside this
+  checkout and was not modified.

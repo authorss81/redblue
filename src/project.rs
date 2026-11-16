@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::manifest::{is_module_name, Manifest, MANIFEST_FILE};
+use crate::manifest::{is_module_name, Manifest, LANGUAGE_VERSION, MANIFEST_FILE};
 
 /// The directory holding a project's entry point.
 pub const SOURCE_DIR: &str = "src";
@@ -118,6 +118,13 @@ fn clean_path(path: &Path) -> PathBuf {
 /// points at an empty directory or at nothing at all. Following it would write
 /// the scaffold somewhere other than `parent`, which is the same escape a path
 /// separator would allow and is never what `rb new` was asked for.
+///
+/// The manifest states the range of language versions the scaffold targets —
+/// the version of Redblue running `rb new` — rather than leaving the language
+/// out. The package's own `version` stays a separate number: it names a release
+/// of this package, while `language` names the Redblue releases that can run
+/// it. A fresh package therefore says what it needs in the place the resolver
+/// reads, instead of encoding the language in its version or in a comment.
 pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf> {
     check_project_name(name)?;
 
@@ -183,7 +190,9 @@ pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf> {
         )?;
         write(
             &root.join(MANIFEST_FILE),
-            &format!("name {name}\nversion {DEFAULT_VERSION}\n"),
+            &format!(
+                "name {name}\nversion {DEFAULT_VERSION}\nlanguage {LANGUAGE_VERSION} to {LANGUAGE_VERSION}\n"
+            ),
         )?;
 
         Ok(())

@@ -723,6 +723,140 @@ fn rb_new_scaffolds_a_project_that_tests_green() {
     );
 }
 
+/// `rb new` writes a manifest that states the range of Redblue versions the
+/// scaffold targets, separately from the package's own version.
+///
+/// The two numbers are independent: the scaffold is package `0.1.0`, and it
+/// declares the language version this compiler implements. A manifest that
+/// left `language` out would make the fresh package silent about what runs it,
+/// which is the gap this phase closes.
+#[test]
+fn edge_a_scaffolded_project_declares_its_language_range() {
+    let parent = scratch("scaffold-language");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        created.status.success(),
+        "`rb new hello` failed: {}",
+        stderr(&created)
+    );
+
+    let root = parent.join("hello");
+    let text = fs::read_to_string(root.join("redblue.manifest"))
+        .expect("the scaffolded manifest should be readable");
+    let parsed = manifest::parse_manifest(&text)
+        .unwrap_or_else(|error| panic!("the scaffolded manifest is not valid: {error}"));
+
+    assert_eq!(
+        parsed.version.map(|version| version.to_string()).as_deref(),
+        Some("0.1.0"),
+        "the scaffold's own package version is unchanged"
+    );
+    assert_eq!(
+        parsed.language,
+        Some(manifest::LanguageRange {
+            low: manifest::LANGUAGE_VERSION,
+            high: manifest::LANGUAGE_VERSION,
+        }),
+        "the scaffold must declare the language range it targets"
+    );
+    manifest::resolve_in(&root)
+        .expect("a fresh scaffold declares a range that includes the running language");
+}
+
+/// A scaffolded package that declares a language range elsewhere is refused,
+/// naming the package, its version, the range and the running language.
+#[test]
+fn edge_a_scaffolded_project_outside_its_language_range_is_refused() {
+    let parent = scratch("scaffold-language-outside");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        created.status.success(),
+        "`rb new hello` failed: {}",
+        stderr(&created)
+    );
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("redblue.manifest"),
+        b"name hello\nversion 0.1.0\nlanguage 9.0.0 to 9.9.9\n",
+    )
+    .expect("fixture manifest");
+    let error = manifest::resolve_in(&root)
+        .expect_err("a scaffold outside its declared range must not resolve");
+    let message = error.message();
+    assert!(
+        message.contains("'hello' 0.1.0"),
+        "the refusal names the package and its own version, got: {message}"
+    );
+    assert!(
+        message.contains("9.0.0 to 9.9.9"),
+        "the refusal names the declared range, got: {message}"
+    );
+    assert!(
+        message.contains(&manifest::LANGUAGE_VERSION.to_string()),
+        "the refusal names the running language, got: {message}"
+    );
+}
+
+/// An inverted scaffolded range is refused where it is written, so the
+/// comparison cannot silently accept an empty range.
+#[test]
+fn edge_a_scaffolded_project_with_an_inverted_language_range_is_refused_by_line() {
+    let parent = scratch("scaffold-language-inverted");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        created.status.success(),
+        "`rb new hello` failed: {}",
+        stderr(&created)
+    );
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("redblue.manifest"),
+        b"name hello\nversion 0.1.0\nlanguage 9.0.0 to 8.0.0\n",
+    )
+    .expect("fixture manifest");
+    let error =
+        manifest::resolve_in(&root).expect_err("a low end above the high end is not a range");
+    let message = error.message();
+    assert!(
+        message.contains("is empty"),
+        "the refusal says the range is empty, got: {message}"
+    );
+    assert!(
+        message.contains("line 3"),
+        "the refusal names the line the range is on, got: {message}"
+    );
+}
+
+/// Dropping the `language` line keeps the scaffold resolving: the field is
+/// opt-in, so a package written before it is not refused.
+#[test]
+fn edge_a_scaffolded_project_without_a_language_line_still_resolves() {
+    let parent = scratch("scaffold-language-absent");
+    let created = run_in(&parent, &["new", "hello"]);
+    assert!(
+        created.status.success(),
+        "`rb new hello` failed: {}",
+        stderr(&created)
+    );
+
+    let root = parent.join("hello");
+    fs::write(
+        root.join("redblue.manifest"),
+        b"name hello\nversion 0.1.0\n",
+    )
+    .expect("fixture manifest");
+    let parsed = manifest::parse_manifest("name hello\nversion 0.1.0\n")
+        .expect("a manifest with no language line parses");
+    assert_eq!(
+        parsed.language, None,
+        "omitting `language` leaves the package with no declared range"
+    );
+    manifest::resolve_in(&root)
+        .expect("a package that declares no range supports every language version");
+}
+
 /// `rb new` must never merge into occupied ground. The refused directory keeps
 /// the file it already had, and no scaffold file appears beside it.
 #[test]

@@ -2248,7 +2248,10 @@ version answers the requirement.
 
 The field is optional. A manifest written before `language` existed keeps
 resolving, which is what makes the addition backwards compatible; the resolver
-refuses only a package that declared a range and is outside it. The program's
+refuses only a package that declared a range and is outside it. `rb new` writes
+the running compiler's language version as both ends of the range in a fresh
+manifest, so a new package starts out stating the language it needs instead of
+leaving the reader to infer it. The program's
 own manifest is checked before its first statement runs, whether or not it has
 an `import`: an out-of-range program is refused before any of its `say`,
 `files.write` or other side effects, and before any other failure can hide the
