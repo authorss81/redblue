@@ -1984,7 +1984,8 @@ impl Parser {
     /// what follows the `at` of `items at 0` and what follows the `of` of
     /// `length of items`.
     ///
-    /// This is [`Parser::kind_starts_expression`] without `MightFail`, and the
+    /// This is [`Parser::kind_starts_expression`] without `MightFail`, plus the
+    /// primary `this` that [`Parser::parse_primary`] already reads. The first
     /// difference is the whole point of the separate table. A worded index and a
     /// worded length read their operand one precedence level *below* every
     /// comparison ([`Parser::parse_worded_operand`]), and `might fail` is not a
@@ -2009,6 +2010,14 @@ impl Parser {
                 | TokenKind::Not
                 | TokenKind::Minus
                 | TokenKind::To
+                // `this` is a primary — [`Parser::parse_primary`] reads it as the
+                // ordinary variable it is — so it is an operand like every other
+                // primary. Without this arm a worded form refused `this` while
+                // the primary table accepted it: `length of this` was
+                // `Expected something to measure`, and `this.xs at this` split
+                // `at this` into two statements that the analyzer reported as
+                // `Unknown variable 'at'`.
+                | TokenKind::This
         )
     }
 

@@ -890,3 +890,299 @@ fn edge_a_worded_index_operand_that_nests_past_the_limit_is_refused() {
         Err(other) => panic!("expected a Parser error, got {:?}", other),
     }
 }
+
+// ---------------------------------------------------------------------------
+// `this` as the operand of a worded form
+// ---------------------------------------------------------------------------
+//
+// `this` was already a primary, but the separate table that decides whether the
+// operand of a worded form may start did not name it. The word was a value
+// everywhere except after `at` and `of`: `length of this` was refused as
+// `Expected something to measure`, and `this.xs at this` split `at this` into
+// two statements that the analyzer reported as `Unknown variable 'at'`. The
+// tests below pin the parse, the runtime check, both engines, and the fact that
+// the two operand tables themselves name the same kinds.
+
+/// The body of `method` in `object` of a parsed program.
+fn method_body<'a>(
+    program: &'a Program,
+    object: &str,
+    method: &str,
+) -> &'a [redblue::parser::Stmt] {
+    let body = program
+        .statements
+        .iter()
+        .find_map(|stmt| match &stmt.statement {
+            redblue::parser::Statement::Object { name, body, .. } if name == object => Some(body),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the program should declare object `{object}`"));
+    body.iter()
+        .find_map(|stmt| match &stmt.statement {
+            redblue::parser::Statement::Method { name, body, .. } if name == method => {
+                Some(body.as_slice())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("object `{object}` should declare method `{method}`"))
+}
+
+/// The value the method hands back: its last `give back`, or its last bare
+/// expression statement.
+///
+/// `give back` is two tokens, and the second is an operand-table decision of its
+/// own, so a value beginning with `this` arrives as a bare `give back` followed
+/// by an expression statement. That is the same value; this reads it rather than
+/// insisting on the one-token spelling.
+fn handed_back(body: &[redblue::parser::Stmt]) -> &redblue::parser::Expr {
+    use redblue::parser::Statement;
+    body.iter()
+        .rev()
+        .find_map(|stmt| match &stmt.statement {
+            Statement::GiveBack(Some(expr)) | Statement::Expr(expr) => Some(expr),
+            _ => None,
+        })
+        .expect("the method should hand back a value")
+}
+
+/// Runs `source` on the bytecode engine, returning its printed lines.
+fn bytecode_lines(source: &str) -> Result<Vec<String>, Error> {
+    let chunk = redblue::compile_source(source)?;
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    vm.set_echo(false);
+    let result = vm.run(&chunk);
+    let output = vm.take_output();
+    result.map(|_| output)
+}
+
+#[test]
+fn edge_length_of_this_is_one_worded_length() {
+    use redblue::parser::Expr;
+    let program = parse(
+        "object Thing\n    has xs default [1, 2, 3]\n    to can measure()\n        give back length of this\n    end\nend\n",
+    );
+    match handed_back(method_body(&program, "Thing", "measure")) {
+        Expr::Call { name, args } => {
+            assert_eq!(name, "length", "`length of this` must be the length call");
+            assert_eq!(args.len(), 1, "`length of this` must take one operand");
+            assert!(
+                matches!(&args[0], Expr::Variable(name, _) if name == "this"),
+                "the measured operand must be `this`, got {:?}",
+                args[0]
+            );
+        }
+        other => panic!("`length of this` must parse as one length call, got {other:?}"),
+    }
+}
+
+#[test]
+fn edge_length_of_this_reaches_the_runtime_check_for_zero_one_and_many_fields() {
+    let programs = [
+        "object Empty\n    to can measure()\n        give back length of this\n    end\nend\nsay Empty.measure()\n",
+        "object One\n    has only default 1\n    to can measure()\n        give back length of this\n    end\nend\nsay One.measure()\n",
+        "object Many\n    has a default 1\n    has b default 2\n    has c default 3\n    to can measure()\n        give back length of this\n    end\nend\nsay Many.measure()\n",
+    ];
+    for source in programs {
+        let tree = run_err(source);
+        assert_eq!(tree.label(), "RuntimeError", "tree walk: {tree:?}");
+        assert_eq!(
+            tree.message(),
+            "length requires a list or text",
+            "`length of this` must reach the length rule for every field count"
+        );
+        let bytes = bytecode_lines(source).expect_err("the bytecode engine must refuse a record");
+        assert_eq!(bytes.label(), "RuntimeError", "bytecode: {bytes:?}");
+        assert_eq!(
+            bytes.message(),
+            tree.message(),
+            "the two engines must name the same problem"
+        );
+    }
+}
+
+#[test]
+fn edge_this_is_the_operand_of_a_worded_index() {
+    use redblue::parser::Expr;
+    let program = parse(
+        "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        give back this.xs at this\n    end\nend\n",
+    );
+    match handed_back(method_body(&program, "Thing", "pick")) {
+        Expr::Index { index, .. } => assert!(
+            matches!(index.as_ref(), Expr::Variable(name, _) if name == "this"),
+            "`this.xs at this` must index by `this`, got {index:?}"
+        ),
+        other => panic!("`this.xs at this` must parse as one index, got {other:?}"),
+    }
+
+    let source = "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        give back this.xs at this\n    end\nend\nsay Thing.pick()\n";
+    assert!(
+        run(source).is_err(),
+        "`this.xs at this` must be a clean failure, not an accepted two-statement program"
+    );
+    let failure = run_err(source);
+    assert_eq!(failure.label(), "RuntimeError", "got {failure:?}");
+    assert_eq!(failure.message(), "Index must be a number");
+    assert!(
+        !failure.message().contains("Unknown variable"),
+        "`at this` must never be split into an unknown name: {}",
+        failure.message()
+    );
+    let bytes = bytecode_lines(source).expect_err("the bytecode engine must refuse this too");
+    assert_eq!(bytes.label(), "RuntimeError");
+    assert_eq!(bytes.message(), failure.message());
+}
+
+#[test]
+fn edge_this_is_the_operand_of_at_in_a_nested_object_and_a_function_literal() {
+    let nested = "object Inner\n    has xs default [1, 2, 3]\n    to can pick()\n        give back this.xs at this\n    end\nend\nobject Outer\n    has inner default Inner\n    to can pick()\n        give back this.inner.xs at this\n    end\nend\nsay Outer.pick()\n";
+    let failure = run_err(nested);
+    assert_eq!(failure.label(), "RuntimeError");
+    assert_eq!(failure.message(), "Index must be a number");
+    assert_eq!(
+        bytecode_lines(nested)
+            .expect_err("the bytecode engine must refuse a nested object index too")
+            .message(),
+        failure.message()
+    );
+
+    let literal = parse(
+        "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        set f to to ()\n            give back this.xs at this\n        end\n        give back f()\n    end\nend\n",
+    );
+    let body = method_body(&literal, "Thing", "pick");
+    let found = body.iter().any(|stmt| match &stmt.statement {
+        redblue::parser::Statement::Set { value, .. } => contains_index_of_this(value),
+        _ => false,
+    });
+    assert!(
+        found,
+        "`this.xs at this` inside a function literal must parse as one index"
+    );
+}
+
+fn contains_index_of_this(expr: &redblue::parser::Expr) -> bool {
+    use redblue::parser::{Expr, Statement};
+    match expr {
+        Expr::FunctionLiteral { body, .. } => body.iter().any(|stmt| match &stmt.statement {
+            Statement::GiveBack(Some(expr)) | Statement::Expr(expr) => contains_index_of_this(expr),
+            _ => false,
+        }),
+        Expr::Index { index, .. } => {
+            matches!(index.as_ref(), Expr::Variable(name, _) if name == "this")
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn edge_the_index_spellings_that_already_worked_keep_their_behaviour() {
+    assert_eq!(printed("set xs to [1, 2, 3]\nsay xs at 0\n"), vec!["1"]);
+    assert_eq!(printed("set xs to [1, 2, 3]\nsay xs[0]\n"), vec!["1"]);
+    assert_eq!(
+        printed("set xs to [1, 2, 3]\nsay length of xs\n"),
+        vec!["3"]
+    );
+    let source = "object Thing\n    has xs default [1, 2, 3]\n    to can first()\n        give back this.xs at 0\n    end\n    to can last()\n        give back this.xs at 2\n    end\nend\nsay Thing.first()\nsay Thing.last()\n";
+    assert_eq!(printed(source), vec!["1", "3"]);
+}
+
+#[test]
+fn edge_a_worded_length_with_no_operand_is_still_refused_by_the_parser() {
+    let sources = [
+        "say length of\n",
+        "object Thing\n    to can measure()\n        give back length of\n    end\nend\n",
+    ];
+    for source in sources {
+        let failure = any_failure(source).expect("a bare `length of` must be refused");
+        assert_eq!(failure.label(), "ParserError", "for {source:?}");
+        assert!(
+            failure.message().contains("Expected something to measure"),
+            "for {source:?}, got {}",
+            failure.message()
+        );
+    }
+}
+
+#[test]
+fn edge_this_as_an_at_operand_outside_a_method_is_still_an_unknown_variable() {
+    let failure = any_failure("set xs to [1, 2, 3]\nsay xs at this\n")
+        .expect("`this` outside a method has no value");
+    assert_eq!(failure.label(), "AnalyzerError");
+    assert!(
+        failure.message().contains("Unknown variable 'this'"),
+        "got {}",
+        failure.message()
+    );
+}
+
+#[test]
+fn edge_the_two_operand_tables_name_the_same_token_kinds() {
+    let rust = operand_kinds_from_parser();
+    let redblue = operand_kinds_from_bootstrap();
+    assert_eq!(
+        rust, redblue,
+        "the Rust operand table and the stage-2 operand table must name the same kinds"
+    );
+    assert!(
+        rust.contains("this"),
+        "`this` must be in both operand tables; got {rust:?}"
+    );
+}
+
+fn operand_kinds_from_parser() -> std::collections::BTreeSet<String> {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/parser.rs"))
+        .expect("src/parser.rs should be readable");
+    let start = source
+        .find("fn kind_starts_operand")
+        .expect("the parser's operand table should exist");
+    let rest = &source[start..];
+    let end = rest.find("\n    }").expect("the operand table should end");
+    let body = &rest[..end];
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("TokenKind::") {
+        rest = &rest[at + "TokenKind::".len()..];
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+        match name.as_str() {
+            "Number" => kinds.insert("num".to_string()),
+            "Text" => kinds.insert("text".to_string()),
+            "YesNo" => {
+                kinds.insert("yes".to_string());
+                kinds.insert("no".to_string())
+            }
+            "Nothing" => kinds.insert("nothing".to_string()),
+            "Identifier" => kinds.insert("id".to_string()),
+            "LeftParen" => kinds.insert("lparen".to_string()),
+            "LeftBracket" => kinds.insert("lbrack".to_string()),
+            "LeftBrace" => kinds.insert("lbrace".to_string()),
+            "Not" => kinds.insert("not".to_string()),
+            "Minus" => kinds.insert("minus".to_string()),
+            "To" => kinds.insert("to".to_string()),
+            "This" => kinds.insert("this".to_string()),
+            other => panic!("the operand table names an unmapped kind `{other}`"),
+        };
+    }
+    kinds
+}
+
+fn operand_kinds_from_bootstrap() -> std::collections::BTreeSet<String> {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/bootstrap/compiler.rb"
+    ))
+    .expect("bootstrap/compiler.rb should be readable");
+    let start = source
+        .find("to is_operand_start(tokens, pos)")
+        .expect("the stage-2 operand table should exist");
+    let rest = &source[start..];
+    let end = rest.find("\nend").expect("the operand table should end");
+    let body = &rest[..end];
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut rest = body;
+    while let Some(at) = rest.find(" is \"") {
+        rest = &rest[at + " is \"".len()..];
+        let end = rest.find('"').expect("a quoted token kind should close");
+        kinds.insert(rest[..end].to_string());
+        rest = &rest[end + 1..];
+    }
+    kinds
+}

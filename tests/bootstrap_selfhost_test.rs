@@ -2449,3 +2449,39 @@ fn edge_name_heavy_fixture_is_byte_identical_in_both_stages() {
         );
     }
 }
+
+/// `this` as the operand of a worded form, on both compilers.
+///
+/// `this` is a primary in both `parse_primary` implementations, but each engine
+/// also has a separate operand table for what may follow `at` and `of`. Both
+/// tables omitted `this`, so `length of this` was refused and `this.xs at this`
+/// became two statements — in stage 1 *and* stage 2. A test that only compared
+/// the two engines could not see it: two compilers making the same mistake write
+/// the same bytes. These cases are therefore compared to each other only after
+/// the behaviour itself is pinned in `tests/this_operand_test.rs`; here they
+/// prove the stage-2 table was moved with the stage-1 table rather than after it.
+#[test]
+fn edge_this_is_a_worded_operand_on_both_compilers() {
+    assert_identical(
+        "edge_this_as_a_worded_length_operand",
+        "object Thing\n    has xs default [1, 2, 3]\n    to can measure()\n        give back length of this\n    end\nend\nsay Thing.measure()\n",
+    );
+    assert_identical(
+        "edge_this_as_a_worded_index_operand",
+        "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        give back this.xs at this\n    end\nend\nsay Thing.pick()\n",
+    );
+
+    // Controls: the spellings that never consulted the operand table.
+    assert_identical(
+        "edge_this_property_index_is_unchanged",
+        "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        give back this.xs at 0\n    end\nend\nsay Thing.pick()\n",
+    );
+    assert_identical(
+        "edge_plain_worded_index_is_unchanged",
+        "set xs to [1, 2, 3]\nsay xs at 0\n",
+    );
+    assert_identical(
+        "edge_plain_bracketed_index_is_unchanged",
+        "set xs to [1, 2, 3]\nsay xs[0]\n",
+    );
+}
