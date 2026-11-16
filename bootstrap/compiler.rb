@@ -1135,6 +1135,12 @@ to is_expression_start(tokens, pos)
     if is_expression_start_k is "to" then
         set is_expression_start_starts to yes
     end
+    // `this` is a primary — `parse_primary` reads it as the ordinary variable
+    // it is. Leaving it out split `give back this` into a valueless `give back`
+    // plus a separate statement, exactly as the missing `nothing` row did.
+    if is_expression_start_k is "this" then
+        set is_expression_start_starts to yes
+    end
     if is_expression_start_k is "mightfail" then
         set is_expression_start_starts to yes
     end

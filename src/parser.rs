@@ -1972,6 +1972,12 @@ impl Parser {
             | TokenKind::LeftBrace
             | TokenKind::Not
             | TokenKind::Minus
+            // `this` is a primary — [`Parser::parse_primary`] reads it as the
+            // ordinary variable it is. Leaving it out of this table split
+            // `give back this` into a valueless `give back` followed by a
+            // separate expression statement, the same shape the `nothing` arm
+            // below exists to prevent.
+            | TokenKind::This
             | TokenKind::To => true,
             // `might fail f()` is an expression in its own right, so a
             // statement may begin with one and an argument list may hold one.

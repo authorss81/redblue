@@ -2458,7 +2458,7 @@ fn edge_name_heavy_fixture_is_byte_identical_in_both_stages() {
 /// became two statements — in stage 1 *and* stage 2. A test that only compared
 /// the two engines could not see it: two compilers making the same mistake write
 /// the same bytes. These cases are therefore compared to each other only after
-/// the behaviour itself is pinned in `tests/this_operand_test.rs`; here they
+/// the behaviour itself is pinned in `tests/index_words_test.rs`; here they
 /// prove the stage-2 table was moved with the stage-1 table rather than after it.
 #[test]
 fn edge_this_is_a_worded_operand_on_both_compilers() {
@@ -2483,5 +2483,35 @@ fn edge_this_is_a_worded_operand_on_both_compilers() {
     assert_identical(
         "edge_plain_bracketed_index_is_unchanged",
         "set xs to [1, 2, 3]\nsay xs[0]\n",
+    );
+}
+
+/// `this` heads an expression on both engines, not just a worded operand.
+///
+/// The operand table and the expression table are separate lists in both
+/// engines. Adding `this` to the first without the second still left `give back
+/// this.xs at this` split into a valueless `give back` plus a separate
+/// expression statement — the same shape the `nothing` cases above pin. These
+/// programs never consult the operand table, so byte identity here proves the
+/// expression table moved with it.
+#[test]
+fn edge_this_heads_an_expression_on_both_engines() {
+    assert_identical(
+        "edge_this_as_a_give_back_value",
+        "object Thing\n    has x default 7\n    to can self_ref()\n        give back this\n    end\nend\nsay Thing.self_ref()\n",
+    );
+    assert_identical(
+        "edge_this_as_a_return_value",
+        "object Thing\n    has x default 7\n    to can self_ref()\n        return this\n    end\nend\nsay Thing.self_ref()\n",
+    );
+    assert_identical(
+        "edge_this_as_a_give_back_worded_index",
+        "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        give back this.xs at this\n    end\nend\nsay Thing.pick()\n",
+    );
+    // Control: the bracketed spelling reads its operand through
+    // `parse_expression`, never through either table, and must stay identical.
+    assert_identical(
+        "edge_this_through_a_bracketed_index",
+        "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        give back this.xs[0]\n    end\nend\nsay Thing.pick()\n",
     );
 }

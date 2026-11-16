@@ -927,22 +927,20 @@ fn method_body<'a>(
         .unwrap_or_else(|| panic!("object `{object}` should declare method `{method}`"))
 }
 
-/// The value the method hands back: its last `give back`, or its last bare
-/// expression statement.
+/// The value the method hands back: its last `give back`.
 ///
-/// `give back` is two tokens, and the second is an operand-table decision of its
-/// own, so a value beginning with `this` arrives as a bare `give back` followed
-/// by an expression statement. That is the same value; this reads it rather than
-/// insisting on the one-token spelling.
+/// A value beginning with `this` must be part of the `give back`, not a separate
+/// expression statement. Reading only `GiveBack(Some(..))` makes a split fail
+/// here rather than quietly treating the two statements as the same value.
 fn handed_back(body: &[redblue::parser::Stmt]) -> &redblue::parser::Expr {
     use redblue::parser::Statement;
     body.iter()
         .rev()
         .find_map(|stmt| match &stmt.statement {
-            Statement::GiveBack(Some(expr)) | Statement::Expr(expr) => Some(expr),
+            Statement::GiveBack(Some(expr)) => Some(expr),
             _ => None,
         })
-        .expect("the method should hand back a value")
+        .expect("the method should hand back a value in one `give back` statement")
 }
 
 /// Runs `source` on the bytecode engine, returning its printed lines.
@@ -1185,4 +1183,231 @@ fn operand_kinds_from_bootstrap() -> std::collections::BTreeSet<String> {
         rest = &rest[end + 1..];
     }
     kinds
+}
+
+#[test]
+fn edge_this_heads_a_give_back_as_one_statement() {
+    use redblue::parser::{Expr, Statement};
+    for (source, expected) in [
+        (
+            "object Thing\n    has x default 7\n    to can self_ref()\n        give back this\n    end\nend\n",
+            "give back",
+        ),
+        (
+            "object Thing\n    has x default 7\n    to can self_ref()\n        return this\n    end\nend\n",
+            "return",
+        ),
+    ] {
+        let program = parse(source);
+        let body = method_body(&program, "Thing", "self_ref");
+        let value = match body.last().map(|stmt| &stmt.statement) {
+            Some(Statement::GiveBack(Some(expr))) if expected == "give back" => expr,
+            Some(Statement::Return(Some(expr))) if expected == "return" => expr,
+            other => panic!("`{expected} this` must carry `this`, got {other:?}"),
+        };
+        assert!(
+            !body.iter().any(|stmt| matches!(stmt.statement, Statement::Expr(_))),
+            "`{expected} this` must not leave `this` as a separate statement: {body:?}"
+        );
+        assert!(
+            matches!(value, Expr::Variable(name, _) if name == "this"),
+            "`{expected} this` must hand back `this`, got {value:?}"
+        );
+    }
+}
+
+#[test]
+fn edge_this_heads_an_expression_on_both_engines() {
+    let source = "object Thing\n    has x default 7\n    to can self_ref()\n        give back this\n    end\nend\nsay Thing.self_ref()\n";
+    let tree = printed(source);
+    assert_eq!(tree, vec!["{x: 7}"]);
+    let bytes = bytecode_lines(source).expect("the bytecode engine must run `give back this`");
+    assert_eq!(bytes, tree, "both engines must print the same record");
+}
+
+#[test]
+fn edge_this_in_a_function_literal_nested_in_a_method_runs_on_both_engines() {
+    let source = "object Thing\n    has xs default [1, 2, 3]\n    to can pick()\n        set f to to ()\n            give back this.xs at 0\n        end\n        give back f()\n    end\nend\nsay Thing.pick()\n";
+    let tree = printed(source);
+    assert_eq!(tree, vec!["1"]);
+    let bytes = bytecode_lines(source).expect("the bytecode engine must run the function literal");
+    assert_eq!(bytes, tree, "both engines must see the same `this`");
+}
+
+#[test]
+fn edge_the_two_expression_tables_name_the_same_token_kinds() {
+    let rust = expression_kinds_from_parser();
+    let redblue = expression_kinds_from_bootstrap();
+    assert_eq!(
+        rust, redblue,
+        "the Rust expression table and the stage-2 expression table must name the same kinds"
+    );
+    assert!(
+        rust.contains("this"),
+        "`this` must be in both expression tables; got {rust:?}"
+    );
+}
+
+fn expression_kinds_from_parser() -> std::collections::BTreeSet<String> {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/parser.rs"))
+        .expect("src/parser.rs should be readable");
+    let start = source
+        .find("fn kind_starts_expression")
+        .expect("the parser's expression table should exist");
+    let rest = &source[start..];
+    let end = rest
+        .find("\n    }")
+        .expect("the expression table should end");
+    let body = &rest[..end];
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("TokenKind::") {
+        rest = &rest[at + "TokenKind::".len()..];
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+        let kind = match name.as_str() {
+            "Number" => "num",
+            "Text" => "text",
+            "YesNo" => {
+                kinds.insert("yes".to_string());
+                kinds.insert("no".to_string());
+                "yes"
+            }
+            "Nothing" => "nothing",
+            "Identifier" => "id",
+            "LeftParen" => "lparen",
+            "LeftBracket" => "lbrack",
+            "LeftBrace" => "lbrace",
+            "Not" => "not",
+            "Minus" => "minus",
+            "To" => "to",
+            "This" => "this",
+            "MightFail" => "mightfail",
+            other => panic!("the expression table names an unmapped kind `{other}`"),
+        };
+        kinds.insert(kind.to_string());
+    }
+    kinds
+}
+
+fn expression_kinds_from_bootstrap() -> std::collections::BTreeSet<String> {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/bootstrap/compiler.rb"
+    ))
+    .expect("bootstrap/compiler.rb should be readable");
+    let start = source
+        .find("to is_expression_start(tokens, pos)")
+        .expect("the stage-2 expression table should exist");
+    let rest = &source[start..];
+    let end = rest.find("\nend").expect("the expression table should end");
+    let body = &rest[..end];
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut rest = body;
+    while let Some(at) = rest.find(" is \"") {
+        rest = &rest[at + " is \"".len()..];
+        let end = rest.find('"').expect("a quoted token kind should close");
+        kinds.insert(rest[..end].to_string());
+        rest = &rest[end + 1..];
+    }
+    kinds
+}
+
+#[test]
+fn edge_a_worded_index_of_this_outside_a_method_is_err() {
+    let result = run("set xs to [1, 2, 3]\nsay xs at this\n");
+    assert!(
+        result.is_err(),
+        "`this` outside a method must be a clean failure, got {result:?}"
+    );
+    let failure = result.expect_err("the call is refused");
+    assert_eq!(failure.label(), "AnalyzerError");
+    assert!(
+        failure.message().contains("Unknown variable 'this'"),
+        "got {}",
+        failure.message()
+    );
+}
+
+/// `at_argument_label` asks the expression table whether the token after `by`
+/// can begin an argument, so naming `this` there makes
+/// `split(text, by this.sep)` a labelled call. Pin the parse: the label must be
+/// consumed and the property must arrive as the one separator argument, not as
+/// a `by` variable followed by an orphaned `this`.
+#[test]
+fn edge_this_after_by_is_a_labelled_argument() {
+    use redblue::parser::Expr;
+    let source = "object Thing\n    has sep default \",\"\n    to can parts()\n        give back split(\"a,b,c\", by this.sep)\n    end\nend\nsay Thing.parts()\n";
+    let program = parse(source);
+    match handed_back(method_body(&program, "Thing", "parts")) {
+        Expr::Call { name, args } => {
+            assert_eq!(name, "split", "the labelled call must be `split`");
+            assert_eq!(
+                args.len(),
+                2,
+                "the label must not be an argument of its own: {args:?}"
+            );
+            assert!(
+                matches!(&args[0], Expr::Text(text) if text == "a,b,c"),
+                "the first argument must be the text, got {:?}",
+                args[0]
+            );
+            match &args[1] {
+                Expr::Property { object, property } if property == "sep" => {
+                    assert!(
+                        matches!(object.as_ref(), Expr::Variable(name, _) if name == "this"),
+                        "the separator must be `this.sep`, got {object:?}"
+                    );
+                }
+                other => panic!("`by this.sep` must pass `this.sep`, got {other:?}"),
+            }
+        }
+        other => panic!("the method must hand back the split call, got {other:?}"),
+    }
+    assert_eq!(
+        printed(source),
+        vec!["[a, b, c]"],
+        "the labelled `this.sep` argument must reach the split builtin"
+    );
+}
+
+/// `can_begin_statement` is the other consumer of the expression table. A
+/// one-line function-literal body ends at the newline, so `this` must be
+/// recognised as the literal's body rather than stopping the body empty and
+/// leaving `this` for the enclosing statement to trip over.
+#[test]
+fn edge_this_begins_a_one_line_literal_body_statement() {
+    use redblue::parser::{Expr, Statement};
+    let source = "object Thing\n    has x default 7\n    to can run()\n        set f to to () this\n        give back f()\n    end\nend\nsay Thing.run()\n";
+    let program = parse(source);
+    let body = method_body(&program, "Thing", "run");
+    let literal = body
+        .iter()
+        .find_map(|stmt| match &stmt.statement {
+            Statement::Set { value, .. } => Some(value),
+            _ => None,
+        })
+        .expect("the method should set the function literal");
+    match literal {
+        Expr::FunctionLiteral { body, .. } => {
+            assert_eq!(
+                body.len(),
+                1,
+                "`this` on the literal's line must be its one-statement body: {body:?}"
+            );
+            assert!(
+                matches!(
+                    &body[0].statement,
+                    Statement::Expr(Expr::Variable(name, _)) if name == "this"
+                ),
+                "the one-line body must be the `this` expression, got {:?}",
+                body[0]
+            );
+        }
+        other => panic!("the set value must be a function literal, got {other:?}"),
+    }
+    assert_eq!(
+        printed(source),
+        vec!["{x: 7}"],
+        "the one-line `this` body must run and hand back the receiver"
+    );
 }
