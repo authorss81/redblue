@@ -416,24 +416,29 @@ write `if not (x is in haystack)`.
 ### If-Then-Else
 
 ```redblue
-if condition
+if condition then
     // statements
 end
 
-if condition
+if condition then
     // then branch
 else
     // else branch
 end
 
-if x > 0
+if x > 0 then
     say "positive"
-else if x < 0
+else if x < 0 then
     say "negative"
 else
     say "zero"
 end
 ```
+
+`else if` begins on the same line as its `else`: that `if` is the next arm of
+the chain, and the whole chain shares one `end`. Written on the following line,
+the `if` is an ordinary nested `if` in the `else` body, so it needs its own
+`end` before the outer one.
 
 ### When (Pattern Matching)
 

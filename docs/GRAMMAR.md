@@ -231,6 +231,10 @@ if_statement     = 'if' expression
                       { statement } ]
                     'end'
 
+// `else if` must start on the same line as `else`: that `if` is the next arm of
+// the chain and the chain shares one `end`. Written across a newline, the `if`
+// is a nested statement in the else body and needs its own `end`.
+
 // When statement (pattern matching) — NOT IMPLEMENTED, and `when` is not a
 // reserved word: it is an ordinary identifier. Left here so the form a future
 // `when` has to parse is written down rather than invented again.

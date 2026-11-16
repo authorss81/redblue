@@ -839,26 +839,54 @@ impl Parser {
         }
 
         let mut else_branch = Vec::new();
+        let mut end_consumed = false;
 
         if let Some(Token {
             kind: TokenKind::Else,
+            line: else_line,
             ..
         }) = self.current()
         {
+            let else_line = *else_line;
             self.advance();
             self.skip_newlines();
 
-            while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
-                && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
-            {
+            // `else if` on the same line is another arm of this `if`, not a
+            // nested `if` inside its `else` body: the chain shares one `end`.
+            // A newline between the two words makes the `if` an ordinary
+            // statement in the `else` body again, which is why the line is
+            // compared rather than only the token kind.
+            let is_else_if = matches!(
+                self.current(),
+                Some(Token {
+                    kind: TokenKind::If,
+                    line,
+                    ..
+                }) if *line == else_line
+            );
+
+            if is_else_if {
                 if let Some(stmt) = self.parse_statement()? {
                     else_branch.push(stmt);
                 }
-                self.skip_newlines();
+                // The nested chain consumed the one `end` this whole `if`
+                // shares; expecting another here is the bug this form had.
+                end_consumed = true;
+            } else {
+                while self.current().map(|t| &t.kind) != Some(&TokenKind::End)
+                    && self.current().map(|t| &t.kind) != Some(&TokenKind::Eof)
+                {
+                    if let Some(stmt) = self.parse_statement()? {
+                        else_branch.push(stmt);
+                    }
+                    self.skip_newlines();
+                }
             }
         }
 
-        self.expect(&TokenKind::End)?;
+        if !end_consumed {
+            self.expect(&TokenKind::End)?;
+        }
 
         Ok(Some(Statement::If {
             condition,
@@ -3238,9 +3266,14 @@ fn opens_block_at_statement_start(kind: &TokenKind) -> bool {
 pub fn open_block_depth(tokens: &[Token]) -> i32 {
     let mut depth = 0;
     let mut at_statement_start = true;
+    // The line of an `else` immediately before this token, if any. An `if` on
+    // that same line is the next arm of the same chain, not a second block:
+    // `else if` shares the chain's one `end`.
+    let mut else_line: Option<usize> = None;
     let mut index = 0;
 
     while index < tokens.len() {
+        let preceded_by_else = else_line.take();
         match &tokens[index].kind {
             TokenKind::Newline => at_statement_start = true,
             TokenKind::End => {
@@ -3255,9 +3288,14 @@ pub fn open_block_depth(tokens: &[Token]) -> i32 {
                 at_statement_start = false;
             }
             // A branch of a block already counted rather than a statement of its
-            // own, so the statement-start rule still holds after it: `else if x
-            // then` opens one more block.
-            TokenKind::Else | TokenKind::Catch | TokenKind::Finally => {
+            // own, so the statement-start rule still holds after it. An `if` on
+            // the same line is an `else if` arm and is counted below as part of
+            // the block it extends rather than as a new one.
+            TokenKind::Else => {
+                at_statement_start = true;
+                else_line = Some(tokens[index].line);
+            }
+            TokenKind::Catch | TokenKind::Finally => {
                 at_statement_start = true;
             }
             // `lru_cache` is an identifier, so without this the `to` it decorates
@@ -3269,7 +3307,11 @@ pub fn open_block_depth(tokens: &[Token]) -> i32 {
                 at_statement_start = false;
             }
             kind if at_statement_start && opens_block_at_statement_start(kind) => {
-                depth += 1;
+                let arm_of_else =
+                    preceded_by_else == Some(tokens[index].line) && matches!(kind, TokenKind::If);
+                if !arm_of_else {
+                    depth += 1;
+                }
                 at_statement_start = false;
             }
             _ => at_statement_start = false,
@@ -3441,13 +3483,20 @@ mod tests {
     }
 
     /// `else`, `catch` and `finally` are branches of a block already counted, so
-    /// the block after one of them is still counted — `else if ... then` opens a
-    /// second block needing a second `end`.
+    /// the statement after one of them can still begin a block. An `if` on the
+    /// same line as `else` is not such a block: it is the next arm of the same
+    /// chain, sharing the chain's one `end`.
     #[test]
-    fn open_block_depth_counts_the_block_inside_an_else_if() {
-        assert_eq!(depth_of("if x then\nelse if y then"), 2);
-        assert_eq!(depth_of("if x then\nelse if y then\nend"), 1);
-        assert_eq!(depth_of("if x then\nelse if y then\nend\nend"), 0);
+    fn open_block_depth_treats_an_else_if_arm_as_the_same_block() {
+        assert_eq!(depth_of("if x then\nelse if y then"), 1);
+        assert_eq!(depth_of("if x then\nelse if y then\nend"), 0);
+        assert_eq!(depth_of("if x then\nelse if y then\nend\nend"), -1);
+
+        // A newline between the words is still the nested-statement form, which
+        // needs its own `end` before the outer one.
+        assert_eq!(depth_of("if x then\nelse\nif y then"), 2);
+        assert_eq!(depth_of("if x then\nelse\nif y then\nend"), 1);
+        assert_eq!(depth_of("if x then\nelse\nif y then\nend\nend"), 0);
     }
 
     #[test]
