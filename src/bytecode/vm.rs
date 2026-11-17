@@ -4494,6 +4494,7 @@ impl BytecodeVm {
                     matches!(
                         stmt.statement,
                         Statement::Set { .. }
+                            | Statement::SetMultiple { .. }
                             | Statement::Constant { .. }
                             | Statement::Function { .. }
                     )

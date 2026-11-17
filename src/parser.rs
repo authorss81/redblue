@@ -132,6 +132,12 @@ pub enum Statement {
         value: Expr,
     },
 
+    // set x, y to 1, 2
+    SetMultiple {
+        names: Vec<String>,
+        values: Vec<Expr>,
+    },
+
     // constant NAME to <expr> — a name bound once, which no assignment may
     // rebind. A module file uses it for the values every function of the
     // module shares, as `modules/MathUtils.rb` does for `PI`.
@@ -332,7 +338,8 @@ pub fn module_body(program: &Program) -> &[Stmt] {
 }
 
 /// The names a module body's top-level statements declare: every `to`
-/// function's, plus every `set` and `constant`.
+/// function's, plus every `set`, `constant`, and name a multiple assignment
+/// binds.
 ///
 /// Read by the VM to decide what `export all` publishes and what an `export`
 /// naming one thing has already found. Takes the body rather than a file so a
@@ -345,6 +352,7 @@ pub fn module_declared_names(body: &[Stmt]) -> Vec<String> {
             Statement::Set { name, .. } | Statement::Constant { name, .. } => {
                 names.push(name.clone())
             }
+            Statement::SetMultiple { names: bound, .. } => names.extend(bound.iter().cloned()),
             _ => {}
         }
     }
@@ -785,8 +793,98 @@ impl Parser {
             }));
         }
 
+        if let Some(Token {
+            kind: TokenKind::Comma,
+            ..
+        }) = self.current()
+        {
+            let mut names = vec![name];
+            while let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = self.current()
+            {
+                self.advance();
+                match self.current() {
+                    Some(Token {
+                        kind: TokenKind::Identifier(name),
+                        ..
+                    }) => {
+                        let n = name.clone();
+                        self.advance();
+                        names.push(n);
+                    }
+                    _ => {
+                        return Err(Error::Parser(
+                            expected_name("variable name", self.current()),
+                            self.span(),
+                        ))
+                    }
+                }
+            }
+
+            self.expect(&TokenKind::To)?;
+            let mut values = vec![self.parse_expression()?];
+            while let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = self.current()
+            {
+                self.advance();
+                values.push(self.parse_expression()?);
+            }
+
+            if names.len() != values.len() {
+                return Err(Error::Parser(
+                    format!(
+                        "Multiple assignment has {} names but {} values",
+                        names.len(),
+                        values.len()
+                    ),
+                    self.span(),
+                ));
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            for name in &names {
+                if !seen.insert(name) {
+                    return Err(Error::Parser(
+                        format!("Multiple assignment declares '{}' more than once", name),
+                        self.span(),
+                    ));
+                }
+            }
+
+            return Ok(Some(Statement::SetMultiple { names, values }));
+        }
+
         self.expect(&TokenKind::To)?;
         let value = self.parse_expression()?;
+
+        // A comma here means more right-hand sides were written than the one
+        // name on the left. `set x to 1, 2` is not a multiple assignment (there
+        // is no comma between names), so report the arity mismatch rather than
+        // letting the comma fall through as an unrelated stray token.
+        if let Some(Token {
+            kind: TokenKind::Comma,
+            ..
+        }) = self.current()
+        {
+            let mut values = 1;
+            while let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = self.current()
+            {
+                self.advance();
+                self.parse_expression()?;
+                values += 1;
+            }
+            return Err(Error::Parser(
+                format!("Multiple assignment has 1 name but {values} values"),
+                self.span(),
+            ));
+        }
 
         Ok(Some(Statement::Set { name, value }))
     }
@@ -3947,5 +4045,31 @@ mod tests {
             None,
             "a nameless catch with a body still binds nothing"
         );
+    }
+
+    #[test]
+    fn multiple_assignment_parses_into_one_statement() {
+        let tokens = Lexer::tokenize("set x, y to 1, 2").expect("the source should lex");
+        let program = parse(tokens).expect("multiple assignment should parse");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].statement {
+            Statement::SetMultiple { names, values } => {
+                assert_eq!(names, &["x".to_string(), "y".to_string()]);
+                assert_eq!(values.len(), 2);
+            }
+            other => panic!("expected a multiple assignment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edge_multiple_assignment_arity_mismatch_is_a_parser_error() {
+        let tokens = Lexer::tokenize("set x, y to 1").expect("the source should lex");
+        assert!(matches!(parse(tokens), Err(Error::Parser(_, _))));
+    }
+
+    #[test]
+    fn edge_dotted_import_is_a_parser_error() {
+        let tokens = Lexer::tokenize("import math.sqrt as s").expect("the source should lex");
+        assert!(matches!(parse(tokens), Err(Error::Parser(_, _))));
     }
 }

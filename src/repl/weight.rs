@@ -110,6 +110,10 @@ pub fn value_bytes(value: &Value) -> usize {
                         bytes += name.len();
                         pending.push(Pending::Expression(value));
                     }
+                    Statement::SetMultiple { names, values } => {
+                        bytes += names.iter().map(|name| name.len()).sum::<usize>();
+                        pending.extend(values.iter().map(Pending::Expression));
+                    }
                     Statement::SetProperty {
                         object,
                         property,
@@ -646,6 +650,32 @@ mod tests {
         assert!(
             filled_bytes - empty_bytes >= "hello".len(),
             "the body's text is counted: {filled_bytes} vs {empty_bytes}"
+        );
+    }
+
+    /// A multiple assignment keeps every name on its left and every expression
+    /// on its right, so the weight walk has to count both lists rather than
+    /// only the first name.
+    #[test]
+    fn val_bytes_covers_a_multiple_assignment_function_body() {
+        let empty = function_with_body(FunctionBody::Statements(std::sync::Arc::new(Vec::new())));
+        let body = vec![crate::parser::Stmt {
+            span: crate::error::Span::new(1, 1),
+            statement: crate::parser::Statement::SetMultiple {
+                names: vec!["left".to_string(), "right".to_string()],
+                values: vec![
+                    crate::parser::Expr::Text("hello".to_string()),
+                    crate::parser::Expr::Text("world".to_string()),
+                ],
+            },
+        }];
+        let filled = function_with_body(FunctionBody::Statements(std::sync::Arc::new(body)));
+
+        let added = value_bytes(&filled) - value_bytes(&empty);
+        let carried = "left".len() + "right".len() + "hello".len() + "world".len();
+        assert!(
+            added >= carried,
+            "both names and both values are counted: {added} vs at least {carried}"
         );
     }
 

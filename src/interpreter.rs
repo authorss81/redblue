@@ -674,13 +674,17 @@ pub(crate) fn module_bound_names(root: &Path, pinned: Option<&str>, name: &str) 
         return Vec::new();
     };
 
-    redblue_parser::module_body(&ast)
-        .iter()
-        .filter_map(|stmt| match &stmt.statement {
-            Statement::Set { name, .. } | Statement::Constant { name, .. } => Some(name.clone()),
-            _ => None,
-        })
-        .collect()
+    let mut names = Vec::new();
+    for stmt in redblue_parser::module_body(&ast) {
+        match &stmt.statement {
+            Statement::Set { name, .. } | Statement::Constant { name, .. } => {
+                names.push(name.clone())
+            }
+            Statement::SetMultiple { names: bound, .. } => names.extend(bound.iter().cloned()),
+            _ => {}
+        }
+    }
+    names
 }
 
 impl Vm {
@@ -2096,6 +2100,22 @@ impl Vm {
             Statement::Set { name, value } => {
                 let val = self.evaluate(value)?;
                 self.set_var(name, val)?;
+                Ok(Value::Nothing)
+            }
+            Statement::SetMultiple { names, values } => {
+                let mut evaluated = Vec::with_capacity(values.len());
+                for value in values {
+                    evaluated.push(self.evaluate(value)?);
+                }
+                // The bytecode compiler emits one `STORE` per name in reverse,
+                // because the operand stack holds the values in source order and
+                // a `STORE` takes the top one. Binding in the same order here
+                // keeps the two engines' failure paths identical: with a
+                // constant among the targets, both refuse it before writing any
+                // name that would have been stored after it.
+                for (name, val) in names.iter().rev().zip(evaluated.into_iter().rev()) {
+                    self.set_var(name, val)?;
+                }
                 Ok(Value::Nothing)
             }
             Statement::Constant { name, value } => {

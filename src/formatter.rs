@@ -296,6 +296,22 @@ impl Formatter {
                 self.write(" to ");
                 self.format_expression(value);
             }
+            Statement::SetMultiple { names, values } => {
+                self.write("set ");
+                for (i, name) in names.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.write(name);
+                }
+                self.write(" to ");
+                for (i, value) in values.iter().enumerate() {
+                    if i > 0 {
+                        self.write(", ");
+                    }
+                    self.format_expression(value);
+                }
+            }
             Statement::Constant { name, value } => {
                 self.write("constant ");
                 self.write(name);

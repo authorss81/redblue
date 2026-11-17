@@ -53,7 +53,8 @@ pub fn module_program(path: &str) -> Result<Program> {
     crate::parser::Parser::new(tokens).parse()
 }
 
-/// The names `program` binds: one per top-level `set` or `constant`.
+/// The names `program` binds: one per top-level `set` or `constant`, and every
+/// name a top-level multiple assignment binds.
 ///
 /// The caller binds them through whatever refusal its own name resolution uses,
 /// so a module's `constant` is refused a second binding exactly as a `constant`
@@ -63,24 +64,56 @@ pub fn module_program(path: &str) -> Result<Program> {
 /// Takes the parsed program rather than the path so that the file is read once:
 /// reading it again could fail — the file could have gone away between the two
 /// reads — after the caller had already installed some of the bindings.
-pub fn module_bindings(
-    program: &Program,
-    mut evaluate: impl FnMut(&Expr) -> Result<Value>,
-) -> Result<Vec<(String, Value, bool)>> {
+/// What running a module's declarations does to the importing program.
+///
+/// Evaluation and binding are one operation each so the loader can bind a
+/// declaration before evaluating the next one, which is what lets a module's
+/// later statement read a name an earlier statement bound.
+pub trait ModuleLoader {
+    /// Evaluates one of the module's expressions in the importing program's
+    /// environment.
+    fn evaluate(&mut self, expression: &Expr) -> Result<Value>;
+
+    /// Binds one name the module contributes into the importing program.
+    fn bind(&mut self, name: &str, value: Value, is_constant: bool) -> Result<()>;
+}
+
+pub fn module_bindings(program: &Program, loader: &mut impl ModuleLoader) -> Result<()> {
     // A module's functions are not bound to a name, so a member stays
-    // unreachable — see FINDINGS.md. The two declarations below are the whole of
+    // unreachable — see FINDINGS.md. The declarations below are the whole of
     // what an import currently contributes.
-    let mut bound = Vec::new();
+    //
+    // Each declaration is bound as it is read, not collected and bound at the
+    // end: a module may read a name an earlier declaration of the same module
+    // bound, exactly as those statements would read it inline. A multiple
+    // assignment still evaluates all of its right-hand sides before binding
+    // any of its names, and binds them in reverse, the order both VMs store
+    // them, so a constant among the targets is refused before the names ahead
+    // of it are written on every path.
     for stmt in crate::parser::module_body(program) {
-        let (name, value, is_const) = match &stmt.statement {
-            Statement::Set { name, value } => (name, value, false),
-            Statement::Constant { name, value } => (name, value, true),
+        match &stmt.statement {
+            Statement::Set { name, value } => {
+                let value = loader.evaluate(value)?;
+                loader.bind(name, value, false)?;
+            }
+            Statement::Constant { name, value } => {
+                let value = loader.evaluate(value)?;
+                loader.bind(name, value, true)?;
+            }
+            Statement::SetMultiple { names, values } => {
+                let mut evaluated = Vec::with_capacity(values.len());
+                for value in values {
+                    evaluated.push(loader.evaluate(value)?);
+                }
+                for (name, value) in names.iter().zip(evaluated).rev() {
+                    loader.bind(name, value, false)?;
+                }
+            }
             _ => continue,
-        };
-        bound.push((name.clone(), evaluate(value)?, is_const));
+        }
     }
 
-    Ok(bound)
+    Ok(())
 }
 
 /// `object.property`, and the failure for a receiver that is not a record.
