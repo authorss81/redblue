@@ -176,9 +176,9 @@ import_statement = 'import' identifier { 'as' identifier }
 export_statement = 'export' identifier { ',' identifier }
                  | 'export' 'all'
 ```
+**Not Implemented:** `import a.b as c` is not read by the parser (`ParserError: Unexpected token Dot`); use `import a` or `import a as b` instead.
 
 ### 3.2 Standalone Script
-
 ```
 script           = { statement }
 ```

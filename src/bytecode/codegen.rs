@@ -276,6 +276,15 @@ impl Compiler {
                 let name = self.text(name);
                 emit(code, Opcode::Store, name, 0, line);
             }
+            Statement::SetMultiple { names, values } => {
+                for value in values {
+                    self.expr(value, code, blocks, depth, line)?;
+                }
+                for name in names.iter().rev() {
+                    let name = self.text(name);
+                    emit(code, Opcode::Store, name, 0, line);
+                }
+            }
             // `constant` is its own opcode, not the `STORE` a `set` compiles to: the
             // name is read-only, and the file has to say so for an interpreter
             // to enforce it. A `STORE` naming a constant is what the
