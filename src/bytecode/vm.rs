@@ -681,6 +681,62 @@ fn builtin_names() -> &'static HashSet<String> {
     NAMES.get_or_init(|| stdlib::builtins().into_keys().collect())
 }
 
+/// Where a plain `STORE` lands, so a rolled-back multiple assignment can put
+/// the previous binding back where it came from.
+enum StoreTarget {
+    Global,
+    Local(usize),
+    None,
+}
+
+/// One plain `STORE` a multiple assignment has already written successfully.
+///
+/// The compiler emits a multiple assignment as a run of consecutive `STORE`s.
+/// The run is one statement, so a constant among its names must refuse the
+/// whole statement rather than leave the names stored before it bound. Keeping
+/// the previous value of each write lets the VM undo the run if a later
+/// `STORE` refuses.
+struct PendingStore {
+    target: StoreTarget,
+    name: String,
+    previous: Option<Value>,
+}
+
+/// One table write an `import` made, with what the table held before it.
+///
+/// Restoring an import replays these in reverse. That records only the keys the
+/// module actually wrote, rather than copying every table on every import.
+enum ImportUndo {
+    Global {
+        name: String,
+        previous: Option<Value>,
+    },
+    Constant {
+        name: String,
+        was_bound: bool,
+    },
+    PublishedMember {
+        name: String,
+        was_published: bool,
+    },
+    Object {
+        name: String,
+        previous: Option<ObjectType>,
+    },
+    Module {
+        name: String,
+        previous: Option<Arc<Program>>,
+    },
+    ModuleAlias {
+        name: String,
+        previous: Option<String>,
+    },
+    DeclaredModule {
+        name: String,
+        previous: Option<DeclaredModule>,
+    },
+}
+
 /// Runs a compiled Redblue program.
 pub struct BytecodeVm {
     /// The directory modules are resolved from: where the `redblue.manifest`
@@ -844,6 +900,16 @@ pub struct BytecodeVm {
     /// Loop-variable bindings waiting for the failure handling that owes them —
     /// see [`BytecodeVm::put_back_binding`].
     deferred_bindings: Vec<LoopVariable>,
+    /// The plain stores of the multiple assignment being executed, oldest
+    /// first. Cleared when the run ends or rolled back when a later store in
+    /// the run refuses. See [`PendingStore`].
+    pending_stores: Vec<PendingStore>,
+    /// The writes an import in progress has made, oldest first. See
+    /// [`ImportUndo`].
+    import_undo_log: Vec<ImportUndo>,
+    /// Where each running import began in [`BytecodeVm::import_undo_log`],
+    /// outermost first.
+    import_marks: Vec<usize>,
 }
 
 impl Default for BytecodeVm {
@@ -920,6 +986,9 @@ impl BytecodeVm {
             abrupt_exit: false,
             handling_failure: false,
             deferred_bindings: Vec::new(),
+            pending_stores: Vec::new(),
+            import_undo_log: Vec::new(),
+            import_marks: Vec::new(),
         }
     }
 
@@ -1447,6 +1516,181 @@ impl BytecodeVm {
         Ok(self.stack.split_off(base))
     }
 
+    // -- rolling an import back ------------------------------------------------
+
+    fn begin_import(&mut self) {
+        self.import_marks.push(self.import_undo_log.len());
+    }
+
+    fn commit_import(&mut self) {
+        let Some(mark) = self.import_marks.pop() else {
+            return;
+        };
+        if self.import_marks.is_empty() {
+            self.import_undo_log.truncate(mark);
+        }
+    }
+
+    fn rollback_import(&mut self) {
+        let Some(mark) = self.import_marks.pop() else {
+            return;
+        };
+        while self.import_undo_log.len() > mark {
+            let Some(undo) = self.import_undo_log.pop() else {
+                break;
+            };
+            match undo {
+                ImportUndo::Global { name, previous } => match previous {
+                    Some(value) => {
+                        self.globals.insert(name, value);
+                    }
+                    None => {
+                        self.globals.remove(&name);
+                    }
+                },
+                ImportUndo::Constant { name, was_bound } => {
+                    if was_bound {
+                        self.constants.insert(name);
+                    } else {
+                        self.constants.remove(&name);
+                    }
+                }
+                ImportUndo::PublishedMember {
+                    name,
+                    was_published,
+                } => {
+                    if was_published {
+                        self.published_members.insert(name);
+                    } else {
+                        self.published_members.remove(&name);
+                    }
+                }
+                ImportUndo::Object { name, previous } => match previous {
+                    Some(object) => {
+                        self.objects.insert(name, object);
+                    }
+                    None => {
+                        self.objects.remove(&name);
+                    }
+                },
+                ImportUndo::Module { name, previous } => match previous {
+                    Some(program) => {
+                        self.modules.insert(name, program);
+                    }
+                    None => {
+                        self.modules.remove(&name);
+                    }
+                },
+                ImportUndo::ModuleAlias { name, previous } => match previous {
+                    Some(alias) => {
+                        self.module_aliases.insert(name, alias);
+                    }
+                    None => {
+                        self.module_aliases.remove(&name);
+                    }
+                },
+                ImportUndo::DeclaredModule { name, previous } => match previous {
+                    Some(module) => {
+                        self.declared_modules.insert(name, module);
+                    }
+                    None => {
+                        self.declared_modules.remove(&name);
+                    }
+                },
+            }
+        }
+    }
+
+    fn record_global(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::Global {
+            name: name.to_string(),
+            previous: self.globals.get(name).cloned(),
+        });
+    }
+
+    fn set_global(&mut self, name: String, value: Value) {
+        self.record_global(&name);
+        self.globals.insert(name, value);
+    }
+
+    fn record_constant(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::Constant {
+            name: name.to_string(),
+            was_bound: self.constants.contains(name),
+        });
+    }
+
+    fn set_constant(&mut self, name: String) {
+        self.record_constant(&name);
+        self.constants.insert(name);
+    }
+
+    fn record_published_member(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::PublishedMember {
+            name: name.to_string(),
+            was_published: self.published_members.contains(name),
+        });
+    }
+
+    fn publish_name(&mut self, name: String) {
+        self.record_published_member(&name);
+        self.published_members.insert(name);
+    }
+
+    fn record_object(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::Object {
+            name: name.to_string(),
+            previous: self.objects.get(name).cloned(),
+        });
+    }
+
+    fn record_module(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::Module {
+            name: name.to_string(),
+            previous: self.modules.get(name).cloned(),
+        });
+    }
+
+    fn record_module_alias(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::ModuleAlias {
+            name: name.to_string(),
+            previous: self.module_aliases.get(name).cloned(),
+        });
+    }
+
+    fn set_module_alias(&mut self, name: String, alias: String) {
+        self.record_module_alias(&name);
+        self.module_aliases.insert(name, alias);
+    }
+
+    fn record_declared_module(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::DeclaredModule {
+            name: name.to_string(),
+            previous: self.declared_modules.get(name).cloned(),
+        });
+    }
+
     // -- names --------------------------------------------------------------
 
     fn get_var(&self, name: &str) -> Option<Value> {
@@ -1497,7 +1741,7 @@ impl BytecodeVm {
             }
             return;
         }
-        self.globals.insert(name.to_string(), value);
+        self.set_global(name.to_string(), value);
     }
 
     /// Binds `name` as a constant, refusing a second declaration of a name that
@@ -1507,13 +1751,14 @@ impl BytecodeVm {
     /// `constant` that declared twice silently kept its first value in one VM
     /// and its second in the other would not be the same language.
     fn declare_const(&mut self, name: &str, value: Value) -> Result<()> {
-        if !self.constants.insert(name.to_string()) {
+        if self.constants.contains(name) {
             return Err(Error::Runtime(
                 format!("Constant '{name}' is already declared"),
                 self.span(),
             ));
         }
-        self.globals.insert(name.to_string(), value);
+        self.set_constant(name.to_string());
+        self.set_global(name.to_string(), value);
         Ok(())
     }
 
@@ -1829,6 +2074,7 @@ impl BytecodeVm {
             }
         }
 
+        self.record_object(&pending.name);
         self.objects.insert(
             pending.name,
             ObjectType {
@@ -1895,6 +2141,12 @@ impl BytecodeVm {
 
     fn execute(&mut self, instruction: Instruction, frame: usize) -> Result<()> {
         let opcode = instruction.opcode;
+        // A run of consecutive `STORE`s is one multiple assignment. The first
+        // instruction after the run is not a `STORE`, so it ends the run and
+        // keeps the bindings it wrote.
+        if opcode != Opcode::Store {
+            self.pending_stores.clear();
+        }
         match opcode {
             Opcode::Nop => {
                 // A `NOP` is the filler and does nothing — including inside a
@@ -2292,6 +2544,92 @@ impl BytecodeVm {
         self.advance(frame);
     }
 
+    /// Where a plain `STORE` will write, resolved exactly as [`BytecodeVm::bind`]
+    /// resolves it, so a rollback puts the previous value back in the same
+    /// table the write landed in.
+    fn store_target(&self, frame: usize, name: &str) -> StoreTarget {
+        if self.frames[frame].globals_only {
+            return StoreTarget::Global;
+        }
+        for (index, scope) in self.locals.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                return StoreTarget::Local(index);
+            }
+        }
+        if self.module_depth > 0 {
+            return match self.locals.len().checked_sub(1) {
+                Some(index) => StoreTarget::Local(index),
+                None => StoreTarget::None,
+            };
+        }
+        StoreTarget::Global
+    }
+
+    fn binding_at(&self, target: &StoreTarget, name: &str) -> Option<Value> {
+        match target {
+            StoreTarget::Global => self.globals.get(name).cloned(),
+            StoreTarget::Local(index) => self
+                .locals
+                .get(*index)
+                .and_then(|scope| scope.get(name))
+                .cloned(),
+            StoreTarget::None => None,
+        }
+    }
+
+    /// Undoes the stores of the multiple assignment being executed, newest
+    /// first. Called when a later store in the same run refuses.
+    fn rollback_pending_stores(&mut self) {
+        while let Some(pending) = self.pending_stores.pop() {
+            match pending.target {
+                StoreTarget::Global => match pending.previous {
+                    Some(value) => {
+                        self.globals.insert(pending.name, value);
+                    }
+                    None => {
+                        self.globals.remove(&pending.name);
+                    }
+                },
+                StoreTarget::Local(index) => {
+                    let Some(scope) = self.locals.get_mut(index) else {
+                        continue;
+                    };
+                    match pending.previous {
+                        Some(value) => {
+                            scope.insert(pending.name, value);
+                        }
+                        None => {
+                            scope.shift_remove(&pending.name);
+                        }
+                    }
+                }
+                StoreTarget::None => {}
+            }
+        }
+    }
+
+    /// A plain `STORE`: binds the top of the stack and remembers the binding it
+    /// displaced until the run of stores ends.
+    fn store_plain(&mut self, name: &str, frame: usize) -> Result<()> {
+        // A write that lands in a scope is not a write to a constant, which is
+        // why this is refused only above the module boundary: the tree-walking
+        // VM refuses it in `set_var` on the same path.
+        if self.module_depth == 0 {
+            self.refuse_constant_rebind(name)?;
+        }
+        let target = self.store_target(frame, name);
+        let previous = self.binding_at(&target, name);
+        let value = self.pop()?;
+        self.bind(frame, name, value);
+        self.pending_stores.push(PendingStore {
+            target,
+            name: name.to_string(),
+            previous,
+        });
+        self.advance(frame);
+        Ok(())
+    }
+
     /// `STORE`, which is either a plain binding or a loop's variable.
     ///
     /// A loop's variable is the one `STORE` that sits on its loop's `top`: the
@@ -2313,18 +2651,16 @@ impl BytecodeVm {
             .find(|site| site.iterator && site.top == ip)
             .copied()
         else {
-            // A write that lands in a scope is not a write to a constant, which
-            // is why this is refused only above the module boundary: the
-            // tree-walking VM refuses it in `set_var` on the same path.
-            if self.module_depth == 0 {
-                self.refuse_constant_rebind(&name)?;
+            let result = self.store_plain(&name, frame);
+            if result.is_err() {
+                self.rollback_pending_stores();
             }
-            let value = self.pop()?;
-            self.bind(frame, &name, value);
-            self.advance(frame);
-            return Ok(());
+            return result;
         };
 
+        // A loop variable is not part of a multiple assignment's run, even if a
+        // malformed file placed it next to one.
+        self.pending_stores.clear();
         let index = self.loop_entry(frame, site);
         // The value for this turn is taken before the turn is charged, so a loop
         // that has run out does not spend an iteration on the fact.
@@ -2359,7 +2695,7 @@ impl BytecodeVm {
 
     fn bind(&mut self, frame: usize, name: &str, value: Value) {
         if self.frames[frame].globals_only {
-            self.globals.insert(name.to_string(), value);
+            self.set_global(name.to_string(), value);
         } else {
             self.set_var(name, value);
         }
@@ -2743,6 +3079,7 @@ impl BytecodeVm {
             return Ok(());
         };
         if let Some(name) = frame.module_body.as_deref() {
+            self.record_declared_module(name);
             self.declared_modules.remove(name);
             self.module_depth = self.module_depth.saturating_sub(1);
             self.importing.pop();
@@ -3980,6 +4317,7 @@ impl BytecodeVm {
                 // `module` of the same name with `is already declared` and a
                 // later `import` of it with a module that published nothing. The
                 // tree-walking VM removes it for the same reason.
+                self.record_declared_module(name);
                 self.declared_modules.remove(name);
                 self.module_depth = self.module_depth.saturating_sub(1);
                 self.importing.pop();
@@ -4194,7 +4532,19 @@ impl BytecodeVm {
                     .iter()
                     .map(|member| (member.clone(), self.globals.get(member).cloned()))
                     .collect();
+                // An import is one unit: a module that fails part way through
+                // must not leave the declarations it already bound behind.
+                // Every write the module makes records only the key it touched,
+                // so the failing path below replays exactly those writes in
+                // reverse instead of copying every table the program owns.
+                self.begin_import();
                 self.importing.push(name.clone());
+                // The handlers around the `import` belong to the importing
+                // frame. Taking them away while the module runs makes a failure
+                // inside the module reach the `import`, so it can roll back as a
+                // unit; the outer handlers are put back before the failure is
+                // returned and the caller's `try` catches it then.
+                let handlers_before = std::mem::take(&mut self.handlers);
                 let mut module_frame = self.frame_for(&chunk, Vec::new());
                 module_frame.globals_only = true;
                 module_frame.stack_base = self.stack.len();
@@ -4205,16 +4555,24 @@ impl BytecodeVm {
                 if let Some(error) = failure {
                     // The module failed, so it is not loaded: leaving it in the
                     // set would answer a later import of the same name with a
-                    // module that was never successfully bound.
-                    self.modules.remove(&name);
+                    // module that was never successfully bound. The module's
+                    // frame is dropped while the outer handlers are still out of
+                    // the way, then they are put back so the caller's `try` is
+                    // the one that catches the failure.
+                    self.discard_frames_above(frame);
+                    self.handlers = handlers_before;
+                    self.rollback_import();
                     return Err(error);
                 }
+                self.handlers = handlers_before;
+                self.commit_import();
                 self.publish_module_functions(&name, saved);
                 // Recorded only once the module has compiled *and* run, so a
                 // module that failed either way is not in the set: a name left
                 // there by a compile failure would answer a later import of the
                 // same name with a module that was never bound, binding the alias
                 // to nothing rather than reporting the failure again.
+                self.record_module(&name);
                 self.modules.insert(name.clone(), program);
             }
         }
@@ -4226,8 +4584,8 @@ impl BytecodeVm {
             let members = declared.members.clone();
             for (member, _, value) in members {
                 let qualified = qualified_member(&alias, &member);
-                self.published_members.insert(qualified.clone());
-                self.globals.insert(qualified, value);
+                self.publish_name(qualified.clone());
+                self.set_global(qualified, value);
             }
         }
 
@@ -4235,17 +4593,17 @@ impl BytecodeVm {
         // reaches the same function the unaliased name does. The module's own
         // name names it too, which is what leaves `json.stringify` working after
         // `import json as J`.
-        self.module_aliases.insert(alias.clone(), name.clone());
-        self.module_aliases
-            .entry(name.clone())
-            .or_insert_with(|| name.clone());
+        self.set_module_alias(alias.clone(), name.clone());
+        if !self.module_aliases.contains_key(&name) {
+            self.set_module_alias(name.clone(), name.clone());
+        }
 
         // The module's *own* name is a name of the program as well, so an
         // unbound one is bound to `nothing` — which is what makes `say MathUtils`
         // read a module rather than fail on an unknown variable. The tree-walking
         // VM binds it under the same guard.
         if self.get_var(&name).is_none() {
-            self.globals.insert(name.clone(), Value::Nothing);
+            self.set_global(name.clone(), Value::Nothing);
         }
 
         self.advance(frame);
@@ -4398,15 +4756,16 @@ impl BytecodeVm {
                 continue;
             };
             let qualified = qualified_member(&name, member);
-            self.published_members.insert(qualified.clone());
-            self.globals.insert(qualified.clone(), value.clone());
+            self.publish_name(qualified.clone());
+            self.set_global(qualified.clone(), value.clone());
             members.push((member.clone(), qualified, value));
         }
+        self.record_declared_module(&name);
         self.declared_modules
             .insert(name.clone(), DeclaredModule { members });
-        self.module_aliases
-            .entry(name.clone())
-            .or_insert_with(|| name.clone());
+        if !self.module_aliases.contains_key(&name) {
+            self.set_module_alias(name.clone(), name.clone());
+        }
     }
 
     /// The value a name a module body declares is bound to, or `None` when it
@@ -4440,14 +4799,15 @@ impl BytecodeVm {
     /// module bound is still readable.
     fn publish_module_functions(&mut self, name: &str, saved: Vec<(String, Option<Value>)>) {
         for (member, previous) in saved {
+            self.record_global(&member);
             let Some(value) = self.globals.remove(&member) else {
                 continue;
             };
             let qualified = qualified_member(name, &member);
-            self.published_members.insert(qualified.clone());
-            self.globals.insert(qualified, value);
+            self.publish_name(qualified.clone());
+            self.set_global(qualified, value);
             if let Some(previous) = previous {
-                self.globals.insert(member, previous);
+                self.set_global(member, previous);
             }
         }
     }
@@ -4494,6 +4854,7 @@ impl BytecodeVm {
                     matches!(
                         stmt.statement,
                         Statement::Set { .. }
+                            | Statement::SetMultiple { .. }
                             | Statement::Constant { .. }
                             | Statement::Function { .. }
                     )

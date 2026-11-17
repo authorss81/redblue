@@ -163,6 +163,16 @@ fn same_statement(a: &Statement, b: &Statement) -> bool {
             },
         ) => n1 == n2 && same_expr(v1, v2),
         (
+            Statement::SetMultiple {
+                names: n1,
+                values: v1,
+            },
+            Statement::SetMultiple {
+                names: n2,
+                values: v2,
+            },
+        ) => n1 == n2 && same_exprs(v1, v2),
+        (
             Statement::Constant {
                 name: n1,
                 value: v1,
@@ -611,6 +621,42 @@ fn edge_the_formatter_keeps_every_else_if_chain_shape() {
             "formatting a chain must be idempotent"
         );
     }
+}
+
+/// A multiple assignment is one statement with two lists, and the formatter
+/// writes it as one line rather than splitting it into a name list and a value
+/// list that would no longer re-parse. Its output must read back as the same
+/// statement and pass `rb format --check`.
+#[test]
+fn edge_multiple_assignment_round_trips_and_passes_format_check() {
+    let source = "set a,b to 1+1,2*3\nsay a\nsay b\n";
+    let formatted = formatter::format(source).expect("multiple assignment should format");
+
+    assert_eq!(
+        formatted, "set a, b to 1 + 1, 2 * 3\nsay a\nsay b\n",
+        "the formatter must keep both names and both values on one `set` line"
+    );
+
+    let before = parse(source);
+    let after = parse(&formatted);
+    assert!(
+        same_program(&before, &after),
+        "formatting changed the multiple assignment\n--- source ---\n{}\n--- formatted ---\n{}",
+        source,
+        formatted
+    );
+    assert_eq!(
+        formatter::format(&formatted).expect("second format"),
+        formatted,
+        "the formatter's own output must be canonical"
+    );
+
+    let check = run_format_check(&formatted);
+    assert_eq!(
+        check.code, 0,
+        "`rb format --check` rejected the formatter's multiple assignment:\n{}",
+        check.stdout
+    );
 }
 
 // ---------------------------------------------------------------------------

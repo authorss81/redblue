@@ -268,6 +268,7 @@ const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
     "resume phase-108:",
     "resume phase-109:",
     "resume phase-112:",
+    "resume phase-114:",
 ];
 
 /// The reason recorded for the delivery commits this rule acknowledges.
@@ -849,25 +850,34 @@ fn is_unreviewed_subject(subject: &str) -> bool {
     lower.contains("checkpoint") || lower.contains("resume phase-")
 }
 
-/// Is this the delivery commit of a phase whose work is in flight?
+/// The phase named by a properly shaped delivery subject, if the subject has
+/// that shape.
 ///
-/// A prefix test on [`DELIVERY_SUBJECT_PREFIXES`], so it matches the two shapes
-/// the pipeline writes for those phases and nothing else.
-fn is_delivery_subject(subject: &str) -> bool {
-    DELIVERY_SUBJECT_PREFIXES
-        .iter()
-        .any(|prefix| subject.starts_with(prefix))
-}
-
-/// The phase named by a delivery subject, if the subject has that shape.
-///
-/// Used to identify the phase whose delivery commit is at `HEAD`, so the audit
-/// can refuse a prefix that phase added for itself. Returns `None` for any
-/// other subject, including a reviewed commit.
+/// Both halves matter: the subject must name a phase, and the words after the
+/// colon must be one of the two delivery shapes the pipeline writes. A commit
+/// that merely begins `resume phase-114:` is unreviewed work, not a delivery
+/// commit whose contents may be trusted by its prefix.
 fn delivery_phase(subject: &str) -> Option<&str> {
     let rest = subject.strip_prefix("resume ")?;
-    let (phase, _) = rest.split_once(':')?;
-    phase.starts_with("phase-").then_some(phase)
+    let (phase, reason) = rest.split_once(':')?;
+    if !phase.starts_with("phase-") {
+        return None;
+    }
+    let reason = reason.strip_prefix(" adopt ")?;
+    matches!(reason, "preserved work" | "WIP checkpoint").then_some(phase)
+}
+
+/// Is this the delivery commit of a phase whose work is in flight?
+///
+/// A prefix test on [`DELIVERY_SUBJECT_PREFIXES`] *and* a shape test on the
+/// whole subject, so an unrelated commit that starts with a listed phase's
+/// prefix is still unreviewed work.
+fn is_delivery_subject(subject: &str) -> bool {
+    let Some(phase) = delivery_phase(subject) else {
+        return false;
+    };
+    let prefix = format!("resume {phase}:");
+    DELIVERY_SUBJECT_PREFIXES.contains(&prefix.as_str())
 }
 
 /// The delivery commits in `log`, resolved by subject, each with the reason it
@@ -2020,6 +2030,41 @@ fn edge_the_delivery_rule_covers_each_phase_in_flight_and_no_other() {
         result.unreviewed.len(),
         1,
         "a phase that is not in flight is still unreviewed work"
+    );
+}
+
+/// An `edge_*` case: a listed phase's prefix does not acknowledge an unrelated
+/// commit that merely starts with it.
+///
+/// The prefix is necessary but not sufficient. Adding `resume phase-114:` to
+/// the list because this phase's delivery commit begins that way must not also
+/// let `resume phase-114: change something unrelated` through as reviewed
+/// delivery work: the shape after the colon has to be one the pipeline writes.
+#[test]
+fn edge_a_listed_prefix_does_not_cover_an_unrelated_subject_for_the_phase_at_head() {
+    let head = git(&["log", "-1", "--format=%H%x09%s", "HEAD"])
+        .expect("HEAD's delivery commit must be readable");
+    let (_, subject) = parse_log_line(head.trim(), 1).expect("HEAD must be a well-formed log line");
+    let Some(phase) = delivery_phase(subject) else {
+        return;
+    };
+
+    assert!(
+        is_delivery_subject(&format!("resume {phase}: adopt preserved work")),
+        "the phase at HEAD should still recognise the shape the pipeline writes"
+    );
+    assert!(
+        is_delivery_subject(&format!("resume {phase}: adopt WIP checkpoint")),
+        "the phase at HEAD should still recognise the timed-out delivery shape"
+    );
+    assert!(
+        !is_delivery_subject(&format!("resume {phase}: change something unrelated")),
+        "a listed prefix must not cover a subject that is not a delivery commit"
+    );
+    assert_eq!(
+        delivery_phase(&format!("resume {phase}: change something unrelated")),
+        None,
+        "a delivery subject has one of the pipeline's two shapes after the colon"
     );
 }
 

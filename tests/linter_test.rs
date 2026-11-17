@@ -42,6 +42,24 @@ fn unused_variable_is_reported_with_its_line() {
     assert_eq!(warnings[0].line, 1, "the warning must point at the `set`");
 }
 
+/// A multiple assignment declares every name on its left and reads every
+/// expression on its right, so the unused-variable rule has to look at both
+/// lists rather than stopping at the first name.
+#[test]
+fn edge_a_multiple_assignment_tracks_every_name_and_every_value() {
+    assert_eq!(
+        warnings("set used, unused to 1, 2\nsay used\n"),
+        vec!["Unused variable: 'unused'"],
+        "each name on the left is its own binding"
+    );
+
+    assert_eq!(
+        every_message("set seed to 1\nset left, right to seed, seed + 1\nsay left\nsay right\n"),
+        Vec::<String>::new(),
+        "both right-hand sides are read, so `seed` is not unused"
+    );
+}
+
 #[test]
 fn edge_a_name_assigned_on_several_lines_is_reported_once_at_the_first_set() {
     // `set` is assignment, so the same name on three lines is one binding that
