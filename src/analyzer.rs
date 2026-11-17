@@ -344,6 +344,14 @@ impl Analyzer {
                 self.analyze_expr(value, &span);
                 self.declare_assigned(name);
             }
+            Statement::SetMultiple { names, values } => {
+                for value in values {
+                    self.analyze_expr(value, &span);
+                }
+                for name in names {
+                    self.declare_assigned(name);
+                }
+            }
             // A `constant` binds its name for every statement after it, exactly
             // as a `set` does — whether the name may be bound again is a runtime
             // question, because a function body and a module file can each
@@ -766,6 +774,7 @@ pub(crate) fn program_has_import(statements: &[Stmt]) -> bool {
         | Statement::Say(_)
         | Statement::Print(_)
         | Statement::Set { .. }
+        | Statement::SetMultiple { .. }
         | Statement::SetProperty { .. }
         | Statement::Return(_)
         | Statement::GiveBack(_)
@@ -837,6 +846,7 @@ fn collect_later_names(
             Statement::Say(_)
             | Statement::Print(_)
             | Statement::Set { .. }
+            | Statement::SetMultiple { .. }
             | Statement::SetProperty { .. }
             | Statement::Return(_)
             | Statement::GiveBack(_)

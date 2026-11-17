@@ -402,6 +402,7 @@ fn statement_keyword(statement: &Statement) -> &'static str {
         Statement::Expr(_) => "an expression",
         Statement::Print(_) => "print",
         Statement::Set { .. } => "set",
+        Statement::SetMultiple { .. } => "set",
         Statement::Constant { .. } => "constant",
         Statement::SetProperty { .. } => "set",
         Statement::If { .. } => "if",
@@ -611,6 +612,9 @@ fn push_body<'a>(body: &'a [Stmt], _calls: &mut Vec<Call>, pending: &mut Vec<Pen
             | Statement::SetProperty { value, .. }
             | Statement::Return(Some(value))
             | Statement::GiveBack(Some(value)) => pending.push(Pending::Expr(value)),
+            Statement::SetMultiple { values, .. } => {
+                pending.extend(values.iter().map(Pending::Expr));
+            }
             Statement::ForEach { iterable, body, .. } => {
                 pending.push(Pending::Body(body));
                 pending.push(Pending::Expr(iterable));

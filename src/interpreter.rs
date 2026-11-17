@@ -2098,6 +2098,16 @@ impl Vm {
                 self.set_var(name, val)?;
                 Ok(Value::Nothing)
             }
+            Statement::SetMultiple { names, values } => {
+                let mut evaluated = Vec::with_capacity(values.len());
+                for value in values {
+                    evaluated.push(self.evaluate(value)?);
+                }
+                for (name, val) in names.iter().zip(evaluated) {
+                    self.set_var(name, val)?;
+                }
+                Ok(Value::Nothing)
+            }
             Statement::Constant { name, value } => {
                 let val = self.evaluate(value)?;
                 self.bind_constant(name, val)?;

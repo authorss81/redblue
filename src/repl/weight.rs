@@ -110,6 +110,10 @@ pub fn value_bytes(value: &Value) -> usize {
                         bytes += name.len();
                         pending.push(Pending::Expression(value));
                     }
+                    Statement::SetMultiple { names, values } => {
+                        bytes += names.iter().map(|name| name.len()).sum::<usize>();
+                        pending.extend(values.iter().map(Pending::Expression));
+                    }
                     Statement::SetProperty {
                         object,
                         property,
