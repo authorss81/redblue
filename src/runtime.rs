@@ -69,6 +69,15 @@ pub trait ModuleLoader {
     /// environment.
     fn evaluate(&mut self, expression: &Expr) -> Result<Value>;
 
+    /// Reports whether [`ModuleLoader::bind`] would refuse this name, without
+    /// writing anything.
+    ///
+    /// [`module_bindings`] calls this for every target of a multiple assignment
+    /// before it binds any of them. That is what makes the statement atomic for
+    /// the loader by itself, not only when its caller happens to snapshot and
+    /// roll back the tables around the whole module.
+    fn check_bind(&self, name: &str, is_constant: bool) -> Result<()>;
+
     /// Binds one name the module contributes into the importing program.
     fn bind(&mut self, name: &str, value: Value, is_constant: bool) -> Result<()>;
 }
@@ -82,8 +91,10 @@ pub trait ModuleLoader {
 /// Each declaration is evaluated and then bound before the next one is read, so
 /// a module may read a name an earlier declaration of the same module bound. A
 /// multiple assignment still evaluates all of its right-hand sides before
-/// binding any of its names, and binds them in reverse, the order both VMs
-/// store them.
+/// binding any of its names, then checks every target with
+/// [`ModuleLoader::check_bind`] before writing any of them. A refusal therefore
+/// leaves the loader unchanged, and the loader is atomic by itself rather than
+/// only when its caller rolls the whole module back.
 pub fn module_bindings(program: &Program, loader: &mut impl ModuleLoader) -> Result<()> {
     // A module's functions are not bound to a name, so a member stays
     // unreachable — see FINDINGS.md. The declarations below are the whole of
@@ -92,10 +103,10 @@ pub fn module_bindings(program: &Program, loader: &mut impl ModuleLoader) -> Res
     // Each declaration is bound as it is read, not collected and bound at the
     // end: a module may read a name an earlier declaration of the same module
     // bound, exactly as those statements would read it inline. A multiple
-    // assignment still evaluates all of its right-hand sides before binding
-    // any of its names, and binds them in reverse, the order both VMs store
-    // them, so a constant among the targets is refused before the names ahead
-    // of it are written on every path.
+    // assignment still evaluates all of its right-hand sides before checking or
+    // binding any of its names. The check runs in the same reverse order both
+    // VMs store, so a constant among the targets is refused before any target
+    // is written and the two engines name the same target.
     for stmt in crate::parser::module_body(program) {
         match &stmt.statement {
             Statement::Set { name, value } => {
@@ -111,6 +122,9 @@ pub fn module_bindings(program: &Program, loader: &mut impl ModuleLoader) -> Res
                 for value in values {
                     evaluated.push(loader.evaluate(value)?);
                 }
+                for name in names.iter().rev() {
+                    loader.check_bind(name, false)?;
+                }
                 for (name, value) in names.iter().zip(evaluated).rev() {
                     loader.bind(name, value, false)?;
                 }
@@ -124,10 +138,13 @@ pub fn module_bindings(program: &Program, loader: &mut impl ModuleLoader) -> Res
 
 #[cfg(test)]
 mod module_binding_order_tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     #[derive(Default)]
     struct RecordingLoader {
+        checks: RefCell<Vec<(String, bool)>>,
         attempts: Vec<(String, bool)>,
     }
 
@@ -136,8 +153,10 @@ mod module_binding_order_tests {
             Ok(Value::Nothing)
         }
 
-        fn bind(&mut self, name: &str, _value: Value, is_constant: bool) -> Result<()> {
-            self.attempts.push((name.to_string(), is_constant));
+        fn check_bind(&self, name: &str, is_constant: bool) -> Result<()> {
+            self.checks
+                .borrow_mut()
+                .push((name.to_string(), is_constant));
             if name == "a" {
                 return Err(Error::Runtime(
                     "Cannot assign to constant 'a'".to_string(),
@@ -146,11 +165,16 @@ mod module_binding_order_tests {
             }
             Ok(())
         }
+
+        fn bind(&mut self, name: &str, _value: Value, is_constant: bool) -> Result<()> {
+            self.attempts.push((name.to_string(), is_constant));
+            Ok(())
+        }
     }
 
-    /// A multiple assignment in a module still writes its targets in the VMs'
-    /// reverse store order, so a constant among them is refused after the names
-    /// ahead of it have been attempted.
+    /// A multiple assignment in a module checks its targets in the VMs' reverse
+    /// store order, and checks all of them before binding any, so a constant
+    /// among them is refused without a partial binding.
     #[test]
     fn edge_module_bindings_try_a_multiple_assignments_targets_in_reverse() {
         let tokens = Lexer::tokenize("set a, b to 1, 2\nconstant c to 3\n")
@@ -165,9 +189,14 @@ mod module_binding_order_tests {
 
         assert!(matches!(error, Error::Runtime(_, _)));
         assert_eq!(
+            loader.checks.borrow().as_slice(),
+            &[("b".to_string(), false), ("a".to_string(), false)],
+            "the loader should check `b` before the refused `a`"
+        );
+        assert_eq!(
             loader.attempts,
-            vec![("b".to_string(), false), ("a".to_string(), false)],
-            "the loader should attempt `b` before the refused `a`"
+            Vec::<(String, bool)>::new(),
+            "a refused target must leave the loader with nothing bound"
         );
     }
 }

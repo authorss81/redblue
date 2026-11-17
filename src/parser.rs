@@ -671,6 +671,23 @@ impl Parser {
                         let name = name.clone();
                         self.advance();
 
+                        // `docs/GRAMMAR.md` § 3.1 keeps `import a.b as c` as a
+                        // **Not Implemented** production, so refuse it by name
+                        // rather than letting the `.` surface as an unrelated
+                        // stray token.
+                        if let Some(Token {
+                            kind: TokenKind::Dot,
+                            ..
+                        }) = self.current()
+                        {
+                            return Err(Error::Parser(
+                                "Dotted imports are not implemented; use 'import name' or \
+                                 'import name as alias'"
+                                    .to_string(),
+                                self.span(),
+                            ));
+                        }
+
                         let alias =
                             match self.current().map(|t| &t.kind) {
                                 // `as` is the spelling `SPEC.md` and

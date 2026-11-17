@@ -258,6 +258,33 @@ give back result
     );
 }
 
+/// When both targets are constants, the two engines must refuse the same one.
+/// The bytecode VM stores in reverse, so the tree VM's pre-check has to run in
+/// that order too rather than in source order.
+#[test]
+fn edge_two_constant_targets_name_the_same_target_on_both_vms() {
+    let source = "constant a to 1\nconstant b to 2\nset a, b to 3, 4\n";
+
+    let walked =
+        redblue::run_source_value(source).expect_err("the tree VM should refuse a constant target");
+    let chunk = redblue::bytecode::compile_source(source).expect("source should compile");
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    let compiled = vm
+        .run(&chunk)
+        .expect_err("the bytecode VM should refuse a constant target");
+
+    assert_eq!(
+        walked.message(),
+        compiled.message(),
+        "both engines should report the same refused target"
+    );
+    assert!(
+        walked.message().contains("'b'"),
+        "the reverse store order should refuse `b` first, got {:?}",
+        walked.message()
+    );
+}
+
 /// A scratch directory of its own under `target/tmp`, so this test's module
 /// cannot be another test's.
 #[track_caller]
@@ -362,9 +389,9 @@ set c to a + b
     );
 }
 
-/// A module loader writes a multiple assignment's names in the same reverse
+/// A module loader checks a multiple assignment's names in the same reverse
 /// order as both VMs, but an import is atomic. With a constant among the
-/// targets, `b` is attempted before the refused `a`, yet a caught import failure
+/// targets, `b` is checked before the refused `a`, yet a caught import failure
 /// leaves neither name bound on either VM.
 #[test]
 fn edge_a_modules_multiple_assignment_binds_in_the_vms_reverse_order() {
@@ -543,5 +570,77 @@ fn edge_dotted_import_with_alias_is_a_parser_error() {
         matches!(result, Err(Error::Parser(_, _))),
         "the error should be a Parser error, got {:?}",
         result
+    );
+}
+
+/// The dotted import's rejection names the unsupported form instead of leaking
+/// the internal `Dot` token, and it still carries a source span.
+#[test]
+fn edge_dotted_import_names_the_unsupported_form() {
+    let result = redblue::run_source_value("import math.sqrt as s\nsay s(9)");
+    assert!(result.is_err(), "a dotted import must be a clean error");
+    match result {
+        Err(Error::Parser(message, span)) => {
+            assert!(
+                message.contains("Dotted imports are not implemented"),
+                "the message should name the unsupported form, got `{message}`"
+            );
+            assert!(span.is_known(), "the refusal should carry a source span");
+        }
+        other => panic!("expected a Parser error, got {other:?}"),
+    }
+}
+
+/// The no-alias spelling is the same unsupported production, so it gets the
+/// same explanation rather than the generic stray-token error.
+#[test]
+fn edge_dotted_import_without_alias_names_the_unsupported_form() {
+    let result = redblue::run_source_value("import math.sqrt");
+    assert!(result.is_err(), "a dotted import must be a clean error");
+    match result {
+        Err(Error::Parser(message, _)) => assert!(
+            message.contains("Dotted imports are not implemented"),
+            "the message should name the unsupported form, got `{message}`"
+        ),
+        other => panic!("expected a Parser error, got {other:?}"),
+    }
+}
+
+/// A dotted member after an earlier, valid import in the same statement is
+/// refused where it is written, not accepted and then forgotten.
+#[test]
+fn edge_a_dotted_import_after_a_plain_one_is_refused() {
+    let result = redblue::run_source_value("import files, math.sqrt as s");
+    assert!(
+        result.is_err(),
+        "a dotted member in a multi-import must be a clean error"
+    );
+    match result {
+        Err(Error::Parser(message, _)) => assert!(
+            message.contains("Dotted imports are not implemented"),
+            "the message should name the unsupported form, got `{message}`"
+        ),
+        other => panic!("expected a Parser error, got {other:?}"),
+    }
+}
+
+/// Empty collections and empty text are ordinary values, so both lists of a
+/// multiple assignment may hold them without special-casing.
+#[test]
+fn edge_multiple_assignment_binds_empty_values() {
+    assert_eq!(
+        eval("set a, b, c to [], nothing, \"\"\ngive back length(a)"),
+        number("0"),
+        "an empty list should bind as an empty list"
+    );
+    assert_eq!(
+        eval("set a, b, c to [], nothing, \"\"\ngive back b"),
+        Value::Nothing,
+        "`nothing` should bind as nothing"
+    );
+    assert_eq!(
+        eval("set a, b, c to [], nothing, \"\"\ngive back length(c)"),
+        number("0"),
+        "empty text should bind as empty text"
     );
 }

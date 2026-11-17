@@ -170,12 +170,12 @@ module           = 'module' identifier
                    [ export_statement ]
                    'end'
 
-import_statement = 'import' identifier { 'as' identifier }
+import_statement = 'import' identifier [ 'as' identifier ] { ',' identifier [ 'as' identifier ] }
 
 export_statement = 'export' identifier { ',' identifier }
                  | 'export' 'all'
 ```
-**Not Implemented:** `import a.b as c` is not read by the parser (`ParserError: Unexpected token Dot`); use `import a` or `import a as b` instead.
+**Not Implemented:** the parser refuses `import a.b as c` with `ParserError: Dotted imports are not implemented; use 'import name' or 'import name as alias'`. Use `import a` or `import a as b` instead.
 
 ### 3.2 Standalone Script
 ```

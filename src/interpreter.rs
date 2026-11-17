@@ -751,6 +751,14 @@ impl runtime::ModuleLoader for VmModuleLoader<'_> {
         self.vm.evaluate(expression)
     }
 
+    fn check_bind(&self, name: &str, is_constant: bool) -> Result<()> {
+        if is_constant {
+            self.vm.refuse_duplicate_constant(name)
+        } else {
+            self.vm.refuse_constant_rebind(name)
+        }
+    }
+
     fn bind(&mut self, name: &str, value: Value, is_constant: bool) -> Result<()> {
         if is_constant {
             self.vm.bind_constant(name, value)
@@ -2090,12 +2098,7 @@ impl Vm {
     /// declaration leaves the first binding in place, so a module that
     /// declares the same name twice keeps the value it had.
     fn bind_constant(&mut self, name: &str, value: Value) -> Result<()> {
-        if self.constants.contains(name) {
-            return Err(Error::Runtime(
-                format!("Constant '{name}' is already declared"),
-                self.span(),
-            ));
-        }
+        self.refuse_duplicate_constant(name)?;
         if !self.import_marks.is_empty() {
             self.import_undo_log.push(ImportUndo::Constant {
                 name: name.to_string(),
@@ -2111,6 +2114,18 @@ impl Vm {
             writes.insert(name.to_string());
         }
         self.set_global(name.to_string(), value);
+        Ok(())
+    }
+
+    /// The refusal [`Vm::bind_constant`] gives, split out so a module loader can
+    /// ask before it writes anything.
+    fn refuse_duplicate_constant(&self, name: &str) -> Result<()> {
+        if self.constants.contains(name) {
+            return Err(Error::Runtime(
+                format!("Constant '{name}' is already declared"),
+                self.span(),
+            ));
+        }
         Ok(())
     }
 
@@ -2368,7 +2383,11 @@ impl Vm {
                 // among the names refuses the whole statement, not the run of
                 // names that happens to come after it in store order, so a
                 // caught failure leaves no name of this statement bound.
-                for name in names {
+                //
+                // The check runs in the same reverse order the bytecode VM's
+                // `STORE` run uses below, so when more than one target is a
+                // constant both engines name the same one.
+                for name in names.iter().rev() {
                     if !self
                         .locals
                         .iter()

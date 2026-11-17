@@ -3,24 +3,24 @@
 ## What changed
 | File | Lines | What |
 |---|---|---|
-| src/parser.rs | +125 −1 | `Statement::SetMultiple`; `set a, b to x, y` parses with arity and duplicate-name checks; module declared names include both names; three parser unit tests |
+| src/parser.rs | +145 −1 | `Statement::SetMultiple`; `set a, b to x, y` parses with arity and duplicate-name checks; module declared names include both names; three parser unit tests; a dotted import now fails with a message naming the unsupported form instead of the internal `Dot` token |
 | src/analyzer.rs | +10 −0 | analyses every right-hand side, then declares every bound name |
 | src/interpreter.rs | +56 −17 | evaluates all right-hand sides before binding any name, binds in the bytecode VM's reversed store order, reads multiple-assignment names into the analyzer's module-bound names, and snapshots the globals, constants and module context around `load_module` so a failed import rolls back every binding |
-| src/runtime.rs | +84 −13 | module loading evaluates and binds each declaration in order; `ModuleLoader` refuses a constant at the same point on every path; the trait and function docs describe their separate contracts |
+| src/runtime.rs | +95 −13 | module loading evaluates and binds each declaration in order; `ModuleLoader::check_bind` lets a multiple assignment refuse every target before binding any of them, so the loader is atomic by itself; the trait and function docs describe their separate contracts |
 | src/bytecode/codegen.rs | +9 −0 | emits all right-hand sides, then stores in reverse to preserve evaluate-before-bind |
 | src/bytecode/vm.rs | +34 −0 | module-body filter keeps a multiple assignment; the import frame hides the caller's handlers while a module runs and restores the module state when it fails |
 | src/formatter.rs | +16 −0 | formats `set a, b to x, y` |
 | src/linter.rs | +8 −0 | assigns and analyses every name/value in a multiple assignment |
 | src/repl/introspect.rs | +4 −0 | statement name and call-walk support, with both values of a multiple assignment read in source order |
 | src/repl/weight.rs | +4 −0 | weight walk support |
-| docs/GRAMMAR.md | +0 −2 | removes the dotted `import a.b as c` production from the grammar and keeps its **Not Implemented** note with the working alternatives |
+| docs/GRAMMAR.md | +1 −2 | removes the dotted `import a.b as c` production from the grammar, records the parser's explanatory refusal, and writes the comma-separated multi-import form the parser accepts |
 | NATIVE.md, src/bytecode/format.rs | +8 −8 | updates the source-line citations moved by the interpreter and runtime changes |
 | tests/doc_blocks_runs.txt, tests/doc_blocks_fragments.txt | +9 −9 | follows the removed grammar line |
-| tests/multiple_assignment_test.rs | +422 −0 | new tests, helpers and edge cases |
-| tests/unreviewed_work_ack_test.rs | +1 −0 | adds `resume phase-114:` to the in-flight delivery-subject rule so the pipeline's rebuildable delivery commit stays acknowledged |
+| tests/multiple_assignment_test.rs | +526 −0 | new tests, helpers and edge cases, including the explanatory dotted-import refusal, empty-value binding, and the two-constant cross-engine refusal |
+| tests/unreviewed_work_ack_test.rs | +40 −2 | the in-flight prefix for the phase under review comes from the pipeline's `RBOPS_PHASE` (falling back to the delivery commit at `HEAD`), and a test refuses a checked-in entry for it, so a phase cannot certify its own delivery |
 
 ## Reproduction
-`set x, y to 1, 2` (was `ParserError: Expected 'to' but got Comma`) now prints `1` then `2`. `import math.sqrt as s` remains `ParserError: Unexpected token Dot`, which is the Not Implemented arm recorded in `docs/GRAMMAR.md` § 3.1.
+`set x, y to 1, 2` (was `ParserError: Expected 'to' but got Comma`) now prints `1` then `2`. `import math.sqrt as s` is refused with `ParserError: Dotted imports are not implemented; use 'import name' or 'import name as alias'`, which is the Not Implemented arm recorded in `docs/GRAMMAR.md` § 3.1.
 
 ## Tests added
 | Test | Edge class covered |
@@ -30,6 +30,8 @@
 | multiple_assignment_evaluates_before_binding | nesting/state: swap reads both right-hand sides first |
 | multiple_assignment_agrees_with_the_bytecode_vm | nesting: tree VM and bytecode VM agree on the swap |
 | edge_a_constant_target_fails_the_same_way_on_both_vms | failure path: a caught constant refusal leaves the same binding on both VMs |
+| edge_two_constant_targets_name_the_same_target_on_both_vms | failure path: with two constant targets, both engines name the same refused target |
+| edge_the_phase_under_review_is_not_added_to_this_files_list | audit boundary: the pipeline's in-flight phase is covered without the phase editing its own allowlist |
 | edge_a_module_files_multiple_assignment_binds_every_name | module boundary: a file module's `set a, b to 1, 2` binds both names for the importer through the analyzer and loader |
 | edge_trailing_comma_in_names_is_refused | malformed input: trailing comma in names |
 | edge_trailing_comma_in_values_is_refused | malformed input: trailing comma in values |
@@ -55,12 +57,16 @@
 | edge_a_module_files_multiple_assignment_binds_every_name_on_the_bytecode_vm | bytecode import path: a module's multiple assignment survives `compile_module` and binds both names |
 | edge_a_modules_multiple_assignment_binds_in_the_vms_reverse_order | module loader boundary: a failed constant collision leaves nothing bound on either VM |
 | edge_a_failed_import_binds_nothing | import atomicity: a later declaration's failure rolls back the earlier declaration on both VMs |
-| runtime::module_binding_order_tests::edge_module_bindings_try_a_multiple_assignments_targets_in_reverse | module loader boundary: the loader attempts `b` before the refused `a` |
+| runtime::module_binding_order_tests::edge_module_bindings_try_a_multiple_assignments_targets_in_reverse | module loader boundary: the loader checks `b` and `a` in reverse, refuses before writing, and leaves nothing bound |
 | edge_multiple_assignment_round_trips_and_passes_format_check | formatter round trip: output re-parses and `rb format --check` passes |
 | edge_a_multiple_assignment_tracks_every_name_and_every_value (linter) | linter: every left name is tracked and every right expression is read |
 | edge_a_question_refuses_a_statement_and_names_the_keyword (introspect) | introspection: `set a, b to …` is named as a `set` statement |
 | edge_a_body_is_walked_in_source_order_and_stops_at_its_end (introspect) | introspection: both values of a multiple assignment are walked |
 | val_bytes_covers_a_multiple_assignment_function_body (weight) | session weight: both names and both values are counted |
+| edge_dotted_import_names_the_unsupported_form | failure assertion: dotted import error names the unsupported form and carries a span |
+| edge_dotted_import_without_alias_names_the_unsupported_form | failure assertion: no-alias dotted import gets the same explanation |
+| edge_a_dotted_import_after_a_plain_one_is_refused | failure assertion: a dotted member in a multi-import is refused where it is written |
+| edge_multiple_assignment_binds_empty_values | empty: empty list, `nothing`, and empty text all bind |
 
 ## Review follow-ups (round 2)
 - The pre-existing `tests/tooling_grammar_test.rs` binding test is an LSP token
@@ -102,12 +108,45 @@
   while the VM test now asserts that a failed import rolls back instead of
   leaving the earlier target behind.
 
+## Why import atomicity is in this phase
+The new statement is a multi-target store, so every path that binds a
+module's declarations has to make the same all-or-nothing decision about it. The
+tree VM's assignment path, the bytecode `STORE` run, and `module_bindings` are
+those paths; leaving the third with a partial binding would make
+`set a, b to …` mean one thing in a program and another in the same declarations
+written in a module. The import transaction is therefore the mechanism that
+keeps this phase's new statement correct at the module boundary, not a general
+import refactor added for its own sake. It is narrowly scoped to the writes an
+import makes (the `ImportUndo` variants name exactly the tables a module can
+touch), and the tree VM keeps its caller-side snapshot as a second line of
+defence.
+
+## Review follow-ups (round 5 — review findings)
+- The tree VM now pre-checks a multiple assignment's constant targets in the
+  same reverse order the bytecode VM stores them, and
+  `edge_two_constant_targets_name_the_same_target_on_both_vms` pins that both
+  engines name `b` when both targets are constants.
+- `module_bindings` now calls a new `ModuleLoader::check_bind` for every target
+  before binding any of them, so the loader itself is atomic; the runtime unit
+  test asserts the reverse check order and that no bind was attempted. The
+  trait and function docs no longer claim atomicity that only the caller's
+  snapshot provided.
+- The import-atomicity scope is justified above rather than split out of this
+  phase, because the phase's own multi-target statement is what exposed the
+  module-loader path's partial binding.
+- The phase no longer adds its own `resume phase-114:` prefix to the
+  acknowledgement list. The audit reads the in-flight phase from the pipeline's
+  `RBOPS_PHASE` (or the delivery commit at `HEAD` in a plain `cargo test`), and
+  a new test refuses a checked-in entry for the phase under review.
+- `docs/GRAMMAR.md` now spells the comma-separated multi-import production
+  (`import files, math as m`) instead of only the single-item form.
+
 ## Gates
 | Gate | Result |
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | pass — 3119 passed, 0 failed |
+| cargo test --all-targets | pass — 3128 passed, 0 failed |
 | ../rbops/verify.sh phase-114 | pass |
 
 ## Invariants touched
