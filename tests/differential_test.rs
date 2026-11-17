@@ -698,18 +698,18 @@ fn edge_a_column_is_compared_exactly_wherever_both_engines_can_name_one() {
     );
 }
 
-/// The `else if` the phase's summary claimed does not exist.
+/// The `else if` chain both `SPEC.md` and `docs/GRAMMAR.md` document.
 ///
-/// `SPEC.md:353` and `docs/GRAMMAR.md:206` both write `else if` as part of an
-/// `if`, and **neither engine parses it**: every corpus program that writes one
-/// is recorded as a `ParserError`, so the claimed `if/else if/else` coverage was
-/// `if/else` with three refusals counted as successes. Rather than claim a form
-/// the corpus does not hold, this measures both halves — the two-arm `else` that
-/// works, and the `else if` that does not, pinned on both engines — so a day when
-/// `else if` parses, this test says so instead of the summary quietly becoming
-/// true.
+/// This test used to assert the opposite: `else if` was written by three corpus
+/// programs and **neither engine parsed it**, so the golden files recorded three
+/// `ParserError`s and the claimed `if/else if/else` coverage was `if/else` with
+/// three refusals counted as successes. Phase-112 gave the chain a real parser
+/// arm, so the same three programs must now complete, agree with their refreshed
+/// goldens, and agree between the two engines. The two-arm `else` coverage the
+/// old assertion also measured is kept below, because a fix for `else if` must
+/// not disturb the form it extends.
 #[test]
-fn edge_the_control_flow_family_covers_the_if_else_it_has_and_pins_the_else_if_it_does_not() {
+fn edge_the_control_flow_family_covers_if_else_and_the_else_if_chain() {
     let mut with_else = 0usize;
     let mut with_else_if = Vec::new();
     for path in corpus::corpus() {
@@ -717,25 +717,25 @@ fn edge_the_control_flow_family_covers_the_if_else_it_has_and_pins_the_else_if_i
         let expected = corpus::expectation(&path).unwrap_or_else(|e| panic!("{e}"));
         if source.contains("else if") {
             with_else_if.push(path.clone());
-            assert_eq!(
-                expected.label,
-                "ParserError",
-                "{}: `else if` parses now, so its golden and the coverage claim \
-                 both need revisiting rather than a passing test",
+            assert!(
+                !expected.must_fail(),
+                "{}: `else if` is part of the grammar now, so this program must \
+                 complete rather than record a {}",
                 path.display(),
+                expected.label,
             );
-            // Both engines: a refusal is a property of the language, not of one
+            // Both engines: the chain is a property of the language, not of one
             // of them.
             for (engine, outcome) in [
                 ("tree-walking VM", vm::tree_walk(&source)),
                 ("bytecode VM", vm::bytecode(&source)),
             ] {
-                assert_eq!(
-                    outcome.label(),
-                    Some("ParserError"),
-                    "{engine}: {} does not refuse an `else if`",
-                    path.display(),
-                );
+                corpus::compare(&path, &outcome, &expected).unwrap_or_else(|e| {
+                    panic!(
+                        "{engine}: {} disagrees with its golden:\n{e}",
+                        path.display()
+                    )
+                });
             }
         } else if !expected.must_fail() && source.contains("else\n") {
             with_else += 1;
@@ -743,8 +743,7 @@ fn edge_the_control_flow_family_covers_the_if_else_it_has_and_pins_the_else_if_i
     }
     assert!(
         with_else_if.len() >= 3,
-        "only {} corpus program(s) write an `else if`; the refusal is the only \
-         coverage there is of it",
+        "only {} corpus program(s) write an `else if`; the chain needs coverage",
         with_else_if.len(),
     );
     assert!(
@@ -752,6 +751,84 @@ fn edge_the_control_flow_family_covers_the_if_else_it_has_and_pins_the_else_if_i
         "only {with_else} corpus programs run an `if`/`else` that takes its \
          `else` branch; the two-arm form is the one the family really covers",
     );
+}
+
+/// Every arm of an `else if` chain, on both engines.
+///
+/// The corpus covers one middle arm per program; this walks the whole chain so
+/// a fix that makes the first arm win, or that drops the trailing `else`, is
+/// caught rather than passing on one fixture.
+#[test]
+fn edge_an_else_if_chain_picks_every_arm_on_both_engines() {
+    for (n, expected) in [(1, "one"), (2, "two"), (3, "three"), (4, "other")] {
+        let source = format!(
+            "set hit to \"none\"\n\
+             set n to {n}\n\
+             if n is 1 then\n    set hit to \"one\"\n\
+             else if n is 2 then\n    set hit to \"two\"\n\
+             else if n is 3 then\n    set hit to \"three\"\n\
+             else\n    set hit to \"other\"\n\
+             end\n\
+             say hit\n"
+        );
+        for (engine, outcome) in [
+            ("tree-walking VM", vm::tree_walk(&source)),
+            ("bytecode VM", vm::bytecode(&source)),
+        ] {
+            assert_eq!(
+                outcome.output,
+                vec![expected.to_string()],
+                "{engine}: n = {n} must print {expected:?}"
+            );
+            assert_eq!(
+                outcome.result,
+                Ok(Typed::Nothing),
+                "{engine}: n = {n} must complete"
+            );
+        }
+    }
+}
+
+/// A malformed `else if` is a refusal on both engines, not a crash.
+#[test]
+fn edge_else_if_with_a_missing_then_is_a_parser_error_on_both_engines() {
+    let source = "if no then\n    say \"a\"\nelse if yes\n    say \"b\"\nend\n";
+    let result = redblue::run_source(source);
+    assert!(
+        result.is_err(),
+        "`else if` with no `then` must be a clean parser failure"
+    );
+    for (engine, outcome) in [
+        ("tree-walking VM", vm::tree_walk(source)),
+        ("bytecode VM", vm::bytecode(source)),
+    ] {
+        assert_eq!(
+            outcome.label(),
+            Some("ParserError"),
+            "{engine}: a missing `then` must be a ParserError"
+        );
+    }
+}
+
+/// A missing `end` and a dangling `else` are the same clean refusal.
+#[test]
+fn edge_else_if_missing_end_and_dangling_else_are_parser_errors() {
+    for source in [
+        "if no then\n    say \"a\"\nelse if yes then\n    say \"b\"\n",
+        "if yes then\n    say \"a\"\nelse\n",
+    ] {
+        let result = redblue::run_source(source);
+        assert!(
+            result.is_err(),
+            "{source:?} must fail rather than run half a chain"
+        );
+        let outcome = vm::tree_walk(source);
+        assert_eq!(
+            outcome.label(),
+            Some("ParserError"),
+            "{source:?} must be a ParserError, not a panic or a wrong run"
+        );
+    }
 }
 
 /// `break` and `skip` leave the loop they are written in, on **both** engines.

@@ -140,9 +140,9 @@ set data to nothing
 
 ### Conditional Logic
 ```redblue
-if temperature is greater than 30
+if temperature is greater than 30 then
     say "It's hot!"
-else if temperature is less than 10
+else if temperature is less than 10 then
     say "It's cold!"
 else
     say "It's comfortable"

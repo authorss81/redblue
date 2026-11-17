@@ -319,27 +319,7 @@ impl Formatter {
                 then_branch,
                 else_branch,
             } => {
-                self.write("if ");
-                self.format_expression(condition);
-                // `then` is not optional to the parser.
-                self.write(" then");
-                self.open_line(stmt.span.line);
-                let closed_by = self.format_block(then_branch);
-
-                // An `else` the source wrote is written back even when its branch
-                // holds nothing. Dropping it because the branch is empty loses
-                // the comment the author put at the end of that line — with the
-                // keyword gone there is nothing for `// …` to trail, and
-                // `write_keyword_line("end")` re-attached it as `end // …`, a
-                // note about the else branch attached to the line that closed
-                // the whole `if`. The keyword on the line closing this branch is
-                // what says the author wrote one.
-                if closed_by == Some(TokenKind::Else) || !else_branch.is_empty() {
-                    self.write_keyword_line("else");
-                    self.newline();
-                    self.format_block(else_branch);
-                }
-                self.write_keyword_line("end");
+                self.format_if(stmt.span.line, condition, then_branch, else_branch);
             }
             Statement::Unless { condition, body } => {
                 self.write("unless ");
@@ -611,6 +591,71 @@ impl Formatter {
                 self.format_expression(expr);
             }
         }
+    }
+
+    /// Writes an `if` and its arms, leaving the first line's indentation to the
+    /// caller.
+    ///
+    /// The parser models an `else if` arm as a single nested `Statement::If` in
+    /// `else_branch`. Writing that through [`Formatter::format_block`] would
+    /// put the `else` on its own line, indent the arm and close it with its own
+    /// `end` — turning the chain `SPEC.md` documents back into the two-`end`
+    /// nested form. When the nested `if` begins on the same line as the `else`,
+    /// the source wrote a chain arm, so it is written as `else if …` and the
+    /// chain's one `end` is left to the outermost arm.
+    ///
+    /// An `if` that begins on a later line is the nested-statement form, and is
+    /// still written by [`Formatter::format_block`] with its own `end`.
+    fn format_if(
+        &mut self,
+        line: usize,
+        condition: &Expr,
+        then_branch: &[Stmt],
+        else_branch: &[Stmt],
+    ) {
+        self.write("if ");
+        self.format_expression(condition);
+        // `then` is not optional to the parser.
+        self.write(" then");
+        self.open_line(line);
+        let closed_by = self.format_block(then_branch);
+
+        let chain = match else_branch {
+            [Stmt {
+                span,
+                statement:
+                    Statement::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    },
+            }] if closed_by == Some(TokenKind::Else) && span.line == self.last_line => {
+                Some((span.line, condition, then_branch, else_branch))
+            }
+            _ => None,
+        };
+
+        if let Some((arm_line, condition, then_branch, else_branch)) = chain {
+            self.write_indent();
+            self.write("else ");
+            self.format_if(arm_line, condition, then_branch, else_branch);
+            return;
+        }
+
+        // An `else` the source wrote is written back even when its branch
+        // holds nothing. Dropping it because the branch is empty loses
+        // the comment the author put at the end of that line — with the
+        // keyword gone there is nothing for `// …` to trail, and
+        // `write_keyword_line("end")` re-attached it as `end // …`, a
+        // note about the else branch attached to the line that closed
+        // the whole `if`. The keyword on the line closing this branch is
+        // what says the author wrote one.
+        if closed_by == Some(TokenKind::Else) || !else_branch.is_empty() {
+            self.write_keyword_line("else");
+            self.newline();
+            self.format_block(else_branch);
+        }
+        self.write_keyword_line("end");
     }
 
     /// Writes a block's statements, each on its own line, indented one level,
