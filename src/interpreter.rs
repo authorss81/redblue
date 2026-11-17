@@ -330,6 +330,44 @@ pub struct CallContext {
     pub(crate) objects: HashMap<String, ObjectType>,
 }
 
+/// One write an `import` made, with what the table held before it.
+///
+/// A failed import has to leave the importing program exactly as it found it,
+/// and the tables it writes can be large. Recording the one key each write
+/// touched is how that is done without cloning every table around every
+/// import: [`Vm::import_undo_log`] is replayed backwards to put the old values
+/// back.
+enum ImportUndo {
+    Global {
+        name: String,
+        previous: Option<Value>,
+    },
+    Constant {
+        name: String,
+        was_bound: bool,
+    },
+    Module {
+        name: String,
+        previous: Option<Arc<Program>>,
+    },
+    ModuleAlias {
+        name: String,
+        previous: Option<String>,
+    },
+    DeclaredModule {
+        name: String,
+        previous: Option<DeclaredModule>,
+    },
+    QualifiedMember {
+        name: String,
+        was_published: bool,
+    },
+    Object {
+        name: String,
+        previous: Option<ObjectType>,
+    },
+}
+
 pub struct Vm {
     globals: HashMap<String, Value>,
     /// The names bound by a `constant` declaration. The value lives in
@@ -400,6 +438,16 @@ pub struct Vm {
     /// reaches itself through an `import` is a circular import, and this is
     /// what says so instead of walking the cycle.
     importing: Vec<String>,
+    /// The writes an import in progress has made, oldest first.
+    ///
+    /// Empty unless an import is running. Nested imports append to the same
+    /// log; [`Vm::import_marks`] says where each one began, so a failed inner
+    /// import rolls back only its own writes while an outer one can still roll
+    /// back everything when it fails later.
+    import_undo_log: Vec<ImportUndo>,
+    /// The length of [`Vm::import_undo_log`] when each running import began,
+    /// outermost first.
+    import_marks: Vec<usize>,
     /// How many `module` bodies are running. Above zero a `set` writes into the
     /// module's own scope instead of becoming a global, which is what makes a
     /// module declaration a boundary rather than a sequence of top-level
@@ -674,13 +722,50 @@ pub(crate) fn module_bound_names(root: &Path, pinned: Option<&str>, name: &str) 
         return Vec::new();
     };
 
-    redblue_parser::module_body(&ast)
-        .iter()
-        .filter_map(|stmt| match &stmt.statement {
-            Statement::Set { name, .. } | Statement::Constant { name, .. } => Some(name.clone()),
-            _ => None,
-        })
-        .collect()
+    let mut names = Vec::new();
+    for stmt in redblue_parser::module_body(&ast) {
+        match &stmt.statement {
+            Statement::Set { name, .. } | Statement::Constant { name, .. } => {
+                names.push(name.clone())
+            }
+            Statement::SetMultiple { names: bound, .. } => names.extend(bound.iter().cloned()),
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Binds a module's declarations into a [`Vm`] while [`runtime::module_bindings`]
+/// reads them.
+///
+/// It exists so a module's declarations bind through the same refusal as a
+/// `set` or `constant` written in the importing program. The VM snapshots the
+/// target globals and constants around the whole module, so a declaration
+/// that fails later does not leave the earlier ones bound.
+struct VmModuleLoader<'a> {
+    vm: &'a mut Vm,
+}
+
+impl runtime::ModuleLoader for VmModuleLoader<'_> {
+    fn evaluate(&mut self, expression: &Expr) -> Result<Value> {
+        self.vm.evaluate(expression)
+    }
+
+    fn check_bind(&self, name: &str, is_constant: bool) -> Result<()> {
+        if is_constant {
+            self.vm.refuse_duplicate_constant(name)
+        } else {
+            self.vm.refuse_constant_rebind(name)
+        }
+    }
+
+    fn bind(&mut self, name: &str, value: Value, is_constant: bool) -> Result<()> {
+        if is_constant {
+            self.vm.bind_constant(name, value)
+        } else {
+            self.vm.bind_module_name(name, value)
+        }
+    }
 }
 
 impl Vm {
@@ -725,6 +810,8 @@ impl Vm {
             root: root.to_path_buf(),
             pins: crate::manifest::Pins::for_running(root),
             importing: Vec::new(),
+            import_undo_log: Vec::new(),
+            import_marks: Vec::new(),
             module_depth: 0,
             builtin_names: stdlib::builtins().keys().cloned().collect(),
             asking_a_question: false,
@@ -1243,8 +1330,9 @@ impl Vm {
     /// are mangled names and which are a program's own.
     fn publish_member(&mut self, module: &str, member: &str, value: Value) {
         let name = qualified_member(module, member);
+        self.record_qualified_member(&name);
         self.context.qualified_members.insert(name.clone());
-        self.globals.insert(name, value);
+        self.set_global(name, value);
     }
 
     /// Whether `name` is a module member this VM published from a module a
@@ -1470,26 +1558,28 @@ impl Vm {
             return Ok(());
         }
 
+        // An import is one unit: a module that fails part way through must not
+        // leave the declarations it already bound behind. Every write below
+        // records the key it touched in `import_undo_log`, so a failure replays
+        // exactly those writes in reverse instead of copying every table the
+        // importing program owns.
+        self.begin_import();
+
         self.importing.push(name.to_string());
         let program = match runtime::module_program(path) {
             Ok(program) => program,
             Err(error) => {
                 self.importing.pop();
+                self.rollback_import();
                 return Err(error);
             }
         };
-        let bound = match runtime::module_bindings(&program, |expr| self.evaluate(expr)) {
-            Ok(bound) => bound,
-            Err(error) => {
+        {
+            let mut loader = VmModuleLoader { vm: self };
+            if let Err(error) = runtime::module_bindings(&program, &mut loader) {
                 self.importing.pop();
+                self.rollback_import();
                 return Err(error);
-            }
-        };
-        for (name, value, is_const) in bound {
-            if is_const {
-                self.bind_constant(&name, value)?;
-            } else {
-                self.bind_module_name(&name, value)?;
             }
         }
         self.importing.pop();
@@ -1524,12 +1614,15 @@ impl Vm {
         }
         self.pop_scope();
         if let Some(error) = failure {
+            self.rollback_import();
             return Err(error);
         }
 
+        self.record_module(name);
         self.context
             .modules
             .insert(name.to_string(), Arc::new(program));
+        self.commit_import();
         Ok(())
     }
 
@@ -1614,6 +1707,7 @@ impl Vm {
         // Registered before the body runs, so an `import` of this module from
         // inside its own body is a circular import rather than a second
         // declaration or a miss.
+        self.record_declared_module(name);
         self.context
             .declared_modules
             .insert(name.to_string(), DeclaredModule::default());
@@ -1669,6 +1763,7 @@ impl Vm {
         self.importing.pop();
 
         if let Some(error) = failure {
+            self.record_declared_module(name);
             self.context.declared_modules.remove(name);
             return Err(error);
         }
@@ -1678,17 +1773,18 @@ impl Vm {
             // declared` and a later `import` of it with a module that published
             // nothing. The bytecode VM drops it for the same reason on the way
             // out of an abrupt exit.
+            self.record_declared_module(name);
             self.context.declared_modules.remove(name);
             return Ok(Value::Nothing);
         }
 
+        self.record_declared_module(name);
         self.context
             .declared_modules
             .insert(name.to_string(), DeclaredModule { members });
-        self.context
-            .module_aliases
-            .entry(name.to_string())
-            .or_insert_with(|| name.to_string());
+        if !self.context.module_aliases.contains_key(name) {
+            self.set_module_alias(name.to_string(), name.to_string());
+        }
         Ok(Value::Nothing)
     }
 
@@ -1827,6 +1923,172 @@ impl Vm {
         self.globals.get(name)
     }
 
+    // -- rolling an import back ------------------------------------------------
+
+    /// Starts recording writes for an import.
+    fn begin_import(&mut self) {
+        self.import_marks.push(self.import_undo_log.len());
+    }
+
+    /// Keeps the writes an import made, because it succeeded.
+    ///
+    /// The entries of an inner import stay in the log while an outer one is
+    /// still running: if the outer import later fails, its rollback has to undo
+    /// the inner import too. Once no import is running the log is emptied.
+    fn commit_import(&mut self) {
+        let Some(mark) = self.import_marks.pop() else {
+            return;
+        };
+        if self.import_marks.is_empty() {
+            self.import_undo_log.truncate(mark);
+        }
+    }
+
+    /// Puts back every table an import wrote, newest write first.
+    fn rollback_import(&mut self) {
+        let Some(mark) = self.import_marks.pop() else {
+            return;
+        };
+        while self.import_undo_log.len() > mark {
+            let Some(undo) = self.import_undo_log.pop() else {
+                break;
+            };
+            match undo {
+                ImportUndo::Global { name, previous } => match previous {
+                    Some(value) => {
+                        self.globals.insert(name, value);
+                    }
+                    None => {
+                        self.globals.remove(&name);
+                    }
+                },
+                ImportUndo::Constant { name, was_bound } => {
+                    if was_bound {
+                        self.constants.insert(name);
+                    } else {
+                        self.constants.remove(&name);
+                    }
+                }
+                ImportUndo::Module { name, previous } => match previous {
+                    Some(program) => {
+                        self.context.modules.insert(name, program);
+                    }
+                    None => {
+                        self.context.modules.remove(&name);
+                    }
+                },
+                ImportUndo::ModuleAlias { name, previous } => match previous {
+                    Some(alias) => {
+                        self.context.module_aliases.insert(name, alias);
+                    }
+                    None => {
+                        self.context.module_aliases.remove(&name);
+                    }
+                },
+                ImportUndo::DeclaredModule { name, previous } => match previous {
+                    Some(module) => {
+                        self.context.declared_modules.insert(name, module);
+                    }
+                    None => {
+                        self.context.declared_modules.remove(&name);
+                    }
+                },
+                ImportUndo::QualifiedMember {
+                    name,
+                    was_published,
+                } => {
+                    if was_published {
+                        self.context.qualified_members.insert(name);
+                    } else {
+                        self.context.qualified_members.remove(&name);
+                    }
+                }
+                ImportUndo::Object { name, previous } => match previous {
+                    Some(object) => {
+                        self.context.objects.insert(name, object);
+                    }
+                    None => {
+                        self.context.objects.remove(&name);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Records the value `name` had before a write lands on it.
+    ///
+    /// A no-op outside an import, so an ordinary `set` pays one empty check and
+    /// no allocation.
+    fn record_global(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::Global {
+            name: name.to_string(),
+            previous: self.globals.get(name).cloned(),
+        });
+    }
+
+    fn set_global(&mut self, name: String, value: Value) {
+        self.record_global(&name);
+        self.globals.insert(name, value);
+    }
+
+    fn record_module(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::Module {
+            name: name.to_string(),
+            previous: self.context.modules.get(name).cloned(),
+        });
+    }
+
+    fn record_module_alias(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::ModuleAlias {
+            name: name.to_string(),
+            previous: self.context.module_aliases.get(name).cloned(),
+        });
+    }
+
+    fn set_module_alias(&mut self, name: String, alias: String) {
+        self.record_module_alias(&name);
+        self.context.module_aliases.insert(name, alias);
+    }
+
+    fn record_declared_module(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::DeclaredModule {
+            name: name.to_string(),
+            previous: self.context.declared_modules.get(name).cloned(),
+        });
+    }
+
+    fn record_qualified_member(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::QualifiedMember {
+            name: name.to_string(),
+            was_published: self.context.qualified_members.contains(name),
+        });
+    }
+
+    fn record_object(&mut self, name: &str) {
+        if self.import_marks.is_empty() {
+            return;
+        }
+        self.import_undo_log.push(ImportUndo::Object {
+            name: name.to_string(),
+            previous: self.context.objects.get(name).cloned(),
+        });
+    }
+
     /// Binds `name` to `value` as a constant, refusing a second declaration of
     /// a name that already holds one.
     ///
@@ -1836,12 +2098,14 @@ impl Vm {
     /// declaration leaves the first binding in place, so a module that
     /// declares the same name twice keeps the value it had.
     fn bind_constant(&mut self, name: &str, value: Value) -> Result<()> {
-        if !self.constants.insert(name.to_string()) {
-            return Err(Error::Runtime(
-                format!("Constant '{name}' is already declared"),
-                self.span(),
-            ));
+        self.refuse_duplicate_constant(name)?;
+        if !self.import_marks.is_empty() {
+            self.import_undo_log.push(ImportUndo::Constant {
+                name: name.to_string(),
+                was_bound: false,
+            });
         }
+        self.constants.insert(name.to_string());
         // A constant declared inside a call lands in the globals, exactly as a
         // `set` that reaches a global does — and, exactly as that `set` does,
         // it belongs to the frame that wrote it as far as `.locals` is
@@ -1849,7 +2113,19 @@ impl Vm {
         if let Some(writes) = self.frame_writes.last_mut() {
             writes.insert(name.to_string());
         }
-        self.globals.insert(name.to_string(), value);
+        self.set_global(name.to_string(), value);
+        Ok(())
+    }
+
+    /// The refusal [`Vm::bind_constant`] gives, split out so a module loader can
+    /// ask before it writes anything.
+    fn refuse_duplicate_constant(&self, name: &str) -> Result<()> {
+        if self.constants.contains(name) {
+            return Err(Error::Runtime(
+                format!("Constant '{name}' is already declared"),
+                self.span(),
+            ));
+        }
         Ok(())
     }
 
@@ -1893,7 +2169,7 @@ impl Vm {
     /// capture the module's binding for the length of that scope.
     fn bind_module_name(&mut self, name: &str, value: Value) -> Result<()> {
         self.refuse_constant_rebind(name)?;
-        self.globals.insert(name.to_string(), value);
+        self.set_global(name.to_string(), value);
         Ok(())
     }
 
@@ -1923,7 +2199,7 @@ impl Vm {
         if let Some(writes) = self.frame_writes.last_mut() {
             writes.insert(name.to_string());
         }
-        self.globals.insert(name.to_string(), value);
+        self.set_global(name.to_string(), value);
         Ok(())
     }
 
@@ -2096,6 +2372,40 @@ impl Vm {
             Statement::Set { name, value } => {
                 let val = self.evaluate(value)?;
                 self.set_var(name, val)?;
+                Ok(Value::Nothing)
+            }
+            Statement::SetMultiple { names, values } => {
+                let mut evaluated = Vec::with_capacity(values.len());
+                for value in values {
+                    evaluated.push(self.evaluate(value)?);
+                }
+                // Check every target before writing any of them. A constant
+                // among the names refuses the whole statement, not the run of
+                // names that happens to come after it in store order, so a
+                // caught failure leaves no name of this statement bound.
+                //
+                // The check runs in the same reverse order the bytecode VM's
+                // `STORE` run uses below, so when more than one target is a
+                // constant both engines name the same one.
+                for name in names.iter().rev() {
+                    if !self
+                        .locals
+                        .iter()
+                        .rev()
+                        .any(|scope| scope.contains_key(name))
+                        && self.module_depth == 0
+                    {
+                        self.refuse_constant_rebind(name)?;
+                    }
+                }
+                // The bytecode compiler emits one `STORE` per name in reverse,
+                // because the operand stack holds the values in source order and
+                // a `STORE` takes the top one. Binding in the same order here
+                // keeps the two engines' store order identical; the pre-check
+                // above is what makes a failure leave nothing behind.
+                for (name, val) in names.iter().rev().zip(evaluated.into_iter().rev()) {
+                    self.set_var(name, val)?;
+                }
                 Ok(Value::Nothing)
             }
             Statement::Constant { name, value } => {
@@ -2432,17 +2742,14 @@ impl Vm {
                     let target_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
                     // The alias is a name for the module, so a call through it
                     // reaches the module it names.
-                    self.context
-                        .module_aliases
-                        .insert(target_name.clone(), item.name.clone());
+                    self.set_module_alias(target_name.clone(), item.name.clone());
                     // The module's own name names it too — `import json as J`
                     // leaves `json.parse` working — unless the program has bound
                     // that name already, which is the shadowing rule every
                     // declaration in the language follows.
-                    self.context
-                        .module_aliases
-                        .entry(item.name.clone())
-                        .or_insert_with(|| item.name.clone());
+                    if !self.context.module_aliases.contains_key(&item.name) {
+                        self.set_module_alias(item.name.clone(), item.name.clone());
+                    }
 
                     // A module this program declared has no file to read, so
                     // its published members are copied to the alias's own
@@ -3108,6 +3415,7 @@ impl Vm {
             }
         }
 
+        self.record_object(name);
         self.context.objects.insert(
             name.to_string(),
             ObjectType {

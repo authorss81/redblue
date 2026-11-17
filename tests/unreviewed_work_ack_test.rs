@@ -91,14 +91,16 @@
 //! [`edge_a_delivery_subject_of_another_phase_is_not_acknowledged_by_the_rule`]
 //! says so.
 //!
-//! The phase **under review** is on that list too, and that is the correction
-//! this file needed: the pipeline re-creates its delivery commit exactly like
-//! the other phases', so a SHA written by the phase that produced the work is
-//! stale on the next round — and the new `HEAD` is unacknowledged. There is no
-//! SHA the phase can write that survives, so the subject is the only stable
-//! handle. What must not happen is a *SHA-pinned* delivery entry:
+//! The phase **under review** is acknowledged by that rule too, but its prefix
+//! is supplied by the pipeline (`RBOPS_PHASE`) rather than written into the
+//! checked-in list by the phase that produced the work. A phase that edits the
+//! list governing its own delivery is certifying itself; the harness appending
+//! the in-flight phase keeps that decision outside the phase's diff. What must
+//! not happen is a *SHA-pinned* delivery entry:
 //! [`edge_the_phase_under_review_delivery_is_acknowledged_by_subject_not_a_stale_sha`]
-//! requires the subject rule and refuses the stale SHA.
+//! requires the subject rule and refuses the stale SHA, and
+//! [`edge_the_phase_under_review_is_not_added_to_this_files_list`] refuses the
+//! phase's own prefix in the list.
 //!
 //! # What makes the list data rather than a comment
 //!
@@ -118,7 +120,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Commits acknowledged as carrying unreviewed work, each with the reason it is
@@ -235,13 +237,21 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
 /// handle, so the phase under review is on this rule too. See
 /// [`edge_the_phase_under_review_delivery_is_acknowledged_by_subject_not_a_stale_sha`].
 ///
-/// **Every in-flight phase**, so there is one prefix per phase. The pipeline
-/// keeps one recovery branch per phase and re-creates that phase's delivery
-/// commit on top of the current `main` on every round: phase-073's benchmark
-/// harness, phase-084's reviewer-permission work, phase-063's REPL printing
-/// trio, phase-088's value assertions, and phase-096's date and duration values
-/// are all in this history, arrived in a delivery commit, and none of their
-/// delivery commits' SHAs are knowable while the work is being written.
+/// The phase under review is not written into this list by its own diff:
+/// [`phase_under_review`] reads the pipeline's `RBOPS_PHASE` (falling back to
+/// the delivery commit at `HEAD` for a plain `cargo test`) and appends that
+/// prefix, while [`edge_the_phase_under_review_is_not_added_to_this_files_list`]
+/// refuses a checked-in entry for it. The harness owns the in-flight prefix, so
+/// the phase under review cannot acknowledge itself.
+///
+/// **Every other in-flight phase**, so there is one prefix per phase here. The
+/// pipeline keeps one recovery branch per phase and re-creates that phase's
+/// delivery commit on top of the current `main` on every round: phase-073's
+/// benchmark harness, phase-084's reviewer-permission work, phase-063's REPL
+/// printing trio, phase-088's value assertions, and phase-096's date and
+/// duration values are all in this history, arrived in a delivery commit, and
+/// none of their delivery commits' SHAs are knowable while the work is being
+/// written.
 const DELIVERY_SUBJECT_PREFIXES: &[&str] = &[
     "resume phase-077:",
     "resume phase-076:",
@@ -849,25 +859,59 @@ fn is_unreviewed_subject(subject: &str) -> bool {
     lower.contains("checkpoint") || lower.contains("resume phase-")
 }
 
-/// Is this the delivery commit of a phase whose work is in flight?
+/// The phase named by a properly shaped delivery subject, if the subject has
+/// that shape.
 ///
-/// A prefix test on [`DELIVERY_SUBJECT_PREFIXES`], so it matches the two shapes
-/// the pipeline writes for those phases and nothing else.
-fn is_delivery_subject(subject: &str) -> bool {
-    DELIVERY_SUBJECT_PREFIXES
-        .iter()
-        .any(|prefix| subject.starts_with(prefix))
-}
-
-/// The phase named by a delivery subject, if the subject has that shape.
-///
-/// Used to identify the phase whose delivery commit is at `HEAD`, so the audit
-/// can refuse a prefix that phase added for itself. Returns `None` for any
-/// other subject, including a reviewed commit.
+/// Both halves matter: the subject must name a phase, and the words after the
+/// colon must be one of the two delivery shapes the pipeline writes. A commit
+/// that merely begins `resume phase-NNN:` is unreviewed work, not a delivery
+/// commit whose contents may be trusted by its prefix.
 fn delivery_phase(subject: &str) -> Option<&str> {
     let rest = subject.strip_prefix("resume ")?;
-    let (phase, _) = rest.split_once(':')?;
-    phase.starts_with("phase-").then_some(phase)
+    let (phase, reason) = rest.split_once(':')?;
+    if !phase.starts_with("phase-") {
+        return None;
+    }
+    let reason = reason.strip_prefix(" adopt ")?;
+    matches!(reason, "preserved work" | "WIP checkpoint").then_some(phase)
+}
+
+/// The phase whose delivery commit the pipeline is rebuilding right now.
+///
+/// The pipeline exports `RBOPS_PHASE` for the run. Reading it here is what
+/// keeps the in-flight prefix out of the phase's own diff: the harness appends
+/// it, the phase does not. A plain `cargo test` outside the pipeline falls back
+/// to the delivery commit at `HEAD`, which is the same phase when the pipeline
+/// created one; when neither source names a phase there is no delivery commit
+/// to acknowledge and the rule adds nothing.
+fn phase_under_review() -> Option<&'static str> {
+    static PHASE: OnceLock<Option<String>> = OnceLock::new();
+    PHASE
+        .get_or_init(|| {
+            if let Ok(phase) = std::env::var("RBOPS_PHASE") {
+                let phase = phase.trim();
+                if phase.starts_with("phase-") {
+                    return Some(phase.to_string());
+                }
+            }
+            let head = git(&["log", "-1", "--format=%s", "HEAD"]).ok()?;
+            delivery_phase(head.trim()).map(str::to_string)
+        })
+        .as_deref()
+}
+
+/// Is this the delivery commit of a phase whose work is in flight?
+///
+/// A prefix test on [`DELIVERY_SUBJECT_PREFIXES`] *or* the pipeline's
+/// [`phase_under_review`], *and* a shape test on the whole subject, so an
+/// unrelated commit that starts with a covered phase's prefix is still
+/// unreviewed work.
+fn is_delivery_subject(subject: &str) -> bool {
+    let Some(phase) = delivery_phase(subject) else {
+        return false;
+    };
+    let prefix = format!("resume {phase}:");
+    DELIVERY_SUBJECT_PREFIXES.contains(&prefix.as_str()) || phase_under_review() == Some(phase)
 }
 
 /// The delivery commits in `log`, resolved by subject, each with the reason it
@@ -1965,10 +2009,11 @@ fn edge_the_phase_under_review_delivery_is_acknowledged_by_subject_not_a_stale_s
 
     let prefix = format!("resume {phase}:");
     assert!(
-        DELIVERY_SUBJECT_PREFIXES.contains(&prefix.as_str()),
+        is_delivery_subject(subject),
         "the delivery commit {sha} at HEAD ({subject:?}) is re-created by the pipeline on every \
          round, so it must be acknowledged by the subject rule {prefix:?} rather than by a SHA \
-         written before delivery."
+         written before delivery. The phase under review comes from RBOPS_PHASE or HEAD, not from \
+         a checked-in entry for this phase."
     );
     assert!(
         !ACKNOWLEDGED.iter().any(|(entry, _)| *entry == sha),
@@ -2020,6 +2065,70 @@ fn edge_the_delivery_rule_covers_each_phase_in_flight_and_no_other() {
         result.unreviewed.len(),
         1,
         "a phase that is not in flight is still unreviewed work"
+    );
+}
+
+/// An `edge_*` case: a covered phase's prefix does not acknowledge an unrelated
+/// commit that merely starts with it.
+///
+/// The prefix is necessary but not sufficient. Covering the phase at `HEAD`
+/// because its delivery commit begins that way must not also let
+/// `resume phase-NNN: change something unrelated` through as reviewed delivery
+/// work: the shape after the colon has to be one the pipeline writes.
+#[test]
+fn edge_a_listed_prefix_does_not_cover_an_unrelated_subject_for_the_phase_at_head() {
+    let head = git(&["log", "-1", "--format=%H%x09%s", "HEAD"])
+        .expect("HEAD's delivery commit must be readable");
+    let (_, subject) = parse_log_line(head.trim(), 1).expect("HEAD must be a well-formed log line");
+    let Some(phase) = delivery_phase(subject) else {
+        return;
+    };
+
+    assert!(
+        is_delivery_subject(&format!("resume {phase}: adopt preserved work")),
+        "the phase at HEAD should still recognise the shape the pipeline writes"
+    );
+    assert!(
+        is_delivery_subject(&format!("resume {phase}: adopt WIP checkpoint")),
+        "the phase at HEAD should still recognise the timed-out delivery shape"
+    );
+    assert!(
+        !is_delivery_subject(&format!("resume {phase}: change something unrelated")),
+        "a covered prefix must not cover a subject that is not a delivery commit"
+    );
+    assert_eq!(
+        delivery_phase(&format!("resume {phase}: change something unrelated")),
+        None,
+        "a delivery subject has one of the pipeline's two shapes after the colon"
+    );
+}
+
+/// An `edge_*` case: the phase under review is acknowledged by the pipeline's
+/// in-flight prefix, not by an entry this phase wrote into the list itself.
+///
+/// A phase that adds its own prefix to [`DELIVERY_SUBJECT_PREFIXES`] would
+/// certify its own unreviewed delivery. The prefix comes from `RBOPS_PHASE`
+/// (or the delivery commit at `HEAD`), so the checked-in list must not carry
+/// it; only the harness may append it.
+#[test]
+fn edge_the_phase_under_review_is_not_added_to_this_files_list() {
+    let Some(phase) = phase_under_review() else {
+        return;
+    };
+    let prefix = format!("resume {phase}:");
+
+    assert!(
+        !DELIVERY_SUBJECT_PREFIXES.contains(&prefix.as_str()),
+        "{prefix:?} is the phase under review's own delivery prefix. It must come from the \
+         pipeline's RBOPS_PHASE, not from an entry the phase adds to the list it is judged by."
+    );
+    assert!(
+        is_delivery_subject(&format!("{prefix} adopt preserved work")),
+        "the pipeline's in-flight phase should be covered by the rule without a checked-in entry"
+    );
+    assert!(
+        is_delivery_subject(&format!("{prefix} adopt WIP checkpoint")),
+        "the timed-out delivery shape should be covered the same way"
     );
 }
 
