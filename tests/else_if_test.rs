@@ -320,3 +320,74 @@ fn edge_a_chain_deeper_than_the_block_budget_is_a_spanned_parser_error() {
         "a chain past the block budget must be a clean depth error, got {message:?}"
     );
 }
+
+#[test]
+fn edge_else_if_chain_inside_a_function_picks_its_arm() {
+    for (n, expected) in [(0, "zero"), (-2, "negative"), (1, "one"), (9, "many")] {
+        let source = format!(
+            "to classify(n)\n\
+                 set label to \"none\"\n\
+                 if n is 0 then\n        set label to \"zero\"\n\
+                 else if n < 0 then\n        set label to \"negative\"\n\
+                 else if n is 1 then\n        set label to \"one\"\n\
+                 else\n        set label to \"many\"\n\
+                 end\n\
+                 give back label\n\
+             end\n\
+             set hit to classify({n})\n"
+        );
+        assert_eq!(
+            branch_taken_by(&source),
+            expected,
+            "an `else if` chain in a function body must pick {expected:?} for n = {n}"
+        );
+    }
+}
+
+#[test]
+fn edge_else_if_with_no_condition_is_a_spanned_parser_error() {
+    let result = lex_and_parse("if no then\n    say \"a\"\nelse if then\n    say \"b\"\nend\n");
+    assert!(
+        result.is_err(),
+        "an `else if` with no condition must be refused, not parsed as an empty condition"
+    );
+    let message = assert_spanned_parser_error(&result.expect_err("missing condition must fail"));
+    assert!(
+        message.contains("then") || message.contains("Unexpected token"),
+        "the error must name the token where the condition should be, got {message:?}"
+    );
+}
+
+#[test]
+fn edge_else_if_chain_survives_crlf_line_endings() {
+    let source = "set hit to \"none\"\r\n\
+                  if no then\r\n    set hit to \"a\"\r\n\
+                  else if yes then\r\n    set hit to \"b\"\r\n\
+                  else\r\n    set hit to \"c\"\r\n\
+                  end\r\n";
+    assert_eq!(
+        branch_taken_by(source),
+        "b",
+        "a same-line `else if` chain must still parse when every line ends in CRLF"
+    );
+}
+
+#[test]
+fn edge_else_if_compound_conditions_choose_the_first_matching_arm() {
+    for (n, expected) in [(5, "small"), (20, "medium"), (-1, "negative")] {
+        let source = format!(
+            "set hit to \"none\"\n\
+             set n to {n}\n\
+             if n < 0 then\n    set hit to \"negative\"\n\
+             else if n > 0 and n < 10 then\n    set hit to \"small\"\n\
+             else if n > 10 or n is 10 then\n    set hit to \"medium\"\n\
+             else\n    set hit to \"other\"\n\
+             end\n"
+        );
+        assert_eq!(
+            branch_taken_by(&source),
+            expected,
+            "compound conditions must pick {expected:?} for n = {n}"
+        );
+    }
+}

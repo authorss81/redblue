@@ -14,10 +14,11 @@ A newline between the words still means an ordinary nested `if` in the `else`
 body, which keeps the change backwards compatible. The Redblue bootstrap compiler
 had the same defect and is fixed in the same way.
 
-This resumed run kept the preserved implementation, re-ran every gate, corrected
-the report's measured line counts, and added the `resume phase-112:` delivery
-prefix the acknowledgement audit requires; full test coverage was already in the
-tree and was re-run rather than rewritten.
+The implementation and the original 14 targeted tests were preserved from the
+interrupted attempt. This resumed run re-ran every gate, added four further
+edge tests (function scope, CRLF line endings, compound conditions, and an
+`else if` with no condition), and corrected the report's measured test count;
+the preserved tests were re-run rather than rewritten.
 
 | File | Lines | What |
 |---|---|---|
@@ -29,7 +30,7 @@ tree and was re-run rather than rewritten.
 | `tests/common/generator.rs` | +6 −5 | Comment updated: the three chain programs are now runnable, not refusals |
 | `tests/differential_test.rs` | +101 −24 | The old `else if` refusal test is deliberately replaced by one that asserts the three corpus chains parse, complete, match their goldens, and agree on both engines; adds both-engine arm and malformed-input tests |
 | `tests/bootstrap_selfhost_test.rs` | +57 −13 | New stage-1/stage-2 byte-identity test for `else if` chains, including the 63-arm 64-block boundary; corpus acceptance counts corrected from 315/9 to 318/6 |
-| `tests/else_if_test.rs` | +322 | 14 targeted tests: branches, trailing `else`, empty arm, loops, nesting, malformed shapes, both engines, block budget |
+| `tests/else_if_test.rs` | +393 | 18 targeted tests: branches, trailing `else`, empty arm, loops, nesting, malformed shapes, both engines, block budget, function scope, CRLF, compound conditions, missing condition |
 | `tests/unreviewed_work_ack_test.rs` | +1 −0 | Adds the `resume phase-112:` delivery-subject prefix so this phase's rebuildable delivery commit is acknowledged by the rule rather than reported as unreviewed work |
 | `SPEC.md`, `PHILOSOPHY.md` | +11 −6 | Worked `if`/`else if`/`else` examples now include the required `then`, matching the parser and `docs/GRAMMAR.md` |
 | `docs/GRAMMAR.md` | +4 −0 | States the same-line rule the parser enforces: `else if` starts an arm on the same line and shares the chain's one `end`; the newline form is a nested `if` with its own `end` |
@@ -68,9 +69,9 @@ control-flow-0005: c
 
 ## Tests added
 
-14 new `#[test]` functions in `tests/else_if_test.rs`, 3 new `#[test]`
-functions in `tests/differential_test.rs`, 2 new `#[test]` functions in
-`tests/formatter_test.rs`, and 1 new `#[test]` in
+18 new `#[test]` functions in `tests/else_if_test.rs` (14 preserved, 4 added in
+this run), 3 new `#[test]` functions in `tests/differential_test.rs`, 2 new
+`#[test]` functions in `tests/formatter_test.rs`, and 1 new `#[test]` in
 `tests/bootstrap_selfhost_test.rs`. One existing parser unit test and one existing
 differential test were updated deliberately because they asserted the old
 behaviour; neither was deleted or weakened.
@@ -91,6 +92,10 @@ behaviour; neither was deleted or weakened.
 | `edge_else_if_missing_end_is_a_spanned_parser_error` | **asserts a failure**: missing `end` |
 | `edge_else_with_nothing_after_it_is_a_spanned_parser_error` | **asserts a failure**: dangling `else` |
 | `edge_a_chain_deeper_than_the_block_budget_is_a_spanned_parser_error` | resource limit: chain past 64 blocks is an error, not a panic |
+| `edge_else_if_chain_inside_a_function_picks_its_arm` | nesting/scope: the chain selects every arm inside a named function |
+| `edge_else_if_with_no_condition_is_a_spanned_parser_error` | **asserts a failure**: `else if then` is a spanned parser error naming the token |
+| `edge_else_if_chain_survives_crlf_line_endings` | malformed_input: every line ending is CRLF |
+| `edge_else_if_compound_conditions_choose_the_first_matching_arm` | boundary: `and`/`or` conditions select the first matching arm |
 | `edge_an_else_if_chain_picks_every_arm_on_both_engines` (differential) | every arm of a three-arm chain on both VMs |
 | `edge_else_if_with_a_missing_then_is_a_parser_error_on_both_engines` (differential) | **asserts a failure** with `is_err()` on both engines |
 | `edge_else_if_missing_end_and_dangling_else_are_parser_errors` (differential) | **asserts a failure** for two malformed shapes |
@@ -118,7 +123,7 @@ Updated deliberately:
 | unicode | N/A — no lexing or text handling changed; the unicode corpus family is unchanged and green |
 | nesting_recursion | **covered** — nested `if` inside an arm, arms inside `for`/`while`/`repeat`, block budget |
 | duplicate_missing_keys | N/A — no record construction or field access changed |
-| malformed_input | **covered** — missing `then`, missing `end`, `else` with nothing after it |
+| malformed_input | **covered** — missing condition, missing `then`, missing `end`, `else` with nothing after it, and a chain whose lines end in CRLF |
 | resource_limit | **covered** — a chain past `MAX_BLOCK_DEPTH` is a spanned `ParserError`; the bootstrap compiler passes each arm's own `depth`, so a 63-arm chain is accepted on the 64-block boundary by both engines |
 
 ## Gates
@@ -129,14 +134,14 @@ Run in this checkout, this run.
 |---|---|
 | `cargo fmt --all -- --check` | **pass** — exit 0, no output |
 | `cargo clippy --all-targets -- -D warnings` | **pass** — exit 0, no warnings |
-| `cargo test --all-targets` | **pass** — 3081 passed, 0 failed across 86 test binaries |
-| `../rbops/verify.sh phase-112` | **pass** — see verifier output |
+| `cargo test --all-targets` | **pass** — 3085 passed, 0 failed across 86 test binaries |
+| `../rbops/verify.sh phase-112` | **pass** — all checks green; see verifier output |
 
 `verify.sh` also printed one non-failing honesty warning: the pipeline's
-`../phases/phase-112/REPORT.md` still claimed 1820 passing, so the verifier saw
-this phase as under-claiming (1820 reported, 3081 actual). That copy is outside
-this checkout and is not writable from this run; this report, in the checkout,
-records the measured 3081/0.
+`../phases/phase-112/REPORT.md` (outside this checkout and not writable from
+this run) still claims 3081 passing, so the verifier saw this phase as
+under-claiming (3081 reported, 3085 actual). This report, in the checkout,
+records the measured 3085/0.
 
 ## Invariants touched
 
