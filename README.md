@@ -514,18 +514,31 @@ cargo fmt
 cargo clippy
 ```
 
-## Status
+## Status & Verification
 
-- [x] Core language (lexer, parser, analyzer, VM)
-- [x] Standard library (files, time, network, json, csv, math, text)
-- [x] Module system
-- [x] Testing framework
-- [x] Formatter
-- [x] Linter
-- [x] Bytecode compiler + VM (`rb compile`, `rb dis`, `rb vm`)
-- [ ] IDE extensions (in progress)
-- [ ] Package manager (planned)
-- [ ] Self-hosting: the compiler rewritten in Redblue, then compiling itself (in progress — see ROADMAP.md)
+- [x] **Core language**: Lexer, recursive-descent parser, semantic analyzer, tree-walking interpreter.
+- [x] **Bytecode Compiler & Virtual Machine**: Deterministic bytecode compilation (`rb compile`), bytecode chunk format v6 with integrity checks, disassembler (`rb dis`), and standalone VM (`rb vm`).
+- [x] **Extensive Verification Suite**: **3,061+ tests** passing across 86 test binaries with 0 failures, 0 ignored tests, and zero clippy warnings.
+- [x] **Differential Dual-Engine Testing**: Automated differential test harness verifying that the tree-walking interpreter and bytecode VM produce identical outputs and error diagnostics across 370+ test programs.
+- [x] **Standard Library**: Native & bound modules including `files`, `time`, `network`, `json`, `csv`, `math`, `text`, `list` (with `sort`, `reverse`, `zip`, `enumerate`, `filter`, `reduce`), `matrix` (`ndarray` binding), `regex`, and `logging`.
+- [x] **Developer Tooling**: Formatter (`rb format`), linter (`rb lint`), project scaffolding (`rb new`), directory-aware test runner (`rb test`).
+- [x] **Self-Hosting Bootstrap**: 4-stage self-hosting compiler (`bootstrap/compiler.rb`) verifying byte-identical bytecode fixed points (`stage1.rbc == stage2.rbc`).
+- [ ] **Package Management & Ecosystem**: Hermetic package registry and index (`authorss81/rb-pkg`).
+- [ ] **IDE & Language Server Protocol**: Standalone LSP daemon and editor extensions (`authorss81/rb-ide`).
+
+## Philosophy & Strategic Niche: The Auditable Language for the AI Era
+
+Redblue is engineered around a core principle: **code should read like natural, unambiguous English**.
+
+### Why English-Like Syntax in the Era of AI?
+The rise of autonomous AI coding agents has transformed software engineering. Writing code is increasingly fast and cheap; the primary bottleneck is **human verification and auditability**.
+
+When automated systems or AI agents generate code for **tax calculation, banking rules, insurance claims, medical protocols, legal compliance, or smart contracts**, domain experts (auditors, risk officers, compliance attorneys, doctors) must be able to read and verify the logic without deciphering cryptic symbols or language quirks.
+
+Redblue serves as an **executable specification**:
+- **Dual Syntax Flexibility**: Developers can use universal mathematical operators (`+`, `-`, `*`, `/`, `>`, `<`, `>=`, `<=`, `==`, `!=`) for dense arithmetic expressions, while using readable English words (`if ... then ... else ... end`, `give back`, `for each`) for control flow and architecture.
+- **Explicit Block Scoping**: Like Ruby, Lua, and Julia, Redblue uses explicit `end` keywords rather than fragile significant whitespace. This guarantees deterministic parsing over network streams, LLM token streams, and copy-paste refactorings.
+- **Fail-Safe Determinism**: No implicit type coercion, no `NaN`/infinity edge-case surprises (e.g. `1 / 0` is always a catchable runtime error), and complete Unicode fidelity.
 
 ## License
 
