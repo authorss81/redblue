@@ -733,6 +733,7 @@ impl Parser {
     fn parse_set(&mut self) -> Result<Option<Statement>> {
         self.advance(); // consume 'set'
 
+        let name_span = self.span();
         let name = match self.current() {
             Some(Token {
                 kind: TokenKind::Identifier(name),
@@ -799,11 +800,14 @@ impl Parser {
         }) = self.current()
         {
             let mut names = vec![name];
+            let mut name_spans = vec![name_span];
+            let mut last_comma = self.span();
             while let Some(Token {
                 kind: TokenKind::Comma,
                 ..
             }) = self.current()
             {
+                last_comma = self.span();
                 self.advance();
                 match self.current() {
                     Some(Token {
@@ -811,8 +815,10 @@ impl Parser {
                         ..
                     }) => {
                         let n = name.clone();
+                        let span = self.span();
                         self.advance();
                         names.push(n);
+                        name_spans.push(span);
                     }
                     _ => {
                         return Err(Error::Parser(
@@ -830,6 +836,7 @@ impl Parser {
                 ..
             }) = self.current()
             {
+                last_comma = self.span();
                 self.advance();
                 values.push(self.parse_expression()?);
             }
@@ -841,16 +848,16 @@ impl Parser {
                         names.len(),
                         values.len()
                     ),
-                    self.span(),
+                    last_comma,
                 ));
             }
 
             let mut seen = std::collections::HashSet::new();
-            for name in &names {
+            for (name, span) in names.iter().zip(&name_spans) {
                 if !seen.insert(name) {
                     return Err(Error::Parser(
                         format!("Multiple assignment declares '{}' more than once", name),
-                        self.span(),
+                        *span,
                     ));
                 }
             }
@@ -871,18 +878,20 @@ impl Parser {
         }) = self.current()
         {
             let mut values = 1;
+            let mut last_comma = self.span();
             while let Some(Token {
                 kind: TokenKind::Comma,
                 ..
             }) = self.current()
             {
+                last_comma = self.span();
                 self.advance();
                 self.parse_expression()?;
                 values += 1;
             }
             return Err(Error::Parser(
-                format!("Multiple assignment has 1 name but {values} values"),
-                self.span(),
+                format!("A set with 1 name cannot take {values} values"),
+                last_comma,
             ));
         }
 
@@ -4064,7 +4073,35 @@ mod tests {
     #[test]
     fn edge_multiple_assignment_arity_mismatch_is_a_parser_error() {
         let tokens = Lexer::tokenize("set x, y to 1").expect("the source should lex");
-        assert!(matches!(parse(tokens), Err(Error::Parser(_, _))));
+        match parse(tokens) {
+            Err(Error::Parser(message, span)) => {
+                assert!(message.contains("2 names but 1 values"));
+                assert_eq!(
+                    span,
+                    Span::new(1, 6),
+                    "the arity error should point at the comma that separates the names"
+                );
+            }
+            other => panic!("expected a parser error, got {other:?}"),
+        }
+    }
+
+    /// A repeated name is reported where it is written, not at the token after
+    /// the whole statement.
+    #[test]
+    fn edge_a_duplicate_multiple_assignment_name_points_at_the_repeat() {
+        let tokens = Lexer::tokenize("set x, x to 1, 2").expect("the source should lex");
+        match parse(tokens) {
+            Err(Error::Parser(message, span)) => {
+                assert!(message.contains("declares 'x' more than once"));
+                assert_eq!(
+                    span,
+                    Span::new(1, 8),
+                    "the duplicate-name error should point at the repeated name"
+                );
+            }
+            other => panic!("expected a parser error, got {other:?}"),
+        }
     }
 
     #[test]

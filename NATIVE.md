@@ -40,9 +40,9 @@ components it would consume, with the reason each is or is not reusable.
 | Chunk, block, instruction and constant types | `src/bytecode/format.rs:244` (`Chunk`), `src/bytecode/format.rs:222` (`Block`), `src/bytecode/format.rs:158` (`Instruction`), `src/bytecode/format.rs:111` (`Constant`) | **Yes.** This is the in-memory IR a backend would translate. |
 | Encoder and decoder | `src/bytecode/format.rs:290` (`encode`), `src/bytecode/format.rs:308` (`decode`), version at `src/bytecode/format.rs:81` | **Yes, but should be left alone for the first backend.** The decoder is strict about the version and refuses anything it does not know. |
 | Disassembler | `src/bytecode/disasm.rs:102` (`render`), `src/bytecode/disasm.rs:35` (`render_compact`) | **Yes.** It is a pure function of a chunk and is useful for differential testing the backend's input. |
-| Bytecode VM | `src/bytecode/vm.rs:685` (`BytecodeVm`), `src/bytecode/vm.rs:1094` (`run`), `src/bytecode/vm.rs:3427` (`call_function`) | **Yes as the semantic oracle, not as the code generator.** The native backend must agree with it instruction for instruction and error for error. |
-| Tree-walking VM | `src/interpreter.rs:333` (`Vm`), `src/interpreter.rs:1699` (`run`), `src/interpreter.rs:1790` (captured locals) | **Yes as the second oracle.** It is the language's reference behaviour. |
-| Runtime operations | `src/runtime.rs:219` (`binary_op`), `src/runtime.rs:166` (`index`), `src/runtime.rs:107` (`property`), `src/runtime.rs:3271` (`builtin`) | **Partly.** Native code can call these through a runtime ABI, but calling one per operation is the slow path the backend is supposed to remove. |
+| Bytecode VM | `src/bytecode/vm.rs:741` (`BytecodeVm`), `src/bytecode/vm.rs:1163` (`run`), `src/bytecode/vm.rs:3764` (`call_function`) | **Yes as the semantic oracle, not as the code generator.** The native backend must agree with it instruction for instruction and error for error. |
+| Tree-walking VM | `src/interpreter.rs:371` (`Vm`), `src/interpreter.rs:1783` (`run`), `src/interpreter.rs:1874` (captured locals) | **Yes as the second oracle.** It is the language's reference behaviour. |
+| Runtime operations | `src/runtime.rs:288` (`binary_op`), `src/runtime.rs:235` (`index`), `src/runtime.rs:176` (`property`), `src/runtime.rs:3340` (`builtin`) | **Partly.** Native code can call these through a runtime ABI, but calling one per operation is the slow path the backend is supposed to remove. |
 | Value model | `src/value.rs:387` (`Value`), `src/value.rs:21` (`Fields`), `src/value.rs:37` (`Captured`), `src/value.rs:48` (`FunctionBody`), `src/value.rs:85` (`FunctionValue`), `src/value.rs:470` (`Shared<T> = Arc<T>`) | **Only with a runtime contract.** Dynamic tags, `f64` numbers, shared lists/records, captured scope maps and function bodies all need a native representation or a call into Rust. |
 | Standard library | `src/stdlib.rs:520` (`builtins`) | **Yes through the same runtime boundary.** Reimplementing it in native code would duplicate behaviour and drift. |
 | Self-hosted compiler and fixed point | `docs/BOOTSTRAP.md:16` (S3), `docs/BOOTSTRAP.md:17` (S4) | **Yes as the acceptance corpus.** A native backend that runs `stage1.rbc` must still produce the same `stage2.rbc` bytes. |
@@ -67,7 +67,7 @@ A realistic first backend has this pipeline:
    and edges.
 3. **Lower the operand stack to SSA or virtual registers.** Every opcode has a
    documented stack effect; the existing VM interprets it with an operand stack
-   (`src/bytecode/vm.rs:1094`). A backend needs stack-to-SSA conversion and
+   (`src/bytecode/vm.rs:1163`). A backend needs stack-to-SSA conversion and
    liveness.
 4. **Resolve names, or accept hash lookups.** The compiler emits names on
    purpose (`src/bytecode/codegen.rs:7`). The VM resolves them against captured
@@ -81,7 +81,7 @@ A realistic first backend has this pipeline:
    same line number, same step-budget point, same catchability, same record order,
    same Unicode handling.
 7. **Add an execution command and a differential test.** The cheapest proof is
-   that the native path and `src/bytecode/vm.rs:1094` produce identical output
+   that the native path and `src/bytecode/vm.rs:1163` produce identical output
    and identical failures over `corpus/` (370 programs as of this study),
    `examples/` (7 programs), `modules/`, and `bootstrap/compiler.rb`.
 
@@ -109,7 +109,7 @@ bounds the gain.
 The bytecode deliberately carries names (`src/bytecode/codegen.rs:7`). A
 function value captures a `Vec<IndexMap<String, Value>>` of whole lexical scopes
 (`src/value.rs:37`, `src/value.rs:85`), and the tree-walker clones the live locals when it
-declares a function (`src/interpreter.rs:1790`). The VM resolves a `LOAD` by
+declares a function (`src/interpreter.rs:1874`). The VM resolves a `LOAD` by
 name against those maps.
 
 **Cost:** a native backend either keeps a hash lookup per variable access, which
@@ -122,7 +122,7 @@ language documents.
 ### 3. The IR is stack bytecode, not SSA, and jumps are block-local
 
 The VM is a stack machine with explicit frames, operand stacks, loop sites and
-handler stacks (`src/bytecode/vm.rs:685`, `src/bytecode/vm.rs:1094`). Bytecode instructions carry
+handler stacks (`src/bytecode/vm.rs:741`, `src/bytecode/vm.rs:1163`). Bytecode instructions carry
 jump targets that are valid only inside their own block.
 
 **Cost:** the backend needs a real CFG builder, stack-height analysis, SSA
@@ -134,7 +134,7 @@ control-flow bugs will live.
 ### 4. The runtime is Rust and the boundary is undefined
 
 Arithmetic, indexing, property access and builtins live in Rust
-(`src/runtime.rs:219`, `src/runtime.rs:166`, `src/runtime.rs:107`, `src/runtime.rs:3271`), and the standard library is a
+(`src/runtime.rs:288`, `src/runtime.rs:235`, `src/runtime.rs:176`, `src/runtime.rs:3340`), and the standard library is a
 large `HashMap` of builtins (`src/stdlib.rs:520`). A native program cannot call
 those functions directly without an ABI: argument passing, ownership, error
 representation, panic boundaries, and the thread or stack on which the runtime
@@ -150,7 +150,7 @@ builtins. That is where the design effort goes, not into instruction selection.
 Redblue promises exact error kinds and messages, catchable runtime failures,
 `finally` ordering, `might fail`, record insertion order, deterministic
 disassembly, and resource limits. The bytecode VM already charges one step per
-statement (`src/bytecode/vm.rs:1304`) so both engines stop at the same point.
+statement (`src/bytecode/vm.rs:1373`) so both engines stop at the same point.
 The self-hosted fixed point is byte-for-byte (`docs/BOOTSTRAP.md:16`).
 
 **Cost:** the native backend must instrument statement boundaries or prove it

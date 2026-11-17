@@ -221,6 +221,43 @@ give back x
     );
 }
 
+/// A constant among the *first* targets is refused before any name is written,
+/// not after the names later in store order have already been bound. This is
+/// the order the reverse-store path is easiest to get wrong in: a caught
+/// failure must leave `y` unbound as well as leaving `x` at its constant.
+#[test]
+fn edge_a_constant_first_target_leaves_no_later_name_bound() {
+    let source = "\
+constant x to 5
+try
+    set x, y to 1, 2
+catch error
+    set caught to yes
+end
+set result to 0
+try
+    set result to y
+catch error
+    set result to 0
+end
+give back result
+";
+    assert_eq!(
+        eval(source),
+        number("0"),
+        "the tree VM must not bind `y` when the first target is a constant"
+    );
+
+    let chunk = redblue::bytecode::compile_source(source).expect("source should compile");
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    let result = vm.run(&chunk).expect("compiled source should run");
+    assert_eq!(
+        result,
+        number("0"),
+        "the bytecode VM must roll back `y` when the first target is a constant"
+    );
+}
+
 /// A scratch directory of its own under `target/tmp`, so this test's module
 /// cannot be another test's.
 #[track_caller]
@@ -289,10 +326,46 @@ fn edge_a_module_files_multiple_assignment_binds_every_name_on_the_bytecode_vm()
     );
 }
 
-/// The module loader is the third binding path, and it must write a multiple
-/// assignment's names in the same reverse order as both VMs. With a constant
-/// among the targets, `b` is written before the refused `a`, so a caught import
-/// failure leaves `b` bound on every path.
+/// A module's later declaration reads a name an earlier declaration of the
+/// same module bound. This is the ordering `module_bindings` exists to keep,
+/// and both the tree VM's loader and the bytecode import path must keep it.
+#[test]
+fn edge_a_module_later_declaration_reads_an_earlier_multiple_assignment() {
+    let dir = scratch_dir("module-multiple-assignment-order");
+    std::fs::create_dir_all(dir.join("modules"))
+        .expect("the modules directory should be creatable");
+    std::fs::write(
+        dir.join("modules/Ordered.rb"),
+        "set a, b to 1, 2
+set c to a + b
+",
+    )
+    .expect("the module file should be writable");
+
+    let source = "import Ordered\ngive back c\n";
+    let walked = redblue::run_source_value_in(source, &dir)
+        .unwrap_or_else(|error| panic!("the tree VM should run, failed with {error:?}"));
+    assert_eq!(
+        walked,
+        number("3"),
+        "the module's later declaration should read both names the earlier one bound"
+    );
+
+    let chunk = bytecode_chunk_in(source, &dir);
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new_in(&dir);
+    let compiled = vm
+        .run(&chunk)
+        .unwrap_or_else(|error| panic!("the bytecode VM should run, failed with {error:?}"));
+    assert_eq!(
+        compiled, walked,
+        "the bytecode import path should bind the module's declarations in source order too"
+    );
+}
+
+/// A module loader writes a multiple assignment's names in the same reverse
+/// order as both VMs, but an import is atomic. With a constant among the
+/// targets, `b` is attempted before the refused `a`, yet a caught import failure
+/// leaves neither name bound on either VM.
 #[test]
 fn edge_a_modules_multiple_assignment_binds_in_the_vms_reverse_order() {
     let dir = scratch_dir("module-multiple-assignment-constant-order");
@@ -308,14 +381,20 @@ try
 catch error
     set caught to yes
 end
-give back b
+set result to 0
+try
+    set result to b
+catch error
+    set result to 0
+end
+give back result
 ";
     let walked = redblue::run_source_value_in(source, &dir)
         .unwrap_or_else(|error| panic!("the tree VM should run, failed with {error:?}"));
     assert_eq!(
         walked,
-        number("2"),
-        "the loader should write `b` before refusing the constant `a`, as the inline statement does"
+        number("0"),
+        "a failed import should leave no name bound on the tree VM"
     );
 
     let chunk = bytecode_chunk_in(source, &dir);
@@ -325,7 +404,53 @@ give back b
         .unwrap_or_else(|error| panic!("the bytecode VM should run, failed with {error:?}"));
     assert_eq!(
         compiled, walked,
-        "the loader and the bytecode VM must leave the same bindings behind"
+        "the loader and the bytecode VM must roll back a failed import the same way"
+    );
+}
+
+/// An import is one unit: a module whose second declaration errors must not
+/// leave the first declaration bound after the failure is caught.
+#[test]
+fn edge_a_failed_import_binds_nothing() {
+    let dir = scratch_dir("module-failed-import-atomic");
+    std::fs::create_dir_all(dir.join("modules"))
+        .expect("the modules directory should be creatable");
+    std::fs::write(
+        dir.join("modules/Failed.rb"),
+        "set first to 1\nset second to missing_name\n",
+    )
+    .expect("the module file should be writable");
+
+    let source = "\
+try
+    import Failed
+catch error
+    set caught to yes
+end
+set result to 0
+try
+    set result to first
+catch error
+    set result to 0
+end
+give back result
+";
+    let walked = redblue::run_source_value_in(source, &dir)
+        .unwrap_or_else(|error| panic!("the tree VM should run, failed with {error:?}"));
+    assert_eq!(
+        walked,
+        number("0"),
+        "the first declaration must not survive a later declaration's failure"
+    );
+
+    let chunk = bytecode_chunk_in(source, &dir);
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new_in(&dir);
+    let compiled = vm
+        .run(&chunk)
+        .unwrap_or_else(|error| panic!("the bytecode VM should run, failed with {error:?}"));
+    assert_eq!(
+        compiled, walked,
+        "both VMs should leave a failed import fully unbound"
     );
 }
 
@@ -382,6 +507,37 @@ fn edge_multiple_assignment_missing_value_is_err() {
 #[test]
 fn edge_dotted_import_without_alias_is_err() {
     let result = redblue::run_source_value("import math.sqrt");
+    assert!(result.is_err(), "a dotted import must be a clean error");
+    assert!(
+        matches!(result, Err(Error::Parser(_, _))),
+        "the error should be a Parser error, got {:?}",
+        result
+    );
+}
+
+/// A longer list keeps its source order: name `i` gets value `i`, not the
+/// reverse order the VMs use internally when they store the values.
+#[test]
+fn edge_five_names_bind_in_source_order() {
+    assert_eq!(
+        eval("set a, b, c, d, e to 1, 2, 3, 4, 5\ngive back a * 10000 + b * 1000 + c * 100 + d * 10 + e"),
+        number("12345"),
+        "five names should bind in the order they are written"
+    );
+}
+
+/// The left-hand side is names only. A literal there is a parse failure, not a
+/// name silently dropped.
+#[test]
+fn edge_a_non_name_target_is_a_parser_error() {
+    assert_parser_error("set 1, y to 2, 3");
+}
+
+/// The dotted import is refused at the parser, asserted with `is_err` so the
+/// Not Implemented note in `docs/GRAMMAR.md` is pinned by a failing-path test.
+#[test]
+fn edge_dotted_import_with_alias_is_a_parser_error() {
+    let result = redblue::run_source_value("import math.sqrt as s");
     assert!(result.is_err(), "a dotted import must be a clean error");
     assert!(
         matches!(result, Err(Error::Parser(_, _))),
