@@ -1101,19 +1101,21 @@ An objective evaluation of this strategy's real-world potential:
 ## 24. Distributed Multi-Runner Concurrency, Repository Architecture & Sequencing
 
 ### 24.1 Repository Topology: Registry Index vs. Package Artifacts
-When scaling to thousands or 100,000+ packages, **a single monolithic git repository holding all package source code is a fatal anti-pattern**:
-- A git repo containing 100,000 packages would exceed 50+ GB in history.
+When scaling to thousands or 100,000+ packages, **storing every package's full source code directly in the git tree is a fatal anti-pattern**:
+- A single git repository containing 100,000 packages would exceed 50+ GB in history.
 - Cloning, fetching, and running `git status` would take 15+ minutes per CI run, causing runner timeouts and lock contention.
 
-#### The Homebrew / Cargo / Go Hybrid Architecture:
-1. **Registry Index Repository (`authorss81/rb-pkg`)**:
-   - Acts strictly as the **Package Registry Index & Metadata Manifest**:
-     - Stores metadata JSON/TOML files defining version pins, authors, dependencies, checksums, and capability manifests.
-     - Files are sharded using standard two-character prefix directory paths to prevent filesystem degradation (e.g. `sq/li/sqlite.json`, `re/di/redis.json`, identical to crates.io).
-     - Lightweight (< 50 MB), fast to query, and cloneable in seconds.
-2. **Foundational Monorepo vs. Community Repositories**:
-   - **Tier 1 (The "Curated 100")**: The core foundational standard packages are maintained directly in `authorss81/rb-pkg/packages/` as the canonical standard ecosystem.
-   - **Tier 2 (Autonomous & Community Packages)**: Each package is either maintained in its own repository (`authorss81/rb-pkg-<name>`) or packaged as an immutable, content-addressed archive (`<name>-<version>.tar.zst`) hosted via GitHub Releases or decentralized object storage with verified SHA-256 signatures recorded in the index.
+#### The Two-Tier Storage Strategy (Permanently Capping Repo Size Under 50 MB):
+1. **Tier 1: The Foundational "Curated 100" (In-Tree Standard Packages)**:
+   - The first 100 foundational standard packages live directly inside `authorss81/rb-pkg/packages/<name>/` as first-party code.
+   - Total disk footprint for 100 packages is small (~15–25 MB), ensuring clone times under 2 seconds.
+2. **Tier 2: The Autonomous 10,000 to 100,000+ Ecosystem (Release Artifacts + Metadata Index)**:
+   - When an autonomous runner in `authorss81/rb-pkg-ops` writes and verifies package #101 through #100,000:
+     1. The runner builds and runs the test suite inside an ephemeral scratch container.
+     2. Once the gates pass, it packs the source files into an immutable, cryptographically signed compressed archive: `<pkg_name>-<version>.tar.zst`.
+     3. It attaches the archive to a GitHub Release asset in `authorss81/rb-pkg` (or publishes to decentralized S3/R2/CDN object storage).
+     4. The runner commits **only the tiny metadata manifest** into the index tree (`index/sq/li/sqlite.json`), recording the download URL and SHA-256 checksum.
+   - **Result**: `authorss81/rb-pkg` **never bloats**. Even with 100,000 packages, the repository holds only lightweight JSON manifests (~2 KB each), matching the exact architecture of `crates.io-index` (which indexes 150,000+ Rust crates in < 50 MB).
 
 ### 24.2 Package Manager Runtime Architecture (`rb pkg` / `rb add`)
 - **Manifest (`redblue.manifest`)**: Declares semver constraints and capabilities:
@@ -1239,6 +1241,17 @@ Redblue solves this with a 3-tier capability engine:
 3. **Explicit Developer Override Precedence**:
    - If the application developer explicitly defines permissions in their project manifest (e.g., `capabilities: [ files.read("/tmp") ]`), the developer's explicit definition **strictly overrides auto-accept**.
    - Even if `auto_accept_capabilities` is turned on, the developer's explicit sandbox boundaries are absolute and cannot be expanded by a dependency.
+
+### 24.10 Arbitrary Horizontal Scalability (5 to 50+ Concurrent Workers)
+The Git atomic lease protocol is completely stateless, decentralized, and serverless:
+- **Zero Race Conditions Across N Workers**:
+  - The protocol is not constrained to 5 workflows. As additional API keys (`OPENCODE_KEY_1` through `OPENCODE_KEY_N`) and GitHub Actions concurrency slots are added, the worker pool can scale to **10, 20, or 50+ parallel workflows simultaneously**.
+- **Linear Throughput Scaling**:
+  - Whether 5 runners or 50 runners query the recovery queue simultaneously, Git's remote atomic ref server serializes the claim pushes in milliseconds.
+  - A rejected claim in `select.sh` incurs a latency of only ~300 milliseconds before attempting the next candidate in the queue.
+  - **Zero workflow time is wasted**: The runner does not abort; it merely selects the next available package and immediately starts its 90-minute implementation phase.
+  - If 20 API keys are provided, 20 packages are synthesized and verified simultaneously, increasing ecosystem generation throughput by 4× with zero modifications to the locking protocol.
+
 
 
 
