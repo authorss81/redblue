@@ -613,7 +613,7 @@ fn push_body<'a>(body: &'a [Stmt], _calls: &mut Vec<Call>, pending: &mut Vec<Pen
             | Statement::Return(Some(value))
             | Statement::GiveBack(Some(value)) => pending.push(Pending::Expr(value)),
             Statement::SetMultiple { values, .. } => {
-                pending.extend(values.iter().map(Pending::Expr));
+                pending.extend(values.iter().rev().map(Pending::Expr));
             }
             Statement::ForEach { iterable, body, .. } => {
                 pending.push(Pending::Body(body));
@@ -872,6 +872,7 @@ mod tests {
     fn edge_a_question_refuses_a_statement_and_names_the_keyword() {
         for (code, keyword) in [
             ("set x to 1", "set"),
+            ("set a, b to 1, 2", "set"),
             ("say \"hi\"", "say"),
             ("print \"hi\"", "print"),
             ("import files", "import"),
@@ -1127,6 +1128,11 @@ mod tests {
             members(&statements("set x to [a(), b()]")),
             vec!["a", "b"],
             "and the left-to-right order survives a list literal"
+        );
+        assert_eq!(
+            members(&statements("set left, right to f(), g()")),
+            vec!["f", "g"],
+            "a multiple assignment is walked from both of its values"
         );
 
         // The boundaries: nothing in, nothing out.

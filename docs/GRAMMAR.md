@@ -171,7 +171,6 @@ module           = 'module' identifier
                    'end'
 
 import_statement = 'import' identifier { 'as' identifier }
-                 | 'import' identifier '.' identifier 'as' identifier
 
 export_statement = 'export' identifier { ',' identifier }
                  | 'export' 'all'
@@ -193,7 +192,7 @@ script           = { statement }
 // Variable declaration
 declaration      = 'set' identifier [ ':' type_expression ] 'to' expression
 
-// Multiple assignment
+// Multiple assignment; the name and value lists have equal length and each name appears once
 declaration      = 'set' identifier { ',' identifier } 'to' expression { ',' expression }
 
 // Constant declaration

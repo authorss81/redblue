@@ -653,6 +653,32 @@ mod tests {
         );
     }
 
+    /// A multiple assignment keeps every name on its left and every expression
+    /// on its right, so the weight walk has to count both lists rather than
+    /// only the first name.
+    #[test]
+    fn val_bytes_covers_a_multiple_assignment_function_body() {
+        let empty = function_with_body(FunctionBody::Statements(std::sync::Arc::new(Vec::new())));
+        let body = vec![crate::parser::Stmt {
+            span: crate::error::Span::new(1, 1),
+            statement: crate::parser::Statement::SetMultiple {
+                names: vec!["left".to_string(), "right".to_string()],
+                values: vec![
+                    crate::parser::Expr::Text("hello".to_string()),
+                    crate::parser::Expr::Text("world".to_string()),
+                ],
+            },
+        }];
+        let filled = function_with_body(FunctionBody::Statements(std::sync::Arc::new(body)));
+
+        let added = value_bytes(&filled) - value_bytes(&empty);
+        let carried = "left".len() + "right".len() + "hello".len() + "world".len();
+        assert!(
+            added >= carried,
+            "both names and both values are counted: {added} vs at least {carried}"
+        );
+    }
+
     /// A function body held as a compiled block keeps the whole chunk alive, so
     /// the measurement counts the chunk's encoded bytes and the path that names
     /// the block rather than stopping at the function's name.

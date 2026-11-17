@@ -6,6 +6,8 @@
 //! all right-hand sides are evaluated before any name is written, and a name
 //! count that does not match the value count is refused.
 
+use std::path::{Path, PathBuf};
+
 use redblue::{Error, Value};
 
 /// Runs the whole pipeline on `source` and returns the value of its last
@@ -188,9 +190,202 @@ fn multiple_assignment_agrees_with_the_bytecode_vm() {
     );
 }
 
+/// A constant among the targets is refused by both VMs at the same point: the
+/// names are written in the same order, so a caught failure leaves the same
+/// bindings behind.
+#[test]
+fn edge_a_constant_target_fails_the_same_way_on_both_vms() {
+    let source = "\
+set x to 0
+constant y to 5
+try
+    set x, y to 1, 2
+catch error
+    set handled to yes
+end
+give back x
+";
+    assert_eq!(
+        eval(source),
+        number("0"),
+        "the tree VM should refuse the constant before writing any name after it"
+    );
+
+    let chunk = redblue::bytecode::compile_source(source).expect("source should compile");
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    let result = vm.run(&chunk).expect("compiled source should run");
+    assert_eq!(
+        result,
+        number("0"),
+        "the bytecode VM should leave the same binding behind"
+    );
+}
+
+/// A scratch directory of its own under `target/tmp`, so this test's module
+/// cannot be another test's.
+#[track_caller]
+fn scratch_dir(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/tmp/multiple-assignment-test")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the scratch directory should be creatable");
+    dir
+}
+
+/// Compiles `source` after analysing it against `root`, so imports resolve
+/// against the directory the module file was written to rather than the process
+/// working directory. [`redblue::bytecode::compile_source`] would analyse
+/// against `.` and report the module's names as unknown.
+#[track_caller]
+fn bytecode_chunk_in(source: &str, root: &Path) -> redblue::Chunk {
+    let tokens = redblue::lexer::Lexer::tokenize(source).expect("source should lex");
+    let ast = redblue::parser::parse(tokens).expect("source should parse");
+    redblue::analyzer::analyze_in(&ast, root).expect("source should analyze");
+    redblue::bytecode::compile_program(&ast).expect("source should compile")
+}
+
+/// A module file's `set a, b to ...` binds both names for the importing program,
+/// through the analyzer and through the loader, rather than advertising names
+/// it cannot produce.
+#[test]
+fn edge_a_module_files_multiple_assignment_binds_every_name() {
+    let dir = scratch_dir("module-multiple-assignment");
+    std::fs::create_dir_all(dir.join("modules"))
+        .expect("the modules directory should be creatable");
+    std::fs::write(dir.join("modules/Pair.rb"), "set a, b to 1, 2\n")
+        .expect("the module file should be writable");
+
+    let result = redblue::run_source_value_in("import Pair\ngive back a * 10 + b\n", &dir)
+        .unwrap_or_else(|error| panic!("the importing program should run, failed with {error:?}"));
+    assert_eq!(
+        result,
+        number("12"),
+        "the import should bind both names the module's multiple assignment declares"
+    );
+}
+
+/// The bytecode VM compiles a module file down to the declarations it binds, so
+/// a module's `set a, b to ...` has to survive that filter and bind both names
+/// on the import path as well.
+#[test]
+fn edge_a_module_files_multiple_assignment_binds_every_name_on_the_bytecode_vm() {
+    let dir = scratch_dir("module-multiple-assignment-bytecode");
+    std::fs::create_dir_all(dir.join("modules"))
+        .expect("the modules directory should be creatable");
+    std::fs::write(dir.join("modules/Pair.rb"), "set a, b to 1, 2\n")
+        .expect("the module file should be writable");
+
+    let source = "import Pair\ngive back a * 10 + b\n";
+    let chunk = bytecode_chunk_in(source, &dir);
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new_in(&dir);
+    let result = vm
+        .run(&chunk)
+        .unwrap_or_else(|error| panic!("the importing program should run, failed with {error:?}"));
+    assert_eq!(
+        result,
+        number("12"),
+        "the bytecode import path should bind both names the module declares"
+    );
+}
+
+/// The module loader is the third binding path, and it must write a multiple
+/// assignment's names in the same reverse order as both VMs. With a constant
+/// among the targets, `b` is written before the refused `a`, so a caught import
+/// failure leaves `b` bound on every path.
+#[test]
+fn edge_a_modules_multiple_assignment_binds_in_the_vms_reverse_order() {
+    let dir = scratch_dir("module-multiple-assignment-constant-order");
+    std::fs::create_dir_all(dir.join("modules"))
+        .expect("the modules directory should be creatable");
+    std::fs::write(dir.join("modules/Pair.rb"), "set a, b to 1, 2\n")
+        .expect("the module file should be writable");
+
+    let source = "\
+constant a to 0
+try
+    import Pair
+catch error
+    set caught to yes
+end
+give back b
+";
+    let walked = redblue::run_source_value_in(source, &dir)
+        .unwrap_or_else(|error| panic!("the tree VM should run, failed with {error:?}"));
+    assert_eq!(
+        walked,
+        number("2"),
+        "the loader should write `b` before refusing the constant `a`, as the inline statement does"
+    );
+
+    let chunk = bytecode_chunk_in(source, &dir);
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new_in(&dir);
+    let compiled = vm
+        .run(&chunk)
+        .unwrap_or_else(|error| panic!("the bytecode VM should run, failed with {error:?}"));
+    assert_eq!(
+        compiled, walked,
+        "the loader and the bytecode VM must leave the same bindings behind"
+    );
+}
+
 /// A name repeated on the left has two values that could both win; the grammar
 /// does not define that, so the statement is refused.
 #[test]
 fn edge_duplicate_name_is_refused() {
     assert_parser_error("set x, x to 1, 2");
+}
+
+/// Each right-hand side is a full expression, not a bare literal.
+#[test]
+fn edge_multiple_assignment_values_are_full_expressions() {
+    assert_eq!(
+        eval("set x, y to 1 + 1, 2 * 3\ngive back x * 10 + y"),
+        number("26"),
+        "each right-hand side should be evaluated as an expression"
+    );
+}
+
+/// A name may bind text and another may bind `nothing`; the form does not
+/// restrict the value type.
+#[test]
+fn edge_multiple_assignment_binds_text_and_nothing() {
+    assert_eq!(
+        eval("set a, b to \"hello\", nothing\ngive back a"),
+        Value::Text("hello".to_string()),
+        "a name may bind text"
+    );
+    assert_eq!(
+        eval("set a, b to \"hello\", nothing\ngive back b"),
+        Value::Nothing,
+        "a name may bind nothing"
+    );
+}
+
+/// A missing value on the right is a parser error, asserted directly with
+/// `is_err` rather than only through the helper above.
+#[test]
+fn edge_multiple_assignment_missing_value_is_err() {
+    let result = redblue::run_source_value("set x, y to 1");
+    assert!(
+        result.is_err(),
+        "a missing right-hand side must be a clean error"
+    );
+    assert!(
+        matches!(result, Err(Error::Parser(_, _))),
+        "the error should be a Parser error, got {:?}",
+        result
+    );
+}
+
+/// A dotted import with no alias is refused directly, not silently accepted.
+#[test]
+fn edge_dotted_import_without_alias_is_err() {
+    let result = redblue::run_source_value("import math.sqrt");
+    assert!(result.is_err(), "a dotted import must be a clean error");
+    assert!(
+        matches!(result, Err(Error::Parser(_, _))),
+        "the error should be a Parser error, got {:?}",
+        result
+    );
 }

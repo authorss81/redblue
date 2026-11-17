@@ -338,7 +338,8 @@ pub fn module_body(program: &Program) -> &[Stmt] {
 }
 
 /// The names a module body's top-level statements declare: every `to`
-/// function's, plus every `set` and `constant`.
+/// function's, plus every `set`, `constant`, and name a multiple assignment
+/// binds.
 ///
 /// Read by the VM to decide what `export all` publishes and what an `export`
 /// naming one thing has already found. Takes the body rather than a file so a
@@ -859,6 +860,31 @@ impl Parser {
 
         self.expect(&TokenKind::To)?;
         let value = self.parse_expression()?;
+
+        // A comma here means more right-hand sides were written than the one
+        // name on the left. `set x to 1, 2` is not a multiple assignment (there
+        // is no comma between names), so report the arity mismatch rather than
+        // letting the comma fall through as an unrelated stray token.
+        if let Some(Token {
+            kind: TokenKind::Comma,
+            ..
+        }) = self.current()
+        {
+            let mut values = 1;
+            while let Some(Token {
+                kind: TokenKind::Comma,
+                ..
+            }) = self.current()
+            {
+                self.advance();
+                self.parse_expression()?;
+                values += 1;
+            }
+            return Err(Error::Parser(
+                format!("Multiple assignment has 1 name but {values} values"),
+                self.span(),
+            ));
+        }
 
         Ok(Some(Statement::Set { name, value }))
     }
