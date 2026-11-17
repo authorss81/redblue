@@ -1351,9 +1351,25 @@ end
 // `parse_if_then` again — and a name a Redblue function assigns is one
 // program-wide name, so `parse_if_then_body` would come back holding the
 // *inner* branch and the outer `if` would compile the wrong statements.
+//
+// An `if` on the same line as `else` is the next arm of this chain, not a
+// nested statement in its else body: it shares the one `end` the whole chain
+// closes on. A newline between the words keeps the nested-statement reading.
 to parse_if_else_branch(tokens, pos, depth, line, cond, then_branch)
-    set parse_if_else_branch_tail to parse_block_body(tokens, pos, depth, ["end"])
-    give back parse_if_finish(tokens, parse_if_else_branch_tail[1], line, cond, then_branch, parse_if_else_branch_tail[0])
+    set parse_if_else_branch_after to skip_newlines(tokens, pos)
+    set parse_if_else_branch_else_line to token_line(tokens, pos - 1)
+    set parse_if_else_branch_out to nothing
+    if token_kind(tokens, parse_if_else_branch_after) is "if" then
+        if token_line(tokens, parse_if_else_branch_after) is parse_if_else_branch_else_line then
+            set parse_if_else_branch_nested to parse_if(tokens, parse_if_else_branch_after, depth, token_line(tokens, parse_if_else_branch_after))
+            set parse_if_else_branch_out to [{s: "if", l: line, c: cond, t: then_branch, e: [parse_if_else_branch_nested[0]]}, parse_if_else_branch_nested[1]]
+        end
+    end
+    if type_of(parse_if_else_branch_out) is "nothing" then
+        set parse_if_else_branch_tail to parse_block_body(tokens, pos, depth, ["end"])
+        set parse_if_else_branch_out to parse_if_finish(tokens, parse_if_else_branch_tail[1], line, cond, then_branch, parse_if_else_branch_tail[0])
+    end
+    give back parse_if_else_branch_out
 end
 
 to parse_if_finish(tokens, pos, line, cond, then_branch, else_branch)

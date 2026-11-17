@@ -734,11 +734,12 @@ const CONTROL_FLOW: &[&str] = &[
     "if \"a\" is \"a\" then\n    say \"text\"\nend\n",
     "if yes and no then\n    say \"never\"\nend\nsay \"after\"\n",
     "if nothing is nothing then\n    say \"nothing\"\nend\n",
-    // The two-arm `if`/`else` is what the family really covers: `else if` is
-    // written by the three programs above and **refused** by both engines
-    // (`SPEC.md:353` and `docs/GRAMMAR.md:206` both document a form neither
-    // parses), so the `else` branch is pinned here with something in it, with
-    // nothing in it, and with a nested `if` inside it.
+    // The three programs above are the `if`/`else if`/`else` chain both
+    // `SPEC.md` and `docs/GRAMMAR.md` document: phase-112 gave it a parser arm,
+    // so they now run and their goldens record the branch each one takes. The
+    // two-arm `if`/`else` stays covered here with something in its `else`, with
+    // nothing in it, and with a nested `if` inside a newline-separated `else`
+    // body (which is still a nested statement, not another arm).
     "if no then\n    say \"a\"\nelse\n    say \"b\"\nend\n",
     "if no then\n    say \"a\"\nelse\n    say \"b\"\n    if 1 is 1 then\n        say \"b1\"\n    end\nend\n",
     "if no then\n    say \"a\"\nelse\nend\nsay \"after\"\n",
