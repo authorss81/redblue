@@ -528,6 +528,91 @@ fn format_is_idempotent_over_the_whole_corpus() {
     }
 }
 
+/// The `else if` corpus is canonical: the formatter must write it back as the
+/// chain it was given, with its one shared `end`, and `rb format --check` must
+/// accept it.
+///
+/// Writing the nested `Statement::If` through `format_block` used to split
+/// `else if` into `else` plus an indented `if` and add a second `end`, so the
+/// exact programs `SPEC.md` and `docs/GRAMMAR.md` document were reported as
+/// unformatted by the tool that shares their grammar.
+#[test]
+fn edge_else_if_chains_round_trip_and_pass_format_check() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let mut chain_files = 0;
+    for name in [
+        "control-flow-0003.rb",
+        "control-flow-0004.rb",
+        "control-flow-0005.rb",
+    ] {
+        let path = root.join(name);
+        let source = read(&path);
+        assert!(
+            source.contains("else if"),
+            "{}: fixture no longer writes the chain",
+            path.display()
+        );
+        let formatted = formatter::format(&source)
+            .unwrap_or_else(|e| panic!("{}: format failed: {e}", path.display()));
+        assert_eq!(
+            formatted,
+            source,
+            "{}: an `else if` chain must keep its `else if` line and shared `end`",
+            path.display()
+        );
+        assert!(
+            !formatter::needs_reformat(&source, &formatted),
+            "{}: `rb format --check` must accept the chain",
+            path.display()
+        );
+        let check = run_rb_args(&["format", "--check"], &source);
+        assert_eq!(
+            check.code,
+            0,
+            "{}: `rb format --check` rejected the chain:\n{}",
+            path.display(),
+            check.stdout
+        );
+        chain_files += 1;
+    }
+    assert_eq!(
+        chain_files, 3,
+        "the three chain corpus programs must all be checked"
+    );
+}
+
+/// Every shape the chain parser builds has to survive a format round trip: a
+/// last arm with no trailing `else`, an empty arm, several arms, and the
+/// newline-nested form, which is a different construct and must not be
+/// collapsed into a chain.
+#[test]
+fn edge_the_formatter_keeps_every_else_if_chain_shape() {
+    let cases = [
+        "if n is 1 then\n    say \"one\"\nelse if n is 2 then\n    say \"two\"\nend\n",
+        "if n is 1 then\n    say \"one\"\nelse if n is 2 then\n    say \"two\"\n\
+         else if n is 3 then\n    say \"three\"\nelse\n    say \"other\"\nend\n",
+        "if no then\n    say \"first\"\nelse if yes then\nelse\n    say \"else\"\nend\n",
+        "if no then\n    say \"first\"\nelse\n    if yes then\n        say \"nested\"\n    end\nend\n",
+    ];
+    for source in cases {
+        let formatted = formatter::format(source)
+            .unwrap_or_else(|e| panic!("chain should format:\n{source}\n{e}"));
+        assert_eq!(
+            formatted, source,
+            "the formatter changed the chain shape it was given"
+        );
+        assert!(
+            !formatter::needs_reformat(source, &formatted),
+            "the formatter's own output must pass `--check`"
+        );
+        assert_eq!(
+            formatter::format(&formatted).expect("second format"),
+            formatted,
+            "formatting a chain must be idempotent"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Losslessness: format then parse gives the same tree
 // ---------------------------------------------------------------------------

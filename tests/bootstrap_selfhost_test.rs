@@ -331,6 +331,50 @@ fn edge_source_shapes_are_byte_identical() {
     );
 }
 
+/// The `else if` chain, in the compiler that is written in Redblue.
+///
+/// `bootstrap/compiler.rb` had the same defect the Rust parser had: it read an
+/// `if` after `else` as a nested statement, so the inner block consumed the one
+/// `end` the chain shares and the outer `if` failed at end of input. The three
+/// corpus programs that write the form now exercise the single-arm case; these
+/// pin the rest — a middle arm, three arms with a trailing `else`, an `else if`
+/// as the last arm, an empty arm, and the newline form that is still a nested
+/// statement — by comparing the Redblue compiler's bytes with stage 1's.
+#[test]
+fn stage2_is_byte_identical_for_an_else_if_chain() {
+    assert_identical(
+        "edge_else_if_middle_arm",
+        "set n to 2\nif n is 1 then\n    say \"one\"\nelse if n is 2 then\n    say \"two\"\nelse\n    say \"other\"\nend\n",
+    );
+    assert_identical(
+        "edge_else_if_three_arms",
+        "set n to 3\nif n is 1 then\n    say \"one\"\nelse if n is 2 then\n    say \"two\"\nelse if n is 3 then\n    say \"three\"\nelse\n    say \"other\"\nend\n",
+    );
+    assert_identical(
+        "edge_else_if_last_arm",
+        "set n to 4\nif n is 1 then\n    say \"one\"\nelse if n is 4 then\n    say \"last\"\nend\n",
+    );
+    assert_identical(
+        "edge_else_if_empty_arm",
+        "set hit to \"none\"\nif no then\n    set hit to \"first\"\nelse if yes then\nelse\n    set hit to \"else\"\nend\nsay hit\n",
+    );
+    assert_identical(
+        "edge_else_newline_nested_if",
+        "set hit to \"none\"\nif no then\n    set hit to \"first\"\nelse\n    if yes then\n        set hit to \"nested\"\n    end\nend\nsay hit\n",
+    );
+
+    // Every arm costs one block, so an outer `if` plus 63 `else if` arms sits
+    // exactly on the 64-level budget. Stage 2 used to charge the arm's else
+    // body and then add a level again for the arm, so it refused this chain
+    // around arm 32 while stage 1 accepted it.
+    let mut at_budget = String::from("set n to 63\nif n is 0 then\n    say \"0\"\n");
+    for arm in 1..=63 {
+        at_budget.push_str(&format!("else if n is {arm} then\n    say \"{arm}\"\n"));
+    }
+    at_budget.push_str("end\n");
+    assert_identical("edge_else_if_chain_at_the_block_budget", &at_budget);
+}
+
 /// `nothing` heads an expression, and a stage-2 table that forgets it writes a
 /// *different program* rather than reporting a difference.
 ///
@@ -659,13 +703,13 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
     // still passes with six corpus programs deleted, which is the whole claim
     // this test makes — that stage 2 is byte-identical on *every* program the
     // frontend accepts. And a total that is never asserted is how six files go
-    // missing without anything noticing, because `refused == 9` and
+    // missing without anything noticing, because `refused == 6` and
     // `checked >= 300` are both still true afterwards.
     assert_eq!(
-        checked, 315,
+        checked, 318,
         "only {checked} corpus programs were compared; stage 2 is byte-identical on \
-         every program of the corpus the frontend accepts, which is 315 of the 324 in \
-         the families above — the other 9 are refused by the frontend, and the 46 in \
+         every program of the corpus the frontend accepts, which is 318 of the 324 in \
+         the families above — the other 6 are refused by the frontend, and the 46 in \
          `malformed` are refused too"
     );
     assert_eq!(
@@ -676,10 +720,10 @@ fn stage2_is_byte_identical_on_its_corpus_families() {
          has been added or removed and the counts below still hold"
     );
     assert_eq!(
-        refused, 9,
+        refused, 6,
         "{refused} corpus programs in the families above are refused by the frontend; \
-         there were 9 when this test was written, and each is listed in \
-         phases/phase-021/FINDINGS.md section 2"
+         there were 6 when phase-112 gave `else if` a parser arm, and each is listed \
+         in phases/phase-021/FINDINGS.md section 2"
     );
     for family in UNSUPPORTED {
         assert!(
@@ -1374,7 +1418,7 @@ fn edge_stage3_is_byte_identical_on_the_awkward_shapes() {
 /// the tree-walker executing the compiler. This one makes it with the bytecode VM
 /// executing the compiler, which is the only execution path S3 has: a stage 2
 /// that is byte-identical under one engine and wrong under the other is not a
-/// compiler, it is a coincidence. 313 programs, about 24 seconds.
+/// compiler, it is a coincidence. 318 programs, about a minute.
 #[test]
 fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
@@ -1439,20 +1483,20 @@ fn edge_stage3_is_byte_identical_on_every_corpus_program() {
     }
 
     // Exact, for the reason `stage2_is_byte_identical_on_its_corpus_families`
-    // says it: `checked >= 300` and `refused == 9` are both still true after six
+    // says it: `checked >= 300` and `refused == 6` are both still true after six
     // corpus programs are deleted, and this test's whole claim is that *every*
     // program the frontend accepts is byte-identical through the bytecode path.
     // A floor cannot carry that claim — only the count itself can.
     assert_eq!(
-        checked, 315,
+        checked, 318,
         "{checked} corpus programs were compared through the bytecode path, not the \
-         315 of the 324 outside `malformed` that the frontend accepts; stage 2 run \
+         318 of the 324 outside `malformed` that the frontend accepts; stage 2 run \
          as bytecode is byte-identical on every one of them"
     );
     assert_eq!(
-        refused, 9,
+        refused, 6,
         "{refused} corpus programs outside `malformed` were refused by the frontend; \
-         there were 9 when this test was written"
+         there were 6 when phase-112 gave `else if` a parser arm"
     );
     assert_eq!(
         checked + refused,
