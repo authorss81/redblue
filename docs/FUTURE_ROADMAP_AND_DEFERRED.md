@@ -1352,17 +1352,17 @@ A critical failure mode in high-velocity package pipelines is **cascading pipeli
      - **`rbos-ops`**: Updates drivers or kernel modules when core memory interfaces evolve.
      - **`rb-ide-ops`**: Re-aligns Language Server Protocol endpoints when compiler diagnostics change.
 
-### 26.2 CodeRabbit Automated PR Review & Dual-Model Verification Gate
+### 26.2 CodeRabbit Automated PR Review & Asynchronous Zero-Wait Pipelining
 - **Free for Public Repositories**: CodeRabbit is 100% free for open-source public GitHub repositories, providing deep AI-powered AST review, security vulnerability checks, and automated pull request summarization.
-- **The Autonomous Review and Merge Pipeline**:
-  1. **Autonomous PR Creation**: The worker agent pushes a feature branch and opens a PR with clear architectural rationale.
-  2. **CodeRabbit Automated Review**: CodeRabbit reviews the diff in real time, posting line-by-line feedback, security alerts, and performance suggestions.
-  3. **Dual-Model Gate Verification**:
-     - The orchestrator runner triggers a secondary agent turn to analyze CodeRabbit's review comments.
-     - The agent filters out any hallucinated suggestions, accepts legitimate performance or style improvements, applies necessary code updates, and ensures deterministic test gates (`verify.sh`) pass.
-  4. **Automated Merge**:
-     - Once CodeRabbit approves (or has all comments resolved) AND deterministic CI test gates are 100% green, GitHub Actions automatically squashes and merges the pull request to `main`.
-     - Zero human clicking is required, ensuring 24/7 continuous delivery.
+- **Asynchronous Pipelining (Zero Idling for Authoring Models)**:
+  - If the authoring model had to pause and wait for CodeRabbit to complete its webhook review (which takes 1–3 minutes), expensive model runner compute and API quotas would be wasted idling.
+  - **Decoupled Workflow Flow**:
+    1. **Authoring Model Push**: The worker agent writes the code, runs fast local targeted tests (1–5 seconds), pushes the feature branch, and opens a PR.
+    2. **Immediate Task Advancement**: The authoring workflow immediately completes or proceeds to synthesize the next package without waiting for CodeRabbit.
+    3. **Asynchronous CodeRabbit Review**: In the cloud, CodeRabbit evaluates the diff asynchronously.
+    4. **Path A (Clean Verdict)**: If CodeRabbit approves and CI checks pass, GitHub Actions auto-merges the PR directly to `main`.
+    5. **Path B (Action Required)**: If CodeRabbit detects an issue, security vulnerability, or code smell, it labels the PR `needs-remediation`.
+    6. **Subsequent Pick-up**: A remediation agent in a subsequent workflow picks up the labeled PR, reviews CodeRabbit's feedback, resolves the issue, and auto-merges.
 
 ### 26.3 Accelerated Testing Architecture: Eliminating Redundancy Without Compromising Rigor
 Running 3,000+ tests from scratch on every tiny change or testing all 10,000 packages creates an unbearable CI bottleneck. Redblue employs a 4-pillar test acceleration strategy to maintain speed without weakening verification:
@@ -1380,6 +1380,27 @@ Running 3,000+ tests from scratch on every tiny change or testing all 10,000 pac
 4. **Tiered Gate Verification (Fast Inner-Loop vs Deep Async Verification)**:
    - **Tier 1 (Fast PR Gate, < 45 seconds)**: Linter checks (`cargo clippy`), fast syntax checks (`cargo check`), and affected unit tests. PRs merge rapidly.
    - **Tier 2 (Post-Merge / Scheduled Crater Gate, Asynchronous)**: Comprehensive full test suite, multi-platform matrix runs (Linux/macOS/Windows), memory leak sanitizers (ASan/Valgrind), and ecosystem reverse-dependency sweeps run in the background without holding up developer or worker agent inner loops.
+
+### 26.4 Targeted Package Test Isolation (Why Compiler Tests Are Never Run for Packages)
+- **Compiler Tests vs Package Tests**:
+  - The 3,100+ compiler tests in `authorss81/redblue` validate Rust compiler internals (lexer, parser, semantic analyzer, bytecode VM, bytecode verification, and self-hosted compiler).
+  - Third-party Redblue packages (`packages/<name>`) do NOT touch compiler source code. They execute purely on top of a pre-compiled, verified release binary of `rb`.
+  - Re-running 3,100 Rust compiler tests when authoring a Redblue package (e.g. `sqlite` or `math_utils`) is completely unnecessary, wastes 10–15 minutes of compute, and burns runner quotas.
+- **Microsecond Package Verification**:
+  - In `authorss81/rb-pkg-ops`, a package synthesis runner only executes `rb test packages/<name>/test.rb`.
+  - Package test execution finishes in **0.1 to 0.3 seconds**.
+  - A background scheduled integration workflow runs multi-package integration sweeps asynchronously. If any package fails in the background, it is sent to the non-blocking remediation queue.
+
+### 26.5 Staged Implementation Timeline: Phase 126 Boundary
+- **Active Core Pipeline (`rbops` Phases 001–126)**:
+  - `rbops` is currently executing Phase 114 with only **8 functional base phases remaining** to Phase 126.
+  - To guarantee zero disruption, zero regression risk, and 100% historical continuity, the active `rbops` harness remains strictly locked until Phase 126 lands on `main`.
+- **Immediate Post-126 Ecosystem Rollout**:
+  - The moment Phase 126 lands, all 4 paired ecosystem repositories (`rb-pkg-ops`, `rb-apps-ops`, `rbos-ops`, `rb-ide-ops`) and post-126 core operations launch with this decoupled async architecture from Day 1:
+    1. Local fast targeted test only (1–5s).
+    2. Cloud asynchronous CodeRabbit AST review with zero model wait time.
+    3. Heavy integration suites offloaded to decoupled background CI runners.
+    4. Non-blocking failure remediation queues.
 
 
 
