@@ -284,9 +284,9 @@ fn edge_every_citation_resolves_to_a_line_that_exists() {
         .nth(regex_citation.1 - 1)
         .expect("the cited line exists, checked above");
     assert!(
-        cited_line.contains("regex"),
+        cited_line.contains("fn regex_builtin"),
         "the regex entry cites src/stdlib.rs:{}, and that line reads `{cited_line}` — \
-         it does not carry the regex binding the entry is making. The implementation \
+         it does not name the regex binding the entry is making. The implementation \
          starts at line {}.",
         regex_citation.1,
         stdlib_text

@@ -6,8 +6,8 @@
 | src/repl/commands.rs | +53 −20 | Added `:builtins`/`.builtins` and `:modules`/`.modules` to the command table and enum; a bare `:prompt` now asks for the current prompt, while `:prompt none` restores the default; `:help` names the no-argument form. |
 | src/repl/completer.rs | +46 −33 | The completer's builtin and module vocabularies now come from the shared `stdlib` functions instead of a hand-kept list; `builtin_names()`/`module_names()` expose those sets to the agreement tests. |
 | src/repl/introspect.rs | +191 −2 | Added `builtin_lines()` and `module_lines()`, both sorted from the same registry the completer uses, with module annotations for builtins that have a dotted spelling, including the `list_map`/`map` pair. |
-| src/repl/mod.rs | +266 −6 | Dispatches `:builtins` and `:modules`; `:prompt` answers with the prompt the next line is read at, and `:prompt none` restores `>>> `. Added the command, registry-agreement, prompt, block and sub-REPL edge tests. |
-| src/stdlib.rs | +65 −0 | Added `builtin_vocabulary()`, `module_vocabulary()` and `module_of_builtin()`, the shared registry views used by completion and introspection; `module_of_builtin` also compares the member spelling so `map` is annotated `(list)` like `filter` and `reduce`. |
+| src/repl/mod.rs | +339 −6 | Dispatches `:builtins` and `:modules`; `:prompt` answers with the prompt the next line is read at, and `:prompt none` restores `>>> `. Added the command, registry-agreement, prompt, unicode-prompt, oversize-prompt, command-looking-prompt, block and sub-REPL edge tests. |
+| src/stdlib.rs | +65 −0 | Added `builtin_vocabulary()`, `module_vocabulary()` and `module_of_builtin()`, the shared registry views used by completion and introspection; `module_of_builtin` follows the operation a dotted pair reaches, so `list.map`/`list_map` annotate `(list)` while `console.log` and `files.append` do not annotate the unrelated flat `log` and `append`. |
 | SURVEY.md | +1 −1 | Re-anchored the `regex_builtin` citation after the new `src/stdlib.rs` lines moved it. |
 | tests/unreviewed_work_ack_test.rs | +39 −0 | Acknowledged the already-landed phase-117 resume commit by its SHA and added the test that pins it to the SHA rather than the in-flight subject rule, matching the phase-117 acknowledgement of phase-114. |
 
@@ -47,7 +47,11 @@ $ printf ':builtins\n:modules\n:prompt\n:quit\n' | target/debug/rb
 | modules_lists_every_module_and_completion_agrees | complete registry: every `MODULES` entry is listed, resolves as a module, and is offered by TAB |
 | edge_a_builtin_without_a_module_has_no_empty_annotation | empty field: a builtin with no module prints no empty `()` annotation |
 | builtins_annotates_a_known_builtin_with_its_module | positive module annotation: `abs (math)`, `files_read (files)` and `map (list)` are present exactly |
+| builtins_annotates_a_name_by_the_operation_the_dotted_pair_reaches | collision: `log (math)` rather than console, bare `append` rather than files, and `list_map (list)` still annotated |
 | edge_an_empty_prompt_still_reads_and_evaluates_a_program | empty: an empty prompt still reads and evaluates the next line |
+| edge_a_unicode_prompt_is_kept_whole_and_still_reads_a_program | unicode: CJK/RTL/emoji/combining text is printed byte-for-byte and the next line still runs |
+| edge_an_oversize_unicode_prompt_is_refused_by_bytes_not_characters | failure assertion: a prompt whose characters fit but whose UTF-8 bytes exceed the limit is refused and the old prompt kept |
+| edge_a_prompt_that_looks_like_a_command_is_not_executed | display vs parsing: `:quit ` as a prompt is printed, not executed, and the next line still runs |
 | edge_a_prompt_of_only_spaces_is_still_a_prompt | boundary: whitespace-only prompt is display text, not "no argument" |
 | edge_a_prompt_wider_than_the_terminal_is_kept_whole | boundary/resource: a 300-byte prompt is printed untruncated and the next line still runs |
 | edge_repl_significant_text_in_a_prompt_does_not_break_continuation | malformed/ambiguous display text: `>>>` in the prompt does not take over the numbered continuation prompt |
@@ -60,10 +64,18 @@ $ printf ':builtins\n:modules\n:prompt\n:quit\n' | target/debug/rb
 | edge_the_phase_117_delivery_is_acknowledged_by_sha_not_the_rule | history audit: the prior delivery is SHA-pinned, not added to the in-flight rule |
 
 ## Review follow-ups (round 2 — review findings)
-- `module_of_builtin` now compares the member spelling as well as the resolved
-  registry name, so `list.map` annotates the flat `map` as `(list)` just as it
-  already annotated `filter` and `reduce`. `builtins_annotates_a_known_builtin_with_its_module`
-  pins `map (list)` alongside `abs (math)` and `files_read (files)`.
+- `module_of_builtin` follows the operation a dotted pair reaches rather than
+  the member spelling alone: `list.map` annotates the flat `map` as `(list)`
+  because `list_operation` says `list_map` and `map` are one operation, while
+  `console.log` and `files.append` resolve to their own registered names and no
+  longer annotate the unrelated flat `log` and `append`. The new test
+  `builtins_annotates_a_name_by_the_operation_the_dotted_pair_reaches` pins
+  `log (math)`, a bare `append`, and `list_map (list)`, alongside
+  `builtins_annotates_a_known_builtin_with_its_module` pinning `map (list)`,
+  `abs (math)` and `files_read (files)`.
+- SURVEY.md now cites `src/stdlib.rs:1851`, and the citation test requires the
+  cited line to be `fn regex_builtin` rather than any line that mentions regex,
+  so the anchor cannot silently drift to a nearby comment again.
 - `prompt_answer` now delegates to `prompt_for_next_line`, so a bare `:prompt`
   answers with the numbered continuation prompt while a block is open and the
   sub-REPL's prompt while one is, instead of always reporting the primary
@@ -80,10 +92,10 @@ Edge-case matrix dispositions:
 - empty — covered: empty prompt still evaluates; an absent module annotation is omitted rather than printed as an empty field.
 - singleton — covered: every registry name is listed exactly once, and each module is asserted individually.
 - boundary — covered: whitespace-only prompt, a prompt wider than the terminal, and the existing 1024-byte prompt limit.
-- out_of_bounds — N/A: the new commands take no arguments and take no index from user input.
+- out_of_bounds — covered: a trailing word after `:builtins`/`:modules` is ignored like every command with no usage, and neither takes an index from user input.
 - type_mismatch — N/A: `:builtins`/`:modules` take no argument; `:prompt` accepts display text, never a typed value.
 - numeric_boundary — N/A: no arithmetic or numeric conversion is involved.
-- unicode — N/A to the new code paths: prompts are stored and printed as opaque text, and no new parsing or encoding of them was added.
+- unicode — covered: a prompt containing CJK, RTL, emoji and a combining mark is printed byte-for-byte and the following line still evaluates.
 - nesting_recursion — N/A: both listings are flat table reads with no recursion.
 - duplicate_missing_keys — covered: vocabulary is sorted/deduplicated once, and the agreement tests pin the exact set.
 - malformed_input — covered: an unknown `:prompt` placeholder is refused and leaves the old prompt intact.
@@ -94,8 +106,8 @@ Edge-case matrix dispositions:
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 3172 passed, 0 failed, 0 ignored across 87 suites |
-| rbops/verify.sh phase-118 | pass |
+| cargo test --all-targets | 3178 passed, 0 failed, 0 ignored across 87 suites |
+| rbops/verify.sh phase-118 | pass — all checks green, and the report count matches the observed 3178 |
 
 ## Invariants touched
 - None of the language invariants (`.rb`, `to … end`, `set`, `say`, `Value`, `Error`) changed.

@@ -1563,6 +1563,37 @@ mod tests {
         }
     }
 
+    /// A member name shared with an unrelated builtin does not decide the
+    /// annotation. `log` is the math logarithm even though console has a `log`
+    /// member, and `append` is the flat list builtin even though
+    /// `files.append` is a different operation; only a dotted pair that reaches
+    /// the same operation, like `list.map`, annotates the flat name.
+    #[test]
+    fn builtins_annotates_a_name_by_the_operation_the_dotted_pair_reaches() {
+        let lines = builtin_lines();
+
+        assert!(
+            lines.iter().any(|line| line == "  log (math)"),
+            "flat `log` is the math logarithm: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line == "  log (console)"),
+            "console.log resolves to console_log, not the flat log: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "  append"),
+            "files.append resolves to files_append, so flat `append` has no module: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("  append (")),
+            "no module is invented for `append`: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "  list_map (list)"),
+            "list.map is the dotted spelling of list_map: {lines:?}"
+        );
+    }
+
     /// Two consecutive listings are byte-for-byte the same.
     ///
     /// Registry iteration order reaching output is a known defect class here, so
@@ -1596,12 +1627,27 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .map(str::to_string)
             .collect();
-        let offered: Vec<String> = completer.builtin_names().to_vec();
+        assert_eq!(
+            listed,
+            completer.builtin_names(),
+            "the completer holds the registry the listing names"
+        );
 
+        let offered: Vec<String> = completer
+            .complete("")
+            .into_iter()
+            .filter(|name| listed.contains(name))
+            .collect();
         assert_eq!(
             listed, offered,
             ":builtins and TAB name the same flat builtins in the same order"
         );
+        for name in &listed {
+            assert!(
+                completer.complete(name).contains(name),
+                "TAB offers {name} under its own name"
+            );
+        }
     }
 
     /// `:modules` lists every module, each one resolves as a module, and TAB

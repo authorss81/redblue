@@ -10422,6 +10422,93 @@ mod tests {
             );
         }
 
+        /// A prompt is display text, not source: CJK, RTL, emoji and a combining
+        /// mark are printed byte-for-byte, and the line after them is still a
+        /// program the session evaluates.
+        #[test]
+        fn edge_a_unicode_prompt_is_kept_whole_and_still_reads_a_program() {
+            let mut repl = Repl::new();
+            let unicode = "你好 🙂 مرحبا e\u{0301} ";
+            assert!(
+                repl.handle_command(&format!(":prompt {unicode}")),
+                "the unicode prompt is set through :prompt, not a private setter"
+            );
+
+            let prompts = prompts_for(&mut repl, &["set unicode_answer to 6 * 7", ":quit"]);
+
+            assert_eq!(
+                prompts[0], unicode,
+                "the prompt is printed exactly as set, including combining marks"
+            );
+            assert_eq!(
+                repl.lookup("unicode_answer").cloned(),
+                Some(Value::Number(42.0)),
+                "the line after the unicode prompt was read and evaluated"
+            );
+        }
+
+        /// The prompt limit is a byte limit: a unicode prompt whose characters
+        /// fit but whose UTF-8 bytes do not is refused, and the old prompt stays.
+        #[test]
+        fn edge_an_oversize_unicode_prompt_is_refused_by_bytes_not_characters() {
+            let mut repl = Repl::new();
+            assert!(
+                repl.handle_command(":prompt rb> "),
+                "the starting prompt is set through :prompt"
+            );
+
+            let over = "é".repeat(MAX_PROMPT_BYTES / 2 + 1);
+            assert!(
+                over.chars().count() < MAX_PROMPT_BYTES,
+                "the test prompt fits by character count and only exceeds by bytes"
+            );
+            assert!(
+                repl.handle_command(&format!(":prompt {over}")),
+                "an oversize :prompt is still handled rather than panicking"
+            );
+            assert_eq!(
+                repl.prompt_format, "rb> ",
+                "a prompt over the byte limit is refused even when its characters fit"
+            );
+            let refused = super::super::check_prompt_format(&over);
+            assert!(
+                refused.is_err(),
+                "the bytes, not the characters, are what the limit refuses"
+            );
+            assert!(
+                refused.unwrap_err().contains(&MAX_PROMPT_BYTES.to_string()),
+                "and the refusal names the byte limit"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                "rb> ",
+                "the prompt the session had is still the prompt"
+            );
+        }
+
+        /// A prompt is display text: one that spells a command is printed, not
+        /// parsed, so the line after it still runs as a program.
+        #[test]
+        fn edge_a_prompt_that_looks_like_a_command_is_not_executed() {
+            let mut repl = Repl::new();
+            assert!(
+                repl.handle_command(":prompt :quit "),
+                "a command-looking prompt is set through :prompt"
+            );
+
+            let prompts = prompts_for(&mut repl, &["set still_here to 9", ":quit"]);
+
+            assert_eq!(
+                prompts[0], ":quit ",
+                "the command-looking prompt is printed as typed"
+            );
+            assert_eq!(
+                repl.lookup("still_here").cloned(),
+                Some(Value::Number(9.0)),
+                "and it did not end the session before the next line was evaluated"
+            );
+        }
+
         /// A prompt made only of spaces is accepted and kept: the spaces are
         /// display text, not a request for the default.
         #[test]

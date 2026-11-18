@@ -2121,14 +2121,30 @@ mod tests {
     }
 
     /// The two introspection commands are commands, under either sigil, and
-    /// neither takes an argument.
+    /// neither takes an argument. Like every command with `usage: None`, a
+    /// trailing word is not a second argument: it is ignored, not silently
+    /// turned into a missing-argument report.
     #[test]
     fn parse_reads_builtins_and_modules_as_commands() {
-        for input in [":builtins", ".builtins"] {
+        for input in [":builtins", ".builtins", ":bi"] {
             assert_eq!(ReplCommand::parse(input), ReplCommand::Builtins);
         }
-        for input in [":modules", ".modules"] {
+        for input in [":modules", ".modules", ":mods"] {
             assert_eq!(ReplCommand::parse(input), ReplCommand::Modules);
+        }
+        for input in [":builtins extra", ".builtins x"] {
+            assert_eq!(
+                ReplCommand::parse(input),
+                ReplCommand::Builtins,
+                "{input:?} takes no argument, so its trailing word is ignored"
+            );
+        }
+        for input in [":modules extra", ".modules x"] {
+            assert_eq!(
+                ReplCommand::parse(input),
+                ReplCommand::Modules,
+                "{input:?} takes no argument, so its trailing word is ignored"
+            );
         }
     }
 }

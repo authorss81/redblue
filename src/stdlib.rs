@@ -970,8 +970,13 @@ pub fn module_vocabulary() -> Vec<&'static str> {
 /// The member spelling is compared as well as the resolved registry name,
 /// because the two are not always the same: `list.map` is stored as the
 /// registered `list_map`, so `resolve("list_map")` answers `list_map` rather
-/// than the flat `map` that names the same operation. Comparing only the
-/// resolved name would annotate `list_map (list)` while leaving `map` bare.
+/// than the flat `map` that names the same operation. The comparison goes
+/// through [`list_operation`] so that alias is recognised, but a member that
+/// merely shares a name with an unrelated builtin does not count:
+/// `console.log` resolves to `console_log`, not the flat `log` (the math
+/// logarithm), and `files.append` resolves to `files_append`, not the list
+/// `append`. Comparing the member spelling alone annotated both of those with
+/// the wrong module.
 pub fn module_of_builtin(name: &str) -> Option<&'static str> {
     if is_module(name) {
         return None;
@@ -981,7 +986,8 @@ pub fn module_of_builtin(name: &str) -> Option<&'static str> {
             .iter()
             .any(|member| {
                 let qualified = format!("{module}_{member}");
-                member_resolves(module, member) && (resolve(&qualified) == name || *member == name)
+                member_resolves(module, member)
+                    && (resolve(&qualified) == name || list_operation(&qualified) == Some(name))
             })
             .then_some(*module)
     })
