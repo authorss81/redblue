@@ -1309,6 +1309,19 @@ impl Repl {
         self.render_prompt_format()
     }
 
+    /// What a bare `:prompt` prints: the prompt the next line would be read at.
+    ///
+    /// The answer comes from [`Self::prompt_for_next_line`], so it is the same
+    /// prompt the reader is about to show — the numbered continuation prompt
+    /// while a block is open, and the sub-REPL's prompt while one is. It is the
+    /// rendered text rather than the format string, because that is what the
+    /// user sees at every line. A format with `{version}` in it still answers
+    /// with the version it is filling in, which is the question "what is my
+    /// prompt?" rather than "what did I type to set it?".
+    fn prompt_answer(&self) -> String {
+        self.prompt_for_next_line()
+    }
+
     /// The user's prompt format with its placeholders filled in.
     ///
     /// Filled by substitution rather than by a formatting library so the whole
@@ -1333,7 +1346,8 @@ impl Repl {
     }
 
     /// Sets the prompt from a `:prompt` format string, or restores
-    /// [`DEFAULT_PROMPT`] when given no argument.
+    /// [`DEFAULT_PROMPT`] when given no argument — the shape `:prompt none`
+    /// uses, while a bare `:prompt` asks [`Self::prompt_answer`] instead.
     ///
     /// The format is checked before it is stored, so a format string that would
     /// print `{nope}` at the user — or one big enough to be printed at them a
@@ -1783,6 +1797,14 @@ impl Repl {
                 self.print_functions();
                 true
             }
+            ReplCommand::Builtins => {
+                self.print_builtins();
+                true
+            }
+            ReplCommand::Modules => {
+                self.print_modules();
+                true
+            }
             ReplCommand::Shell(command) => {
                 self.run_shell(&command);
                 true
@@ -2048,9 +2070,28 @@ impl Repl {
                 // read, not parsed, so `:prompt rb> ` must keep the space the
                 // prompt ends with. Hence the command carries an `Option` and the
                 // table is not the one that decides it is missing.
-                let argument = argument.as_deref();
-                if let Err(message) = self.set_prompt_format(argument) {
-                    println!("{}", self.style.paint(Paint::Error, &message));
+                match argument.as_deref() {
+                    // A bare `:prompt` is the question "what is it?", not a
+                    // command missing its argument. Setting it back to the
+                    // default is the separate word `none`, so asking cannot
+                    // silently change what the next prompt is.
+                    //
+                    // The restore sentinel is the exact word `none`, with no
+                    // trailing display whitespace. That is also the one literal
+                    // prompt this command cannot set: `:prompt none ` (with the
+                    // trailing space a prompt normally carries) is display text
+                    // and keeps the literal prompt `none `.
+                    None => println!("{}", self.prompt_answer()),
+                    Some("none") => {
+                        if let Err(message) = self.set_prompt_format(None) {
+                            println!("{}", self.style.paint(Paint::Error, &message));
+                        }
+                    }
+                    Some(format) => {
+                        if let Err(message) = self.set_prompt_format(Some(format)) {
+                            println!("{}", self.style.paint(Paint::Error, &message));
+                        }
+                    }
                 }
                 true
             }
@@ -3234,6 +3275,20 @@ impl Repl {
 
     fn print_environment(&self) {
         for line in self.environment_lines() {
+            println!("{}", line);
+        }
+    }
+
+    /// `:builtins` — every name in scope without an import.
+    fn print_builtins(&self) {
+        for line in introspect::builtin_lines() {
+            println!("{}", line);
+        }
+    }
+
+    /// `:modules` — every module the language exposes.
+    fn print_modules(&self) {
+        for line in introspect::module_lines() {
             println!("{}", line);
         }
     }
@@ -9797,11 +9852,12 @@ mod tests {
     /// prompt it is asked at, which is the only place a prompt is observable — the
     /// reader is what a user sees.
     mod surface {
-        use super::super::{MAX_PROMPT_BYTES, REPEAT};
+        use super::super::{DEFAULT_PROMPT, MAX_PROMPT_BYTES, REPEAT};
         use super::{Repl, ScriptedSource, SessionEnd};
         use crate::repl::banner;
         use crate::repl::editor::Line;
         use crate::repl::style::Style;
+        use crate::value::Value;
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -9942,14 +9998,110 @@ mod tests {
                 "the format is what the next prompt is, with its placeholders filled"
             );
 
+            let custom = repl.prompt_answer();
             assert!(
                 repl.handle_command(":prompt"),
                 ":prompt with no argument is the command too, not a missing argument"
             );
             assert_eq!(
+                repl.prompt_answer(),
+                custom,
+                "and with no argument it asks rather than changing the prompt"
+            );
+
+            assert!(
+                repl.handle_command(":prompt none"),
+                "`:prompt none` is the command that puts the default back"
+            );
+            assert_eq!(
                 prompts_for(&mut repl, &[""])[0],
                 ">>> ",
-                "and with no argument it puts the default back"
+                "and it does put the default back"
+            );
+        }
+
+        /// `:prompt none` restores the default in both places it lives: the
+        /// stored format and the prompt the next line is read at. A regression
+        /// that only reset one of them would leave the session disagreeing with
+        /// what a bare `:prompt` answers.
+        #[test]
+        fn edge_prompt_none_restores_the_default_format_and_the_rendered_prompt() {
+            let mut repl = Repl::new();
+            repl.set_prompt_format(Some("rb{version} "))
+                .expect("a custom prompt is settable");
+
+            assert!(
+                repl.handle_command(":prompt none"),
+                "`:prompt none` is the command that restores the default"
+            );
+            assert_eq!(
+                repl.prompt_format, DEFAULT_PROMPT,
+                "the stored format is the default again"
+            );
+            assert_eq!(
+                repl.prompt_answer(),
+                DEFAULT_PROMPT,
+                "and a bare :prompt would answer with the default"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                DEFAULT_PROMPT,
+                "and the next line is read at the default prompt"
+            );
+        }
+
+        /// A bare `:prompt` answers with the prompt the next line is actually
+        /// read at, not merely the configured primary prompt: the numbered
+        /// continuation while a block is open, and the sub-REPL's prompt while
+        /// one is.
+        #[test]
+        fn edge_a_bare_prompt_answers_at_the_prompt_the_next_line_is_read_at() {
+            let mut repl = Repl::new();
+            repl.in_multiline = true;
+            repl.multiline_buffer = vec!["repeat 2 times".to_string()];
+
+            assert_eq!(
+                repl.prompt_answer(),
+                "..  2 ",
+                "a block's next line is read at the numbered continuation prompt"
+            );
+            assert_eq!(
+                repl.prompt_answer(),
+                repl.prompt_for_next_line(),
+                "and the answer is the prompt the reader will show"
+            );
+
+            let mut debugged = Repl::new();
+            debugged.enter_debug("");
+
+            assert_eq!(
+                debugged.prompt_answer(),
+                "debug> ",
+                "a sub-REPL's next line is read at the sub-REPL's prompt"
+            );
+            assert_eq!(
+                debugged.prompt_answer(),
+                debugged.prompt_for_next_line(),
+                "and the answer follows the sub-REPL rather than the parent"
+            );
+        }
+
+        /// Only the exact word `none` restores the default. The trailing space
+        /// a prompt normally carries makes `none ` literal display text, so a
+        /// prompt cannot be made unsettable by the sentinel.
+        #[test]
+        fn edge_a_prompt_of_none_with_a_trailing_space_is_kept_verbatim() {
+            let mut repl = Repl::new();
+
+            assert!(repl.handle_command(":prompt none "));
+            assert_eq!(
+                repl.prompt_format, "none ",
+                "`none ` is a prompt, not the restore sentinel"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                "none ",
+                "and the next line is read at the literal prompt"
             );
         }
 
@@ -10249,6 +10401,114 @@ mod tests {
                 repl.repeat_target(),
                 Some("set x to 1"),
                 "the history outlives a reset, so `!!` still has something to repeat"
+            );
+        }
+
+        /// An empty prompt is still a prompt: it reads the next line, and that
+        /// line is still a program the session evaluates.
+        #[test]
+        fn edge_an_empty_prompt_still_reads_and_evaluates_a_program() {
+            let mut repl = Repl::new();
+            repl.set_prompt_format(Some(""))
+                .expect("an empty prompt is a prompt, not a format error");
+
+            let prompts = prompts_for(&mut repl, &["set answer to 41 + 1", "say answer", ":quit"]);
+
+            assert_eq!(prompts[0], "", "the prompt is empty rather than defaulted");
+            assert_eq!(
+                repl.lookup("answer").cloned(),
+                Some(Value::Number(42.0)),
+                "the line after the empty prompt was read and evaluated"
+            );
+        }
+
+        /// A prompt made only of spaces is accepted and kept: the spaces are
+        /// display text, not a request for the default.
+        #[test]
+        fn edge_a_prompt_of_only_spaces_is_still_a_prompt() {
+            let mut repl = Repl::new();
+            repl.set_prompt_format(Some("    "))
+                .expect("whitespace is display text, not an empty argument");
+
+            let prompts = prompts_for(&mut repl, &["set spaced to 2", "spaced + 1", ":quit"]);
+
+            assert_eq!(prompts[0], "    ", "the prompt is the spaces that were set");
+            assert_eq!(
+                repl.lookup("spaced").cloned(),
+                Some(Value::Number(2.0)),
+                "and the program after it still parsed and ran"
+            );
+        }
+
+        /// A prompt wider than the terminal is held whole rather than truncated:
+        /// it is display text, and cutting it would silently change what the user
+        /// set. The session still evaluates the line after it.
+        #[test]
+        fn edge_a_prompt_wider_than_the_terminal_is_kept_whole() {
+            let mut repl = Repl::new();
+            let long = "x".repeat(300);
+            repl.set_prompt_format(Some(&long))
+                .expect("300 bytes is well inside the prompt limit");
+
+            let prompts = prompts_for(&mut repl, &["set wide to 5", "wide + 1", ":quit"]);
+
+            assert_eq!(prompts[0].len(), 300, "the whole prompt is printed");
+            assert_eq!(prompts[0], long, "and none of it was truncated");
+            assert_eq!(
+                repl.lookup("wide").cloned(),
+                Some(Value::Number(5.0)),
+                "the line after a wide prompt is still read as a program"
+            );
+        }
+
+        /// REPL-significant text in the prompt is display text only: it does not
+        /// become a continuation marker or take over the numbered block prompt.
+        #[test]
+        fn edge_repl_significant_text_in_a_prompt_does_not_break_continuation() {
+            let mut repl = Repl::new();
+            repl.set_prompt_format(Some(">>> >>> "))
+                .expect("a prompt is display text, even when it repeats the default");
+
+            let prompts = prompts_for(
+                &mut repl,
+                &["repeat 1 times", "    say \"body\"", "end", ":quit"],
+            );
+
+            assert_eq!(prompts[0], ">>> >>> ", "the user's prompt is used as typed");
+            assert_eq!(
+                prompts[1], "..  2 ",
+                "and line 2 of the block still has the numbered continuation prompt"
+            );
+            assert_eq!(
+                prompts[2], "..  3 ",
+                "and line 3 is numbered from the block, not from the prompt text"
+            );
+            assert_eq!(
+                prompts[3], ">>> >>> ",
+                "the closing `end` returns to the user's prompt"
+            );
+        }
+
+        /// A prompt format the language cannot render is refused, and the prompt
+        /// the session had is kept rather than replaced by the bad one.
+        #[test]
+        fn edge_a_prompt_with_an_unknown_placeholder_is_refused() {
+            let mut repl = Repl::new();
+            let before = repl.prompt_answer();
+
+            let refused = repl.set_prompt_format(Some("rb{nope} "));
+            assert!(
+                refused.is_err(),
+                "an unknown placeholder is refused rather than printed forever"
+            );
+            assert!(
+                refused.unwrap_err().contains("{nope}"),
+                "and the refusal names the placeholder"
+            );
+            assert_eq!(
+                repl.prompt_answer(),
+                before,
+                "the prompt the session had is still the prompt"
             );
         }
     }

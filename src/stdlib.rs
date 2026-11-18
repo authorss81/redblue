@@ -922,6 +922,71 @@ pub fn is_global(name: &str) -> bool {
     GLOBAL_CONSTANTS.contains(&name)
 }
 
+/// Every name the language provides without an import, in one deterministic
+/// order.
+///
+/// This is the callable builtins plus the value-only [`GLOBAL_CONSTANTS`]
+/// (`PI`, `E`): two kinds of name, one surface a session can write without an
+/// import. The completer and `:builtins` both read this rather than walking
+/// [`BUILTIN_NAMES`] and [`GLOBAL_CONSTANTS`] separately: a name added to the
+/// registry is offered and listed by the same release, and neither can grow a
+/// private list beside the other.
+pub fn builtin_vocabulary() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = BUILTIN_NAMES
+        .iter()
+        .chain(GLOBAL_CONSTANTS.iter())
+        .copied()
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Every module name the language exposes, in one deterministic order.
+///
+/// The same table the analyzer, the completer, `:doc` and `:modules` read, so a
+/// module cannot be offered on TAB while no listing mentions it.
+pub fn module_vocabulary() -> Vec<&'static str> {
+    let mut names = MODULES.to_vec();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The first module a flat builtin is also reachable through, if it has one.
+///
+/// `Some("math")` for `abs`, `Some("files")` for `files_read`, and `None` for a
+/// name with no dotted spelling. The answer comes from [`MODULE_MEMBERS`] and
+/// [`resolve`], not from splitting the name at its first `_`: `list_map` is the
+/// member `map` of `list`, and only the table knows which pairs the language
+/// actually has.
+///
+/// This reports **one** module, the first row of [`MODULE_MEMBERS`] that
+/// resolves to `name`; [`MODULE_MEMBERS`] is a fixed const, so the choice is
+/// deterministic but not exhaustive. A name reachable through more than one
+/// module (`length` is both `list.length` and `text.length`) is annotated with
+/// the first spelling the table lists rather than every spelling.
+///
+/// The member spelling is compared as well as the resolved registry name,
+/// because the two are not always the same: `list.map` is stored as the
+/// registered `list_map`, so `resolve("list_map")` answers `list_map` rather
+/// than the flat `map` that names the same operation. Comparing only the
+/// resolved name would annotate `list_map (list)` while leaving `map` bare.
+pub fn module_of_builtin(name: &str) -> Option<&'static str> {
+    if is_module(name) {
+        return None;
+    }
+    MODULE_MEMBERS.iter().find_map(|(module, members)| {
+        members
+            .iter()
+            .any(|member| {
+                let qualified = format!("{module}_{member}");
+                member_resolves(module, member) && (resolve(&qualified) == name || *member == name)
+            })
+            .then_some(*module)
+    })
+}
+
 /// Calls the builtin `name`, for the builtins [`runtime::builtin`] does not
 /// answer.
 ///

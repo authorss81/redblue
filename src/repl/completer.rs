@@ -35,9 +35,23 @@ const ALT_DOT: &str = ".";
 /// that decision, and [`crate::analyzer`] asks it, so a name added there is
 /// completed here without a second list to remember to change.
 fn module_names() -> Vec<String> {
-    crate::stdlib::MODULES
-        .iter()
-        .map(|name| (*name).to_string())
+    crate::stdlib::module_vocabulary()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every name the language provides without an import: callable builtins and
+/// the value-only globals.
+///
+/// Read from [`crate::stdlib::builtin_vocabulary`], which `:builtins` also
+/// prints: completion and introspection answer from one registry, so a name
+/// added to the language cannot be offered without being listed or listed
+/// without being offered.
+fn builtin_names() -> Vec<String> {
+    crate::stdlib::builtin_vocabulary()
+        .into_iter()
+        .map(str::to_string)
         .collect()
 }
 
@@ -55,6 +69,7 @@ fn split_dotted(word: &str) -> Option<(&str, &str)> {
 pub struct ReplCompleter {
     keywords: Vec<String>,
     builtins: Vec<String>,
+    modules: Vec<String>,
     commands: Vec<String>,
 }
 
@@ -117,36 +132,11 @@ impl ReplCompleter {
             // `ReplCommand`'s own list. The hand-kept copy had drifted both ways:
             // it offered `formats`, which no program can name, and did not offer
             // five modules that answer — `bytes`, `csv`, `json`, `sys`, `time`.
-            builtins: module_names()
-                .into_iter()
-                .chain(vec![
-                    "PI".to_string(),
-                    "E".to_string(),
-                    "abs".to_string(),
-                    "floor".to_string(),
-                    "ceil".to_string(),
-                    "round".to_string(),
-                    "sqrt".to_string(),
-                    "pow".to_string(),
-                    "sin".to_string(),
-                    "cos".to_string(),
-                    "tan".to_string(),
-                    "length".to_string(),
-                    "push".to_string(),
-                    "pop".to_string(),
-                    "map".to_string(),
-                    "filter".to_string(),
-                    "reduce".to_string(),
-                    "random".to_string(),
-                    "random_seed".to_string(),
-                    "uppercase".to_string(),
-                    "lowercase".to_string(),
-                    "trim".to_string(),
-                    "split".to_string(),
-                    "join".to_string(),
-                    "contains".to_string(),
-                ])
-                .collect(),
+            modules: module_names(),
+            // The flat builtins and constants are the language's registry too,
+            // read through one vocabulary function `:builtins` shares, so TAB
+            // and the listing cannot name different sets.
+            builtins: builtin_names(),
             // The REPL's own command words, read from the table the parser
             // accepts them in rather than written out again. A hand-kept list
             // here is the second table: it held the sixteen canonical names
@@ -202,6 +192,12 @@ impl ReplCompleter {
             }
         }
 
+        for module in &self.modules {
+            if sigil.is_none() && module.to_lowercase().starts_with(&word_lower) {
+                matches.push(module.clone());
+            }
+        }
+
         // An empty word asks what could go here, which includes the commands;
         // any other word only reaches them through a sigil, or `hi` would offer
         // `:hist`.
@@ -233,6 +229,23 @@ impl ReplCompleter {
         matches.dedup();
 
         matches
+    }
+
+    /// The flat builtins and constants this completer offers, in registry order.
+    ///
+    /// Exposed for the test that compares completion with `:builtins`: the two
+    /// have to answer from one list, and a test that rebuilt the list would be
+    /// the second copy the list exists to avoid.
+    pub fn builtin_names(&self) -> &[String] {
+        &self.builtins
+    }
+
+    /// The modules this completer offers, in registry order.
+    ///
+    /// Exposed for the test that compares completion with `:modules`, for the
+    /// same reason [`Self::builtin_names`] is.
+    pub fn module_names(&self) -> &[String] {
+        &self.modules
     }
 
     /// What TAB offers for a word holding a dot, and `None` for a word that is

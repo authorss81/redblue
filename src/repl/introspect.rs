@@ -226,6 +226,41 @@ pub fn doc_lines(module: &str) -> Option<Vec<String>> {
     Some(lines)
 }
 
+/// The `:builtins` listing: every name the language provides without an import
+/// — callable builtins and value-only globals alike — one per line, with the
+/// module it is also reachable through when it has one.
+///
+/// Read from [`stdlib::builtin_vocabulary`], the same function the completer
+/// reads, and sorted there, so two consecutive calls are the same bytes and a
+/// registry added to the language is listed without editing this function.
+///
+/// A name reachable through more than one module shows the first spelling
+/// [`stdlib::module_of_builtin`] finds; the listing names one module rather than
+/// pretending the others do not exist, and [`stdlib::module_of_builtin`]
+/// documents that the choice is the first row of the fixed member table.
+pub fn builtin_lines() -> Vec<String> {
+    let names = stdlib::builtin_vocabulary();
+    let mut lines = vec![format!("builtins ({}):", names.len())];
+    for name in names {
+        match stdlib::module_of_builtin(name) {
+            Some(module) => lines.push(format!("  {} ({})", name, module)),
+            None => lines.push(format!("  {}", name)),
+        }
+    }
+    lines
+}
+
+/// The `:modules` listing: every module the language exposes, one per line.
+///
+/// Read from [`stdlib::module_vocabulary`], the table the analyzer, the
+/// completer and `:doc` already share, and sorted there for determinism.
+pub fn module_lines() -> Vec<String> {
+    let names = stdlib::module_vocabulary();
+    let mut lines = vec![format!("modules ({}):", names.len())];
+    lines.extend(names.into_iter().map(|name| format!("  {}", name)));
+    lines
+}
+
 /// The `.sighelp` answer for `name`, or the refusal to give one.
 ///
 /// `None` is a clean refusal rather than an empty listing, because "there is
@@ -719,8 +754,9 @@ fn receiver_name(expression: &Expr) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        calls_in, calls_in_body, classify, doc_lines, expression_of, expression_of_for,
-        sighelp_lines, type_lines, which_lines, Call, Definition, Origin, Wording,
+        builtin_lines, calls_in, calls_in_body, classify, doc_lines, expression_of,
+        expression_of_for, module_lines, sighelp_lines, type_lines, which_lines, Call, Definition,
+        Origin, Wording,
     };
     use crate::parser::{Parser, Stmt};
     use crate::stdlib;
@@ -1467,5 +1503,158 @@ mod tests {
                 lines
             );
         }
+    }
+
+    /// `:builtins` lists the registry, not a hand-written copy of it: every
+    /// [`stdlib::BUILTIN_NAMES`] entry is there, every listed flat name is a
+    /// registered builtin, and the global constants are there too.
+    #[test]
+    fn builtins_lists_every_registered_name_and_nothing_else() {
+        let lines = builtin_lines();
+        let listed: Vec<&str> = lines
+            .iter()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+
+        for name in stdlib::BUILTIN_NAMES {
+            assert!(
+                listed.contains(name),
+                "{name} is registered, so :builtins lists it: {listed:?}"
+            );
+            assert!(
+                stdlib::is_builtin(name),
+                "{name} is listed and is also callable by name"
+            );
+        }
+        for name in stdlib::GLOBAL_CONSTANTS {
+            assert!(
+                listed.contains(name),
+                "{name} is in scope without an import, so :builtins lists it"
+            );
+            assert!(stdlib::is_global(name), "{name} is still a global constant");
+        }
+        for name in &listed {
+            assert!(
+                stdlib::is_builtin(name) || stdlib::is_global(name),
+                "{name} is listed as a builtin, so the language has to provide it"
+            );
+        }
+        assert_eq!(
+            listed.len(),
+            stdlib::builtin_vocabulary().len(),
+            "the listing is exactly the registry, with no name printed twice"
+        );
+    }
+
+    /// A builtin that has a dotted spelling is annotated with it: the module
+    /// branch is exercised positively, not merely by the absence of an empty
+    /// `()`. If `module_of_builtin` regressed to always answer `None`, every row
+    /// would be bare and the no-empty-field test would still pass.
+    #[test]
+    fn builtins_annotates_a_known_builtin_with_its_module() {
+        let lines = builtin_lines();
+
+        for expected in ["  abs (math)", "  files_read (files)", "  map (list)"] {
+            assert!(
+                lines.iter().any(|line| line == expected),
+                "{expected:?} is a known annotated row: {lines:?}"
+            );
+        }
+    }
+
+    /// Two consecutive listings are byte-for-byte the same.
+    ///
+    /// Registry iteration order reaching output is a known defect class here, so
+    /// the assertion is made against the command's own second answer rather than
+    /// against a sorted copy a test could write for it.
+    #[test]
+    fn edge_builtins_and_modules_are_deterministic_across_calls() {
+        assert_eq!(
+            builtin_lines(),
+            builtin_lines(),
+            "a second :builtins is the same listing"
+        );
+        assert_eq!(
+            module_lines(),
+            module_lines(),
+            "a second :modules is the same listing"
+        );
+    }
+
+    /// Completion and `:builtins` answer from one registry, so a name one can
+    /// reach the other can explain.
+    #[test]
+    fn edge_builtins_and_completion_share_one_registry() {
+        use crate::repl::completer::ReplCompleter;
+
+        let completer = ReplCompleter::new();
+        let lines = builtin_lines();
+        let listed: Vec<String> = lines
+            .iter()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+        let offered: Vec<String> = completer.builtin_names().to_vec();
+
+        assert_eq!(
+            listed, offered,
+            ":builtins and TAB name the same flat builtins in the same order"
+        );
+    }
+
+    /// `:modules` lists every module, each one resolves as a module, and TAB
+    /// offers the same list.
+    #[test]
+    fn modules_lists_every_module_and_completion_agrees() {
+        use crate::repl::completer::ReplCompleter;
+
+        let completer = ReplCompleter::new();
+        let lines = module_lines();
+        let listed: Vec<String> = lines
+            .iter()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            listed,
+            stdlib::module_vocabulary(),
+            "every registered module is listed, once, in a deterministic order"
+        );
+        assert_eq!(
+            listed,
+            completer.module_names(),
+            ":modules and TAB name the same modules"
+        );
+        for module in &listed {
+            assert!(stdlib::is_module(module), "{module} resolves as a module");
+            assert!(
+                completer.complete(module).contains(module),
+                "and TAB offers {module} under its own name"
+            );
+        }
+    }
+
+    /// A builtin with no module behind it gets a bare name rather than an empty
+    /// `()` — an empty field reads as a module whose name was lost.
+    #[test]
+    fn edge_a_builtin_without_a_module_has_no_empty_annotation() {
+        let lines = builtin_lines();
+
+        for line in lines.iter().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert!(!fields.is_empty(), "no listing row is blank: {line:?}");
+            assert!(
+                !fields.iter().any(|field| *field == "()" || *field == "("),
+                "no row has an empty module field: {line:?}"
+            );
+        }
+        assert!(
+            lines.iter().any(|line| line.trim() == "PI"),
+            "a constant with no module is just its name: {lines:?}"
+        );
     }
 }
