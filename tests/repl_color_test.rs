@@ -139,16 +139,23 @@ fn paint_never_mutates_its_input() {
 #[test]
 fn detection_precedence_is_explicit_then_no_color_then_tty() {
     let _pinned = pin_env();
-    // REDBLUE_COLOR wins over everything.
+    // An explicit REDBLUE_COLOR value wins over everything, including NO_COLOR.
     std::env::set_var("REDBLUE_COLOR", "always");
     std::env::remove_var("NO_COLOR");
     assert!(Style::detect().enabled(), "REDBLUE_COLOR=always must win");
+
+    std::env::set_var("NO_COLOR", "1");
+    assert!(
+        Style::detect().enabled(),
+        "an explicit REDBLUE_COLOR=always wins over NO_COLOR, which is the order SPEC.md records"
+    );
 
     std::env::set_var("REDBLUE_COLOR", "never");
     assert!(
         !Style::detect().enabled(),
         "REDBLUE_COLOR=never must win over the TTY check"
     );
+    std::env::remove_var("NO_COLOR");
 
     // An unrecognised value falls back to detection rather than erroring, so a
     // typo cannot unexpectedly colour someone's transcript.
@@ -161,6 +168,12 @@ fn detection_precedence_is_explicit_then_no_color_then_tty() {
     assert!(
         !Style::detect().enabled(),
         "NO_COLOR must disable colour, per the cross-platform convention"
+    );
+
+    std::env::set_var("REDBLUE_COLOR", "auto");
+    assert!(
+        !Style::detect().enabled(),
+        "REDBLUE_COLOR=auto defers to NO_COLOR rather than bypassing it"
     );
 
     std::env::remove_var("NO_COLOR");

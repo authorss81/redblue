@@ -215,6 +215,14 @@ pub enum ReplCommand {
     /// A block can be typed, but a fifty-line one has to be typed: without this
     /// there was no way to *paste* one into a session at all.
     Edit,
+    /// Lists every colour theme this build ships, with a sample of each role.
+    Themes,
+    /// Switches the session's colour theme at runtime.
+    ///
+    /// The name is human-typed, so dispatch resolves it case-insensitively and
+    /// with surrounding whitespace ignored; an unknown name is an error that
+    /// names the available themes rather than silently keeping the old one.
+    Theme(String),
     /// Sets the prompt from a format string, or restores the default when given
     /// no argument.
     ///
@@ -792,6 +800,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |_| ReplCommand::Example,
     },
     CommandSpec {
+        names: &["themes"],
+        description: "List the colour themes with a sample of each role",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Themes,
+    },
+    CommandSpec {
+        names: &["theme"],
+        description: "Switch the colour theme for this session",
+        usage: Some("<name>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Theme(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["prompt"],
         description: "Set the prompt from {engine}, {version}, {history}; none restores it",
         usage: Some("<format>"),
@@ -1110,6 +1134,7 @@ impl ReplCommand {
             | ReplCommand::Watch(value)
             | ReplCommand::Export(Some(value)) => Some(value.as_str()),
             ReplCommand::Prompt(Some(value)) => Some(value.as_str()),
+            ReplCommand::Theme(value) => Some(value.as_str()),
             ReplCommand::Vm(Some(value)) => Some(value.as_str()),
             ReplCommand::Alias(Some(value)) => Some(value.as_str()),
             ReplCommand::Macro(Some(value)) => Some(value.as_str()),
@@ -2034,5 +2059,43 @@ mod tests {
             ReplCommand::PrintWorkingDirectory
         );
         assert_eq!(ReplCommand::parse(".ls"), ReplCommand::ListDirectory);
+    }
+
+    /// The colour-theme commands parse under either sigil. `:themes` takes no
+    /// argument; `:theme` requires the name it switches to, so a bare `:theme`
+    /// is reported as missing one rather than silently listing or doing nothing.
+    #[test]
+    fn edge_theme_commands_parse() {
+        for input in [":themes", ".themes"] {
+            assert_eq!(ReplCommand::parse(input), ReplCommand::Themes);
+        }
+        for (input, argument) in [
+            (":theme dark", "dark"),
+            (".theme light", "light"),
+            (":theme   none  ", "none"),
+            (":theme  LiGhT", "LiGhT"),
+        ] {
+            assert_eq!(
+                ReplCommand::parse(input),
+                ReplCommand::Theme(argument.to_string()),
+                "{input:?} carries the theme name it was given"
+            );
+        }
+        assert_eq!(
+            ReplCommand::parse(":theme"),
+            ReplCommand::MissingArgument {
+                command: "theme",
+                usage: "<name>"
+            },
+            "a theme command with no name says what it is missing"
+        );
+        assert_eq!(
+            ReplCommand::parse(":theme   "),
+            ReplCommand::MissingArgument {
+                command: "theme",
+                usage: "<name>"
+            },
+            "whitespace is not a theme name"
+        );
     }
 }

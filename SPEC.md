@@ -2336,3 +2336,43 @@ identifiers too.
 ---
 
 *This specification is a draft. Implementation details may change before v1.0.*
+
+---
+
+## REPL Themes
+
+The REPL's colour is chosen by a named theme. A theme holds one colour parameter
+for every `Paint` role — prompt, heading, result, error, dim, the three brand
+roles, keyword, string, number, comment, builtin and operator — so changing the
+palette never means editing a paint call. The one exception is `none`, the
+explicit no-colour theme: it deliberately holds no parameters and paints every
+role with nothing.
+
+`rb` ships three themes:
+
+| Theme | Purpose |
+|---|---|
+| `:theme dark` | The default palette, chosen for a dark terminal background. |
+| `:theme light` | Dark inks and no faint white, for a light terminal background. |
+| `:theme none` | No colour at all; byte-identical to running with colour disabled. |
+
+`:themes` lists every shipped theme with a sample of each role. The sample is
+rendered through the real colour painter, so it reflects the palette rather than
+repeating it. `:theme <name>` switches the session immediately: the next line
+printed already uses the new palette, with no restart.
+
+```text
+:themes
+:theme light
+:theme none
+```
+
+Theme names are matched case-insensitively and with surrounding whitespace
+ignored, because they are typed by a human. An unknown name is an error that
+lists the available themes; it does not silently keep the old one. Switching to
+`none` (or choosing a name that does not exist) leaves the session usable — the
+following programs still run and print normally.
+
+Colour detection is unchanged: `REDBLUE_COLOR=always|never|auto` overrides it,
+`NO_COLOR` disables colour, and otherwise stdout being a terminal decides. A
+theme only chooses colours when colour is enabled.
