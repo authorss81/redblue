@@ -644,3 +644,179 @@ fn edge_multiple_assignment_binds_empty_values() {
         "empty text should bind as empty text"
     );
 }
+
+/// A right-hand side that fails is a clean runtime error, not a panic and not a
+/// name left bound to a partial result.
+#[test]
+fn edge_a_right_hand_side_failure_is_a_clean_error() {
+    let result = redblue::run_source_value("set a, b to 1, 1 / 0");
+    assert!(
+        result.is_err(),
+        "a failing right-hand side must be a clean error"
+    );
+    assert!(
+        matches!(result, Err(Error::Runtime(_, _))),
+        "the error should be a runtime error, got {:?}",
+        result
+    );
+}
+
+/// Every right-hand side is evaluated before any name is written, so when the
+/// last one fails the earlier names of the same statement must stay unbound.
+/// The failure is caught, and reading the first name afterwards must still be
+/// unbound rather than seeing the `1` that had already been computed.
+#[test]
+fn edge_a_failed_right_hand_side_binds_no_name() {
+    let source = "\
+set caught to 0
+try
+    set fresh_a, fresh_b to 1, 1 / 0
+catch error
+    set caught to 1
+end
+set unbound to 0
+try
+    set unbound to fresh_a
+catch error
+    set unbound to 1
+end
+give back caught * 10 + unbound
+";
+    assert_eq!(
+        eval(source),
+        number("11"),
+        "a caught right-hand-side failure should bind neither name"
+    );
+}
+
+/// Unicode is part of the identifier surface, so a multiple assignment binds a
+/// non-ASCII name exactly as it binds an ASCII one.
+#[test]
+fn edge_multiple_assignment_binds_unicode_names() {
+    assert_eq!(
+        eval("set café, naïve to \"drink\", \"simple\"\ngive back café + \" \" + naïve"),
+        Value::Text("drink simple".to_string()),
+        "non-ASCII names should bind and read back in source order"
+    );
+}
+
+/// A multiple assignment targets names under the same scoping rules as `set`:
+/// a parameter is the function's own binding, while a name that is only global
+/// is written globally.
+#[test]
+fn edge_multiple_assignment_uses_the_same_scoping_as_set() {
+    let source = "\
+set outer to 1
+to bump(inner)
+    set inner, outer to inner + 1, outer + 10
+    give back inner * 100 + outer
+end
+set result to bump(5)
+give back result * 1000 + outer
+";
+    assert_eq!(
+        eval(source),
+        number("611011"),
+        "the parameter should stay local and the global should be written"
+    );
+}
+
+/// Each right-hand side is evaluated exactly once and in source order. A
+/// duplicated evaluation would count the second call twice and bind the wrong
+/// values.
+#[test]
+fn edge_multiple_assignment_evaluates_each_right_hand_side_once() {
+    let source = "\
+set calls to 0
+to tick()
+    set calls to calls + 1
+    give back calls
+end
+set a, b to tick(), tick()
+give back a * 10 + b + calls * 100
+";
+    assert_eq!(
+        eval(source),
+        number("212"),
+        "two calls should bind 1 and 2 and leave the counter at 2"
+    );
+}
+
+/// A dotted import with more than one member is the same unsupported
+/// production, and the refusal still names it rather than leaking a token.
+#[test]
+fn edge_a_dotted_import_with_two_members_is_refused() {
+    let result = redblue::run_source_value("import math.sqrt.abs as s");
+    assert!(
+        result.is_err(),
+        "a two-member dotted import must be a clean error"
+    );
+    match result {
+        Err(Error::Parser(message, span)) => {
+            assert!(
+                message.contains("Dotted imports are not implemented"),
+                "the message should name the unsupported form, got `{message}`"
+            );
+            assert!(span.is_known(), "the refusal should carry a source span");
+        }
+        other => panic!("expected a Parser error, got {other:?}"),
+    }
+}
+
+/// A parameter of the same name as a constant is a local target, not a write
+/// onto the constant, on both engines. The multiple assignment must write that
+/// local rather than refuse the statement.
+#[test]
+fn edge_a_parameter_shadowing_a_constant_is_a_local_target_on_both_vms() {
+    let source = "\
+constant X to 1
+to shadow(X)
+    set X, y to X + 1, 2
+    give back X * 10 + y
+end
+set result to shadow(5)
+give back result * 100 + X
+";
+    assert_eq!(
+        eval(source),
+        number("6201"),
+        "the tree VM should write the parameter and leave the constant alone"
+    );
+
+    let chunk = redblue::bytecode::compile_source(source).expect("source should compile");
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    let result = vm.run(&chunk).expect("compiled source should run");
+    assert_eq!(
+        result,
+        number("6201"),
+        "the bytecode VM should write the parameter and leave the constant alone"
+    );
+}
+
+/// A loop variable of the same name as a constant is likewise a local target.
+/// The loop's own binding shadows the constant, so a multiple assignment
+/// inside the loop must not be refused for the constant's name.
+#[test]
+fn edge_a_loop_variable_shadowing_a_constant_is_a_local_target_on_both_vms() {
+    let source = "\
+constant X to 1
+for each X in [5]
+    set X, y to X + 1, 2
+end
+give back X * 100 + y
+";
+    assert_eq!(
+        eval(source),
+        number("102"),
+        "the tree VM should write the loop variable and leave the constant alone"
+    );
+
+    let chunk = redblue::bytecode::compile_source(source).expect("source should compile");
+    let mut vm = redblue::bytecode::vm::BytecodeVm::new();
+    let result = vm.run(&chunk).expect("compiled source should run");
+    assert_eq!(
+        result,
+        number("102"),
+        "the bytecode VM should write the loop variable and leave the constant alone"
+    );
+}

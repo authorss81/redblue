@@ -199,6 +199,11 @@ declaration      = 'set' identifier { ',' identifier } 'to' expression { ',' exp
 declaration      = 'constant' identifier [ ':' type_expression ] 'to' expression
 ```
 
+Multiple assignment evaluates every right-hand expression before it binds any
+name, so `set x, y to y, x` swaps the two values. The name and value counts must
+match, a name may appear only once, and a right-hand side that fails leaves no
+name of the statement bound.
+
 A `constant` binds a name of the whole program, so it may be declared once
 only — a second declaration of the same name is a runtime error
 (`Constant 'NAME' is already declared`) — and no `set` may rebind it

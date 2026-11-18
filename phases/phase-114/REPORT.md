@@ -14,9 +14,10 @@
 | src/repl/introspect.rs | +4 −0 | statement name and call-walk support, with both values of a multiple assignment read in source order |
 | src/repl/weight.rs | +4 −0 | weight walk support |
 | docs/GRAMMAR.md | +1 −2 | removes the dotted `import a.b as c` production from the grammar, records the parser's explanatory refusal, and writes the comma-separated multi-import form the parser accepts |
+| docs/GRAMMAR.md | +5 −0 | documents evaluate-before-bind, the equal-length and unique-name rules, and failure atomicity beside the multiple-assignment production |
 | NATIVE.md, src/bytecode/format.rs | +8 −8 | updates the source-line citations moved by the interpreter and runtime changes |
-| tests/doc_blocks_runs.txt, tests/doc_blocks_fragments.txt | +9 −9 | follows the removed grammar line |
-| tests/multiple_assignment_test.rs | +526 −0 | new tests, helpers and edge cases, including the explanatory dotted-import refusal, empty-value binding, and the two-constant cross-engine refusal |
+| tests/doc_blocks_runs.txt, tests/doc_blocks_fragments.txt | +17 −17 | moves the block line keys with the removed production and the inserted prose, without changing any block's classification |
+| tests/multiple_assignment_test.rs | +644 −0 | new tests, helpers and edge cases, including the dotted-import refusal, empty-value binding, the two-constant cross-engine refusal, failing-right-hand-side atomicity, unicode names, `set`-compatible scoping, and exactly-once evaluation |
 | tests/unreviewed_work_ack_test.rs | +40 −2 | the in-flight prefix for the phase under review comes from the pipeline's `RBOPS_PHASE` (falling back to the delivery commit at `HEAD`), and a test refuses a checked-in entry for it, so a phase cannot certify its own delivery |
 
 ## Reproduction
@@ -67,6 +68,15 @@
 | edge_dotted_import_without_alias_names_the_unsupported_form | failure assertion: no-alias dotted import gets the same explanation |
 | edge_a_dotted_import_after_a_plain_one_is_refused | failure assertion: a dotted member in a multi-import is refused where it is written |
 | edge_multiple_assignment_binds_empty_values | empty: empty list, `nothing`, and empty text all bind |
+| edge_a_right_hand_side_failure_is_a_clean_error | failure assertion: `is_err` on a failing right-hand side, and the error is `Runtime` |
+| edge_a_failed_right_hand_side_binds_no_name | failure atomicity: a caught failure on the last value leaves the earlier name unbound |
+| edge_a_parameter_shadowing_a_constant_is_a_local_target_on_both_vms | shadowing: a parameter of a constant's name is a local target on both engines |
+| edge_a_loop_variable_shadowing_a_constant_is_a_local_target_on_both_vms | shadowing: a loop variable of a constant's name is a local target on both engines |
+| edge_a_checked_multiple_assignment_uses_the_infallible_bind | module-loader atomicity: checked targets bind through the infallible `bind_checked` |
+| edge_multiple_assignment_binds_unicode_names | unicode: non-ASCII names bind and read back in source order |
+| edge_multiple_assignment_uses_the_same_scoping_as_set | nesting/scoping: a parameter target stays local while a global target is written globally |
+| edge_multiple_assignment_evaluates_each_right_hand_side_once | boundary: each value expression is evaluated exactly once, in source order |
+| edge_a_dotted_import_with_two_members_is_refused | malformed input: a two-member dotted import is a Parser error naming the unsupported form |
 
 ## Review follow-ups (round 2)
 - The pre-existing `tests/tooling_grammar_test.rs` binding test is an LSP token
@@ -141,12 +151,39 @@ defence.
 - `docs/GRAMMAR.md` now spells the comma-separated multi-import production
   (`import files, math as m`) instead of only the single-item form.
 
+## Review follow-ups (round 6 — resumed run)
+- The resumed tree was committed at `HEAD`, so `verify.sh` saw no working-tree
+  diff and failed diff hygiene, the test quota, the `edge_*` rule and the
+  failure-assertion check. Six new tests and a five-line grammar clarification
+  land on top of that commit; no earlier work was removed.
+- The new tests pin the failure atomicity of the right-hand side, unicode
+  names, `set`-compatible scoping, exactly-once evaluation, and a two-member
+  dotted import refusal.
+- `tests/doc_blocks_runs.txt` and `tests/doc_blocks_fragments.txt` follow the
+  grammar insertion so the documented blocks keep their absolute line keys;
+  their run/fragment counts are unchanged.
+
+## Review follow-ups (round 7 — review findings)
+- Both engines now resolve a multiple assignment's target the same way before
+  deciding whether it is a constant: the bytecode `STORE` refuses only a write
+  that lands in the globals, and treats an active loop variable as the shadow
+  it is, so a parameter or loop variable of a constant's name is written rather
+  than refused. Cross-VM tests pin both shadows.
+- A module's multiple assignment writes through a new
+  `ModuleLoader::bind_checked`, which cannot fail after every target has passed
+  `check_bind`; the fallible `bind` remains for single declarations. A loader
+  whose `bind` refuses is pinned as irrelevant to the checked run.
+- `phases/phase-114/FINDINGS.md` now quotes the parser's explanatory dotted
+  import refusal instead of the old `Unexpected token Dot`.
+- `NATIVE.md` and `src/bytecode/format.rs` cite the lines moved by these
+  changes.
+
 ## Gates
 | Gate | Result |
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | pass — 3128 passed, 0 failed |
+| cargo test --all-targets | pass — 3137 passed, 0 failed |
 | ../rbops/verify.sh phase-114 | pass |
 
 ## Invariants touched
@@ -161,12 +198,12 @@ defence.
 |---|---|
 | empty | N/A — the grammar requires at least one name and one value; `set x, y to 1` and `set x to 1, 2` cover the missing side. |
 | singleton | covered — `single_assignment_still_works` and `multiple_assignment_binds_each_name`. |
-| boundary | covered — two and three names. |
+| boundary | covered — two, three and five names; each right-hand side is evaluated exactly once. |
 | out_of_bounds | N/A — no index is involved. |
 | type_mismatch | N/A — assignment binds any `Value`; no declared types in this form. |
 | numeric_boundary | N/A — no arithmetic is performed by the statement. |
-| unicode | N/A — identifiers are tokenised by the existing lexer; no new text handling. |
-| nesting_recursion | covered — swap evaluation order, bytecode agreement, and a caught constant-refusal agreement test. |
+| unicode | covered — `edge_multiple_assignment_binds_unicode_names` binds non-ASCII names. |
+| nesting_recursion | covered — swap evaluation order, bytecode agreement, a caught constant-refusal agreement test, and `set`-compatible scoping inside a function. |
 | duplicate_missing_keys | covered — duplicate left-hand name refused; missing right-hand side refused. |
 | malformed_input | covered — trailing commas, missing/extra values, dotted imports. |
 | resource_limit | N/A — the statement adds no loops or recursion; existing call/loop limits apply. |

@@ -766,6 +766,10 @@ impl runtime::ModuleLoader for VmModuleLoader<'_> {
             self.vm.bind_module_name(name, value)
         }
     }
+
+    fn bind_checked(&mut self, name: &str, value: Value) {
+        self.vm.bind_module_name_checked(name, value);
+    }
 }
 
 impl Vm {
@@ -2169,8 +2173,15 @@ impl Vm {
     /// capture the module's binding for the length of that scope.
     fn bind_module_name(&mut self, name: &str, value: Value) -> Result<()> {
         self.refuse_constant_rebind(name)?;
-        self.set_global(name.to_string(), value);
+        self.bind_module_name_checked(name, value);
         Ok(())
+    }
+
+    /// Writes a module name after every target of the statement has passed the
+    /// loader's check. The refusal is [`Vm::refuse_constant_rebind`], asked by
+    /// `check_bind` before this runs.
+    fn bind_module_name_checked(&mut self, name: &str, value: Value) {
+        self.set_global(name.to_string(), value);
     }
 
     fn set_var(&mut self, name: &str, value: Value) -> Result<()> {

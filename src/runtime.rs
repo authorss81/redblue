@@ -69,7 +69,7 @@ pub trait ModuleLoader {
     /// environment.
     fn evaluate(&mut self, expression: &Expr) -> Result<Value>;
 
-    /// Reports whether [`ModuleLoader::bind`] would refuse this name, without
+    /// Reports whether this loader would refuse a write of this name, without
     /// writing anything.
     ///
     /// [`module_bindings`] calls this for every target of a multiple assignment
@@ -78,8 +78,20 @@ pub trait ModuleLoader {
     /// roll back the tables around the whole module.
     fn check_bind(&self, name: &str, is_constant: bool) -> Result<()>;
 
-    /// Binds one name the module contributes into the importing program.
+    /// Binds one name a single module declaration contributes.
+    ///
+    /// This can refuse, so its caller rolls the declaration back. A multiple
+    /// assignment's targets use [`ModuleLoader::bind_checked`] after every one
+    /// of them has passed `check_bind` instead.
     fn bind(&mut self, name: &str, value: Value, is_constant: bool) -> Result<()>;
+
+    /// Binds one target of a multiple assignment whose targets have all passed
+    /// [`ModuleLoader::check_bind`].
+    ///
+    /// Infallible by signature: a loader that would refuse the write says so in
+    /// `check_bind`, so after the whole run has been checked there is no way
+    /// for a later target to fail part-way through the writes.
+    fn bind_checked(&mut self, name: &str, value: Value);
 }
 
 /// Binds the declarations of a parsed module into `loader`, in source order.
@@ -92,7 +104,8 @@ pub trait ModuleLoader {
 /// a module may read a name an earlier declaration of the same module bound. A
 /// multiple assignment still evaluates all of its right-hand sides before
 /// binding any of its names, then checks every target with
-/// [`ModuleLoader::check_bind`] before writing any of them. A refusal therefore
+/// [`ModuleLoader::check_bind`] before writing any of them through
+/// [`ModuleLoader::bind_checked`], which cannot fail. A refusal therefore
 /// leaves the loader unchanged, and the loader is atomic by itself rather than
 /// only when its caller rolls the whole module back.
 pub fn module_bindings(program: &Program, loader: &mut impl ModuleLoader) -> Result<()> {
@@ -126,7 +139,7 @@ pub fn module_bindings(program: &Program, loader: &mut impl ModuleLoader) -> Res
                     loader.check_bind(name, false)?;
                 }
                 for (name, value) in names.iter().zip(evaluated).rev() {
-                    loader.bind(name, value, false)?;
+                    loader.bind_checked(name, value);
                 }
             }
             _ => continue,
@@ -146,6 +159,8 @@ mod module_binding_order_tests {
     struct RecordingLoader {
         checks: RefCell<Vec<(String, bool)>>,
         attempts: Vec<(String, bool)>,
+        refuse_bind: bool,
+        allow_a: bool,
     }
 
     impl ModuleLoader for RecordingLoader {
@@ -157,7 +172,7 @@ mod module_binding_order_tests {
             self.checks
                 .borrow_mut()
                 .push((name.to_string(), is_constant));
-            if name == "a" {
+            if !self.allow_a && name == "a" {
                 return Err(Error::Runtime(
                     "Cannot assign to constant 'a'".to_string(),
                     Span::unknown(),
@@ -167,8 +182,18 @@ mod module_binding_order_tests {
         }
 
         fn bind(&mut self, name: &str, _value: Value, is_constant: bool) -> Result<()> {
+            if self.refuse_bind {
+                return Err(Error::Runtime(
+                    "a single declaration bind must not run here".to_string(),
+                    Span::unknown(),
+                ));
+            }
             self.attempts.push((name.to_string(), is_constant));
             Ok(())
+        }
+
+        fn bind_checked(&mut self, name: &str, _value: Value) {
+            self.attempts.push((name.to_string(), false));
         }
     }
 
@@ -197,6 +222,32 @@ mod module_binding_order_tests {
             loader.attempts,
             Vec::<(String, bool)>::new(),
             "a refused target must leave the loader with nothing bound"
+        );
+    }
+
+    /// Once every target of a multiple assignment has passed `check_bind`, the
+    /// writes go through `bind_checked`, which cannot fail. A loader whose
+    /// single-declaration `bind` refuses therefore still completes the checked
+    /// run: no earlier target is left bound by a later target's failure.
+    #[test]
+    fn edge_a_checked_multiple_assignment_uses_the_infallible_bind() {
+        let tokens = Lexer::tokenize("set a, b to 1, 2\n").expect("the module source should lex");
+        let program = crate::parser::Parser::new(tokens)
+            .parse()
+            .expect("the module source should parse");
+
+        let mut loader = RecordingLoader {
+            refuse_bind: true,
+            allow_a: true,
+            ..RecordingLoader::default()
+        };
+        module_bindings(&program, &mut loader)
+            .expect("checked targets should bind without the fallible `bind`");
+
+        assert_eq!(
+            loader.attempts,
+            vec![("b".to_string(), false), ("a".to_string(), false)],
+            "both checked targets should be written, in the VMs' reverse store order"
         );
     }
 }

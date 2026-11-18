@@ -2608,16 +2608,37 @@ impl BytecodeVm {
         }
     }
 
+    /// Whether `name` is the variable of an active loop in `frame`'s body.
+    ///
+    /// The bytecode VM shadows a loop's variable by writing the name it
+    /// displaced, not by adding a local scope, so the name is not in `locals`.
+    /// The tree-walking VM gives each turn its own scope, where a constant is
+    /// shadowed; this is the same answer for the store refusal.
+    fn is_active_loop_variable(&self, frame: usize, name: &str) -> bool {
+        self.loops.iter().rev().any(|entry| {
+            entry.frame == frame
+                && entry
+                    .variable
+                    .as_ref()
+                    .is_some_and(|variable| variable.name == name)
+        })
+    }
+
     /// A plain `STORE`: binds the top of the stack and remembers the binding it
     /// displaced until the run of stores ends.
     fn store_plain(&mut self, name: &str, frame: usize) -> Result<()> {
-        // A write that lands in a scope is not a write to a constant, which is
-        // why this is refused only above the module boundary: the tree-walking
-        // VM refuses it in `set_var` on the same path.
-        if self.module_depth == 0 {
+        // A write that lands in a scope is not a write to a constant: the
+        // tree-walking VM writes a local of the same name rather than refusing
+        // it, so this refuses only a write that reaches the globals above the
+        // module boundary. A loop's variable is that kind of shadow even though
+        // it is stored over the name it displaced rather than in a local scope.
+        let target = self.store_target(frame, name);
+        if self.module_depth == 0
+            && matches!(&target, StoreTarget::Global)
+            && !self.is_active_loop_variable(frame, name)
+        {
             self.refuse_constant_rebind(name)?;
         }
-        let target = self.store_target(frame, name);
         let previous = self.binding_at(&target, name);
         let value = self.pop()?;
         self.bind(frame, name, value);
