@@ -12,6 +12,10 @@ pub enum ReplCommand {
     History,
     Vars,
     Functions,
+    /// Every name in scope without an import, with its module when it has one.
+    Builtins,
+    /// Every module the language exposes, one name per line.
+    Modules,
     /// Runs a shell command in the host shell and reports its output and exit.
     ///
     /// The command text is kept whole rather than split into words: the shell
@@ -223,11 +227,11 @@ pub enum ReplCommand {
     /// with surrounding whitespace ignored; an unknown name is an error that
     /// names the available themes rather than silently keeping the old one.
     Theme(String),
-    /// Sets the prompt from a format string, or restores the default when given
-    /// no argument.
+    /// Shows the current prompt, sets it from a format string, or restores the
+    /// default when given the word `none`.
     ///
     /// `Option` rather than a plain `String` because `:prompt` on its own is not
-    /// a command missing its argument: it is the one that puts the prompt back.
+    /// a command missing its argument: it is the question "what is my prompt?".
     /// The table still declares a usage so `:help` names what the argument is.
     Prompt(Option<String>),
     /// A user-named shortcut for a command, or — with no argument — the list of
@@ -276,12 +280,12 @@ struct CommandSpec {
     usage: Option<&'static str>,
     /// Whether the argument may be left out without that being an error.
     ///
-    /// True for two commands: `:prompt` with nothing after it restores the
-    /// default prompt, and `.debug` with nothing after it opens the debug
-    /// sub-REPL on nothing yet — a session into which `.watch` and a later
-    /// `.debug <file>` are the way in. Each is a thing a user asks for rather
-    /// than a command typed incompletely. Both still declare a `usage`, so
-    /// `:help` names the format the argument takes.
+    /// True for two commands: `:prompt` with nothing after it shows the current
+    /// prompt, and `.debug` with nothing after it opens the debug sub-REPL on
+    /// nothing yet — a session into which `.watch` and a later `.debug <file>`
+    /// are the way in. Each is a thing a user asks for rather than a command
+    /// typed incompletely. Both still declare a `usage`, so `:help` names the
+    /// format the argument takes.
     optional_argument: bool,
     /// Whether the argument is display text, whose trailing whitespace is part of
     /// it rather than a separator to be dropped.
@@ -379,6 +383,22 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         optional_argument: false,
         verbatim_argument: false,
         build: |_| ReplCommand::Functions,
+    },
+    CommandSpec {
+        names: &["builtins", "bi"],
+        description: "List every name in scope without an import, with its module",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Builtins,
+    },
+    CommandSpec {
+        names: &["modules", "mods"],
+        description: "List every standard library module",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Modules,
     },
     CommandSpec {
         names: &["pipe"],
@@ -817,7 +837,8 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["prompt"],
-        description: "Set the prompt from {engine}, {version}, {history}; none restores it",
+        description: "Set the prompt from {engine}, {version}, {history}; none restores it; \
+                      with no argument, show the current prompt",
         usage: Some("<format>"),
         optional_argument: true,
         verbatim_argument: true,
@@ -1046,7 +1067,7 @@ impl ReplCommand {
                     }
                     // An argument the command does not insist on is the command's
                     // own business, not a missing-argument report: `:prompt` reads
-                    // "no format given" as "put the default back".
+                    // "no format given" as "show the current prompt".
                     None if spec.optional_argument => (spec.build)(None),
                     None => ReplCommand::MissingArgument {
                         command: spec.names[0],
@@ -1295,9 +1316,9 @@ mod tests {
                 | ReplCommand::Table(value)
                 | ReplCommand::Delete(value) => value.as_str(),
                 // The two `Prompt` shapes are told apart by the variant itself:
-                // `Prompt(None)` is a command that restores the default and falls
-                // to the empty argument below, `Prompt(Some(..))` is one that was
-                // given a format and carries it verbatim.
+                // `Prompt(None)` is the question that shows the current prompt
+                // and falls to the empty argument below, `Prompt(Some(..))` is
+                // one that was given a format and carries it verbatim.
                 ReplCommand::Prompt(Some(value)) => value.as_str(),
                 // `.export` with a path carries it the same way; with none it
                 // carries nothing, which is the empty argument above.
@@ -1445,17 +1466,17 @@ mod tests {
     ///
     /// A prompt ends in a space — that space is between the prompt and what the
     /// user types — so `:prompt rb> ` and `:prompt rb>` are different prompts. And
-    /// `:prompt` on its own is not a command typed incompletely: it is the one
-    /// that puts the default back. Both facts are only worth anything if the
-    /// parser keeps them, which is what this asserts directly rather than through
-    /// the alias table, where a `Prompt` row could pass while the argument it
-    /// carries was wrong.
+    /// `:prompt` on its own is not a command typed incompletely: it is the
+    /// question that shows the current prompt. Both facts are only worth anything
+    /// if the parser keeps them, which is what this asserts directly rather than
+    /// through the alias table, where a `Prompt` row could pass while the
+    /// argument it carries was wrong.
     #[test]
     fn parse_reads_a_prompt_as_display_text_or_as_no_argument() {
         assert_eq!(
             ReplCommand::parse(":prompt"),
             ReplCommand::Prompt(None),
-            "no argument at all is the command that restores the default"
+            "no argument at all is the command that shows the current prompt"
         );
         assert_eq!(
             ReplCommand::parse(":prompt   "),
@@ -2097,5 +2118,17 @@ mod tests {
             },
             "whitespace is not a theme name"
         );
+    }
+
+    /// The two introspection commands are commands, under either sigil, and
+    /// neither takes an argument.
+    #[test]
+    fn parse_reads_builtins_and_modules_as_commands() {
+        for input in [":builtins", ".builtins"] {
+            assert_eq!(ReplCommand::parse(input), ReplCommand::Builtins);
+        }
+        for input in [":modules", ".modules"] {
+            assert_eq!(ReplCommand::parse(input), ReplCommand::Modules);
+        }
     }
 }

@@ -169,6 +169,7 @@ const ACKNOWLEDGED: &[(&str, &str)] = &[
     ("985e4456ce8d526d292e5157a449542bcdba5259", "resume phase-046: adopt preserved work. Carries unreviewed code (+1274/-26, 11 files, +370 lines under src/). Deliberately not rewritten."),
     ("a72143420f1da24667137b3f809bece989f274d2", "resume phase-086: adopt preserved work. Carries unreviewed code (+664/-27, 7 files, +79 lines under src/). Deliberately not rewritten."),
     ("cd36c70140413f9559e417e8401f88babdf528b1", "resume phase-114: adopt preserved work. Carries unreviewed code (+2211/-151, 21 files, +1145/-97 under src/ - multiple assignment across the parser, analyzer, interpreter, runtime, bytecode codegen/vm/format, formatter, linter and REPL introspection, plus the dotted-import refusal and this phase's tests and docs). Deliberately not rewritten; kept so HEAD's ancestry stays intact. Pinned by SHA because phase-114 is no longer the phase under review, so the pipeline's in-flight subject rule does not cover its delivery commit."),
+    ("ae98b8558a7a2ef07dbe945ba974b8992c49aac6", "resume phase-117: adopt preserved work. Carries unreviewed code (+911/-79, 9 files, +746/-79 under src/ - selectable REPL colour themes in src/repl/style.rs, the live style handover in src/repl/editor.rs, `:themes`/`:theme` in src/repl/commands.rs and the dispatch in src/repl/mod.rs, plus the phase's tests and docs). Deliberately not rewritten; kept so HEAD's ancestry stays intact. Pinned by SHA now that phase-117 is no longer the phase under review, so the pipeline's in-flight subject rule does not cover its delivery commit."),
     // The two below are invisible to a shallow `git log`, which is how phase-083
     // undercounted this shape as thirteen. Recorded so the count cannot drift.
     ("e26659d49097210a2d1ab8abecc97d61698afebe", "resume phase-048: adopt preserved work. Carries unreviewed code (+1223/-16, 8 files, +120 lines under src/). Deliberately not rewritten. Visible only on a complete history: a shallow `git log main` does not reach it."),
@@ -2098,6 +2099,44 @@ fn edge_the_phase_114_delivery_is_acknowledged_by_sha_not_the_rule() {
         .iter()
         .find(|(sha, _)| *sha == DELIVERY_SHA)
         .expect("phase-114's delivery commit must be acknowledged by its SHA");
+    assert!(
+        reason.contains("unreviewed") && reason.contains("Deliberately not rewritten"),
+        "the acknowledgement must say what the commit carries and that it was deliberately kept: \
+         {reason:?}"
+    );
+}
+
+/// `resume phase-117:` is not on the subject rule: phase-117 is no longer the
+/// phase under review, so its delivery commit is acknowledged by its SHA with
+/// an independent reason.
+///
+/// This is the sanctioned handoff the phase after a delivery makes: phase-117
+/// acknowledged phase-114 the same way, by SHA, and phase-118 acknowledges
+/// phase-117. Putting the prefix back on the rule would let a later phase
+/// certify another phase's unreviewed delivery. The SHA entry is checked here
+/// so it cannot be dropped or replaced by a prefix without the audit noticing.
+#[test]
+fn edge_the_phase_117_delivery_is_acknowledged_by_sha_not_the_rule() {
+    const DELIVERY_SHA: &str = "ae98b8558a7a2ef07dbe945ba974b8992c49aac6";
+    let prefix = "resume phase-117:";
+
+    assert!(
+        !DELIVERY_SUBJECT_PREFIXES.contains(&prefix),
+        "{prefix:?} must not widen the rule: phase-117 is not the phase under review, so its \
+         delivery commit is acknowledged by its SHA with an independent reason"
+    );
+
+    let (_, log) = audit_head().expect("HEAD's history must be readable");
+    assert!(
+        log.lines()
+            .any(|line| line.starts_with(&format!("{DELIVERY_SHA}\t"))),
+        "phase-117's delivery commit must be present in the history this audit measures"
+    );
+
+    let (_, reason) = ACKNOWLEDGED
+        .iter()
+        .find(|(sha, _)| *sha == DELIVERY_SHA)
+        .expect("phase-117's delivery commit must be acknowledged by its SHA");
     assert!(
         reason.contains("unreviewed") && reason.contains("Deliberately not rewritten"),
         "the acknowledgement must say what the commit carries and that it was deliberately kept: \
