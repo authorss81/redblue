@@ -101,6 +101,15 @@ pub trait LineSource {
     fn highlights(&self) -> bool {
         false
     }
+
+    /// Tells this source which palette the session is painting with.
+    ///
+    /// The session owns the `Style`, and `:theme` changes it in place; a
+    /// terminal reader holds its own copy for the prompt and the highlighter, so
+    /// it has to be told or the line being typed keeps the previous palette.
+    /// The default is nothing to do: a source that paints nothing needs no
+    /// palette, and a test source only records what it is given.
+    fn set_style(&mut self, _style: Style) {}
 }
 
 /// The reader a session with no terminal gets: one line at a time off standard
@@ -159,6 +168,10 @@ impl LineSource for PlainSource {
             Ok(_) => Ok(Line::Text(input.trim_end_matches(['\r', '\n']).to_string())),
             Err(error) => Err(error),
         }
+    }
+
+    fn set_style(&mut self, style: Style) {
+        self.style = style;
     }
 }
 
@@ -271,6 +284,16 @@ struct SessionCompleter {
 }
 
 impl SessionCompleter {
+    /// Adopts `style`, including the theme it carries.
+    ///
+    /// The two fields are always kept together: `highlight` reads the roles from
+    /// `theme` and the colours from `style`, so a completer that took one and
+    /// not the other would paint the new palette through the old roles.
+    fn set_style(&mut self, style: Style) {
+        self.style = style;
+        self.theme = style.theme();
+    }
+
     /// The start of the word under `pos` within `line`, and that word.
     ///
     /// Byte offsets are walked by character rather than by adding one: the space
@@ -408,9 +431,6 @@ impl Helper for SessionCompleter {}
 /// The line editor a terminal session reads through.
 pub struct EditSource {
     editor: Editor<SessionCompleter, FileHistory>,
-    /// The same completer the editor holds, so what TAB offers can be asked for
-    /// without a terminal.
-    completer: SessionCompleter,
     history_path: Option<PathBuf>,
 }
 
@@ -458,14 +478,17 @@ impl EditSource {
             names,
             dir,
             style,
-            theme: Theme::standard(),
+            theme: style.theme(),
         };
         let config = Config::builder().auto_add_history(true).build();
         let mut editor = Editor::with_config(config).map_err(io_error)?;
         // Without a helper the line editor answers TAB with silence: it has
         // nothing to complete with, so it does nothing at all rather than
         // ringing. The completer has to be handed over, not merely built.
-        editor.set_helper(Some(completer.clone()));
+        // This is the only copy: every hook and every accessor below reads the
+        // editor's own helper, so there is no second palette that can drift
+        // from the one the terminal actually paints with.
+        editor.set_helper(Some(completer));
         if let Some(path) = history_path.as_deref() {
             if path.exists() {
                 if let Err(error) = editor.load_history(&path) {
@@ -479,15 +502,26 @@ impl EditSource {
         }
         Ok(Self {
             editor,
-            completer,
             history_path,
         })
+    }
+
+    /// The live helper the editor hands its hooks: completion, hints, and the
+    /// palette for the prompt and the line being typed.
+    ///
+    /// One handle rather than two: reading the editor is the only way this
+    /// module can answer with the same palette a terminal uses, and it is what
+    /// makes a theme-switch test able to fail if the helper was not updated.
+    fn helper(&self) -> &SessionCompleter {
+        self.editor
+            .helper()
+            .expect("EditSource installs its completer before it is returned")
     }
 
     /// What TAB after `line` at `pos` offers.
     pub fn completion(&self, line: &str, pos: usize) -> (usize, Vec<String>) {
         let context = Context::new(self.editor.history());
-        match self.completer.complete(line, pos, &context) {
+        match self.helper().complete(line, pos, &context) {
             Ok((start, candidates)) => (start, candidates),
             Err(_) => (0, Vec::new()),
         }
@@ -509,14 +543,37 @@ impl EditSource {
     /// one — so what a reader is shown about a call is a thing a test can hold
     /// rather than a thing only a terminal can see.
     pub fn signature_hint(&self, line: &str, pos: usize) -> Option<String> {
-        self.completer.signature_hint(line, pos)
+        self.helper().signature_hint(line, pos)
     }
 
     /// The line as this editor would draw it while it is being typed.
     ///
-    /// What the terminal asks for on every keystroke, reachable without one.
+    /// What the terminal asks for on every keystroke, reached through the same
+    /// helper rustyline holds rather than a copy beside it.
     pub fn highlight<'l>(&self, line: &'l str) -> Cow<'l, str> {
-        Highlighter::highlight(&self.completer, line, line.len())
+        Highlighter::highlight(self.helper(), line, line.len())
+    }
+
+    /// The prompt as this editor would paint it, reachable without a terminal.
+    ///
+    /// `highlight_prompt` is the hook rustyline calls with the plain prompt the
+    /// session hands it; asserting on its answer is how a test holds what a
+    /// reader sees at the prompt rather than only what the session printed.
+    pub fn painted_prompt<'a>(&'a self, prompt: &'a str) -> Cow<'a, str> {
+        Highlighter::highlight_prompt(self.helper(), prompt, false)
+    }
+
+    /// Adopts `style` for the prompt and the line being typed.
+    ///
+    /// The style is written into the editor's own helper, the object rustyline
+    /// calls for every prompt and keystroke. There is no second copy to update
+    /// and none to leave behind, so a `:theme` switch reaches the live line
+    /// without rebuilding the editor.
+    pub fn apply_style(&mut self, style: Style) {
+        self.editor
+            .helper_mut()
+            .expect("EditSource installs its completer before it is returned")
+            .set_style(style);
     }
 
     /// Records `line` as read, so Up and Down can walk back to it.
@@ -581,6 +638,10 @@ impl LineSource for EditSource {
 
     fn highlights(&self) -> bool {
         true
+    }
+
+    fn set_style(&mut self, style: Style) {
+        self.apply_style(style);
     }
 }
 
@@ -1198,6 +1259,56 @@ mod tests {
             source.highlight("say \"hi\"").into_owned(),
             "say \"hi\"",
             "with colour off the editor borrows the line rather than building a copy of it"
+        );
+    }
+
+    /// A theme switch reaches the source that is actually painting the prompt
+    /// and the line being typed, not only the session's own `Style`.
+    ///
+    /// The source is built once, before the session loop, and it holds the
+    /// completer the terminal calls for every keystroke. If it kept that copy
+    /// through a `:theme`, the prompt and the line would stay dark while the
+    /// rest of the output turned light — and the unit tests that call
+    /// `Style::paint` directly would never see it.
+    #[test]
+    fn edge_switching_theme_repaints_the_live_prompt_and_line() {
+        let mut source = coloured_editor(Style::forced(true));
+        let dark_prompt = source.painted_prompt(">>> ").into_owned();
+        let dark_line = source.highlight("set x to total + 1").into_owned();
+
+        let light = Style::forced(true).with_theme(Theme::resolve("light").expect("light ships"));
+        assert_eq!(
+            source.helper().theme.name(),
+            "dark",
+            "before the switch the editor's own helper carries the palette it was built with"
+        );
+        LineSource::set_style(&mut source, light);
+        assert_eq!(
+            source.helper().theme.name(),
+            "light",
+            "the editor's own helper, not a copy tests read instead, adopts the switched theme"
+        );
+
+        let light_prompt = source.painted_prompt(">>> ").into_owned();
+        let light_line = source.highlight("set x to total + 1").into_owned();
+
+        assert_eq!(
+            light_prompt,
+            light.paint(Paint::Prompt, ">>> "),
+            "the live prompt is painted with the new theme, not the one the source was built with"
+        );
+        assert_ne!(
+            light_prompt, dark_prompt,
+            "the light prompt differs from the dark one it replaced"
+        );
+        assert_ne!(
+            light_line, dark_line,
+            "the line being typed is highlighted with the new theme as well"
+        );
+        assert!(
+            light_line.contains(&light.paint(Paint::Operator, "+")),
+            "`+` takes the light theme's operator colour in the live highlighter, got {}",
+            light_line.escape_debug()
         );
     }
 

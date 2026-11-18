@@ -547,3 +547,22 @@ MIT License - see [LICENSE](LICENSE)
 ---
 
 *Code should read like English prose.*
+
+## REPL themes
+
+The REPL ships three colour themes: `dark` (the default for dark terminals),
+`light` (dark inks for a light terminal), and `none` (no colour, byte-identical
+to running with colour off). Use `:themes` to see every theme with a sample of
+each role, and `:theme <name>` to switch at runtime — the next line printed uses
+the new palette, with no restart.
+
+```text
+:themes
+:theme dark
+:theme light
+:theme none
+```
+
+Theme names are case-insensitive and ignore surrounding whitespace. An unknown
+name is reported with the themes that do exist, and switching to `none` or
+mistyping a name leaves the session usable.

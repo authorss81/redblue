@@ -2205,3 +2205,37 @@ fn edge_pipe_cd_and_ls_use_the_session_directory() {
         .assert_stdout_contains("loaded.rb")
         .assert_stdout_contains("loaded_from_cd");
 }
+
+/// `:themes` lists every shipped theme and `:theme <name>` switches at runtime:
+/// the very next program runs under the new palette with no restart.
+#[test]
+fn edge_themes_command_lists_themes_and_theme_switches_at_runtime() {
+    let s = session(":themes\n:theme light\nsay \"after switch\"\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("dark")
+        .assert_stdout_contains("light")
+        .assert_stdout_contains("none")
+        .assert_stdout_contains("Theme set to light.")
+        .assert_stdout_contains("after switch")
+        .assert_stdout_lacks("Unknown command 'themes'")
+        .assert_stdout_lacks("Unknown command 'theme'");
+}
+
+/// A no-colour switch and a rejected name both leave the session usable: the
+/// programs after them still run and print, and the rejection names the themes
+/// that do exist instead of keeping the old palette silently.
+#[test]
+fn edge_unknown_and_no_colour_theme_leave_the_session_usable() {
+    let s = session(
+        ":theme none\nsay \"plain after none\"\n:theme solarized\nsay \"after unknown\"\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Theme set to none.")
+        .assert_stdout_contains("plain after none")
+        .assert_stdout_contains("unknown theme 'solarized'")
+        .assert_stdout_contains("dark, light, none")
+        .assert_stdout_contains("after unknown")
+        .assert_stdout_lacks("panicked");
+}

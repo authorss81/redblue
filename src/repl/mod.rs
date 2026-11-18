@@ -35,7 +35,7 @@ use crate::error::Error;
 use crate::interpreter::{CallContext, Vm};
 use crate::lexer::{Lexer, TokenKind};
 use crate::parser::{open_block_depth, Expr, Parser, Program, Stmt};
-use crate::repl::style::{strip_escapes, Paint, Style};
+use crate::repl::style::{strip_escapes, Paint, Style, Theme};
 use crate::stdlib;
 use crate::value::{CapturedScope, FunctionBody, Value};
 
@@ -1144,6 +1144,13 @@ impl Repl {
             *names.borrow_mut() = self.completion_names();
             *dir.borrow_mut() = self.cwd.clone();
 
+            // The prompt and the line being typed are painted by the source, not
+            // by this loop, so a `:theme` that changed `self.style` on the
+            // previous line has to be handed over before the next read. Updating
+            // it here, every line, is what makes the switch immediate rather
+            // than something the next session inherits.
+            source.set_style(self.style);
+
             let line = match source.read_line(&prompt) {
                 Ok(Line::Text(text)) => text,
                 // Ctrl-C throws away the line being written, not the session.
@@ -2019,6 +2026,21 @@ impl Repl {
             }
             ReplCommand::Edit => {
                 self.edit_buffer();
+                true
+            }
+            ReplCommand::Themes => {
+                self.print_themes();
+                true
+            }
+            ReplCommand::Theme(name) => {
+                match self.set_theme(&name) {
+                    Ok(()) => println!(
+                        "{}",
+                        self.style
+                            .paint(Paint::Heading, &format!("Theme set to {}.", name.trim()))
+                    ),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
                 true
             }
             ReplCommand::Prompt(argument) => {
@@ -2986,6 +3008,57 @@ impl Repl {
             globals.insert(name, value);
         }
         self.vm.observe_bindings(&locals, &globals);
+    }
+
+    /// The `:themes` listing: every shipped theme, its name, what it is for,
+    /// and a sample of every role drawn through the real [`Style`].
+    ///
+    /// The sample is not a literal SGR string in the help text. Each role is
+    /// painted by a style carrying that theme, so a theme whose palette changes
+    /// changes its sample with it, and colour-off sessions get plain samples
+    /// rather than escape bytes they did not ask for.
+    fn theme_lines(&self) -> Vec<String> {
+        let mut lines = vec![self
+            .style
+            .paint(Paint::Heading, "Colour themes (switch with :theme <name>):")];
+        for theme in Theme::ALL {
+            let sample_style = Style::themed(self.style.enabled(), theme);
+            let sample = Paint::ALL
+                .iter()
+                .map(|role| sample_style.paint(*role, role.label()))
+                .collect::<Vec<String>>()
+                .join(" ");
+            let marker = if self.style.theme() == theme {
+                "*"
+            } else {
+                " "
+            };
+            lines.push(format!(
+                " {marker} {:<6} {:<48} {}",
+                theme.name(),
+                theme.description(),
+                sample
+            ));
+        }
+        lines
+    }
+
+    fn print_themes(&self) {
+        for line in self.theme_lines() {
+            println!("{line}");
+        }
+    }
+
+    /// Switches this session's palette, returning a catchable error when the
+    /// name is not one this build ships.
+    ///
+    /// The change is written in place on the session's [`Style`], so the very
+    /// next line printed already uses the new theme. The error names every
+    /// available theme rather than leaving the old palette in place silently.
+    fn set_theme(&mut self, name: &str) -> Result<(), String> {
+        let theme = Theme::resolve(name)?;
+        self.style = self.style.with_theme(theme);
+        Ok(())
     }
 
     fn print_help(&self) {
@@ -5553,6 +5626,12 @@ mod tests {
         /// of the continuation-numbering and `:prompt` tests: what a session
         /// prints at the user is only observable from the reader's side.
         prompts: Vec<String>,
+        /// Every palette the session handed over, in the order it did.
+        ///
+        /// The prompt and the line are painted by the source, so a `:theme`
+        /// switch is only immediate if the source actually receives the new
+        /// style. Recording it is how a test can see that handover.
+        styles: Vec<crate::repl::style::Style>,
     }
 
     impl ScriptedSource {
@@ -5560,6 +5639,7 @@ mod tests {
             Self {
                 lines: lines.into_iter().collect(),
                 prompts: Vec::new(),
+                styles: Vec::new(),
             }
         }
 
@@ -5567,12 +5647,21 @@ mod tests {
         fn prompts(&self) -> &[String] {
             &self.prompts
         }
+
+        /// The styles the session handed over, in order.
+        fn styles(&self) -> &[crate::repl::style::Style] {
+            &self.styles
+        }
     }
 
     impl LineSource for ScriptedSource {
         fn read_line(&mut self, prompt: &str) -> io::Result<Line> {
             self.prompts.push(prompt.to_string());
             self.lines.pop_front().unwrap_or(Ok(Line::Eof))
+        }
+
+        fn set_style(&mut self, style: crate::repl::style::Style) {
+            self.styles.push(style);
         }
     }
 
@@ -13637,6 +13726,145 @@ mod tests {
             assert!(
                 !hints.iter().any(|line| line == "  files: nothing"),
                 "an import's Nothing placeholder is not a user binding: {hints:?}"
+            );
+        }
+    }
+
+    /// `:themes` and `:theme`: colour is now data the user can choose.
+    mod themes {
+        use super::{drive, feed, Repl, ScriptedSource};
+        use crate::repl::editor::Line;
+        use crate::repl::style::{Paint, Style, Theme};
+
+        /// The listing names every shipped theme and draws its sample through
+        /// the real painter, not from a literal list of SGR codes. A sample that
+        /// only echoed the palette would keep looking right after the palette
+        /// moved, which is exactly the drift this pins shut.
+        #[test]
+        fn themes_listing_names_every_theme_and_paints_each_sample() {
+            let mut repl = Repl::new();
+            repl.style = Style::forced(true);
+
+            let lines = repl.theme_lines();
+            let joined = lines.join("\n");
+            for theme in Theme::ALL {
+                assert!(
+                    joined.contains(theme.name()),
+                    "{:?} is shipped so :themes must list it: {joined}",
+                    theme.name()
+                );
+                let sample = Style::themed(true, theme).paint(Paint::Prompt, "prompt");
+                let line = lines
+                    .iter()
+                    .find(|line| line.contains(theme.name()))
+                    .expect("the theme has a line");
+                assert!(
+                    line.contains(&sample),
+                    "{:?}'s sample is painted by its own Style, got {line:?}",
+                    theme.name()
+                );
+            }
+            assert!(
+                joined.contains(":theme <name>"),
+                "the listing says how to switch: {joined}"
+            );
+        }
+
+        /// A switch is written in place, so the very next paint uses the new
+        /// palette. The no-colour theme is compared as bytes against a disabled
+        /// style, which is the guarantee the whole colour module rests on.
+        #[test]
+        fn edge_theme_switch_is_immediate_and_no_colour_is_byte_identical() {
+            let mut repl = Repl::new();
+            repl.style = Style::forced(true);
+            let dark_prompt = repl.style.paint(Paint::Prompt, "x");
+
+            repl.set_theme("  LiGhT  ")
+                .expect("light is a shipped theme");
+            assert_eq!(repl.style.theme().name(), "light");
+            assert_ne!(
+                repl.style.paint(Paint::Prompt, "x"),
+                dark_prompt,
+                "the very next paint uses the light prompt colour"
+            );
+
+            repl.set_theme("none").expect("none is a shipped theme");
+            let off = Style::forced(false);
+            for role in Paint::ALL {
+                assert_eq!(
+                    repl.style.paint(role, "say \"hi\"").as_bytes(),
+                    off.paint(role, "say \"hi\"").as_bytes(),
+                    "{role:?} under no-colour must be byte-identical to colour off"
+                );
+            }
+        }
+
+        /// The switch is handed to the source that paints the prompt and the
+        /// line being typed, on the next read. A `Style` updated only on the
+        /// `Repl` would leave a real terminal painting the old palette until the
+        /// session restarted.
+        #[test]
+        fn edge_a_theme_switch_reaches_the_live_line_source() {
+            let mut repl = Repl::new();
+            repl.style = Style::forced(true);
+            let mut source = ScriptedSource::new(vec![
+                Ok(Line::Text(":theme light".to_string())),
+                Ok(Line::Eof),
+            ]);
+
+            drive(&mut repl, &mut source);
+
+            assert_eq!(repl.style.theme().name(), "light");
+            let handed = source
+                .styles()
+                .last()
+                .expect("the read loop hands the source a style before every read");
+            assert_eq!(
+                handed.theme().name(),
+                "light",
+                "the source is given the palette the session switched to"
+            );
+            assert_eq!(
+                *handed, repl.style,
+                "and it is the whole style, not only the theme name"
+            );
+        }
+
+        /// An unknown name is reported with the names that would work, and the
+        /// session is still usable: the failed switch changes neither the theme
+        /// nor the ability of the next program to run and print.
+        #[test]
+        fn edge_unknown_theme_reports_names_and_leaves_session_usable() {
+            let mut repl = Repl::new();
+            repl.style = Style::forced(true);
+
+            let error = repl
+                .set_theme("solarized")
+                .expect_err("solarized is not shipped");
+            for theme in Theme::ALL {
+                assert!(
+                    error.contains(theme.name()),
+                    "the error names every theme, got {error:?}"
+                );
+            }
+            assert_eq!(
+                repl.style.theme().name(),
+                "dark",
+                "a failed switch keeps the theme it had"
+            );
+
+            feed(
+                &mut repl,
+                &[
+                    "set after_theme_failure to 1 + 1",
+                    "say after_theme_failure",
+                ],
+            );
+            assert!(
+                repl.session_bindings()
+                    .iter()
+                    .any(|(name, value)| name == "after_theme_failure" && value.to_string() == "2"),
+                "a following program still runs after a bad theme name"
             );
         }
     }
