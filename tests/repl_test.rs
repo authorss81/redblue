@@ -1100,15 +1100,44 @@ fn edge_bang_bang_at_the_start_of_a_session_says_there_is_nothing_to_repeat() {
 /// refused by name rather than printed as `{nope}` at every line that follows.
 #[test]
 fn a_prompt_command_replaces_the_prompt_and_refuses_an_unknown_placeholder() {
-    let s = session(":prompt rb> \nset x to 41\nx + 1\n:prompt rb{nope} \n:prompt\n:quit\n");
+    let s = session(":prompt rb> \nset x to 41\nx + 1\n:prompt rb{nope} \n:prompt none\n:quit\n");
 
     s.assert_exited_ok()
         .assert_stdout_contains("rb> ")
         .assert_stdout_contains("does not know the placeholder {nope}")
         // The line typed at the custom prompt ran, the refused format never
-        // became the prompt, and `:prompt` with no argument put the default back.
+        // became the prompt, and `:prompt none` put the default back.
         .assert_stdout_contains("= 42")
         .assert_stdout_contains(">>> ");
+}
+
+/// A bare `:prompt` asks for the prompt the next line would be read at, and
+/// prints it without changing anything. `:prompt none` is the separate command
+/// that restores the default, so asking and resetting cannot be confused.
+#[test]
+fn edge_a_bare_prompt_prints_the_current_prompt_without_changing_it() {
+    let s =
+        session(":prompt rb> \n:prompt\nsay \"custom\"\n:prompt none\nsay \"default\"\n:quit\n");
+
+    s.assert_exited_ok()
+        // The prompt before the bare command, then the command's own answer,
+        // which is the same custom prompt.
+        .assert_stdout_contains("rb> rb> \n")
+        // The next line still ran at the custom prompt: asking did not reset it.
+        .assert_stdout_contains("rb> custom")
+        // And only `:prompt none` put the default prompt back.
+        .assert_stdout_contains(">>> default");
+}
+
+/// A literal prompt of `none ` (the trailing space a prompt normally carries)
+/// is display text, so the restore sentinel is the exact word `none` only.
+#[test]
+fn edge_a_prompt_of_none_with_a_trailing_space_is_literal() {
+    let s = session(":prompt none  \nsay \"literal\"\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("none  literal")
+        .assert_stdout_lacks(">>> literal");
 }
 
 /// A line that failed is very often the line being worked on, so `!!` repeats the
