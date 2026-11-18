@@ -2239,3 +2239,17 @@ fn edge_unknown_and_no_colour_theme_leave_the_session_usable() {
         .assert_stdout_contains("after unknown")
         .assert_stdout_lacks("panicked");
 }
+
+/// A bare `:theme` is a missing-argument failure, not a silent listing and not
+/// a switch to some default: it says what it needs, keeps the palette it had,
+/// and the next program still runs and prints.
+#[test]
+fn edge_bare_theme_reports_the_missing_name_and_keeps_the_session_usable() {
+    let s = session(":theme\nsay \"after missing name\"\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Usage: :theme <name>")
+        .assert_stdout_contains("after missing name")
+        .assert_stdout_lacks("Theme set to")
+        .assert_stdout_lacks("panicked");
+}

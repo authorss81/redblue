@@ -256,6 +256,14 @@ impl Theme {
         DARK
     }
 
+    /// Every name `:theme` accepts, in the order `:themes` lists them.
+    ///
+    /// The one place the available names are read from, so the error a bad name
+    /// produces cannot drift from the themes this build actually ships.
+    pub fn names() -> impl Iterator<Item = &'static str> {
+        Self::ALL.iter().map(|theme| theme.name)
+    }
+
     /// Resolve a human-typed name: case-insensitive, with surrounding
     /// whitespace ignored. An unknown name lists what is available instead of
     /// silently keeping the old theme.
@@ -266,7 +274,7 @@ impl Theme {
             .copied()
             .find(|theme| theme.name == wanted)
             .ok_or_else(|| {
-                let names: Vec<&str> = Self::ALL.iter().map(|theme| theme.name).collect();
+                let names: Vec<&str> = Self::names().collect();
                 format!(
                     "Error: unknown theme '{input}'. Available themes: {}.",
                     names.join(", ")
@@ -637,6 +645,92 @@ mod tests {
                     theme.name()
                 );
             }
+        }
+    }
+
+    /// The names `:themes` lists are exactly the names `:theme` accepts, in a
+    /// stable order, with no two themes sharing one. A duplicate would make a
+    /// typed name ambiguous; a name that did not resolve would be a listing a
+    /// user cannot follow.
+    #[test]
+    fn edge_theme_names_are_unique_and_resolve_in_listing_order() {
+        let names: Vec<&'static str> = Theme::names().collect();
+        assert_eq!(
+            names.len(),
+            Theme::ALL.len(),
+            "every shipped theme contributes one name to the listing"
+        );
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(
+                *name,
+                Theme::ALL[index].name(),
+                "the listing reads Theme::ALL in order"
+            );
+            assert_eq!(
+                Theme::resolve(name).expect("a listed name resolves"),
+                Theme::ALL[index],
+                "{name:?} selects the theme it names"
+            );
+        }
+        for (index, name) in names.iter().enumerate() {
+            for other in &names[index + 1..] {
+                assert_ne!(
+                    name, other,
+                    "two shipped themes must not answer to the same name"
+                );
+            }
+        }
+    }
+
+    /// A colour theme is whole: it names each [`Paint`] role exactly once. A
+    /// missing role would draw plain without the theme saying so, and a repeated
+    /// role would leave one of its two colours dead.
+    #[test]
+    fn edge_a_colour_theme_holds_one_colour_for_every_paint_role() {
+        for theme in [super::DARK, super::LIGHT] {
+            assert!(!theme.is_colorless(), "{} is a colour theme", theme.name());
+            assert_eq!(
+                theme.colors.len(),
+                Paint::ALL.len(),
+                "{} must have one colour per role",
+                theme.name()
+            );
+            for role in Paint::ALL {
+                assert!(
+                    theme.color(role).is_some(),
+                    "{} has no colour for {role:?}",
+                    theme.name()
+                );
+                let seen = theme
+                    .colors
+                    .iter()
+                    .filter(|(candidate, _)| *candidate == role)
+                    .count();
+                assert_eq!(seen, 1, "{} names {role:?} {seen} times", theme.name());
+            }
+        }
+    }
+
+    /// The no-colour theme keeps every token class mapped even though it has no
+    /// palette: switching to it must not lose the ability to highlight source
+    /// if the same style later gains colours, and it must paint every role plain.
+    #[test]
+    fn edge_no_colour_theme_keeps_every_token_class_but_no_palette() {
+        assert!(super::NONE.is_colorless(), "none ships no SGR parameters");
+        assert_eq!(super::NONE.colors.len(), 0, "none carries no palette");
+        for class in TokenClass::ALL {
+            assert!(
+                super::NONE.role(*class).is_some(),
+                "{class:?} keeps its token-class mapping under none"
+            );
+        }
+        for role in Paint::ALL {
+            assert_eq!(super::NONE.color(role), None, "none has no {role:?} colour");
+            assert_eq!(
+                Style::themed(true, super::NONE).paint(role, "plain"),
+                "plain",
+                "{role:?} under none must be the text itself"
+            );
         }
     }
 
