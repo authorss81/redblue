@@ -1495,6 +1495,91 @@ To prevent wasted runner compute and model context timeouts:
   Every phase prompt across all ops repositories enforces the **Dynamic Write Mandate**:
   > *Agents must never spend more than 15 consecutive minutes in a read-only research state. Agents MUST write intermediate reproduction tests, scaffoldings, or partial implementations to disk at least once every 15–30 minutes and commit checkpoints. If a runner timeout occurs, recovery branches preserve the work on `rbops-recovery/<phase>` so the subsequent agent resumes seamlessly from where the previous agent stopped.*
 
+---
+
+## 28. Application & Operating System Topologies: Phase Slicing, Directory Structure & Execution Models
+
+### 28.1 `authorss81/rb-apps`: Practical Application Architecture
+The practical application incubator (`authorss81/rb-apps`) drives end-user dogfooding and demonstrates real-world software built in pure Redblue.
+
+#### 1. Phase Slicing Strategy
+- **Small-to-Medium Utility Apps** *(e.g. `sysmon`, `todo_cli`, `csv_inspector`, `pass_manager`, `api_tester`)*:
+  - **1 Phase per App**: A single 90-minute attempt encapsulates the complete application: data model, business logic, CLI/TUI interface, automated headless test suite, and documentation.
+- **Complex Flagship Applications** *(e.g. `spreadsheet`, `vector_canvas`, `markdown_ide`, `database_gui`)*:
+  - Sliced into **3 Staged Slices** to guarantee high quality and prevent runner timeouts:
+    1. **Slice 1 (Core Engine & Data Model)**: Headless domain logic, serialization, mathematical operations, and headless unit tests.
+    2. **Slice 2 (Interface & Interaction Layer)**: TUI terminal controls or Webview canvas event loops, keybindings, and state management.
+    3. **Slice 3 (I/O, Extensions & End-to-End Verification)**: File persistence, external package integration, error boundaries, and integration smoke tests.
+
+#### 2. Directory Structure of `authorss81/rb-apps`
+```
+authorss81/rb-apps/
+├── apps/
+│   ├── sysmon/                  # TUI System Resource Monitor
+│   │   ├── app.toml             # App manifest (name, version, permissions, entrypoint)
+│   │   ├── main.rb              # Main application entrypoint
+│   │   ├── src/                 # Modular application logic
+│   │   │   ├── cpu.rb
+│   │   │   ├── memory.rb
+│   │   │   └── ui.rb
+│   │   └── tests/               # Headless automated app test suite
+│   │       └── sysmon_test.rb
+│   ├── csv_studio/              # CSV query, filter, and charting tool
+│   ├── todo_tui/                # Interactive terminal task manager
+│   └── markdown_notes/          # Personal notes & knowledge base
+├── packages/                    # Local shared app components
+├── tests/                       # Integration smoke tests
+└── README.md                    # Catalog of all available applications
+```
+
+#### 3. How Applications Run
+- **Development Mode**: `rb app run sysmon` or `rb run apps/sysmon/main.rb`.
+- **Standalone Production Binary**: `rb bundle apps/sysmon -o sysmon` (produces a single hermetic, zero-dependency executable packing the bytecode VM, bytecode, and assets).
+- **Runtime Execution Modes**:
+  - **TUI (Terminal UI)**: Built using Phase 132's `tui` module with ANSI box-drawing, color themes, and terminal keyboard events.
+  - **Web / Playground**: Compiled to WebAssembly for instant, zero-install execution in modern web browsers.
+  - **Desktop GUI**: Native window hosting a local Redblue backend process.
+
+---
+
+### 28.2 `authorss81/rbos`: Sovereign Kernel & Desktop Workspace
+The operating system track (`authorss81/rbos`) constructs a sovereign, verified Redblue operating system.
+
+#### 1. Phase Slicing Strategy (Strict Layered Dependency Pipeline)
+An operating system cannot be built in a single phase; it requires a bottom-up layered architecture where each phase validates the layer beneath it:
+1. **Layer 1 (Bare-Metal Boot & Hardware Init)**: Multiboot header, GDT/IDT interrupt descriptor tables, and VGA/Serial console driver.
+2. **Layer 2 (Memory Management)**: Physical frame allocator, 4KB virtual paging, kernel heap, and per-fiber bump arenas.
+3. **Layer 3 (Preemptive Fiber Concurrency)**: Task Control Blocks (TCB), PIT/APIC timer interrupts, cooperative fiber yield, and Chase-Lev work-stealing run queues.
+4. **Layer 4 (VirtIO Virtual Hardware Drivers)**: VirtIO-Block (disk storage), VirtIO-Net (Ethernet), VirtIO-Input (keyboard/mouse), and VirtIO-GPU (framebuffer display).
+5. **Layer 5 (VFS & Storage)**: Virtual File System abstraction, RAMFS, TarFS, and read/write SimpleFS.
+6. **Layer 6 (Userland & Compositor)**: Interactive Redblue shell (`init`, `sh`), ANSI terminal multiplexer, and framebuffer desktop window manager.
+
+#### 2. Directory Structure of `authorss81/rbos`
+```
+authorss81/rbos/
+├── kernel/
+│   ├── boot/            # Multiboot2 entry stub & assembly trampolines
+│   ├── arch/x86_64/     # Hardware GDT, IDT, paging, interrupt handlers
+│   ├── mem/             # Physical page frames, virtual paging, heap
+│   ├── sched/           # Fiber scheduler, context switch, TCB
+│   └── drivers/         # VirtIO drivers (block, net, console, input, gpu)
+├── fs/                  # Virtual File System (VFS), devfs, ramfs
+├── userland/            # Sovereign userland (init, sh, coreutils written in Redblue)
+├── desktop/             # Framebuffer window compositor & desktop workspace
+├── Makefile / build.rs  # Automated ISO / disk image generation
+└── README.md
+```
+
+#### 3. How `rbos` Runs & Is Verified
+- **In Autonomous CI (`rbos-ops`)**:
+  Runs headless in **QEMU with serial console assertion testing**:
+  ```bash
+  qemu-system-x86_64 -cdrom rbos.iso -serial stdio -display none -no-reboot
+  ```
+  CI asserts that the boot sequence completes, memory managers pass invariants, and the test userland shell responds to commands over serial.
+- **On Developer Desktops**:
+  `make run` boots QEMU with a graphical framebuffer displaying the Redblue desktop GUI.
+
 
 
 
