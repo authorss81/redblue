@@ -4,6 +4,12 @@ use crate::stdlib;
 use crate::suggest;
 use std::collections::{HashMap, HashSet};
 
+/// The REPL's name for the last value.
+///
+/// It is a view of `_`, not a binding a program owns, so a declaration or an
+/// assignment may not create a second one that would shadow it.
+const LAST_VALUE_NAME: &str = "$_";
+
 pub struct Analyzer {
     scopes: Vec<HashSet<String>>,
     functions: HashMap<String, Vec<String>>,
@@ -154,6 +160,22 @@ impl Analyzer {
     fn declare(&mut self, name: &str) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string());
+        }
+    }
+
+    /// Refuses `$_` where a program would bind a name.
+    ///
+    /// The alias belongs to the session: reads resolve it after every line so
+    /// it is the same value as `_`. A declaration or an assignment would put a
+    /// local of the same name in front of that view, so the two names could
+    /// disagree. The name is still readable; only binding it is refused.
+    fn refuse_last_value_target(&mut self, name: &str, span: Span) {
+        if name == LAST_VALUE_NAME {
+            self.add_error(
+                "'$_' is the session's last value and cannot be assigned or declared; \
+                 it is a view of '_'.",
+                span,
+            );
         }
     }
 
@@ -342,6 +364,7 @@ impl Analyzer {
             }
             Statement::Set { name, value } => {
                 self.analyze_expr(value, &span);
+                self.refuse_last_value_target(name, span);
                 self.declare_assigned(name);
             }
             Statement::SetMultiple { names, values } => {
@@ -349,6 +372,7 @@ impl Analyzer {
                     self.analyze_expr(value, &span);
                 }
                 for name in names {
+                    self.refuse_last_value_target(name, span);
                     self.declare_assigned(name);
                 }
             }
@@ -358,6 +382,7 @@ impl Analyzer {
             // declare one without either being visible here.
             Statement::Constant { name, value } => {
                 self.analyze_expr(value, &span);
+                self.refuse_last_value_target(name, span);
                 self.declare_constant(name);
             }
             Statement::SetProperty {
@@ -396,6 +421,7 @@ impl Analyzer {
                 body,
             } => {
                 self.analyze_expr(iterable, &span);
+                self.refuse_last_value_target(variable, span);
                 self.push_scope();
                 self.declare(variable);
                 self.analyze_body(body);
@@ -413,6 +439,7 @@ impl Analyzer {
                 if let Some(s) = step {
                     self.analyze_expr(s, &span);
                 }
+                self.refuse_last_value_target(variable, span);
                 self.push_scope();
                 self.declare(variable);
                 self.analyze_body(body);
@@ -457,30 +484,32 @@ impl Analyzer {
             Statement::Function {
                 name, params, body, ..
             } => {
+                self.refuse_last_value_target(name, span);
                 self.declare(name);
                 self.functions.insert(name.clone(), params.clone());
                 self.push_scope();
                 for param in params {
+                    self.refuse_last_value_target(param, span);
                     self.declare(param);
                 }
                 self.analyze_deferred_body(body);
                 self.pop_scope();
             }
             Statement::Method {
-                name: _,
-                params,
-                body,
-                ..
+                name, params, body, ..
             } => {
+                self.refuse_last_value_target(name, span);
                 self.push_scope();
                 self.declare("this");
                 for param in params {
+                    self.refuse_last_value_target(param, span);
                     self.declare(param);
                 }
                 self.analyze_deferred_body(body);
                 self.pop_scope();
             }
-            Statement::Has { default, .. } => {
+            Statement::Has { name, default } => {
+                self.refuse_last_value_target(name, span);
                 if let Some(expr) = default {
                     self.analyze_expr(expr, &span);
                 }
@@ -490,6 +519,7 @@ impl Analyzer {
                 extends,
                 body,
             } => {
+                self.refuse_last_value_target(name, span);
                 self.declare(name);
                 if let Some(parent) = extends {
                     if !self.lookup(parent) {
@@ -513,6 +543,7 @@ impl Analyzer {
                     return;
                 }
                 if let Some(var) = catch_var {
+                    self.refuse_last_value_target(var, span);
                     self.push_scope();
                     self.declare(var);
                     self.analyze_body(catch_body);
@@ -571,8 +602,10 @@ impl Analyzer {
                     // it may give it under are names of the program: an
                     // import's own name is readable (`import json as J` leaves
                     // `json.parse` working), so both are declared.
+                    self.refuse_last_value_target(&item.name, span);
                     self.declare(&item.name);
                     if let Some(alias) = &item.alias {
+                        self.refuse_last_value_target(alias, span);
                         self.declare(alias);
                     }
                 }
@@ -582,6 +615,7 @@ impl Analyzer {
             // importing program reads, and an `export` publishes a name rather
             // than declaring one here.
             Statement::Module { name, body } => {
+                self.refuse_last_value_target(name, span);
                 self.declare(name);
                 self.push_scope();
                 self.analyze_body(body);
@@ -675,6 +709,7 @@ impl Analyzer {
             Expr::FunctionLiteral { params, body } => {
                 self.push_scope();
                 for param in params {
+                    self.refuse_last_value_target(param, *span);
                     self.declare(param);
                 }
                 self.analyze_deferred_body(body);

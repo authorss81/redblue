@@ -529,11 +529,23 @@ impl Lexer {
 
             // `$_` is the session's last value. It is read as one name so a
             // program can refer to it; a bare `$` is still not a character the
-            // language has a use for.
-            if c == '$' && lexer.peek() == Some('_') {
+            // language has a use for. Only the exact `$_` is a name: a longer
+            // run such as `$_foo` is not a new spelling, so it stays the bare
+            // `$` the language refuses.
+            if c == '$'
+                && lexer.peek() == Some('_')
+                && !lexer
+                    .source
+                    .get(lexer.pos + 2)
+                    .is_some_and(|next| next.is_alphanumeric() || *next == '_')
+            {
                 lexer.advance();
-                let ident = format!("${}", lexer.read_identifier());
-                tokens.push(Token::new(TokenKind::Identifier(ident), line, column));
+                lexer.advance();
+                tokens.push(Token::new(
+                    TokenKind::Identifier("$_".to_string()),
+                    line,
+                    column,
+                ));
                 continue;
             }
 
@@ -691,6 +703,16 @@ mod tests {
         assert!(
             error.to_string().contains("Unexpected character '$'"),
             "the error names the character the language cannot read: {error}"
+        );
+    }
+
+    #[test]
+    fn test_last_value_name_does_not_swallow_a_suffix() {
+        let error = Lexer::tokenize("$_foo")
+            .expect_err("only the exact $_ is a name, not any name it prefixes");
+        assert!(
+            error.to_string().contains("Unexpected character '$'"),
+            "the longer run is refused where a bare $ is: {error}"
         );
     }
 }
