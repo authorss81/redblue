@@ -4,10 +4,10 @@
 | File | Lines | What |
 |---|---|---|
 | src/lexer.rs | +47 −0 | reads only the exact `$_` as one identifier; `$_foo` is still the bare `$` error, a bare `$` is still a lexer error, and lexer tests pin all three |
-| src/analyzer.rs | +36 −0 | refuses `$_` as a declaration or assignment target, so the alias cannot be shadowed by a local of the same name; reads of `$_` are still allowed |
+| src/analyzer.rs | +36 −0 | refuses `$_` and `_` as declaration or assignment targets, so the alias cannot be shadowed and the VM's `_` cannot drift from the session's last value; reads of both are still allowed |
 | src/interpreter.rs | +21 −1 | `set_global_binding` lets the REPL point `$_` at `_` without re-pointing the whole VM; `user_names` holds `$_` out of the session's own names so listings do not gain a second row |
-| src/repl/mod.rs | +639 −12 | `$_` is kept equal to `_`, `:last` prints that value, `:session <name>` labels a sitting, `:sessions` lists labels plus the existing checkpoints, the bytecode path is seeded with `$_`, labels stop at `MAX_SESSION_LABELS` so a piped `:session` cannot grow the list without bound, and every state restore (`:undo`, `:redo`, `:restore`, `:reset`, `:load`) re-points the alias at the restored `_` |
-| src/repl/debug_repl.rs | +83 −2 | the debug sub-REPL keeps its own `$_` equal to its own `_`, never inheriting the parent's alias, with tests pinning both rules |
+| src/repl/mod.rs | +658 −12 | `$_` is kept equal to `_`, `:last` prints that value, `:session <name>` labels a sitting, `:sessions` lists labels plus the existing checkpoints, the bytecode path is seeded with `$_`, labels stop at `MAX_SESSION_LABELS` so a piped `:session` cannot grow the list without bound, labels reject control characters so a newline cannot forge listing rows, and every state restore (`:undo`, `:redo`, `:restore`, `:reset`, `:load`) re-points the alias at the restored `_` |
+| src/repl/debug_repl.rs | +133 −2 | the debug sub-REPL clears both inherited halves of the parent's last-value pair at the fork, then keeps its own `$_` equal to its own `_`, never inheriting the parent's alias or binding, with tests pinning every rule |
 | src/repl/commands.rs | +25 −3 | command variants and table rows for `:last` and `:session`; `:sessions` description now names both halves |
 | tests/repl_test.rs | +43 −0 | end-to-end stdout tests for `:last` and for the labels-plus-checkpoints listing |
 | tests/unreviewed_work_ack_test.rs | +39 −0 | pins phase-118's delivery commit by SHA, as the phase-after-delivery handoff requires, and refuses its prefix on the in-flight rule |
@@ -28,6 +28,8 @@
 | edge_a_session_label_cannot_be_empty | malformed input — empty label |
 | labelling_a_session_does_not_change_a_program | labelling is observation only |
 | the_existing_underscore_binding_is_unchanged | pre-existing `_` contract |
+| the_underscore_binding_cannot_be_reassigned_out_from_under_the_alias | `_` is the session's binding, so a program cannot desync it from `$_` and `:last` |
+| edge_the_underscore_binding_cannot_be_assigned | analyzer — `_` may be read but never bound, just as `$_` may not |
 | test_last_value_is_one_identifier | lexer — `$_` is a single identifier |
 | test_bare_dollar_is_still_a_lexer_error | lexer — a bare `$` is refused |
 | test_last_value_name_does_not_swallow_a_suffix | lexer — only the exact `$_` is a name, not every name it prefixes |
@@ -40,12 +42,19 @@
 | edge_a_session_label_survives_a_reset_that_forgets_bindings_and_checkpoints | `:reset` clears bindings and checkpoints but keeps the label |
 | a_sub_repl_last_value_is_named_by_the_same_alias_as_the_parent | debug sub-REPL — `$_` is its own last value and survives a failed line |
 | the_parents_last_value_alias_does_not_leak_into_the_sub_repl | debug sub-REPL — its `_` starts empty, so the parent's `$_` is not inherited |
+| the_parents_last_value_binding_does_not_leak_into_the_sub_repl | debug sub-REPL — both `_` and `$_` start empty, so neither half of the parent's pair leaks |
 | last_value_composes_in_a_following_expression | `$_` is a value in a larger expression, not only a line of its own |
 | edge_a_unicode_session_label_is_kept_whole | unicode — a label with emoji, CJK and RTL text is stored as written |
 | edge_session_labels_stop_at_their_capacity | resource limit / boundary — the label list stops at its cap |
 | edge_session_label_capacity_is_a_named_error | resource limit — a label past the cap is a clean named error |
 | declaring_last_value_is_refused_so_it_stays_a_view_of_underscore | malformed input / declaration target — `$_` may be read but never bound, so it cannot shadow `_` |
 | state_restores_keep_the_last_value_alias_equal_to_underscore | state boundary — undo, redo, checkpoint restore, reset and load all keep `$_` a view of `_` |
+| edge_a_session_label_with_a_newline_is_refused | malformed input — a multi-line label cannot forge rows in the listing |
+| edge_a_whitespace_only_session_label_is_refused | malformed input / empty — a label of only whitespace names nothing |
+| edge_a_zero_width_only_session_label_is_refused | malformed input / empty — a label of invisible zero-width characters names nothing |
+| edge_a_session_label_is_trimmed_at_both_ends | boundary — surrounding padding is not carried into the listing |
+| edge_last_command_after_a_failed_line_names_the_last_successful_value | failure does not replace the value `:last` prints, matching `$_` |
+| edge_last_value_is_readable_inside_a_function_body | nesting — the alias resolves in a function body, not only at top level |
 
 The pre-existing `_` contract is also pinned by the tests that predate this phase and were not modified, including `edge_a_block_that_outgrows_the_buffer_is_dropped_not_kept` and the checkpoint tests that read `_`.
 
@@ -59,9 +68,9 @@ The pre-existing `_` contract is also pinned by the tests that predate this phas
 | type_mismatch | N/A — `$_` carries an already-typed `Value`; no new coercion |
 | numeric_boundary | N/A — no arithmetic or numeric conversion is added; `$_` returns the stored value |
 | unicode | covered — a label with emoji, CJK and RTL text is stored as written |
-| nesting_recursion | N/A — no recursive or nested structure is walked |
+| nesting_recursion | covered — `$_` resolves inside a function body as well as at top level |
 | duplicate_missing_keys | N/A — no keyed container is added; duplicate labels are covered above |
-| malformed_input | covered — empty label, and a missing `$_`/`:last` value is a clean error |
+| malformed_input | covered — empty label, whitespace-only label, zero-width-only label, a label with a newline/control character, and a missing `$_`/`:last` value are clean errors |
 | resource_limit | covered — labels stop at `MAX_SESSION_LABELS` and the refusal is a named error |
 
 ## Gates
@@ -69,7 +78,7 @@ The pre-existing `_` contract is also pinned by the tests that predate this phas
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 3214 passed, 0 failed |
+| cargo test --all-targets | 3234 passed, 0 failed |
 | ../rbops/verify.sh "phase-119" | PASS |
 
 ## Invariants touched

@@ -2518,6 +2518,21 @@ impl Repl {
         if name.is_empty() {
             return Err("Error: :session needs a name. Usage: :session <name>".to_string());
         }
+        if name.chars().any(char::is_control) {
+            return Err(
+                "Error: :session names cannot contain control characters such as a newline or a tab."
+                    .to_string(),
+            );
+        }
+        // A label that is made only of zero-width characters is not blank to
+        // `trim`, but it draws as an empty row in the listing just the same. The
+        // width check is the renderer's own, so "visible" means what a reader
+        // sees rather than which Unicode category a character falls in.
+        if crate::error::text_cells(name) == 0 {
+            return Err(
+                "Error: :session names must contain at least one visible character.".to_string(),
+            );
+        }
         if !self.session_labels.iter().any(|label| label == name) {
             if self.session_labels.len() >= MAX_SESSION_LABELS {
                 return Err(format!(
@@ -14782,6 +14797,42 @@ mod tests {
             );
         }
 
+        /// A line can reassign a name the session already bound, but `_` is the
+        /// session's own binding and `$_` is derived from it. Allowing the write
+        /// would let the VM's `_` answer 99 while `$_` and `:last` still answer
+        /// the last result, so the write is refused and all three stay equal.
+        #[test]
+        fn the_underscore_binding_cannot_be_reassigned_out_from_under_the_alias() {
+            let mut repl = Repl::new();
+            repl.execute_code("2 + 3")
+                .expect("the value-producing line runs");
+
+            let error = repl
+                .execute_code("set _ to 99")
+                .expect_err("a line may not rebind the session's `_`");
+            assert!(
+                error.contains("'_' is the session's last value"),
+                "the refusal names the binding it protects: {error}"
+            );
+
+            assert_eq!(
+                repl.lookup("_").map(ToString::to_string),
+                Some("5".to_string()),
+                "the refused write left `_` holding the last result"
+            );
+            assert_eq!(
+                repl.execute_code("$_").expect("$_ still reads").to_string(),
+                "5",
+                "the alias did not drift from `_`"
+            );
+            assert_eq!(
+                repl.last_result_line()
+                    .expect("there is still a last result"),
+                "= 5",
+                ":last agrees with both names"
+            );
+        }
+
         #[test]
         fn last_value_composes_in_a_following_expression() {
             let mut repl = Repl::new();
@@ -15042,6 +15093,133 @@ mod tests {
             assert!(
                 error.contains("maximum") && error.contains("labels"),
                 "the error names the condition it hit: {error}"
+            );
+        }
+
+        #[test]
+        fn edge_a_session_label_with_a_newline_is_refused() {
+            let mut repl = Repl::new();
+
+            let refused = repl.label_session("monday\nSession labels:\n  forged");
+            assert!(
+                refused.is_err(),
+                "a label that spans lines would forge rows in the listing, so it is refused"
+            );
+            let error = refused.expect_err("the label was refused");
+            assert!(
+                error.contains("control"),
+                "the error names the condition it hit: {error}"
+            );
+
+            let listing = repl.checkpoint_listing();
+            assert!(
+                !listing.contains("forged"),
+                "the refused label never reached the listing: {listing}"
+            );
+        }
+
+        #[test]
+        fn edge_a_whitespace_only_session_label_is_refused() {
+            let mut repl = Repl::new();
+
+            let refused = repl.label_session(" \t \n ");
+            assert!(
+                refused.is_err(),
+                "a label made only of whitespace names nothing"
+            );
+            let error = refused.expect_err("the whitespace-only label was refused");
+            assert!(
+                error.contains("needs a name"),
+                "the error says the name is missing: {error}"
+            );
+        }
+
+        /// Zero-width characters are not control characters and `trim` does not
+        /// remove them, so a label made only of them would pass both checks and
+        /// draw as a blank row. The visible-width check refuses it.
+        #[test]
+        fn edge_a_zero_width_only_session_label_is_refused() {
+            let mut repl = Repl::new();
+
+            let refused = repl.label_session("\u{200B}\u{200C}\u{2060}");
+            assert!(refused.is_err(), "a label that draws nothing names nothing");
+            let error = refused.expect_err("the invisible label was refused");
+            assert!(
+                error.contains("visible"),
+                "the error says what the label is missing: {error}"
+            );
+
+            let listing = repl.checkpoint_listing();
+            assert!(
+                listing.starts_with("No checkpoints in this session."),
+                "the refused label never reached the listing: {listing}"
+            );
+        }
+
+        #[test]
+        fn edge_a_session_label_is_trimmed_at_both_ends() {
+            let mut repl = Repl::new();
+
+            assert!(
+                repl.label_session("   padded label   ").is_ok(),
+                "a label with surrounding padding is accepted"
+            );
+
+            let listing = repl.checkpoint_listing();
+            assert!(
+                listing.contains("  padded label\n"),
+                "the label is stored without its padding: {listing}"
+            );
+            assert!(
+                !listing.contains("   padded label"),
+                "the padding is not carried into the listing: {listing}"
+            );
+        }
+
+        #[test]
+        fn edge_last_command_after_a_failed_line_names_the_last_successful_value() {
+            let mut repl = Repl::new();
+            assert_eq!(
+                repl.execute_code("6 * 7")
+                    .expect("the value-producing line runs")
+                    .to_string(),
+                "42",
+                "premise: the last success is 42"
+            );
+            assert!(
+                repl.execute_code("say no_such_name").is_err(),
+                "premise: the line fails"
+            );
+
+            assert_eq!(
+                repl.last_result_line()
+                    .expect("there is still a last result to print"),
+                "= 42",
+                ":last names the last SUCCESSFUL value, not the failure"
+            );
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ is still bound")
+                    .to_string(),
+                "42",
+                "and $_ agrees with :last after the failure"
+            );
+        }
+
+        #[test]
+        fn edge_last_value_is_readable_inside_a_function_body() {
+            let mut repl = Repl::new();
+            repl.execute_code("2 + 3")
+                .expect("the value-producing line runs");
+            repl.execute_code("to recall()\n    give back $_\nend")
+                .expect("the function definition runs");
+
+            assert_eq!(
+                repl.execute_code("recall()")
+                    .expect("the function body reads the session's last value")
+                    .to_string(),
+                "5",
+                "$_ is the same value inside a nested function scope"
             );
         }
     }

@@ -10,6 +10,14 @@ use std::collections::{HashMap, HashSet};
 /// assignment may not create a second one that would shadow it.
 const LAST_VALUE_NAME: &str = "$_";
 
+/// The binding the last value lives in.
+///
+/// The session owns it, and `$_` is derived from it after every line. A program
+/// that could bind `_` would make the two disagree — the VM would hold the
+/// program's value while the session kept the last result — so `_` is refused
+/// as a binding target just as `$_` is. It remains readable through the session.
+const UNDERSCORE_NAME: &str = "_";
+
 pub struct Analyzer {
     scopes: Vec<HashSet<String>>,
     functions: HashMap<String, Vec<String>>,
@@ -163,17 +171,24 @@ impl Analyzer {
         }
     }
 
-    /// Refuses `$_` where a program would bind a name.
+    /// Refuses `$_` and `_` where a program would bind a name.
     ///
-    /// The alias belongs to the session: reads resolve it after every line so
-    /// it is the same value as `_`. A declaration or an assignment would put a
-    /// local of the same name in front of that view, so the two names could
-    /// disagree. The name is still readable; only binding it is refused.
+    /// The value belongs to the session: `_` holds the last result and `$_` is
+    /// a view of it, re-pointed after every line. A declaration or an
+    /// assignment would put a binding of the same name in front of that value,
+    /// so the VM and the session could disagree. Both names are still readable;
+    /// only binding one is refused.
     fn refuse_last_value_target(&mut self, name: &str, span: Span) {
         if name == LAST_VALUE_NAME {
             self.add_error(
                 "'$_' is the session's last value and cannot be assigned or declared; \
                  it is a view of '_'.",
+                span,
+            );
+        } else if name == UNDERSCORE_NAME {
+            self.add_error(
+                "'_' is the session's last value and cannot be assigned or declared; \
+                 it is the binding '$_' is a view of.",
                 span,
             );
         }
@@ -991,6 +1006,24 @@ mod tests {
             outcome.is_ok(),
             "reassigning a session name is not an error: {:?}",
             outcome
+        );
+    }
+
+    /// `_` is the session's own binding, not one a line may take over: `$_` is
+    /// derived from it, so a program that bound `_` would leave the VM and the
+    /// session naming two different values. Refusing the write is what keeps
+    /// the pair from drifting, exactly as refusing `$_` keeps the alias from
+    /// being shadowed.
+    #[test]
+    fn edge_the_underscore_binding_cannot_be_assigned() {
+        let outcome = analyze_with_bound_names(&program("set _ to 99"), &names(&["_"]));
+
+        let error = outcome.expect_err("a line may not rebind the session's `_`");
+        assert!(
+            error
+                .to_string()
+                .contains("'_' is the session's last value"),
+            "the refusal names the binding it protects: {error}"
         );
     }
 

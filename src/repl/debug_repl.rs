@@ -169,6 +169,12 @@ impl DebugRepl {
             }
             DebugAction::Run
         })));
+        // The fork arrives carrying the parent's last-value bindings, and the
+        // sub-REPL's own `_` starts empty. Clear both halves of the inherited
+        // pair, not only the alias: a parent `_` left in the fork would answer
+        // the parent's last value through `_` while the freshly-cleared `$_`
+        // says there is none.
+        vm.set_global_binding("_", None);
         let mut repl = Self {
             vm,
             state,
@@ -189,7 +195,8 @@ impl DebugRepl {
     /// a failed one, so a line that assigned `$_` cannot leave the two apart.
     /// The fork arrives carrying the parent's `$_`, and the sub-REPL's `_`
     /// starts empty, so clearing the inherited alias on entry keeps the same
-    /// rule before the first line runs.
+    /// rule before the first line runs. `with_dir` clears the inherited `_` at
+    /// the same boundary, so both halves start empty together.
     fn sync_last_result_binding(&mut self) {
         let value = self.variables.get("_").cloned();
         self.vm.set_global_binding("$_", value);
@@ -914,6 +921,49 @@ mod tests {
         assert!(
             !answer.iter().any(|line| line.contains("99")),
             "the parent's last value is not the sub-REPL's: {answer:?}"
+        );
+    }
+
+    /// Both halves of the parent's last-value pair are cleared at the fork, not
+    /// only the alias: `_` left in the globals would answer the parent's value
+    /// while `$_` says there is no last value yet.
+    #[test]
+    fn the_parents_last_value_binding_does_not_leak_into_the_sub_repl() {
+        let mut vm = Vm::new();
+        vm.set_global_binding("_", Some(crate::value::Value::Number(99.0)));
+        vm.set_global_binding("$_", Some(crate::value::Value::Number(99.0)));
+        let mut repl = DebugRepl::with_dir(
+            vm,
+            Style::detect(),
+            crate::repl::editor::process_directory(),
+        );
+
+        for name in ["_", "$_"] {
+            let answer = repl.run(name, "session");
+            assert!(
+                answer.iter().any(|line| line.contains("Error")),
+                "the sub-REPL has no last value yet, so `{name}` names nothing: {answer:?}"
+            );
+            assert!(
+                !answer.iter().any(|line| line.contains("99")),
+                "the parent's last value leaked through `{name}`: {answer:?}"
+            );
+        }
+
+        let produced = repl.run("2 + 3", "session");
+        assert!(
+            produced.iter().any(|line| line.contains("= 5")),
+            "the premise: the sub-REPL produced its own value: {produced:?}"
+        );
+        assert_eq!(
+            repl.run("$_", "session"),
+            vec!["= 5".to_string()],
+            "the alias names the sub-REPL's own last value"
+        );
+        let underscore = repl.run("_", "session");
+        assert!(
+            !underscore.iter().any(|line| line.contains("99")),
+            "`_` still does not answer the parent's value after the sub-REPL ran: {underscore:?}"
         );
     }
 
