@@ -71,6 +71,23 @@ const MAX_CHECKPOINTS: usize = 64;
 /// works because that adds no new label.
 const MAX_SESSION_LABELS: usize = 256;
 
+/// Whether `c` is a Unicode bidirectional formatting control.
+///
+/// These are format characters (`Cf`), not control characters, so
+/// [`char::is_control`] misses them. They have non-zero width but can visually
+/// reorder the text around them, which is enough for a label to forge or hide a
+/// row in the listing. A label is drawn as one line, so it has no reason to
+/// carry any of them.
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'                  // ARABIC LETTER MARK
+            | '\u{200E}' | '\u{200F}' // LEFT-TO-RIGHT MARK, RIGHT-TO-LEFT MARK
+            | '\u{202A}'..='\u{202E}' // embedding and override controls
+            | '\u{2066}'..='\u{2069}' // isolate controls
+    )
+}
+
 /// The most lines a block may hold before the session stops waiting for its
 /// `end`.
 ///
@@ -2518,9 +2535,10 @@ impl Repl {
         if name.is_empty() {
             return Err("Error: :session needs a name. Usage: :session <name>".to_string());
         }
-        if name.chars().any(char::is_control) {
+        if name.chars().any(|c| c.is_control() || is_bidi_control(c)) {
             return Err(
-                "Error: :session names cannot contain control characters such as a newline or a tab."
+                "Error: :session names cannot contain control or bidirectional formatting \
+                 characters such as a newline, a tab or a right-to-left override."
                     .to_string(),
             );
         }
@@ -15119,6 +15137,34 @@ mod tests {
         }
 
         #[test]
+        fn edge_a_session_label_with_a_bidi_control_is_refused() {
+            let mut repl = Repl::new();
+
+            for label in [
+                "safe\u{202E}gnp.exe",
+                "alpha\u{2066}beta\u{2069}",
+                "left\u{200E}right",
+            ] {
+                let refused = repl.label_session(label);
+                assert!(
+                    refused.is_err(),
+                    "a label with a bidirectional control can reorder the listing, so it is refused"
+                );
+                let error = refused.expect_err("the bidi label was refused");
+                assert!(
+                    error.contains("control"),
+                    "the error names the condition it hit: {error}"
+                );
+            }
+
+            let listing = repl.checkpoint_listing();
+            assert!(
+                listing.starts_with("No checkpoints in this session."),
+                "no refused label reached the listing: {listing}"
+            );
+        }
+
+        #[test]
         fn edge_a_whitespace_only_session_label_is_refused() {
             let mut repl = Repl::new();
 
@@ -15220,6 +15266,74 @@ mod tests {
                     .to_string(),
                 "5",
                 "$_ is the same value inside a nested function scope"
+            );
+        }
+
+        #[test]
+        fn edge_last_value_carries_unicode_text_whole() {
+            let mut repl = Repl::new();
+            let text = "héllo 🐛 世界";
+
+            let produced = repl
+                .execute_code(&format!("\"{text}\""))
+                .expect("a text literal is a successful line");
+            assert_eq!(
+                produced.to_string(),
+                text,
+                "premise: the line made the text"
+            );
+
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ names the text the line before produced")
+                    .to_string(),
+                text,
+                "the alias carries unicode text as written, not transcoded"
+            );
+        }
+
+        #[test]
+        fn edge_last_value_type_mismatch_is_a_clean_runtime_error() {
+            let mut repl = Repl::new();
+            repl.execute_code("\"hello\"")
+                .expect("a text literal is a successful line");
+
+            let error = repl
+                .execute_code("$_ + 1")
+                .expect_err("adding a number to the last value's text is a type mismatch");
+            assert!(
+                error.contains("Cannot add"),
+                "the mismatch is the runtime's own named error: {error}"
+            );
+            assert!(
+                !error.contains("panicked"),
+                "a type mismatch is an error, not a panic: {error}"
+            );
+        }
+
+        #[test]
+        fn edge_last_value_is_the_latest_success_across_function_calls() {
+            let mut repl = Repl::new();
+            repl.execute_code("to recall()\n    give back $_\nend")
+                .expect("the function definition runs");
+            repl.execute_code("2 + 3")
+                .expect("the first value-producing line runs");
+            assert_eq!(
+                repl.execute_code("recall()")
+                    .expect("the function reads the first last value")
+                    .to_string(),
+                "5",
+                "premise: the function sees the five"
+            );
+
+            repl.execute_code("10 + 20")
+                .expect("the second value-producing line runs");
+            assert_eq!(
+                repl.execute_code("recall()")
+                    .expect("the function reads the newer last value")
+                    .to_string(),
+                "30",
+                "$_ is resolved at call time, not frozen when the function was defined"
             );
         }
     }

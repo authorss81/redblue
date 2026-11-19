@@ -412,6 +412,10 @@ impl DebugRepl {
             Ok(value) => {
                 if !matches!(value, Value::Nothing) {
                     let line = self.style.paint(Paint::Result, &format!("= {}", value));
+                    // The sub-REPL's `_` is its own binding just as the parent's
+                    // is; keeping it in the VM is what makes a later `_` read
+                    // answer this line rather than an unknown variable.
+                    self.vm.set_global_binding("_", Some(value.clone()));
                     self.variables.insert("_".to_string(), value);
                     lines.push(line);
                 }
@@ -960,10 +964,10 @@ mod tests {
             vec!["= 5".to_string()],
             "the alias names the sub-REPL's own last value"
         );
-        let underscore = repl.run("_", "session");
-        assert!(
-            !underscore.iter().any(|line| line.contains("99")),
-            "`_` still does not answer the parent's value after the sub-REPL ran: {underscore:?}"
+        assert_eq!(
+            repl.run("_", "session"),
+            vec!["= 5".to_string()],
+            "`_` names the sub-REPL's own last value, not the parent's"
         );
     }
 

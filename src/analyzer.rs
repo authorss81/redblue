@@ -12,10 +12,12 @@ const LAST_VALUE_NAME: &str = "$_";
 
 /// The binding the last value lives in.
 ///
-/// The session owns it, and `$_` is derived from it after every line. A program
+/// A session owns it, and `$_` is derived from it after every line. A line
 /// that could bind `_` would make the two disagree — the VM would hold the
-/// program's value while the session kept the last result — so `_` is refused
-/// as a binding target just as `$_` is. It remains readable through the session.
+/// line's value while the session kept the last result — so `_` is refused
+/// as a binding target in a session, even before the session has a value for
+/// it. A standalone program, which has no session, may still use `_` as an
+/// ordinary name.
 const UNDERSCORE_NAME: &str = "_";
 
 pub struct Analyzer {
@@ -47,6 +49,15 @@ pub struct Analyzer {
     /// [`crate::manifest::Pins::for_analysis`] — because an analysis is a
     /// question, and a question has no reason to create a `redblue.lock`.
     pins: crate::manifest::Pins,
+    /// Whether this analysis belongs to a session, which owns `_`.
+    ///
+    /// `_` is an ordinary identifier in a standalone program. It is the
+    /// session's last-value binding whenever a host analyses through
+    /// [`Analyzer::with_bound_names`], so a line that bound it would desync
+    /// the VM's `_` from the session's; that write is refused even before the
+    /// first value exists. `$_` is always the session alias, so it is refused
+    /// in every analysis.
+    refuse_underscore_binding: bool,
     /// Whether the manifest conflict has been reported, and so the walk stops
     /// where it found the import that found it.
     ///
@@ -102,6 +113,7 @@ impl Analyzer {
             later: LaterNames::default(),
             root: root.to_path_buf(),
             pins,
+            refuse_underscore_binding: false,
             manifest_failed: false,
             deferred_depth: 0,
         }
@@ -122,6 +134,7 @@ impl Analyzer {
     /// and write of the name resolve the same way they would inside one program.
     pub fn with_bound_names(names: &[String]) -> Self {
         let mut analyzer = Self::new();
+        analyzer.refuse_underscore_binding = true;
         for name in names {
             analyzer.declare_in_program_scope(name);
         }
@@ -171,13 +184,15 @@ impl Analyzer {
         }
     }
 
-    /// Refuses `$_` and `_` where a program would bind a name.
+    /// Refuses `$_` and, in a session, `_` where a program would bind a name.
     ///
     /// The value belongs to the session: `_` holds the last result and `$_` is
     /// a view of it, re-pointed after every line. A declaration or an
-    /// assignment would put a binding of the same name in front of that value,
-    /// so the VM and the session could disagree. Both names are still readable;
-    /// only binding one is refused.
+    /// assignment of `_` in a session would put a binding of the same name in
+    /// front of that value, so the VM and the session could disagree. `_` is
+    /// still an ordinary name for a standalone program, which is why the
+    /// refusal is conditional on the session having supplied it.
+    /// Both names are still readable; only binding one is refused.
     fn refuse_last_value_target(&mut self, name: &str, span: Span) {
         if name == LAST_VALUE_NAME {
             self.add_error(
@@ -185,7 +200,7 @@ impl Analyzer {
                  it is a view of '_'.",
                 span,
             );
-        } else if name == UNDERSCORE_NAME {
+        } else if name == UNDERSCORE_NAME && self.refuse_underscore_binding {
             self.add_error(
                 "'_' is the session's last value and cannot be assigned or declared; \
                  it is the binding '$_' is a view of.",
@@ -1019,6 +1034,35 @@ mod tests {
         let outcome = analyze_with_bound_names(&program("set _ to 99"), &names(&["_"]));
 
         let error = outcome.expect_err("a line may not rebind the session's `_`");
+        assert!(
+            error
+                .to_string()
+                .contains("'_' is the session's last value"),
+            "the refusal names the binding it protects: {error}"
+        );
+    }
+
+    /// A standalone program has no session and no `$_` alias to protect, so
+    /// `_` remains the ordinary identifier the grammar documents. Only a
+    /// session that owns `_` refuses a line that binds it.
+    #[test]
+    fn edge_a_standalone_program_may_still_bind_underscore() {
+        let outcome = analyze(&program("set _ to 1\nsay _"));
+
+        assert!(
+            outcome.is_ok(),
+            "`_` is a legal standalone name, not only a session binding: {:?}",
+            outcome
+        );
+    }
+
+    /// A session owns `_` from its first line, before `_` itself has a value.
+    /// Supplying other bound names does not leave the protection off.
+    #[test]
+    fn edge_a_session_refuses_underscore_even_before_it_is_bound() {
+        let outcome = analyze_with_bound_names(&program("set _ to 1\nsay _"), &names(&["x"]));
+
+        let error = outcome.expect_err("a session may not let a line take over `_`");
         assert!(
             error
                 .to_string()
