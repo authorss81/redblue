@@ -222,13 +222,32 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
 
 ### Wave 1: Immediate Spin-Up at Phase 126 Landing (6 Repositories / 3 Paired Tracks)
 1. **OS Track**: `authorss81/rbos` (kernel & desktop) + `authorss81/rbos-ops` (autonomous pipeline & QEMU runner).
+   - **Delivery Architecture**: Delivered via a strict 6-layer bottom-up dependency pipeline:
+     1. Bare-metal multiboot stub, GDT, IDT & serial console.
+     2. Physical frame allocator, 4KB virtual paging & per-fiber bump arenas.
+     3. Preemptive fiber scheduler, Task Control Blocks (TCB) & timer interrupts.
+     4. VirtIO hardware drivers (Block disk, Net Ethernet, Input keyboard/mouse, GPU display).
+     5. Virtual File System (VFS), RAMFS, TarFS & SimpleFS.
+     6. Userland shell (`init`, `sh`) & framebuffer desktop window manager.
+   - **Verification**: Fully verified in headless CI via `qemu-system-x86_64` with automated serial console assertions.
 2. **Apps Track**: `authorss81/rb-apps` (practical apps incubator) + `authorss81/rb-apps-ops` (autonomous app release runner).
+   - **Phase Slicing Strategy**:
+     - Standard utility apps (`sysmon`, `todo_cli`, `csv_inspector`, `pass_manager`, `api_tester`): **1 Phase per App** (delivers core logic, TUI/CLI interface, headless tests, and docs in ~90 minutes).
+     - Complex flagship apps (`spreadsheet`, `vector_canvas`, `markdown_ide`): Sliced into **2 to 3 staged phases** (Slice 1: Headless Core Engine & Data Model; Slice 2: Interface & Interaction Layer; Slice 3: I/O, File Persistence & End-to-End Verification).
+     - **Feature Granularity Rule**: Any individual complex feature within an app may be divided into its own standalone phase if needed to prevent context exhaustion or runner timeouts.
+   - **Execution Models**: TUI (terminal box-drawing via Phase 132 `tui`), WebAssembly (zero-install in-browser), and standalone single-file executables via `rb bundle`.
 3. **Package Track**: `authorss81/rb-pkg` (package index & registry) + `authorss81/rb-pkg-ops` (package ingestion & crypto verification).
+   - **Security & Ergonomics**: Human-friendly imports (`import sqlite`), backed by automated Blake3/SHA-256 cryptographic subresource integrity in `rb.lock`, signed registry provenance, and Levenshtein typosquatting protection.
 
 ### Wave 2: Staged Tooling Spin-Up at Dogfooding Milestone (2 Repositories / 1 Paired Track)
 4. **Tooling & IDE Track**: `authorss81/rb-ide` + `authorss81/rb-ide-ops`
    - **Scope**: Dedicated Language Server Protocol (`rb lsp` daemon & JSON-RPC transport), VS Code extension backend, Debug Adapter Protocol (DAP), code formatting protocol (`rb format`), linter integration (`rb lint`), syntax highlighting grammars (TextMate / Tree-sitter), and editor integrations (VS Code, Neovim, JetBrains).
    - **Spin-Up Timing**: Initiated at **Milestone 1.5** (midway, once `rb-pkg` establishes the package manifest schema and `rb-apps` ships its first 3 dogfooding apps, or at Core Phase 135), decoupling editor server maintenance completely from compiler core development.
+
+### Orchestrator Operating Standards Across All Paired Tracks:
+- **5-Way Parallel Concurrency**: Autonomous workflows operate 5 parallel workers simultaneously using partitioned secrets (`OPENCODE_KEY_1` through `OPENCODE_KEY_5`) with decentralized atomic Git lease locking.
+- **Perpetual Self-Dispatching Auditors**: When pending queues drain (`pending == 0`), an autonomous audit workflow scans gaps against industry benchmarks (PyPI, crates.io, POSIX, LSP 3.17) and automatically synthesizes the next batch of phases.
+- **Dynamic Write Mandate**: Agents must flush tests, scaffoldings, or implementations to disk at least once every 15–30 minutes to eliminate timeout progress loss.
 
 ## Resources
 
