@@ -29,13 +29,13 @@
 #   64 of 115 blocks. The other 51 are 39 fragments and 12 known failures.
 # --- SPEC.md ---------------------------------------------------------------
 # --- docs/GRAMMAR.md-----------------------------------------------------
-docs/GRAMMAR.md:566
-docs/GRAMMAR.md:613
+docs/GRAMMAR.md:571
 docs/GRAMMAR.md:618
-docs/GRAMMAR.md:634
-docs/GRAMMAR.md:641
-docs/GRAMMAR.md:650
-docs/GRAMMAR.md:665
+docs/GRAMMAR.md:623
+docs/GRAMMAR.md:639
+docs/GRAMMAR.md:646
+docs/GRAMMAR.md:655
+docs/GRAMMAR.md:670
 # --- HANDOUT.md----------------------------------------------------------
 # --- README.md-----------------------------------------------------------
 HANDOUT.md:126

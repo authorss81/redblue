@@ -169,14 +169,37 @@ impl DebugRepl {
             }
             DebugAction::Run
         })));
-        Self {
+        // The fork arrives carrying the parent's last-value bindings, and the
+        // sub-REPL's own `_` starts empty. Clear both halves of the inherited
+        // pair, not only the alias: a parent `_` left in the fork would answer
+        // the parent's last value through `_` while the freshly-cleared `$_`
+        // says there is none.
+        vm.set_global_binding("_", None);
+        let mut repl = Self {
             vm,
             state,
             buffer: Vec::new(),
             style,
             variables: HashMap::new(),
             cwd,
-        }
+        };
+        repl.sync_last_result_binding();
+        repl
+    }
+
+    /// Keeps the sub-REPL's `$_` equal to its own `_`, exactly as the parent
+    /// session does.
+    ///
+    /// `$_` is a view of `_`, not a second binding that can drift from it: it
+    /// is re-pointed from the last successful value after every line, including
+    /// a failed one, so a line that assigned `$_` cannot leave the two apart.
+    /// The fork arrives carrying the parent's `$_`, and the sub-REPL's `_`
+    /// starts empty, so clearing the inherited alias on entry keeps the same
+    /// rule before the first line runs. `with_dir` clears the inherited `_` at
+    /// the same boundary, so both halves start empty together.
+    fn sync_last_result_binding(&mut self) {
+        let value = self.variables.get("_").cloned();
+        self.vm.set_global_binding("$_", value);
     }
 
     /// The names this sub-REPL's code may be analyzed against: its own `_` and
@@ -184,6 +207,11 @@ impl DebugRepl {
     /// held when the sub-REPL was entered plus whatever it has run since.
     pub(super) fn session_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.variables.keys().cloned().collect();
+        // `$_` is always a name a line may mention, even before any line has
+        // succeeded: the analyzer then lets the line through and the VM reports
+        // the missing value as a catchable runtime error rather than refusing
+        // the program at the analyzer with "unknown variable".
+        names.push("$_".to_string());
         names.extend(self.vm.user_names());
         names.sort();
         names.dedup();
@@ -395,6 +423,7 @@ impl DebugRepl {
                 ));
             }
         }
+        self.sync_last_result_binding();
         lines.extend(self.take_reports());
         lines
     }
@@ -834,6 +863,108 @@ mod tests {
             });
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sub-REPL owns its `_`, so it owns the `$_` that names it: a value a
+    /// line here produced is reachable by the same alias the parent uses, and a
+    /// failed line leaves the last success in place.
+    #[test]
+    fn a_sub_repl_last_value_is_named_by_the_same_alias_as_the_parent() {
+        let mut repl = DebugRepl::with_dir(
+            Vm::new(),
+            Style::detect(),
+            crate::repl::editor::process_directory(),
+        );
+
+        let first = repl.run("2 + 3", "session");
+        assert!(
+            first.iter().any(|line| line.contains("= 5")),
+            "the premise: the line produced 5: {first:?}"
+        );
+
+        assert_eq!(
+            repl.run("$_", "session"),
+            vec!["= 5".to_string()],
+            "$_ names the sub-REPL's own last value"
+        );
+
+        let failed = repl.run("say no_such_name", "session");
+        assert!(
+            failed.iter().any(|line| line.contains("Error")),
+            "the premise: the line failed: {failed:?}"
+        );
+        assert_eq!(
+            repl.run("$_", "session"),
+            vec!["= 5".to_string()],
+            "$_ survives a failed line with the last successful value"
+        );
+    }
+
+    /// `$_` is a view of this sub-REPL's `_`, not of the parent's: the fork
+    /// arrives with the parent's alias in its globals, and the sub-REPL's own
+    /// `_` is empty until it runs something.
+    #[test]
+    fn the_parents_last_value_alias_does_not_leak_into_the_sub_repl() {
+        let mut vm = Vm::new();
+        vm.set_global_binding("$_", Some(crate::value::Value::Number(99.0)));
+        let mut repl = DebugRepl::with_dir(
+            vm,
+            Style::detect(),
+            crate::repl::editor::process_directory(),
+        );
+
+        let answer = repl.run("$_", "session");
+        assert!(
+            answer.iter().any(|line| line.contains("Error")),
+            "the sub-REPL has no last value yet: {answer:?}"
+        );
+        assert!(
+            !answer.iter().any(|line| line.contains("99")),
+            "the parent's last value is not the sub-REPL's: {answer:?}"
+        );
+    }
+
+    /// Both halves of the parent's last-value pair are cleared at the fork, not
+    /// only the alias: `_` left in the globals would answer the parent's value
+    /// while `$_` says there is no last value yet.
+    #[test]
+    fn the_parents_last_value_binding_does_not_leak_into_the_sub_repl() {
+        let mut vm = Vm::new();
+        vm.set_global_binding("_", Some(crate::value::Value::Number(99.0)));
+        vm.set_global_binding("$_", Some(crate::value::Value::Number(99.0)));
+        let mut repl = DebugRepl::with_dir(
+            vm,
+            Style::detect(),
+            crate::repl::editor::process_directory(),
+        );
+
+        for name in ["_", "$_"] {
+            let answer = repl.run(name, "session");
+            assert!(
+                answer.iter().any(|line| line.contains("Error")),
+                "the sub-REPL has no last value yet, so `{name}` names nothing: {answer:?}"
+            );
+            assert!(
+                !answer.iter().any(|line| line.contains("99")),
+                "the parent's last value leaked through `{name}`: {answer:?}"
+            );
+        }
+
+        let produced = repl.run("2 + 3", "session");
+        assert!(
+            produced.iter().any(|line| line.contains("= 5")),
+            "the premise: the sub-REPL produced its own value: {produced:?}"
+        );
+        assert_eq!(
+            repl.run("$_", "session"),
+            vec!["= 5".to_string()],
+            "the alias names the sub-REPL's own last value"
+        );
+        let underscore = repl.run("_", "session");
+        assert!(
+            !underscore.iter().any(|line| line.contains("99")),
+            "`_` still does not answer the parent's value after the sub-REPL ran: {underscore:?}"
+        );
     }
 
     /// The scratch and the program it watches resolve the same import, so the
