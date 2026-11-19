@@ -62,6 +62,15 @@ const MAX_UNDO: usize = 50;
 /// The most named checkpoints one session may hold, for the same reason.
 const MAX_CHECKPOINTS: usize = 64;
 
+/// The most session labels one process may record.
+///
+/// A label is a name a sitting keeps for its whole process, and `:session` can
+/// be fed from a pipe as easily as typed, so an unbounded list is an unbounded
+/// allocation. The cap matches [`MAX_ALIASES`]; past it the session says so and
+/// keeps the labels it already has, and naming an existing sitting again still
+/// works because that adds no new label.
+const MAX_SESSION_LABELS: usize = 256;
+
 /// The most lines a block may hold before the session stops waiting for its
 /// `end`.
 ///
@@ -880,6 +889,13 @@ pub struct Repl {
     /// A vector rather than a map because `.sessions` promises creation order,
     /// and a map's iteration order is not a result.
     checkpoints: Vec<Checkpoint>,
+    /// The labels `:session <name>` has given the sessions in this process,
+    /// in the order they were first used.
+    ///
+    /// A label names a sitting rather than a checkpoint, so it is kept apart
+    /// from `checkpoints` and is not forgotten by `:reset`: the listing is what
+    /// makes a week's worth of sessions able to be told apart.
+    session_labels: Vec<String>,
     /// Which checkpoint was most recently saved or restored, for `.sessions`.
     current_checkpoint: Option<String>,
     /// The states `.undo` can walk back to, oldest first.
@@ -987,6 +1003,7 @@ impl Repl {
             macros: HashMap::new(),
             macro_recording: None,
             checkpoints: Vec::new(),
+            session_labels: Vec::new(),
             current_checkpoint: None,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
@@ -1015,6 +1032,11 @@ impl Repl {
     /// writes, and `MathUtils_circle_area` is only how the VM reaches it.
     fn session_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.variables.keys().cloned().collect();
+        // `$_` is always a name a line may mention, even before any line has
+        // succeeded: the analyzer then lets the line through and the VM reports
+        // the missing value as a catchable runtime error rather than refusing
+        // the program at the analyzer with "unknown variable".
+        names.push("$_".to_string());
         names.extend(self.vm.user_names());
         // Inside the sub-REPL, completion and every other reader of this list
         // are the sub-REPL's: the names a line may be analysed against are
@@ -1863,8 +1885,22 @@ impl Repl {
                 }
                 true
             }
+            ReplCommand::Session(name) => {
+                match self.label_session(&name) {
+                    Ok(label) => println!("Session labelled '{}'.", label),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
+                true
+            }
             ReplCommand::Sessions => {
                 println!("{}", self.checkpoint_listing());
+                true
+            }
+            ReplCommand::Last => {
+                match self.last_result_line() {
+                    Ok(line) => println!("{}", self.style.paint(Paint::Result, &line)),
+                    Err(message) => println!("{}", self.style.paint(Paint::Error, &message)),
+                }
                 true
             }
             ReplCommand::Undo => {
@@ -2347,6 +2383,9 @@ impl Repl {
         self.last_engine = Engine::Walker;
         self.engine_named_in_prompt = false;
         self.variables.clear();
+        // A reset forgets the last value, and `$_` names it: leaving the alias
+        // in the fresh VM would be a view of a value the session no longer has.
+        self.sync_last_result_binding();
         self.definitions.clear();
         self.last_file = None;
         self.cwd = Self::process_directory();
@@ -2408,6 +2447,11 @@ impl Repl {
         self.vm.observe_context(&snapshot.context);
         self.variables = snapshot.variables.clone();
         self.definitions = snapshot.definitions.clone();
+        // Undo, redo and a checkpoint restore all come through here, and each of
+        // them can move `_` back to an older value. `$_` is a view of `_`, so it
+        // is re-pointed here rather than left showing the value the session just
+        // stepped away from.
+        self.sync_last_result_binding();
     }
 
     /// Puts a whole snapshot back: its bindings and the session state a
@@ -2461,6 +2505,28 @@ impl Repl {
             snapshot: before,
             full,
         });
+    }
+
+    /// `:session <name>`: labels this sitting.
+    ///
+    /// A label is only a name to read back from `:sessions`; it changes neither
+    /// a binding nor any program. The first use of a label keeps its place in
+    /// the listing, and using it again is not an error — naming the same sitting
+    /// twice should not make it two sittings.
+    fn label_session(&mut self, name: &str) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Error: :session needs a name. Usage: :session <name>".to_string());
+        }
+        if !self.session_labels.iter().any(|label| label == name) {
+            if self.session_labels.len() >= MAX_SESSION_LABELS {
+                return Err(format!(
+                    "Error: this session already holds the maximum of {MAX_SESSION_LABELS} labels; no new label can be added."
+                ));
+            }
+            self.session_labels.push(name.to_string());
+        }
+        Ok(name.to_string())
     }
 
     /// `.checkpoint <name>`: saves the current state under `name`.
@@ -2529,21 +2595,39 @@ impl Repl {
         Ok(())
     }
 
-    /// `.sessions`: the checkpoints in creation order, current one marked.
+    /// `.sessions`: this process's session labels and this session's
+    /// checkpoints, each in creation order with the current checkpoint marked.
+    ///
+    /// The two sections are separated by a blank line, so a label list ending
+    /// directly above the checkpoint heading does not read as one run-on block.
+    ///
+    /// A session with neither still says so with the one line it always did, so
+    /// a reader who never labels or saves sees no new heading.
     fn checkpoint_listing(&self) -> String {
+        let mut sections = Vec::new();
+        if !self.session_labels.is_empty() {
+            let mut lines = vec!["Session labels:".to_string()];
+            for label in &self.session_labels {
+                lines.push(format!("  {}", label));
+            }
+            sections.push(lines.join("\n"));
+        }
         if self.checkpoints.is_empty() {
-            return "No checkpoints in this session.".to_string();
+            sections.push("No checkpoints in this session.".to_string());
+        } else {
+            let mut lines = vec!["Checkpoints:".to_string()];
+            for checkpoint in &self.checkpoints {
+                let marker = if self.current_checkpoint.as_deref() == Some(checkpoint.name.as_str())
+                {
+                    "*"
+                } else {
+                    " "
+                };
+                lines.push(format!("  {} {}", marker, checkpoint.name));
+            }
+            sections.push(lines.join("\n"));
         }
-        let mut lines = vec!["Checkpoints:".to_string()];
-        for checkpoint in &self.checkpoints {
-            let marker = if self.current_checkpoint.as_deref() == Some(checkpoint.name.as_str()) {
-                "*"
-            } else {
-                " "
-            };
-            lines.push(format!("  {} {}", marker, checkpoint.name));
-        }
-        lines.join("\n")
+        sections.join("\n\n")
     }
 
     /// `.undo`: steps one binding change back.
@@ -2733,6 +2817,11 @@ impl Repl {
                 Err(rendered)
             }
         };
+        // `$_` is a view of `_`, not a second binding that can drift from it:
+        // putting it back from the last successful value after every line —
+        // including a failed one — is what makes the two agree even if the line
+        // itself assigned `$_`.
+        self.sync_last_result_binding();
         // Recorded before the transcript so the undo step is the state the line
         // started from, not the state it left behind.
         if Self::bindings_changed(&before, &self.snapshot_state()) {
@@ -2752,6 +2841,44 @@ impl Repl {
             output.iter().map(|line| strip_escapes(line)).collect(),
         );
         outcome
+    }
+
+    /// Keeps the VM's `$_` equal to the session's last successful value.
+    ///
+    /// `_` remains the one binding the session owns; `$_` is how a program names
+    /// the same value, so it is re-pointed after every line instead of being
+    /// updated separately. A failed line leaves `_` alone, and therefore leaves
+    /// `$_` holding the last successful value too.
+    fn sync_last_result_binding(&mut self) {
+        let value = self.variables.get("_").cloned();
+        self.vm.set_global_binding("$_", value);
+    }
+
+    /// Seeds a bytecode session with the same `$_` the tree-walker holds.
+    ///
+    /// [`Vm::user_names`] keeps `$_` out of the session's own names, because it
+    /// is the REPL's view of `_` rather than a name a line bound. That means it
+    /// does not cross through [`Repl::session_bindings`], so a fresh bytecode VM
+    /// is handed it here explicitly.
+    fn seed_last_result_binding(&self, compiled: &mut BytecodeVm) {
+        if let Some(value) = self.vm.user_value("$_") {
+            compiled.seed_binding("$_", value.clone());
+        }
+    }
+
+    /// The last value a line produced, or the condition that there is none.
+    ///
+    /// `:last` reads the same `_` that `$_` is built from, so the command and
+    /// the name cannot answer two different values.
+    fn last_result(&self) -> Result<&Value, String> {
+        self.variables.get("_").ok_or_else(|| {
+            "Error: no last result yet; run a line that produces a value first.".to_string()
+        })
+    }
+
+    /// `:last` rendered the way the session echoes a result.
+    fn last_result_line(&self) -> Result<String, String> {
+        self.last_result().map(|value| format!("= {}", value))
     }
 
     /// Moves a session in a tour on to the step after the one it just ran.
@@ -3017,6 +3144,7 @@ impl Repl {
         for (name, value) in self.vm.published_member_bindings() {
             compiled.seed_binding(&name, value);
         }
+        self.seed_last_result_binding(&mut compiled);
         let result = compiled.run(&chunk);
         let output = compiled.take_output();
         self.adopt_bytecode_bindings(&compiled);
@@ -3829,6 +3957,10 @@ impl Repl {
         self.engine_named_in_prompt = saved_engine != Engine::Walker;
 
         let (replayed, skipped) = self.replay(&lines);
+        // A restored file replaces the history and replays it; the last line
+        // that made a value owns `_`, so the alias is pointed at it once more
+        // here even when the file was empty and nothing replayed.
+        self.sync_last_result_binding();
         println!("Restored {} line(s) from '{}'", restored_lines, path);
         if restored_lines > 0 {
             println!(
@@ -4941,6 +5073,7 @@ impl Repl {
         for (name, value) in self.session_bindings() {
             compiled.seed_binding(&name, value);
         }
+        self.seed_last_result_binding(&mut compiled);
         let compiled_result = compiled.run(&chunk);
         let compiled_said = compiled.take_output();
 
@@ -14309,6 +14442,606 @@ mod tests {
                     .iter()
                     .any(|(name, value)| name == "after_theme_failure" && value.to_string() == "2"),
                 "a following program still runs after a bad theme name"
+            );
+        }
+    }
+
+    mod last_value_and_session_labels {
+        use super::{feed, scratch_file, Repl};
+        use crate::repl::Engine;
+
+        /// Asserts that `code` is refused because `$_` may be read but never
+        /// bound, and that the refusal is the analyzer's own message at `line`.
+        fn assert_refused_at(code: &str, line: usize) {
+            let mut repl = Repl::new();
+            let error = repl
+                .execute_code(code)
+                .expect_err("$_ may be read but never bound");
+            let message = "AnalyzerError: '$_' is the session's last value and cannot be \
+                           assigned or declared; it is a view of '_'.";
+            assert!(
+                error.contains(message),
+                "the analyzer refuses the binding target with its own message: {error}"
+            );
+            assert!(
+                error.contains(&format!("--> <session>:{line}:")),
+                "the refusal points at line {line} of the session: {error}"
+            );
+        }
+
+        #[test]
+        fn last_value_is_usable_as_a_name() {
+            let mut repl = Repl::new();
+
+            let first = repl
+                .execute_code("2 + 3")
+                .expect("the value-producing line runs");
+            assert_eq!(first.to_string(), "5", "premise: the line produced 5");
+
+            let last = repl
+                .execute_code("$_")
+                .expect("$_ names the previous line's value");
+            assert_eq!(
+                last.to_string(),
+                "5",
+                "$_ is the 5 the line before produced"
+            );
+        }
+
+        #[test]
+        fn last_value_is_usable_as_a_name_on_the_bytecode_engine() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[".vm bytecode"]);
+            assert_eq!(
+                repl.engine(),
+                Engine::Bytecode,
+                "premise: the session is running on the bytecode engine"
+            );
+
+            let first = repl
+                .execute_code("2 + 3")
+                .expect("the value-producing line runs on the bytecode engine");
+            assert_eq!(first.to_string(), "5", "premise: the line produced 5");
+
+            let last = repl
+                .execute_code("$_")
+                .expect("$_ names the previous line's value on a fresh bytecode VM");
+            assert_eq!(
+                last.to_string(),
+                "5",
+                "$_ crosses from the session into the VM the bytecode engine builds"
+            );
+        }
+
+        #[test]
+        fn last_value_after_an_error_is_the_last_successful_value() {
+            let mut repl = Repl::new();
+            assert_eq!(
+                repl.execute_code("6 * 7")
+                    .expect("the value-producing line runs")
+                    .to_string(),
+                "42",
+                "premise: the last success is 42"
+            );
+
+            assert!(
+                repl.execute_code("say no_such_name").is_err(),
+                "premise: the line fails"
+            );
+
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ survives the failed line")
+                    .to_string(),
+                "42",
+                "$_ is the last SUCCESSFUL value, not the error"
+            );
+        }
+
+        #[test]
+        fn last_command_reports_the_same_value_as_the_name() {
+            let mut repl = Repl::new();
+            repl.execute_code("10 + 5")
+                .expect("the value-producing line runs");
+
+            let from_name = repl.execute_code("$_").expect("$_ is bound").to_string();
+            assert_eq!(
+                repl.last_result_line()
+                    .expect("there is a last result to print"),
+                format!("= {}", from_name),
+                ":last prints exactly the value $_ resolves to"
+            );
+            assert!(
+                repl.handle_command(":last"),
+                ":last is dispatched rather than run as source"
+            );
+        }
+
+        #[test]
+        fn edge_first_line_last_value_is_a_named_error() {
+            let mut repl = Repl::new();
+
+            let error = repl
+                .execute_code("$_")
+                .expect_err("a first line has no previous value");
+            assert!(
+                error.contains("$_"),
+                "the error names the name that had nothing: {error}"
+            );
+        }
+
+        #[test]
+        fn edge_first_line_last_value_is_a_named_error_on_the_bytecode_engine() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[".vm bytecode"]);
+            assert_eq!(
+                repl.engine(),
+                Engine::Bytecode,
+                "premise: the session is running on the bytecode engine"
+            );
+
+            let error = repl
+                .execute_code("$_")
+                .expect_err("a fresh bytecode session has no previous value");
+            assert!(
+                error.contains("$_"),
+                "the bytecode path names the missing value: {error}"
+            );
+            assert!(
+                !error.contains("panicked"),
+                "the missing value is a named error, not a panic: {error}"
+            );
+            assert!(
+                !error.contains("Nothing"),
+                "the missing value is an error, not an echoed Nothing: {error}"
+            );
+        }
+
+        #[test]
+        fn edge_last_value_after_only_a_nothing_line_is_a_named_error() {
+            let mut repl = Repl::new();
+            repl.execute_code("set x to 1")
+                .expect("a `set` is a successful line");
+            assert!(
+                repl.lookup("_").is_none(),
+                "a line that produced nothing did not produce a last value"
+            );
+
+            let error = repl
+                .execute_code("$_")
+                .expect_err("there is still no last value");
+            assert!(
+                error.contains("$_"),
+                "the error names the missing value: {error}"
+            );
+        }
+
+        #[test]
+        fn edge_last_before_any_success_raises_a_named_error() {
+            let repl = Repl::new();
+
+            let error = repl
+                .last_result_line()
+                .expect_err("a fresh session has nothing to print");
+            assert!(
+                error.contains("no last result"),
+                "the error names the condition rather than printing nothing: {error}"
+            );
+        }
+
+        #[test]
+        fn edge_labels_are_listed_once_in_first_use_order() {
+            let mut repl = Repl::new();
+            assert!(repl.handle_command(":session alpha"));
+            assert!(repl.handle_command(":session beta"));
+            assert!(
+                repl.handle_command(":session alpha"),
+                "naming the same sitting twice is not an error"
+            );
+
+            let listing = repl.checkpoint_listing();
+            let alpha = listing.find("  alpha\n").expect("alpha is listed");
+            let beta = listing.find("  beta\n").expect("beta is listed");
+            assert!(alpha < beta, "first use order is kept: {listing}");
+            assert_eq!(
+                listing.matches("  alpha\n").count(),
+                1,
+                "a repeated label is one label: {listing}"
+            );
+            assert!(
+                listing.contains("No checkpoints in this session."),
+                "the checkpoint half still says it is empty: {listing}"
+            );
+            assert!(repl.handle_command(":sessions"));
+        }
+
+        #[test]
+        fn edge_labels_and_checkpoints_are_two_separated_sections() {
+            let mut repl = Repl::new();
+            assert!(repl.handle_command(":session alpha"));
+            assert!(repl.handle_command(".checkpoint first"));
+
+            let listing = repl.checkpoint_listing();
+            assert_eq!(
+                listing,
+                "Session labels:\n  alpha\n\nCheckpoints:\n  * first",
+                "the label and checkpoint sections each keep their heading, with a blank line between them"
+            );
+        }
+
+        #[test]
+        fn edge_a_label_keeps_spaces_and_command_characters() {
+            let mut repl = Repl::new();
+
+            assert!(
+                repl.handle_command(":session monday morning: bug #42"),
+                "a label is the whole remainder, not one command word"
+            );
+
+            let listing = repl.checkpoint_listing();
+            assert!(
+                listing.contains("  monday morning: bug #42\n"),
+                "the label is kept whole: {listing}"
+            );
+        }
+
+        #[test]
+        fn edge_a_session_label_cannot_be_empty() {
+            let mut repl = Repl::new();
+
+            assert!(
+                repl.handle_command(":session   "),
+                "a session command with no name is still dispatched as a command"
+            );
+            assert!(
+                repl.checkpoint_listing()
+                    .starts_with("No checkpoints in this session."),
+                "the refused label left the listing untouched"
+            );
+        }
+
+        #[test]
+        fn labelling_a_session_does_not_change_a_program() {
+            let mut repl = Repl::new();
+            let before = repl
+                .execute_code("(2 + 3) * 4")
+                .expect("the program runs before the label")
+                .to_string();
+            assert_eq!(before, "20", "premise: the program produced 20");
+
+            assert!(repl.handle_command(":session labelled"));
+
+            let after = repl
+                .execute_code("(2 + 3) * 4")
+                .expect("the identical program runs after the label")
+                .to_string();
+            assert_eq!(
+                after, before,
+                "a label is metadata, not a change to what a program computes"
+            );
+        }
+
+        #[test]
+        fn last_value_alias_is_not_listed_as_a_second_session_binding() {
+            let mut repl = Repl::new();
+            repl.execute_code("2 + 3")
+                .expect("the value-producing line runs");
+
+            let lines = repl
+                .variable_lines()
+                .expect("the session holds the last result");
+            assert!(
+                lines.iter().any(|line| line == "  _ = 5"),
+                "the last result is still listed under `_`: {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|line| line.starts_with("  $_ = ")),
+                "$_ is a view of `_`, not a second row in :vars: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn edge_a_session_label_survives_a_reset_that_forgets_bindings_and_checkpoints() {
+            let mut repl = Repl::new();
+            repl.execute_code("set before_reset to 1")
+                .expect("the binding line runs");
+            assert!(repl.handle_command(":session keeps_its_name"));
+            assert!(repl.handle_command(".checkpoint before_reset"));
+
+            assert!(repl.handle_command(":reset"));
+
+            assert!(
+                repl.lookup("before_reset").is_none(),
+                "the reset forgot the binding"
+            );
+            let listing = repl.checkpoint_listing();
+            assert!(
+                listing.contains("No checkpoints in this session."),
+                "the reset forgot the checkpoint: {listing}"
+            );
+            assert!(
+                listing.contains("  keeps_its_name\n"),
+                "the label names the sitting and survives the reset: {listing}"
+            );
+        }
+
+        #[test]
+        fn the_existing_underscore_binding_is_unchanged() {
+            let mut repl = Repl::new();
+            repl.execute_code("2 + 3")
+                .expect("the value-producing line runs");
+
+            assert_eq!(
+                repl.lookup("_").map(ToString::to_string),
+                Some("5".to_string()),
+                "_ still holds the last value exactly as before"
+            );
+            assert!(
+                repl.execute_code("_").is_err(),
+                "_ is still a binding the session shows, not a program name"
+            );
+        }
+
+        #[test]
+        fn last_value_composes_in_a_following_expression() {
+            let mut repl = Repl::new();
+            repl.execute_code("2 + 3")
+                .expect("the value-producing line runs");
+
+            let doubled = repl
+                .execute_code("$_ * 2")
+                .expect("$_ is a value, not only a line of its own");
+            assert_eq!(
+                doubled.to_string(),
+                "10",
+                "$_ carries 5 into the next expression"
+            );
+        }
+
+        #[test]
+        fn declaring_last_value_is_refused_so_it_stays_a_view_of_underscore() {
+            let mut repl = Repl::new();
+            repl.execute_code("2 + 3")
+                .expect("the value-producing line runs");
+
+            let message = "AnalyzerError: '$_' is the session's last value and cannot be \
+                           assigned or declared; it is a view of '_'.";
+
+            let function_error = repl
+                .execute_code("to $_()\n    give back 1\nend")
+                .expect_err("$_ is not a name a function may declare");
+            assert!(
+                function_error.contains(message),
+                "the refusal names the alias it protects: {function_error}"
+            );
+            assert!(
+                function_error.contains("--> <session>:1:"),
+                "the refusal points at the declaration's line: {function_error}"
+            );
+
+            let assignment_error = repl
+                .execute_code("set $_ to 99")
+                .expect_err("$_ is not a name a line may assign");
+            assert!(
+                assignment_error.contains(message),
+                "the refusal names the alias it protects: {assignment_error}"
+            );
+            assert!(
+                assignment_error.contains("--> <session>:1:"),
+                "the refusal points at the assignment's line: {assignment_error}"
+            );
+
+            assert_eq!(
+                repl.execute_code("$_").expect("$_ still reads").to_string(),
+                "5",
+                "a refused declaration did not shadow the last value"
+            );
+            assert_eq!(
+                repl.lookup("_").map(ToString::to_string),
+                Some("5".to_string()),
+                "and `_` still holds the same value"
+            );
+        }
+
+        #[test]
+        fn constant_last_value_is_refused() {
+            assert_refused_at("constant $_ to 1", 1);
+        }
+
+        #[test]
+        fn for_each_last_value_is_refused() {
+            assert_refused_at("for each $_ in [1]\n    say 1\nend", 1);
+        }
+
+        #[test]
+        fn for_range_last_value_is_refused() {
+            assert_refused_at("for each $_ from 1 to 2\n    say 1\nend", 1);
+        }
+
+        #[test]
+        fn multiple_assignment_last_value_is_refused() {
+            assert_refused_at("set $_, other to 1, 2", 1);
+        }
+
+        #[test]
+        fn object_last_value_is_refused() {
+            assert_refused_at("object $_\nend", 1);
+        }
+
+        #[test]
+        fn catch_last_value_is_refused() {
+            assert_refused_at("try\n    say 1\ncatch error $_\n    say 1\nend", 1);
+        }
+
+        #[test]
+        fn import_name_last_value_is_refused() {
+            assert_refused_at("import $_", 1);
+        }
+
+        #[test]
+        fn import_alias_last_value_is_refused() {
+            assert_refused_at("import json as $_", 1);
+        }
+
+        #[test]
+        fn module_last_value_is_refused() {
+            assert_refused_at("module $_\nend", 1);
+        }
+
+        #[test]
+        fn function_parameter_last_value_is_refused() {
+            assert_refused_at("to f($_)\n    give back 1\nend", 1);
+        }
+
+        #[test]
+        fn function_literal_parameter_last_value_is_refused() {
+            assert_refused_at("set f to to ($_)\n    give back 1\nend", 1);
+        }
+
+        #[test]
+        fn method_name_last_value_is_refused_inside_an_object() {
+            assert_refused_at(
+                "object O\n    to $_()\n        give back 1\n    end\nend",
+                2,
+            );
+        }
+
+        #[test]
+        fn method_parameter_last_value_is_refused_inside_an_object() {
+            assert_refused_at(
+                "object O\n    to m($_)\n        give back 1\n    end\nend",
+                2,
+            );
+        }
+
+        #[test]
+        fn field_name_last_value_is_refused_inside_an_object() {
+            assert_refused_at("object O\n    has $_\nend", 2);
+        }
+
+        #[test]
+        fn state_restores_keep_the_last_value_alias_equal_to_underscore() {
+            let mut repl = Repl::new();
+            repl.execute_code("2 + 3")
+                .expect("the first value-producing line runs");
+            repl.create_checkpoint("five")
+                .expect("a checkpoint of the five is made");
+            repl.execute_code("10 + 20")
+                .expect("the second value-producing line runs");
+            assert_eq!(
+                repl.execute_code("$_").expect("$_ reads").to_string(),
+                "30",
+                "premise: the alias names the newer value"
+            );
+
+            repl.undo_binding().expect("the second value is undoable");
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ reads after undo")
+                    .to_string(),
+                "5",
+                "undo steps the alias back with `_`"
+            );
+
+            repl.redo_binding().expect("the undone value is redoable");
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ reads after redo")
+                    .to_string(),
+                "30",
+                "redo steps the alias forward with `_`"
+            );
+
+            repl.restore_checkpoint("five")
+                .expect("the five checkpoint is restorable");
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ reads after a checkpoint restore")
+                    .to_string(),
+                "5",
+                "a checkpoint restore re-points the alias at the restored `_`"
+            );
+
+            repl.reset_session();
+            assert!(
+                repl.execute_code("$_").is_err(),
+                "a reset forgets the last value, and the alias with it"
+            );
+
+            let path = scratch_file("last-value-load", "40 + 2\n");
+            assert!(
+                repl.handle_command(&format!(":load {}", path.display())),
+                "load is a command"
+            );
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ reads after loading a file")
+                    .to_string(),
+                "42",
+                "a loaded file's last value owns the alias too"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn edge_a_unicode_session_label_is_kept_whole() {
+            let mut repl = Repl::new();
+            let label = "münchen 🐛 مراجعة";
+
+            assert!(
+                repl.handle_command(&format!(":session {label}")),
+                "a unicode label is still a command"
+            );
+
+            let listing = repl.checkpoint_listing();
+            assert!(
+                listing.contains(&format!("  {label}\n")),
+                "the label is stored as written, not transcoded: {listing}"
+            );
+        }
+
+        #[test]
+        fn edge_session_labels_stop_at_their_capacity() {
+            let mut repl = Repl::new();
+            for index in 0..crate::repl::MAX_SESSION_LABELS {
+                repl.label_session(&format!("sitting {index}"))
+                    .expect("a label inside the cap is accepted");
+            }
+
+            let refused = repl.label_session("one too many");
+            assert!(
+                refused.is_err(),
+                "a new label past the cap is refused rather than growing the list"
+            );
+            let listing = repl.checkpoint_listing();
+            assert!(
+                !listing.contains("  one too many\n"),
+                "the refused label was not recorded: {listing}"
+            );
+            assert!(
+                listing.contains("  sitting 0\n"),
+                "the labels already recorded are kept: {listing}"
+            );
+            assert!(
+                repl.label_session("sitting 0").is_ok(),
+                "naming an existing sitting again adds nothing, so it still works at the cap"
+            );
+        }
+
+        #[test]
+        fn edge_session_label_capacity_is_a_named_error() {
+            let mut repl = Repl::new();
+            for index in 0..crate::repl::MAX_SESSION_LABELS {
+                repl.label_session(&format!("sitting {index}"))
+                    .expect("a label inside the cap is accepted");
+            }
+
+            let error = repl
+                .label_session("overflow")
+                .expect_err("a label past the cap is an error");
+            assert!(
+                error.contains("maximum") && error.contains("labels"),
+                "the error names the condition it hit: {error}"
             );
         }
     }

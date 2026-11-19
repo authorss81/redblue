@@ -41,7 +41,7 @@ components it would consume, with the reason each is or is not reusable.
 | Encoder and decoder | `src/bytecode/format.rs:290` (`encode`), `src/bytecode/format.rs:308` (`decode`), version at `src/bytecode/format.rs:81` | **Yes, but should be left alone for the first backend.** The decoder is strict about the version and refuses anything it does not know. |
 | Disassembler | `src/bytecode/disasm.rs:102` (`render`), `src/bytecode/disasm.rs:35` (`render_compact`) | **Yes.** It is a pure function of a chunk and is useful for differential testing the backend's input. |
 | Bytecode VM | `src/bytecode/vm.rs:741` (`BytecodeVm`), `src/bytecode/vm.rs:1163` (`run`), `src/bytecode/vm.rs:3785` (`call_function`) | **Yes as the semantic oracle, not as the code generator.** The native backend must agree with it instruction for instruction and error for error. |
-| Tree-walking VM | `src/interpreter.rs:371` (`Vm`), `src/interpreter.rs:1795` (`run`), `src/interpreter.rs:1886` (captured locals) | **Yes as the second oracle.** It is the language's reference behaviour. |
+| Tree-walking VM | `src/interpreter.rs:371` (`Vm`), `src/interpreter.rs:1799` (`run`), `src/interpreter.rs:1890` (captured locals) | **Yes as the second oracle.** It is the language's reference behaviour. |
 | Runtime operations | `src/runtime.rs:368` (`binary_op`), `src/runtime.rs:315` (`index`), `src/runtime.rs:256` (`property`), `src/runtime.rs:3420` (`builtin`) | **Partly.** Native code can call these through a runtime ABI, but calling one per operation is the slow path the backend is supposed to remove. |
 | Value model | `src/value.rs:387` (`Value`), `src/value.rs:21` (`Fields`), `src/value.rs:37` (`Captured`), `src/value.rs:48` (`FunctionBody`), `src/value.rs:85` (`FunctionValue`), `src/value.rs:470` (`Shared<T> = Arc<T>`) | **Only with a runtime contract.** Dynamic tags, `f64` numbers, shared lists/records, captured scope maps and function bodies all need a native representation or a call into Rust. |
 | Standard library | `src/stdlib.rs:520` (`builtins`) | **Yes through the same runtime boundary.** Reimplementing it in native code would duplicate behaviour and drift. |
@@ -109,7 +109,7 @@ bounds the gain.
 The bytecode deliberately carries names (`src/bytecode/codegen.rs:7`). A
 function value captures a `Vec<IndexMap<String, Value>>` of whole lexical scopes
 (`src/value.rs:37`, `src/value.rs:85`), and the tree-walker clones the live locals when it
-declares a function (`src/interpreter.rs:1886`). The VM resolves a `LOAD` by
+declares a function (`src/interpreter.rs:1890`). The VM resolves a `LOAD` by
 name against those maps.
 
 **Cost:** a native backend either keeps a hash lookup per variable access, which
