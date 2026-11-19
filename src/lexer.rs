@@ -527,6 +527,28 @@ impl Lexer {
                 continue;
             }
 
+            // `$_` is the session's last value. It is read as one name so a
+            // program can refer to it; a bare `$` is still not a character the
+            // language has a use for. Only the exact `$_` is a name: a longer
+            // run such as `$_foo` is not a new spelling, so it stays the bare
+            // `$` the language refuses.
+            if c == '$'
+                && lexer.peek() == Some('_')
+                && !lexer
+                    .source
+                    .get(lexer.pos + 2)
+                    .is_some_and(|next| next.is_alphanumeric() || *next == '_')
+            {
+                lexer.advance();
+                lexer.advance();
+                tokens.push(Token::new(
+                    TokenKind::Identifier("$_".to_string()),
+                    line,
+                    column,
+                ));
+                continue;
+            }
+
             // Operators
             let kind = match c {
                 '+' => {
@@ -667,5 +689,30 @@ mod tests {
     fn test_keywords() {
         let tokens = Lexer::tokenize("if yes then end").unwrap();
         assert_eq!(tokens[1].kind, TokenKind::YesNo(true));
+    }
+
+    #[test]
+    fn test_last_value_is_one_identifier() {
+        let tokens = Lexer::tokenize("$_").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("$_".to_string()));
+    }
+
+    #[test]
+    fn test_bare_dollar_is_still_a_lexer_error() {
+        let error = Lexer::tokenize("$").expect_err("a bare $ is not a name");
+        assert!(
+            error.to_string().contains("Unexpected character '$'"),
+            "the error names the character the language cannot read: {error}"
+        );
+    }
+
+    #[test]
+    fn test_last_value_name_does_not_swallow_a_suffix() {
+        let error = Lexer::tokenize("$_foo")
+            .expect_err("only the exact $_ is a name, not any name it prefixes");
+        assert!(
+            error.to_string().contains("Unexpected character '$'"),
+            "the longer run is refused where a bare $ is: {error}"
+        );
     }
 }

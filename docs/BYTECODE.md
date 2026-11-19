@@ -356,7 +356,8 @@ survive into the file for a VM to resolve it against those scopes. Resolving
 names to slots is a later stage, and a version bump.
 
 The one name the compiler introduces is `$counter`, the counter of a
-`repeat … times` loop. `$` is not an identifier character in Redblue, so it
+`repeat … times` loop. `$` is not an identifier character in Redblue — its only
+exception is the exact name `$_`, the session's last value — so `$counter`
 cannot collide with a name the program declared.
 
 ## How each statement compiles

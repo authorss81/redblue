@@ -29,12 +29,17 @@ newline       = '\n' | '\r' | '\r\n'
 ### 1.2 Identifiers
 
 ```
-identifier    = letter { letter | digit | '_' }
+identifier    = ( letter | '_' ) { letter | digit | '_' }
 letter        = 'a'..'z' | 'A'..'Z' | unicode_letter
 digit         = '0'..'9'
+last_value    = '$_'
 ```
 
 **Note:** Identifiers can contain Unicode letters (e.g., `nom`, `名前`, `имя`)
+
+The exact two characters `$_` are the session's last value and lex as one
+identifier. `$` is not otherwise an identifier character, and only the exact
+`$_` is a name: a longer run such as `$_foo` is not a new spelling.
 
 ### 1.3 Keywords (Reserved)
 
