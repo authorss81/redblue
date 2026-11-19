@@ -50,9 +50,14 @@ pub enum ReplCommand {
     /// A checkpoint is session state and nothing else: it is never a file, never
     /// committed, and dies with the session.
     Checkpoint(String),
-    /// Lists the checkpoints this session holds, in creation order, marking the
-    /// current one.
+    /// Gives this sitting a human-readable label, so a week's sessions can be
+    /// told apart when `:sessions` lists them.
+    Session(String),
+    /// Lists the labels this process has used and the checkpoints this session
+    /// holds, in deterministic order.
     Sessions,
+    /// Prints the session's last successful value, the same value `$_` names.
+    Last,
     /// Steps one binding change back, to the state before the last source line
     /// that changed anything.
     Undo,
@@ -468,12 +473,28 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Checkpoint(argument.unwrap_or_default()),
     },
     CommandSpec {
+        names: &["session"],
+        description: "Label this session, so :sessions can tell sittings apart",
+        usage: Some("<name>"),
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Session(argument.unwrap_or_default()),
+    },
+    CommandSpec {
         names: &["sessions"],
-        description: "List this session's checkpoints, marking the current one",
+        description: "List session labels and this session's checkpoints, marking the current one",
         usage: None,
         optional_argument: false,
         verbatim_argument: false,
         build: |_| ReplCommand::Sessions,
+    },
+    CommandSpec {
+        names: &["last"],
+        description: "Print the last successful value, the one $_ names",
+        usage: None,
+        optional_argument: false,
+        verbatim_argument: false,
+        build: |_| ReplCommand::Last,
     },
     CommandSpec {
         names: &["undo"],
@@ -1153,6 +1174,7 @@ impl ReplCommand {
             | ReplCommand::Save(value)
             | ReplCommand::Restore(value)
             | ReplCommand::Checkpoint(value)
+            | ReplCommand::Session(value)
             | ReplCommand::Run(value)
             | ReplCommand::Inspect(value)
             | ReplCommand::Type(value)

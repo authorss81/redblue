@@ -311,6 +311,27 @@ fn repl_shows_the_result_of_an_expression_under_vars() {
         .assert_stdout_contains("  _ = 5");
 }
 
+/// `:last` prints the same `= value` line a value-producing line prints, for
+/// the value `$_` resolves to. This reads what the dispatch arm actually emits:
+/// a stale value, a different value, or no line at all fails here.
+#[test]
+fn last_command_prints_the_same_value_as_the_name() {
+    let s = session("2 + 3\n7 * 6\n:last\n:quit\n");
+
+    s.assert_exited_ok();
+    let emitted: Vec<&str> = s
+        .stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix(">>> "))
+        .filter(|line| line.starts_with("= "))
+        .collect();
+    assert_eq!(
+        emitted,
+        ["= 5", "= 42", "= 42"],
+        "the final line is the value the previous line left, not a stale one"
+    );
+}
+
 #[test]
 fn repl_runs_a_multiline_block() {
     let s = session("if 1 is greater than 0 then\n    say \"yes\"\nend\n:quit\n");
@@ -797,6 +818,28 @@ fn checkpoint_restore_brings_back_bindings_and_last_result_end_to_end() {
         .assert_stdout_contains("= 42")
         .assert_stdout_contains("x=1")
         .assert_stdout_contains("* a");
+}
+
+/// `:sessions` prints the labels and the checkpoints as two separated sections
+/// when both exist, which is the shape a labelled session with saved state sees.
+#[test]
+fn edge_sessions_lists_labels_and_checkpoints_as_separate_sections() {
+    let s = session(":session alpha\n.checkpoint first\n:sessions\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Session labels:\n  alpha\n\nCheckpoints:\n  * first");
+}
+
+/// `:session` with only spaces is a command missing its name, so the user sees
+/// the usage line the parser produces and no label is recorded.
+#[test]
+fn edge_a_session_command_with_no_name_shows_usage_and_labels_nothing() {
+    let s = session(":session   \n:sessions\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Usage: :session <name>")
+        .assert_stdout_contains("No checkpoints in this session.")
+        .assert_stdout_lacks("Session labels:");
 }
 
 /// An empty undo or redo stack is a named empty, and a session with no

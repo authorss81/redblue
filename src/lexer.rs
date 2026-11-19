@@ -527,6 +527,16 @@ impl Lexer {
                 continue;
             }
 
+            // `$_` is the session's last value. It is read as one name so a
+            // program can refer to it; a bare `$` is still not a character the
+            // language has a use for.
+            if c == '$' && lexer.peek() == Some('_') {
+                lexer.advance();
+                let ident = format!("${}", lexer.read_identifier());
+                tokens.push(Token::new(TokenKind::Identifier(ident), line, column));
+                continue;
+            }
+
             // Operators
             let kind = match c {
                 '+' => {
@@ -667,5 +677,20 @@ mod tests {
     fn test_keywords() {
         let tokens = Lexer::tokenize("if yes then end").unwrap();
         assert_eq!(tokens[1].kind, TokenKind::YesNo(true));
+    }
+
+    #[test]
+    fn test_last_value_is_one_identifier() {
+        let tokens = Lexer::tokenize("$_").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("$_".to_string()));
+    }
+
+    #[test]
+    fn test_bare_dollar_is_still_a_lexer_error() {
+        let error = Lexer::tokenize("$").expect_err("a bare $ is not a name");
+        assert!(
+            error.to_string().contains("Unexpected character '$'"),
+            "the error names the character the language cannot read: {error}"
+        );
     }
 }

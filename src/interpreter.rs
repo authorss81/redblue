@@ -1314,7 +1314,11 @@ impl Vm {
             .globals
             .keys()
             .filter(|name| {
-                !builtins.contains_key(*name) && !self.context.qualified_members.contains(*name)
+                // `$_` is the REPL's view of `_`, not a name a line bound, so it
+                // is not one of the session's own names to list or complete.
+                *name != "$_"
+                    && !builtins.contains_key(*name)
+                    && !self.context.qualified_members.contains(*name)
             })
             .cloned()
             .collect();
@@ -1894,6 +1898,22 @@ impl Vm {
 
     fn get_var(&self, name: &str) -> Option<Value> {
         self.get_var_ref(name).cloned()
+    }
+
+    /// Binds `name` in the VM's globals, or removes it when `value` is `None`.
+    ///
+    /// The REPL uses this to keep `$_` equal to `_` between lines: the value is
+    /// already the session's, and re-pointing the whole VM at its bindings would
+    /// reset the counters and output buffer a run just finished with.
+    pub(crate) fn set_global_binding(&mut self, name: &str, value: Option<Value>) {
+        match value {
+            Some(value) => {
+                self.globals.insert(name.to_string(), value);
+            }
+            None => {
+                self.globals.remove(name);
+            }
+        }
     }
 
     /// The binding a read of `name` resolves to, mutably.
