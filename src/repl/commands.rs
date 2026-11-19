@@ -842,7 +842,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         usage: Some("<format>"),
         optional_argument: true,
         verbatim_argument: true,
-        build: |argument| ReplCommand::Prompt(argument),
+        build: |argument| ReplCommand::Prompt(ReplCommand::prompt_text(argument)),
     },
     CommandSpec {
         names: &["tutorial", "tour"],
@@ -1013,6 +1013,27 @@ impl ReplCommand {
         } else {
             Some(argument.to_string())
         }
+    }
+
+    /// The prompt text a `:prompt` argument names.
+    ///
+    /// The argument is display text, so the whitespace after the command word is
+    /// the separator: an empty prompt or one made only of spaces would otherwise
+    /// be read as no argument at all. Quoting text that is empty or only
+    /// whitespace is the way to name those two prompts, and the quotes delimit
+    /// the text rather than becoming part of it. Any other quoted text keeps its
+    /// quotes, because a prompt is display text and its characters are the
+    /// user's: `:prompt "rb> "` sets the prompt `"rb> "`.
+    fn prompt_text(argument: Option<String>) -> Option<String> {
+        let text = argument?;
+        let quoted = text.len() >= 2 && text.starts_with('"') && text.ends_with('"');
+        if quoted {
+            let inner = &text[1..text.len() - 1];
+            if inner.trim().is_empty() {
+                return Some(inner.to_string());
+            }
+        }
+        Some(text)
     }
 
     /// A path with one matching pair of quotes around it, and without them.
@@ -1518,6 +1539,30 @@ mod tests {
                 usage: "<filename>"
             },
             "and an optional argument is not a licence for every command to have one"
+        );
+    }
+
+    /// An empty prompt and a prompt made only of spaces are the two prompts the
+    /// display-text argument cannot spell: the separator eats the whitespace and
+    /// leaves no argument at all. A pair of quotes around text that is empty or
+    /// only whitespace is the escape for them, while every other quoted prompt is
+    /// still display text whose quotes are part of it.
+    #[test]
+    fn parse_reads_a_quoted_empty_or_whitespace_prompt_as_the_prompt() {
+        assert_eq!(
+            ReplCommand::parse(":prompt \"\""),
+            ReplCommand::Prompt(Some(String::new())),
+            "a quoted empty prompt is an empty prompt, not two quote characters"
+        );
+        assert_eq!(
+            ReplCommand::parse(".prompt \"    \""),
+            ReplCommand::Prompt(Some("    ".to_string())),
+            "a quoted whitespace prompt keeps every space"
+        );
+        assert_eq!(
+            ReplCommand::parse(":prompt \"rb> \""),
+            ReplCommand::Prompt(Some("\"rb> \"".to_string())),
+            "quotes around text that is not whitespace are still part of the prompt"
         );
     }
 

@@ -3,12 +3,14 @@
 ## What changed
 | File | Lines | What |
 |---|---|---|
-| src/repl/commands.rs | +53 −20 | Added `:builtins`/`.builtins` and `:modules`/`.modules` to the command table and enum; a bare `:prompt` now asks for the current prompt, while `:prompt none` restores the default; `:help` names the no-argument form. |
+| src/repl/commands.rs | +115 −21 | Added `:builtins`/`.builtins` and `:modules`/`.modules` to the command table and enum; a bare `:prompt` now asks for the current prompt, while `:prompt none` restores the default; `:help` names the no-argument form. A quoted empty or whitespace-only argument (`:prompt ""`, `:prompt "    "`) names those prompts, while quotes around other text stay part of it. |
 | src/repl/completer.rs | +46 −33 | The completer's builtin and module vocabularies now come from the shared `stdlib` functions instead of a hand-kept list; `builtin_names()`/`module_names()` expose those sets to the agreement tests. |
-| src/repl/introspect.rs | +191 −2 | Added `builtin_lines()` and `module_lines()`, both sorted from the same registry the completer uses, with module annotations for builtins that have a dotted spelling, including the `list_map`/`map` pair. |
-| src/repl/mod.rs | +339 −6 | Dispatches `:builtins` and `:modules`; `:prompt` answers with the prompt the next line is read at, and `:prompt none` restores `>>> `. Added the command, registry-agreement, prompt, unicode-prompt, oversize-prompt, command-looking-prompt, block and sub-REPL edge tests. |
-| src/stdlib.rs | +65 −0 | Added `builtin_vocabulary()`, `module_vocabulary()` and `module_of_builtin()`, the shared registry views used by completion and introspection; `module_of_builtin` follows the operation a dotted pair reaches, so `list.map`/`list_map` annotate `(list)` while `console.log` and `files.append` do not annotate the unrelated flat `log` and `append`. |
+| src/repl/introspect.rs | +237 −2 | Added `builtin_lines()` and `module_lines()`, both sorted from the same registry the completer uses, with module annotations for builtins that have a dotted spelling, including the `list_map`/`map` pair. |
+| src/repl/mod.rs | +450 −6 | Dispatches `:builtins` and `:modules`; `:prompt` answers with the prompt the next line is read at, and `:prompt none` restores `>>> `. Added the command, registry-agreement, prompt, unicode-prompt, oversize-prompt, command-looking-prompt, quoted-empty/quoted-whitespace-prompt, block and sub-REPL edge tests. |
+| src/stdlib.rs | +71 −0 | Added `builtin_vocabulary()`, `module_vocabulary()` and `module_of_builtin()`, the shared registry views used by completion and introspection; `module_of_builtin` follows the operation a dotted pair reaches, so `list.map`/`list_map` annotate `(list)` while `console.log` and `files.append` do not annotate the unrelated flat `log` and `append`. |
 | SURVEY.md | +1 −1 | Re-anchored the `regex_builtin` citation after the new `src/stdlib.rs` lines moved it. |
+| tests/repl_test.rs | +31 −2 | The REPL surface tests were updated for the new commands and prompt behaviour. |
+| tests/stdlib_gap_survey_test.rs | +2 −2 | The survey's regex citation anchor follows the moved `src/stdlib.rs` line. |
 | tests/unreviewed_work_ack_test.rs | +39 −0 | Acknowledged the already-landed phase-117 resume commit by its SHA and added the test that pins it to the SHA rather than the in-flight subject rule, matching the phase-117 acknowledgement of phase-114. |
 
 ## Reproduction
@@ -53,6 +55,11 @@ $ printf ':builtins\n:modules\n:prompt\n:quit\n' | target/debug/rb
 | edge_an_oversize_unicode_prompt_is_refused_by_bytes_not_characters | failure assertion: a prompt whose characters fit but whose UTF-8 bytes exceed the limit is refused and the old prompt kept |
 | edge_a_prompt_that_looks_like_a_command_is_not_executed | display vs parsing: `:quit ` as a prompt is printed, not executed, and the next line still runs |
 | edge_a_prompt_of_only_spaces_is_still_a_prompt | boundary: whitespace-only prompt is display text, not "no argument" |
+| parse_reads_a_quoted_empty_or_whitespace_prompt_as_the_prompt | empty/duplicate: `:prompt ""` is empty, `:prompt "    "` keeps its spaces, and other quoted text keeps its quotes |
+| edge_a_quoted_empty_prompt_is_set_through_the_command_and_still_evaluates | empty: the command sets an empty prompt and the following line still runs |
+| edge_a_quoted_whitespace_prompt_is_set_through_the_command | boundary: a prompt of only spaces is settable through `:prompt` |
+| edge_a_quoted_prompt_with_text_keeps_its_quotes | display text: quoting is the empty/whitespace escape, not general unquoting |
+| edge_a_quoted_oversize_prompt_is_refused_and_the_old_prompt_kept | failure assertion/resource: a quoted prompt past `MAX_PROMPT_BYTES` is refused and the old prompt kept |
 | edge_a_prompt_wider_than_the_terminal_is_kept_whole | boundary/resource: a 300-byte prompt is printed untruncated and the next line still runs |
 | edge_repl_significant_text_in_a_prompt_does_not_break_continuation | malformed/ambiguous display text: `>>>` in the prompt does not take over the numbered continuation prompt |
 | edge_a_prompt_with_an_unknown_placeholder_is_refused | failure assertion: an unknown placeholder is rejected and the old prompt is kept |
@@ -88,10 +95,31 @@ $ printf ':builtins\n:modules\n:prompt\n:quit\n' | target/debug/rb
   the prior delivery's SHA, so history is never rewritten and the audit is not
   widened to let a later phase certify another phase's delivery.
 
+## Resume follow-up (round 3 — the two prompts the parser could not spell)
+
+The round-2 report listed a gap: an empty prompt and a whitespace-only prompt
+were only reachable through the private `set_prompt_format` used by tests, not
+through `:prompt`, because `argument` treats whitespace after the command word as
+the separator. That is the definition-of-done line "a prompt set to an empty
+string still parses input correctly and still evaluates a program" and the
+"prompt of only spaces" edge case, so it is now closed in the command parser:
+
+- `ReplCommand::prompt_text` treats a whole argument wrapped in one pair of
+  quotes as an escape **only when the quoted text is empty or all whitespace**.
+  `:prompt ""` sets the empty prompt and `:prompt "    "` sets four spaces.
+- Quoting is not a general unquoting rule: `:prompt "rb> "` still sets the
+  literal prompt `"rb> "`, which is the display-text contract the existing
+  parser test pins.
+- The escape runs before `check_prompt_format`, so a quoted prompt that exceeds
+  `MAX_PROMPT_BYTES` is refused by the same limit and the old prompt is kept;
+  the new failure-asserting test proves it.
+- Five tests were added (one parser test, four surface tests). The full suite is
+  now 3183 passed, 0 failed, 0 ignored across 87 suites.
+
 Edge-case matrix dispositions:
-- empty — covered: empty prompt still evaluates; an absent module annotation is omitted rather than printed as an empty field.
+- empty — covered: `:prompt ""` sets the empty prompt through the command and the following line still evaluates; an absent module annotation is omitted rather than printed as an empty field.
 - singleton — covered: every registry name is listed exactly once, and each module is asserted individually.
-- boundary — covered: whitespace-only prompt, a prompt wider than the terminal, and the existing 1024-byte prompt limit.
+- boundary — covered: `:prompt "    "` sets a whitespace-only prompt through the command, a prompt wider than the terminal is kept whole, and the existing 1024-byte prompt limit is exercised on both sides.
 - out_of_bounds — covered: a trailing word after `:builtins`/`:modules` is ignored like every command with no usage, and neither takes an index from user input.
 - type_mismatch — N/A: `:builtins`/`:modules` take no argument; `:prompt` accepts display text, never a typed value.
 - numeric_boundary — N/A: no arithmetic or numeric conversion is involved.
@@ -106,8 +134,8 @@ Edge-case matrix dispositions:
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 3178 passed, 0 failed, 0 ignored across 87 suites |
-| rbops/verify.sh phase-118 | pass — all checks green, and the report count matches the observed 3178 |
+| cargo test --all-targets | 3183 passed, 0 failed, 0 ignored across 87 suites |
+| rbops/verify.sh phase-118 | pass — VERIFY PASS, 3183 passed / 0 failed. The gate's report-honesty check emitted one WARN because the gate's copy of this file still cited 3178; this file now cites 3183. |
 
 ## Invariants touched
 - None of the language invariants (`.rb`, `to … end`, `set`, `say`, `Value`, `Error`) changed.
@@ -115,6 +143,6 @@ Edge-case matrix dispositions:
 
 ## Known gaps / follow-ups
 - The command takes only the existing prompt text; there is no per-session persistence of a custom prompt. That is a separate feature.
-- A prompt consisting only of spaces is available to the stored format (and tested), but is not directly settable through the command parser because whitespace after `:prompt` is treated as the separator. This matches the existing display-text argument contract rather than adding a second quoting rule.
+- A quoted argument is only unquoted when it is empty or all whitespace. General quoted prompt text still keeps its quotes; the escape exists for the two prompts the separator cannot spell, not as a second quoting rule.
 - `:prompt none` is the restore sentinel, so a literal prompt text of exactly `none` cannot be set through the command. The sentinel is the *exact* word with no trailing display whitespace: `:prompt none ` (with the space a prompt normally ends in) is the literal prompt `none `.
 - When a builtin is reachable through more than one module, `:builtins` annotates it with the first matching row of `MODULE_MEMBERS` rather than every spelling. For example, `length` shows `list`, because that row comes first; the member table is a fixed const, so the choice is deterministic.

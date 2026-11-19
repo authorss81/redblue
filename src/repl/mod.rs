@@ -10527,6 +10527,103 @@ mod tests {
             );
         }
 
+        /// `:prompt ""` is the command spelling of an empty prompt. Without the
+        /// quotes the argument is only separator whitespace, so the command reads
+        /// it as the question "what is my prompt?" rather than an empty prompt.
+        #[test]
+        fn edge_a_quoted_empty_prompt_is_set_through_the_command_and_still_evaluates() {
+            let mut repl = Repl::new();
+            assert!(
+                repl.handle_command(":prompt \"\""),
+                "the quoted empty prompt is a command, not a usage error"
+            );
+            assert_eq!(
+                repl.prompt_format, "",
+                "the quotes delimit an empty prompt rather than becoming its text"
+            );
+
+            let prompts = prompts_for(&mut repl, &["set quoted_answer to 40 + 2", ":quit"]);
+
+            assert_eq!(prompts[0], "", "the prompt is empty rather than defaulted");
+            assert_eq!(
+                repl.lookup("quoted_answer").cloned(),
+                Some(Value::Number(42.0)),
+                "and the line after an empty prompt is still evaluated as a program"
+            );
+        }
+
+        /// `:prompt "    "` is a prompt made only of spaces, which the command
+        /// cannot spell unquoted: the separator would eat every space and leave
+        /// no argument at all.
+        #[test]
+        fn edge_a_quoted_whitespace_prompt_is_set_through_the_command() {
+            let mut repl = Repl::new();
+            assert!(
+                repl.handle_command(":prompt \"    \""),
+                "the quoted whitespace prompt is a command, not the default"
+            );
+            assert_eq!(
+                repl.prompt_format, "    ",
+                "the quotes delimit the spaces rather than being part of them"
+            );
+
+            let prompts = prompts_for(&mut repl, &["set spaced_again to 2", ":quit"]);
+
+            assert_eq!(prompts[0], "    ", "the prompt is exactly the spaces set");
+            assert_eq!(
+                repl.lookup("spaced_again").cloned(),
+                Some(Value::Number(2.0)),
+                "and the program after it still parsed and ran"
+            );
+        }
+
+        /// Quoting is the escape for the two prompts the argument cannot spell,
+        /// not a new quoting rule for prompts in general: quoted display text
+        /// that is not whitespace keeps its quote characters.
+        #[test]
+        fn edge_a_quoted_prompt_with_text_keeps_its_quotes() {
+            let mut repl = Repl::new();
+            assert!(repl.handle_command(":prompt \"rb> \""));
+            assert_eq!(
+                repl.prompt_format, "\"rb> \"",
+                "the quotes around display text are part of the prompt"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                "\"rb> \"",
+                "and the next line is read at that literal prompt"
+            );
+        }
+
+        /// A quoted whitespace prompt still goes through the same byte limit: the
+        /// escape sets a prompt, it does not bypass the check that a prompt is
+        /// small enough to print before every line.
+        #[test]
+        fn edge_a_quoted_oversize_prompt_is_refused_and_the_old_prompt_kept() {
+            let mut repl = Repl::new();
+            let over = " ".repeat(MAX_PROMPT_BYTES + 1);
+            let refused = super::super::check_prompt_format(&over);
+            assert!(
+                refused.is_err(),
+                "a quoted prompt over the byte limit is refused, got {refused:?}"
+            );
+            assert!(
+                refused.unwrap_err().contains(&MAX_PROMPT_BYTES.to_string()),
+                "and the refusal names the byte limit"
+            );
+
+            assert!(repl.handle_command(&format!(":prompt \"{over}\"")));
+            assert_eq!(
+                repl.prompt_format, DEFAULT_PROMPT,
+                "the prompt the session had is still the prompt"
+            );
+            assert_eq!(
+                prompts_for(&mut repl, &[""])[0],
+                DEFAULT_PROMPT,
+                "and the next line is still read at the old prompt"
+            );
+        }
+
         /// A prompt wider than the terminal is held whole rather than truncated:
         /// it is display text, and cutting it would silently change what the user
         /// set. The session still evaluates the line after it.
