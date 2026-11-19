@@ -1393,7 +1393,8 @@ Running 3,000+ tests from scratch on every tiny change or testing all 10,000 pac
 
 ### 26.5 Staged Implementation Timeline: Phase 126 Boundary
 - **Active Core Pipeline (`rbops` Phases 001–126)**:
-  - `rbops` is currently executing Phase 114 with only **8 functional base phases remaining** to Phase 126.
+  - Phase 117 and Phase 118 are successfully merged into `main`!
+  - `rbops` is currently executing Phase 119 with only **6 functional base phases remaining** to Phase 126 (Phases 119–125, with Phase 126 already `.done`).
   - To guarantee zero disruption, zero regression risk, and 100% historical continuity, the active `rbops` harness remains strictly locked until Phase 126 lands on `main`.
 - **Immediate Post-126 Ecosystem Rollout**:
   - The moment Phase 126 lands, all 4 paired ecosystem repositories (`rb-pkg-ops`, `rb-apps-ops`, `rbos-ops`, `rb-ide-ops`) and post-126 core operations launch with this decoupled async architecture from Day 1:
@@ -1401,6 +1402,98 @@ Running 3,000+ tests from scratch on every tiny change or testing all 10,000 pac
     2. Cloud asynchronous CodeRabbit AST review with zero model wait time.
     3. Heavy integration suites offloaded to decoupled background CI runners.
     4. Non-blocking failure remediation queues.
+
+---
+
+## 27. Package Import Semantics, Cryptographic Provenance & Autonomous Self-Dispatching Auditors
+
+### 27.1 Package Import & Usage Semantics (Source Code and REPL)
+Redblue treats third-party packages as first-class linguistic citizens, retaining natural plain English clarity while supporting structured namespaces.
+
+#### 1. In Redblue Source Code (`.rb` files)
+Developers use standard natural syntax:
+```redblue
+import sqlite
+import sqlite as db
+from math_utils import sin, cos
+
+set connection to db.open("production.db")
+say "Connected to database"
+```
+
+#### 2. In the Interactive REPL
+Packages are dynamically importable directly from the interactive shell session:
+```redblue
+>>> import sqlite
+>>> set db to sqlite.open(":memory:")
+>>> db.execute("create table users (name text)")
+= 0
+```
+Additionally, the REPL provides built-in package discovery and management commands:
+```redblue
+>>> :pkg install sqlite
+>>> :pkg list
+installed:
+  sqlite (1.2.0)
+  json (0.4.1)
+```
+
+#### 3. Package Management CLI (`rb pkg`)
+Project dependencies are managed deterministically via the CLI:
+```bash
+rb pkg add sqlite          # Resolves latest compatible release, adds to rb.toml, installs to cache
+rb pkg remove sqlite       # Removes dependency from rb.toml
+rb pkg update              # Updates dependencies according to semantic version constraints
+rb pkg tree                # Prints visual dependency graph
+```
+- **`rb.toml`**: Human-readable configuration declaring named dependencies and version bounds.
+- **`rb.lock`**: Deterministic, hermetic lockfile recording exact package versions and content-addressed hashes.
+
+### 27.2 Cryptographic Hash Security vs Human Ergonomics (Solving Typosquatting and Malicious Tampering)
+A frequent point of confusion in modern package ecosystems is the tension between human-friendly names and cryptographic security.
+
+- **The Human Experience**: Developers **never** write or memorize 64-character cryptographic hashes in source code. Developers write clean, memorable names (`sqlite`, `csv`, `http`).
+- **The Role of Cryptographic Hashes (Blake3/SHA-256)**:
+  1. **Content-Addressed Subresource Integrity (SRI)**:
+     - When `sqlite` is published to `authorss81/rb-pkg`, a cryptographic hash (Blake3/SHA-256) of the release asset is signed and recorded in the central index.
+     - When `rb pkg add sqlite` executes, it downloads the package and independently recomputes its cryptographic hash.
+     - If a malicious hacker alters even a single bit of the asset on the CDN, the computed hash mismatches the registry hash, and `rb pkg` aborts installation immediately with an integrity violation.
+  2. **Official Provenance & Anti-Typosquatting Shield**:
+     - When a developer runs `rb pkg add <name>`, `rb pkg` verifies whether `<name>` exists in the official verified index of `authorss81/rb-pkg`.
+     - If the package is unverified or unofficial, `rb pkg` halts and prompts for explicit user confirmation:
+       ```
+       ⚠️ WARNING: 'a-bc' is NOT an official verified Redblue package!
+       It has not passed autonomous security audits and may contain malicious code.
+       Do you wish to proceed? [y/N]:
+       ```
+     - **Levenshtein Distance Typosquatting Protection**: If a user attempts to install `sqllite` or `sql-ite`, `rb pkg` detects the near-collision with the official `sqlite` package and warns:
+       ```
+       ⚠️ Did you mean 'sqlite'? 'sqllite' appears to be an unofficial typosquat.
+       ```
+
+### 27.3 Dedicated Queue-Drain Autonomous Auditors (Perpetual Self-Dispatching Loop)
+In autonomous software development, a major vulnerability is **pipeline stagnation**: once the initial queued phases complete, the system idles unless a human intervenes.
+
+#### The Perpetual Audit Architecture across All 4 Paired Repositories:
+1. **Queue-Drain Trigger**:
+   - In `rb-pkg-ops`, `rb-apps-ops`, `rbos-ops`, `rb-ide-ops`, and post-126 `redblue`, whenever the queue of unbuilt phases reaches zero (`pending == 0`), GitHub Actions automatically triggers `auditor_dispatch`.
+2. **Autonomous Gap Analysis**:
+   - The auditor agent scans external ecosystem standards:
+     - **`rb-pkg-ops`**: Scans the top 1,000 PyPI/crates.io packages for missing domain gaps.
+     - **`rbos-ops`**: Scans QEMU and POSIX kernel interfaces for missing virtual drivers.
+     - **`rb-apps-ops`**: Scans application archetypes for missing user tools.
+     - **`rb-ide-ops`**: Scans Microsoft LSP specifications for missing IDE features.
+3. **Evidence-Backed Phase Generation**:
+   - The auditor synthesizes the next batch of 10–20 structured implementation phases with verifiable definitions of done and appends them to `phases.json`.
+4. **Automatic Swarm Re-dispatch**:
+   - The auditor automatically invokes `dispatch.sh tick`, re-triggering the worker pool to execute the newly synthesized phases without requiring human intervention.
+
+### 27.4 Incremental Checkpoint & Dynamic Write Mandate for Agents
+To prevent wasted runner compute and model context timeouts:
+- **The Problem**: An autonomous agent with a 2-to-3-hour budget might spend the entire allocation reading documentation, grepping code, or searching the web, only to be killed by a runner timeout before writing any implementation to disk.
+- **The Mandatory Agent Prompt Directive**:
+  Every phase prompt across all ops repositories enforces the **Dynamic Write Mandate**:
+  > *Agents must never spend more than 15 consecutive minutes in a read-only research state. Agents MUST write intermediate reproduction tests, scaffoldings, or partial implementations to disk at least once every 15–30 minutes and commit checkpoints. If a runner timeout occurs, recovery branches preserve the work on `rbops-recovery/<phase>` so the subsequent agent resumes seamlessly from where the previous agent stopped.*
 
 
 
