@@ -7,7 +7,7 @@
 | src/analyzer.rs | +88 −8 | refuses `$_` everywhere, and `_` as a declaration or assignment target only in a session analysis, so the alias cannot be shadowed and the VM's `_` cannot drift from the session's last value without breaking standalone programs that use `_`; reads of both are still allowed |
 | src/interpreter.rs | +31 −4 | `set_global_binding` lets the REPL point `$_` at `_` without re-pointing the whole VM; `user_names` holds `$_` out of the session's own names so listings do not gain a second row; the resumed pass makes a first-use `$_` a named "no last result yet" error instead of a generic unknown variable |
 | src/bytecode/vm.rs | +8 −1 | the bytecode `Load` path reports the same first-use `$_` condition as the walker, so the two engines cannot disagree about what a missing last value means |
-| src/repl/mod.rs | +1098 −12 | `$_` is kept equal to `_`, `:last` prints that value, `:session <name>` labels a sitting, `:sessions` lists labels plus the existing checkpoints, the bytecode path is seeded with `$_`, labels stop at `MAX_SESSION_LABELS` so a piped `:session` cannot grow the list without bound, labels reject control and bidirectional formatting characters so a newline or a right-to-left override cannot forge or reorder listing rows, and every state restore (`:undo`, `:redo`, `:restore`, `:reset`, `:load`) re-points the alias at the restored `_`; the resumed pass adds tests for a unicode last value, a type-mismatch error, a call-time lookup across function calls, and the first-use condition on both engines |
+| src/repl/mod.rs | +1098 −12 | `$_` is kept equal to `_`, `:last` prints that value, `:session <name>` labels a sitting, `:sessions` lists labels plus the existing checkpoints, the bytecode path is seeded with `$_`, labels stop at `MAX_SESSION_LABELS` and `MAX_SESSION_LABEL_BYTES` so a piped `:session` cannot grow the list or a label without bound, labels reject control and bidirectional formatting characters so a newline or a right-to-left override cannot forge or reorder listing rows, and every state restore (`:undo`, `:redo`, `:restore`, `:reset`, `:load`) re-points the alias at the restored `_`; the resumed pass adds tests for a unicode last value, a type-mismatch error, a call-time lookup across function calls, and the first-use condition on both engines |
 | src/repl/debug_repl.rs | +141 −6 | the debug sub-REPL clears both inherited halves of the parent's last-value pair at the fork, then keeps its own `_` in its VM and its own `$_` equal to it after every successful line, never inheriting the parent's alias or binding, with tests pinning every rule |
 | src/repl/commands.rs | +25 −3 | command variants and table rows for `:last` and `:session`; `:sessions` description now names both halves |
 | tests/repl_test.rs | +43 −0 | end-to-end stdout tests for `:last` and for the labels-plus-checkpoints listing |
@@ -53,6 +53,7 @@
 | edge_a_unicode_session_label_is_kept_whole | unicode — a label with emoji, CJK and RTL text is stored as written |
 | edge_session_labels_stop_at_their_capacity | resource limit / boundary — the label list stops at its cap |
 | edge_session_label_capacity_is_a_named_error | resource limit — a label past the cap is a clean named error |
+| edge_an_overlong_session_label_is_refused | resource limit / boundary — a label past the byte cap is a clean named error, while one at the cap is accepted |
 | declaring_last_value_is_refused_so_it_stays_a_view_of_underscore | malformed input / declaration target — `$_` may be read but never bound, so it cannot shadow `_` |
 | state_restores_keep_the_last_value_alias_equal_to_underscore | state boundary — undo, redo, checkpoint restore, reset and load all keep `$_` a view of `_` |
 | edge_a_session_label_with_a_newline_is_refused | malformed input — a multi-line label cannot forge rows in the listing |
@@ -65,6 +66,10 @@
 | edge_last_value_carries_unicode_text_whole | unicode — `$_` returns a text value with emoji and CJK as written |
 | edge_last_value_type_mismatch_is_a_clean_runtime_error | type mismatch — adding a number to the last value's text is a named runtime error, not a panic |
 | edge_last_value_is_the_latest_success_across_function_calls | nesting / state — `$_` is resolved at call time, not frozen when a function was defined |
+| edge_a_zero_last_value_is_a_value_not_a_missing_one | numeric boundary / empty — `0` is a value, distinct from the missing-value error |
+| edge_last_value_survives_a_malformed_line | malformed input — a line that fails to parse does not replace the last successful value |
+| edge_a_session_label_with_a_tab_is_refused | malformed input / control character — the `:session` command path refuses a tab and leaves the listing unchanged |
+| edge_a_blank_line_does_not_clear_the_last_value | empty — an empty line leaves the last successful value alone |
 | `the_parents_last_value_binding_does_not_leak_into_the_sub_repl` (strengthened) | debug sub-REPL — after `2 + 3`, `_` reads back exactly `= 5` rather than merely not answering the parent's 99 |
 
 The pre-existing `_` contract is also pinned by the tests that predate this phase and were not modified, including `edge_a_block_that_outgrows_the_buffer_is_dropped_not_kept` and the checkpoint tests that read `_`.
@@ -82,14 +87,14 @@ The pre-existing `_` contract is also pinned by the tests that predate this phas
 | nesting_recursion | covered — `$_` resolves inside a function body, at call time, as well as at top level |
 | duplicate_missing_keys | N/A — no keyed container is added; duplicate labels are covered above |
 | malformed_input | covered — empty label, whitespace-only label, zero-width-only label, a label with a newline/control character, a label with a bidirectional formatting control, and a missing `$_`/`:last` value are clean errors |
-| resource_limit | covered — labels stop at `MAX_SESSION_LABELS` and the refusal is a named error |
+| resource_limit | covered — labels stop at `MAX_SESSION_LABELS` and `MAX_SESSION_LABEL_BYTES`, and each refusal is a named error |
 
 ## Gates
 | Gate | Result |
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 3246 passed, 0 failed |
+| cargo test --all-targets | 3250 passed, 0 failed |
 | ../rbops/verify.sh "phase-119" | PASS |
 
 ## Invariants touched
