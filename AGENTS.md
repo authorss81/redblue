@@ -253,7 +253,8 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
   - In `rb-apps-ops`, gates test *only* the modified application (`apps/<app>/tests/`).
   - In `rbops` (compiler core), full test suite execution (3,243+ tests) is mandatory because core compiler changes affect the entire grammar and VM.
   - In `rbos`, bottom-up regression tests validate the modified kernel layer and its upper dependencies.
-- **Multi-Organization Parallelism Scaling**: Standard GitHub accounts enforce a verified limit of **20 concurrent runner jobs** across the entire account. To scale beyond 20 concurrent workers without queuing, package category tracks are sharded across distinct GitHub Organizations (e.g. 5 orgs × 20 = 100 concurrent runners) backed by isolated OpenCode API key rings.
+- **Multi-Organization Parallelism Scaling**: Standard GitHub accounts enforce a verified limit of **20 concurrent runner jobs** across the entire account. To scale beyond 20 concurrent workers without queuing, package category tracks are sharded across 10 distinct GitHub Organizations (e.g. 10 orgs × 20 = 200 concurrent runners) backed by 200+ isolated OpenCode API keys via automated org-level secret provisioning.
+- **CodeRabbit AI Review Integration**: All ecosystem repositories integrate the CodeRabbit GitHub App (`.coderabbit.yaml`) to perform automated AI-assisted code reviews on pull requests, enforcing Redblue idioms, zero-shim policy, test adequacy, and gate criteria before merging.
 - **Resumable 6-Hour Nightly Regression Sweeps**:
   - A daily sweep tests all packages and applications against the latest `redblue` compiler release.
   - To respect GitHub's 6-hour job ceiling, execution checkpoints to `state/sweep_status.json` at the 5h 30m mark.

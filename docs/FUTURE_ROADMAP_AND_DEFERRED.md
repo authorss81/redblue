@@ -1783,6 +1783,35 @@ Instead of manually typing secrets into hundreds of repositories, configure secr
 1. **Production Worker Dispatch (`pending > 0`)**: Do not start generating actual packages or kernel code until Phase 126 lands on `main`.
 2. **Why Wait?**: Phase 126 marks the freeze of the core Redblue language syntax, bytecode VM instructions, and package import grammar. Generating thousands of packages against a pre-126 moving target would require costly mass rewrites.
 
+---
+
+### 31.4 Automated 200-Key Secret Provisioning & CodeRabbit Review Integration
+
+#### 1. The 10-Organization Sharding Model (200 Runners / 200 Keys)
+By sharding package domains across 10 dedicated GitHub Organizations:
+- `rb-pkg-sys`, `rb-pkg-web`, `rb-pkg-net`, `rb-pkg-data`, `rb-pkg-math`
+- `rb-pkg-ai`, `rb-pkg-crypto`, `rb-pkg-media`, `rb-pkg-cli`, `rb-apps-org`
+Each organization receives **20 concurrent GitHub-hosted runners** on the Free tier, scaling total system capacity to **200 concurrent jobs**—a 1:1 match with 200 OpenCode API keys.
+
+#### 2. Automated Local Secret Provisioning Scripts
+To avoid manually typing 200 keys into GitHub web settings:
+- Provide automated scripts: [`scripts/setup_org_secrets.ps1`](../scripts/setup_org_secrets.ps1) and [`scripts/setup_org_secrets.sh`](../scripts/setup_org_secrets.sh).
+- **Security & Privacy**:
+  - The script reads from local `keys.txt` (which is permanently ignored by `.gitignore`).
+  - Secrets are passed directly into `gh secret set --org <org> --visibility all` through standard input (`stdin`).
+  - Keys are **never printed to the console, never logged to disk, and never visible to the AI assistant**.
+  - Works dynamically whether there are 50, 200, or 500 keys, distributing them evenly.
+
+#### 3. CodeRabbit AI Code Review Integration
+- **Setup Order**: Create the organizations first on GitHub, then install the CodeRabbit GitHub App.
+- **How to Install**:
+  1. Visit `https://github.com/apps/coderabbitai`.
+  2. Click **Install** and select the 10 target organizations.
+  3. Select **"All repositories"** (free for open-source public repos).
+- **Configuration (`.coderabbit.yaml`)**:
+  CodeRabbit acts as an automated PR reviewer on every worker branch, performing AST verification, checking that no shims are introduced, ensuring test adequacy, and flagging security vulnerabilities before commits land on `main`.
+
+
 
 
 
