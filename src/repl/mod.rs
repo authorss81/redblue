@@ -14631,6 +14631,67 @@ mod tests {
         }
 
         #[test]
+        fn edge_first_line_last_value_error_names_the_missing_condition() {
+            let mut repl = Repl::new();
+
+            let error = repl
+                .execute_code("$_")
+                .expect_err("a first line has no previous value");
+            assert!(
+                error.contains("$_"),
+                "the error names the alias that had nothing: {error}"
+            );
+            assert!(
+                error.contains("no last result yet"),
+                "the error names the condition rather than only the name: {error}"
+            );
+            assert!(
+                !error.contains("Unknown variable"),
+                "a missing last result is its own condition, not an unknown name: {error}"
+            );
+        }
+
+        #[test]
+        fn edge_last_value_error_is_the_same_condition_on_the_bytecode_engine() {
+            let mut repl = Repl::new();
+            feed(&mut repl, &[".vm bytecode"]);
+            assert_eq!(
+                repl.engine(),
+                Engine::Bytecode,
+                "premise: the session is running on the bytecode engine"
+            );
+
+            let error = repl
+                .execute_code("$_")
+                .expect_err("a fresh bytecode session has no previous value");
+            assert!(
+                error.contains("no last result yet"),
+                "the bytecode path names the same condition as the walker: {error}"
+            );
+            assert!(
+                !error.contains("Unknown variable"),
+                "the bytecode path does not report the alias as merely unknown: {error}"
+            );
+        }
+
+        #[test]
+        fn last_value_stays_missing_after_only_a_failed_line() {
+            let mut repl = Repl::new();
+            assert!(
+                repl.execute_code("say no_such_name").is_err(),
+                "premise: the line failed and produced no value"
+            );
+
+            let error = repl
+                .execute_code("$_")
+                .expect_err("a failure is not a last successful value");
+            assert!(
+                error.contains("no last result yet"),
+                "the failed line did not become the last value: {error}"
+            );
+        }
+
+        #[test]
         fn edge_last_value_after_only_a_nothing_line_is_a_named_error() {
             let mut repl = Repl::new();
             repl.execute_code("set x to 1")

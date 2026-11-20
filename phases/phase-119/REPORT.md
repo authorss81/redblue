@@ -5,13 +5,14 @@
 |---|---|---|
 | src/lexer.rs | +47 −0 | reads only the exact `$_` as one identifier; `$_foo` is still the bare `$` error, a bare `$` is still a lexer error, and lexer tests pin all three |
 | src/analyzer.rs | +88 −8 | refuses `$_` everywhere, and `_` as a declaration or assignment target only in a session analysis, so the alias cannot be shadowed and the VM's `_` cannot drift from the session's last value without breaking standalone programs that use `_`; reads of both are still allowed |
-| src/interpreter.rs | +21 −1 | `set_global_binding` lets the REPL point `$_` at `_` without re-pointing the whole VM; `user_names` holds `$_` out of the session's own names so listings do not gain a second row |
-| src/repl/mod.rs | +1035 −14 | `$_` is kept equal to `_`, `:last` prints that value, `:session <name>` labels a sitting, `:sessions` lists labels plus the existing checkpoints, the bytecode path is seeded with `$_`, labels stop at `MAX_SESSION_LABELS` so a piped `:session` cannot grow the list without bound, labels reject control and bidirectional formatting characters so a newline or a right-to-left override cannot forge or reorder listing rows, and every state restore (`:undo`, `:redo`, `:restore`, `:reset`, `:load`) re-points the alias at the restored `_`; the resumed pass adds tests for a unicode last value, a type-mismatch error, and a call-time lookup across function calls |
+| src/interpreter.rs | +31 −4 | `set_global_binding` lets the REPL point `$_` at `_` without re-pointing the whole VM; `user_names` holds `$_` out of the session's own names so listings do not gain a second row; the resumed pass makes a first-use `$_` a named "no last result yet" error instead of a generic unknown variable |
+| src/bytecode/vm.rs | +8 −1 | the bytecode `Load` path reports the same first-use `$_` condition as the walker, so the two engines cannot disagree about what a missing last value means |
+| src/repl/mod.rs | +1098 −12 | `$_` is kept equal to `_`, `:last` prints that value, `:session <name>` labels a sitting, `:sessions` lists labels plus the existing checkpoints, the bytecode path is seeded with `$_`, labels stop at `MAX_SESSION_LABELS` so a piped `:session` cannot grow the list without bound, labels reject control and bidirectional formatting characters so a newline or a right-to-left override cannot forge or reorder listing rows, and every state restore (`:undo`, `:redo`, `:restore`, `:reset`, `:load`) re-points the alias at the restored `_`; the resumed pass adds tests for a unicode last value, a type-mismatch error, a call-time lookup across function calls, and the first-use condition on both engines |
 | src/repl/debug_repl.rs | +141 −6 | the debug sub-REPL clears both inherited halves of the parent's last-value pair at the fork, then keeps its own `_` in its VM and its own `$_` equal to it after every successful line, never inheriting the parent's alias or binding, with tests pinning every rule |
 | src/repl/commands.rs | +25 −3 | command variants and table rows for `:last` and `:session`; `:sessions` description now names both halves |
 | tests/repl_test.rs | +43 −0 | end-to-end stdout tests for `:last` and for the labels-plus-checkpoints listing |
 | tests/unreviewed_work_ack_test.rs | +39 −0 | pins phase-118's delivery commit by SHA, as the phase-after-delivery handoff requires, and refuses its prefix on the in-flight rule |
-| src/bytecode/format.rs, NATIVE.md | +2 −2 each | the interpreter line citations move with the added lines, so the study still points at `run` and `captured` |
+| src/bytecode/format.rs, NATIVE.md | +3 −3 each | the line citations move with the added lines, so the study still points at `run`, `captured` and `call_function` |
 
 ## Tests added
 | Test | Edge class covered |
@@ -21,6 +22,9 @@
 | last_value_after_an_error_is_the_last_successful_value | failure does not replace the last successful value |
 | last_command_reports_the_same_value_as_the_name | `:last` and `$_` cannot disagree |
 | edge_first_line_last_value_is_a_named_error | singleton / boundary — first line |
+| edge_first_line_last_value_error_names_the_missing_condition | singleton / boundary — first line names the condition, not merely an unknown name |
+| edge_last_value_error_is_the_same_condition_on_the_bytecode_engine | engine boundary — the bytecode path names the same missing-condition error |
+| last_value_stays_missing_after_only_a_failed_line | failure is not a last successful value |
 | edge_last_value_after_only_a_nothing_line_is_a_named_error | empty / nothing — a successful line that produced no value |
 | edge_last_before_any_success_raises_a_named_error | empty — no last result at all |
 | edge_labels_are_listed_once_in_first_use_order | duplicate labels / deterministic order |
@@ -85,7 +89,7 @@ The pre-existing `_` contract is also pinned by the tests that predate this phas
 |---|---|
 | cargo fmt --all -- --check | pass |
 | cargo clippy --all-targets -- -D warnings | pass |
-| cargo test --all-targets | 3243 passed, 0 failed |
+| cargo test --all-targets | 3246 passed, 0 failed |
 | ../rbops/verify.sh "phase-119" | PASS |
 
 ## Invariants touched

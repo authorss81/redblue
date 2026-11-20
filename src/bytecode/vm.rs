@@ -2206,7 +2206,14 @@ impl BytecodeVm {
             Opcode::Load => {
                 let name = self.constant_text(instruction.arg)?;
                 let value = self.get_var(&name).ok_or_else(|| {
-                    Error::Runtime(format!("Unknown variable '{}'", name), self.span())
+                    if name == "$_" {
+                        Error::Runtime(
+                            "no last result yet; '$_' names the last successful value and no line has produced one.".to_string(),
+                            self.span(),
+                        )
+                    } else {
+                        Error::Runtime(format!("Unknown variable '{}'", name), self.span())
+                    }
                 })?;
                 self.push(value);
                 self.advance(frame);

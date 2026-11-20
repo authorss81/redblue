@@ -2904,9 +2904,16 @@ impl Vm {
             Expr::Text(s) => Ok(Value::Text(s.clone())),
             Expr::YesNo(b) => Ok(Value::YesNo(*b)),
             Expr::Nothing => Ok(Value::Nothing),
-            Expr::Variable(name, _) => self
-                .get_var(name)
-                .ok_or_else(|| Error::Runtime(format!("Unknown variable '{}'", name), self.span())),
+            Expr::Variable(name, _) => self.get_var(name).ok_or_else(|| {
+                if name == "$_" {
+                    Error::Runtime(
+                        "no last result yet; '$_' names the last successful value and no line has produced one.".to_string(),
+                        self.span(),
+                    )
+                } else {
+                    Error::Runtime(format!("Unknown variable '{}'", name), self.span())
+                }
+            }),
             Expr::Binary { op, left, right } => {
                 let l = self.evaluate(left)?;
                 let r = self.evaluate(right)?;
