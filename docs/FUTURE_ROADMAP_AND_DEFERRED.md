@@ -1662,7 +1662,7 @@ The **20-runner limit is account-wide**, not per repository. Splitting packages 
 
 #### How to Achieve Maximum Parallelism (Multi-Org Federation):
 To unlock 80–100+ concurrent runners on the free tier:
-1. **Multi-Organization Partitioning**: Host package category tracks under distinct GitHub Organizations (e.g., `rb-pkg-sys`, `rb-pkg-web`, `rb-pkg-data`, `rb-apps-org`). Each GitHub Organization gets its own independent **20 concurrent runner allocation** (5 orgs × 20 = 100 concurrent workers).
+1. **Multi-Organization Partitioning**: Host package category tracks under distinct GitHub Organizations (e.g., `rb-pkg-sys`, `rb-pkg-web`, `rb-pkg-data`, `rb-pkg-math`, `rb-apps-org`, etc.). Each GitHub Organization gets its own independent **20 concurrent runner allocation** (10 orgs × 20 = 200 concurrent workers).
 2. **Self-Hosted Runner Clusters**: In ops orchestrators, registering lightweight self-hosted runner daemons (or Docker container runners) on local workstations or VPS nodes completely removes the 20-runner limit with unlimited parallel execution.
 
 ---
@@ -1745,11 +1745,16 @@ To bypass GitHub’s account-wide 20-runner limit and scale up to 100+ concurren
 1. Visit `https://github.com/account/organizations/new`.
 2. Select the **Free Plan** ($0/month, unlimited public repositories, 20 concurrent GitHub-hosted runner jobs per organization).
 3. Name each organization according to ecosystem domain:
-   - `rb-pkg-sys`: Low-level system, OS, and hardware interface packages.
-   - `rb-pkg-web`: Networking, HTTP, WebSockets, and API client packages.
-   - `rb-pkg-data`: Databases (SQLite, Redis), serialization (JSON, YAML, CSV).
-   - `rb-pkg-math`: Numerical analysis, linear algebra, cryptography, statistics.
-   - `rb-apps-org`: Userland applications incubator.
+   - `rb-pkg-sys`: Low-level system, OS, hardware, and C-FFI interface packages.
+   - `rb-pkg-web`: Web protocols, HTTP clients/servers, REST, WebSockets, and APIs.
+   - `rb-pkg-net`: Low-level networking, TCP/UDP sockets, DNS, and wire protocols.
+   - `rb-pkg-data`: Databases (SQLite, Redis), key-value stores, and serialization (JSON, YAML, CSV).
+   - `rb-pkg-math`: Numerical analysis, linear algebra, calculus, and scientific computation.
+   - `rb-pkg-ai`: Machine learning, neural networks, LLM bindings, and vector embeddings.
+   - `rb-pkg-crypto`: Cryptography, Blake3/SHA hashing, ciphers, and SSL/TLS certificates.
+   - `rb-pkg-media`: Image manipulation, audio synthesis/playback, 2D canvas, and SVG rendering.
+   - `rb-pkg-cli`: Command-line interface utilities, terminal box-drawing (TUI), and argument parsing.
+   - `rb-apps-org`: Userland applications catalog and flagship dogfooding apps.
 4. Provide a contact email (can use your personal email or alias).
 5. Set ownership to **"My personal account"** and complete verification.
 
