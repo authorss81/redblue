@@ -258,6 +258,13 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
   - A daily sweep tests all packages and applications against the latest `redblue` compiler release.
   - To respect GitHub's 6-hour job ceiling, execution checkpoints to `state/sweep_status.json` at the 5h 30m mark.
   - If tests remain, the workflow self-dispatches a fresh runner via `repository_dispatch` to resume from the cursor, automatically isolating compiler degradation from individual package bugs.
+- **Cross-Repo Out-of-Scope Feedback Protocol (`[BLOCKED_BY_CORE]`)**:
+  - If a package or application requires syntax, built-ins, or compiler features not yet in Redblue, workers must NEVER hack the compiler in the package repo.
+  - Workers log the requirement in `docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md` with status `[BLOCKED_BY_CORE]`, mark the package phase as deferred upstream, and immediately proceed to the next package.
+  - `rbops` synthesizes and lands the compiler phase; once resolved on `main`, a dispatch unblocks and resumes the package.
+- **Pre-126 Staging vs. Post-126 Dispatch Playbook**:
+  - Organizations, repository shells, CI workflow files, and organization-level secrets (`OPENCODE_KEY_1..5`) are staged and verified in advance via dry-run smoke tests.
+  - Production phase workers remain locked (`pending == 0`) until Phase 126 lands on `main` to ensure code is synthesized against a frozen, verified language core.
 
 
 ## Resources
