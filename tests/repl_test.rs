@@ -2364,6 +2364,46 @@ fn edge_pipe_with_no_argument_is_a_usage_error_not_an_empty_command() {
         .assert_stdout_contains("Usage: :pipe <command>");
 }
 
+/// The help text must scope `:pipe` to read-only inspection. A session that
+/// checked a file or ran a build with it is not a shell, and the command that
+/// is a shell (`!<command>`) is named separately in the same help.
+#[test]
+fn help_scopes_pipe_to_read_only_inspection() {
+    let s = session(":help\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("read-only")
+        .assert_stdout_contains(":pipe <command>");
+}
+
+/// A command that reads its standard input gets the session's last result on
+/// it, through the real `:pipe` dispatch rather than the helper alone. The
+/// transform makes the assertion depend on the child receiving the bytes: the
+/// bare `payload` line prints the lowercase value, so only a pipe that delivered
+/// stdin can produce the uppercase result.
+#[cfg(unix)]
+#[test]
+fn edge_pipe_to_a_command_that_reads_stdin_returns_what_it_wrote() {
+    let s = session("set payload to \"phase120-stdin\"\npayload\n:pipe tr a-z A-Z\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("PHASE120-STDIN")
+        .assert_stdout_contains("exit code: 0");
+}
+
+/// A command that reads stdin still needs something to read: with no last
+/// result `:pipe cat` is a named error, and the session keeps the lines after
+/// it rather than starting a process with an empty payload.
+#[cfg(unix)]
+#[test]
+fn edge_pipe_to_a_stdin_command_without_a_last_result_names_it() {
+    let s = session(":pipe cat\nset after to 1\nafter\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("last result")
+        .assert_stdout_contains("= 1");
+}
+
 /// `.pipe` sends `_` to a command's stdin, and `.cd`/`.pwd`/`.ls` move and show
 /// one session directory that `:load` also resolves against.
 ///

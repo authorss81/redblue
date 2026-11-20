@@ -1572,7 +1572,7 @@ impl Repl {
     /// redefinition of the session's own alias is allowed, because that is how a
     /// shortcut is corrected.
     fn define_alias(&mut self, argument: &str) -> Result<(), String> {
-        self.define_shortcut(".alias", "alias", argument)
+        self.define_shortcut(".alias", "alias", "aliases", argument)
     }
 
     /// The shared body of `:alias` and `:bind`: one name, one command text, and
@@ -1582,7 +1582,13 @@ impl Repl {
     /// not answered with a sentence about `.alias`. Both commands write the same
     /// table because both are a name for a command; only `:bind` checks the
     /// target exists before the name is stored.
-    fn define_shortcut(&mut self, command: &str, noun: &str, argument: &str) -> Result<(), String> {
+    fn define_shortcut(
+        &mut self,
+        command: &str,
+        noun: &str,
+        plural: &str,
+        argument: &str,
+    ) -> Result<(), String> {
         let argument = argument.trim();
         let (name, value) = match argument.split_once(char::is_whitespace) {
             Some((name, value)) => (name, value.trim()),
@@ -1606,7 +1612,7 @@ impl Repl {
                  Usage: {command} <name> <command>"
             ));
         }
-        self.store_shortcut(command, noun, name, value, value)
+        self.store_shortcut(command, noun, plural, name, value, value)
     }
 
     /// Stores a shortcut once its name and target are known.
@@ -1620,6 +1626,7 @@ impl Repl {
         &mut self,
         command: &str,
         noun: &str,
+        plural: &str,
         name: &str,
         cycle_value: &str,
         stored_value: &str,
@@ -1631,7 +1638,7 @@ impl Repl {
         // different name fixes it, which it does not.
         if self.alias_cycle(name, cycle_value) {
             return Err(format!(
-                "Error: {command} {name} {cycle_value} would create a cycle of {noun}s; \
+                "Error: {command} {name} {cycle_value} would create a cycle of {plural}; \
                  no command is reached."
             ));
         }
@@ -1640,14 +1647,14 @@ impl Repl {
             .any(|builtin| builtin.eq_ignore_ascii_case(name))
         {
             return Err(format!(
-                "Error: '{name}' is already a built-in command; a {noun} may not \
+                "Error: '{name}' is already a built-in command; {plural} may not \
                  shadow it. Pick another name."
             ));
         }
         if !self.aliases.contains_key(name) && self.aliases.len() >= MAX_ALIASES {
             return Err(format!(
                 "Error: this session already holds the maximum of {MAX_ALIASES} \
-                 {noun}s; no new {noun} can be added."
+                 {plural}; no new {noun} can be added."
             ));
         }
         self.aliases
@@ -1656,7 +1663,7 @@ impl Repl {
     }
 
     /// Defines a key from `<key> <command>`, refusing a target that is not a
-    /// command and a key that names itself.
+    /// command and a key that would rebind itself.
     ///
     /// The target check happens here, before the key is stored, so a typo is
     /// reported on the line that made it rather than the next time the key is
@@ -1692,7 +1699,7 @@ impl Repl {
             return Err(format!("Error: a key cannot be bound to itself: '{key}'."));
         }
         let resolved = self.validate_binding_target(key, value)?;
-        self.store_shortcut(":bind", "binding", key, value, &resolved)
+        self.store_shortcut(":bind", "binding", "bindings", key, value, &resolved)
     }
 
     /// Refuses a `:bind` target that does not name a command, and returns the
@@ -1702,7 +1709,9 @@ impl Repl {
     /// command table is asked. `Unknown` and `NotACommand` are the two ways a
     /// target can fail to be a command. A command missing its argument is still
     /// a command — the key runs it and gets the same usage line any typing of it
-    /// would.
+    /// would. A target that is itself `:bind` or `:alias` naming this key is
+    /// refused too: such a key would redefine itself when pressed instead of
+    /// running a command.
     fn validate_binding_target(&self, key: &str, value: &str) -> Result<String, String> {
         let (word, rest) = Self::alias_words(value);
         let resolved = if self.aliases.contains_key(word) {
@@ -1724,6 +1733,14 @@ impl Repl {
             ReplCommand::NotACommand => Err(format!(
                 "Error: :bind cannot bind '{key}' to '{value}'; it is not a command."
             )),
+            ReplCommand::Bind(Some(argument)) | ReplCommand::Alias(Some(argument)) => {
+                if Self::alias_words(&argument).0 == key {
+                    return Err(format!(
+                        "Error: a key cannot be bound to a command that rebinds it: '{key}'."
+                    ));
+                }
+                Ok(resolved)
+            }
             _ => Ok(resolved),
         }
     }
@@ -7241,8 +7258,8 @@ mod tests {
             .define_alias("one-too-many :vars")
             .expect_err("a new alias past the cap is refused");
         assert!(
-            refused.contains("maximum"),
-            "the refusal names the cap: {refused}"
+            refused.contains(&format!("maximum of {} aliases", super::MAX_ALIASES)),
+            "the refusal names the cap with the plural of the command's noun: {refused}"
         );
         assert_eq!(
             repl.aliases.len(),
@@ -7252,6 +7269,23 @@ mod tests {
         assert!(
             repl.define_alias("alias0 :help").is_ok(),
             "redefining an alias already in the table does not need a new slot"
+        );
+    }
+
+    /// An alias cycle is named with the alias wording, not the singular noun
+    /// with an `s` glued on.
+    #[test]
+    fn edge_alias_cycle_refusal_uses_the_alias_wording() {
+        let mut repl = Repl::new();
+        repl.define_alias("a b")
+            .expect("a forward reference is allowed");
+        let refused = repl
+            .define_alias("b a")
+            .expect_err("the second half of a cycle is refused");
+
+        assert!(
+            refused.contains("cycle of aliases"),
+            "the refusal names an alias cycle in the plural: {refused}"
         );
     }
 
@@ -7308,6 +7342,28 @@ mod tests {
             !repl.aliases.contains_key("loop"),
             "and the self-binding is not stored"
         );
+    }
+
+    /// A key whose target is a `:bind` or `:alias` that names the same key would
+    /// rebind itself when pressed, so it is refused even though the target is a
+    /// real command.
+    #[test]
+    fn edge_bind_refuses_a_key_bound_to_a_command_that_rebinds_it() {
+        for target in ["x :bind x :vars", "x :alias x :vars"] {
+            let mut repl = Repl::new();
+            let refusal = repl
+                .define_binding(target)
+                .expect_err("a key cannot be bound to a command that rebinds it");
+
+            assert!(
+                refusal.contains("rebinds it"),
+                "the refusal says the target would rebind the key: {refusal}"
+            );
+            assert!(
+                !repl.aliases.contains_key("x"),
+                "and the indirect self-binding is not stored"
+            );
+        }
     }
 
     /// Rebinding a key replaces its target; the table holds one entry, not two.

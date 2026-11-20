@@ -22,7 +22,8 @@ pub enum ReplCommand {
     /// is the parser for it, and `!echo a | wc -l` is one command with its own
     /// pipeline in it.
     Shell(String),
-    /// Sends the session's last result to a shell command's standard input.
+    /// Sends the session's last result to a shell command's standard input for
+    /// read-only inspection; `!<command>` is the general host-shell escape.
     Pipe(String),
     /// Moves the session's working directory, which every relative file
     /// argument is resolved against.
@@ -416,7 +417,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["pipe"],
-        description: "Send the last result through a shell command for inspection, not as a shell replacement (host only)",
+        description: "Send the last result through a shell command for read-only inspection, not as a shell replacement (host only)",
         usage: Some("<command>"),
         optional_argument: false,
         verbatim_argument: false,

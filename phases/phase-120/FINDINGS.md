@@ -21,6 +21,9 @@ way for `:bind`/`:pipe` to reach one.
 
 `:pipe` runs the command the user typed with the session's last result on its
 standard input and prints both output streams plus the exit status. The help
-text says it is for inspection and is not a shell replacement; `!<command>` is
-the general host-shell escape that already exists. `:pipe` is intentionally not
-extended into a shell replacement by this phase.
+text says it is for **read-only inspection** and is not a shell replacement;
+`!<command>` is the general host-shell escape that already exists. `:pipe` is
+intentionally not extended into a shell replacement by this phase. The read-only
+scope is a documented usage contract, not a sandbox: arbitrary host commands are
+still run as typed, and building a sandbox around the host shell is a separate
+concern that this phase does not attempt.
