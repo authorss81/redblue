@@ -2251,6 +2251,98 @@ fn shell_escape_shows_command_output_and_exit_code() {
         .assert_stdout_lacks("AnalyzerError");
 }
 
+/// `:bind` runs a key as its command, and a bare `:bind` lists every binding in
+/// name order rather than in whatever order the table happened to hold them.
+#[test]
+fn bind_runs_a_key_and_lists_bindings_in_order() {
+    let s = session(
+        ":bind zebra :vars\n:bind alpha :functions\n:bind\n:bind show :vars\nset x to 41\nshow\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Bindings:")
+        .assert_stdout_contains(":alpha = :functions")
+        .assert_stdout_contains(":zebra = :vars")
+        .assert_stdout_contains("Variables:")
+        .assert_stdout_contains("x");
+
+    let alpha = s
+        .stdout
+        .find(":alpha = :functions")
+        .expect("the first binding is listed");
+    let zebra = s
+        .stdout
+        .find(":zebra = :vars")
+        .expect("the second binding is listed");
+    assert!(
+        alpha < zebra,
+        "the listing is in name order, not insertion order:\n{}",
+        s.stdout
+    );
+}
+
+/// A key reaches its command through the same dispatch a typed command does,
+/// so the command's own colour path is the one its output is painted with.
+#[test]
+fn edge_a_bound_key_paints_its_command_output_like_any_other_command() {
+    let s = session_with_env(
+        ":bind hh :help\nhh\n:quit\n",
+        &[("REDBLUE_COLOR", "always")],
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Redblue REPL Commands:");
+    assert!(
+        s.stdout.contains('\u{1b}'),
+        "the bound key's command output is painted, not printed raw:\n{:?}",
+        s.stdout
+    );
+}
+
+/// A key is checked when it is bound: a mistyped target is named on that line,
+/// and the session still runs the lines after it.
+#[test]
+fn edge_bind_refuses_an_unknown_command_before_the_key_is_used() {
+    let s = session(":bind go :notacommand\nset after to 1\nafter\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("cannot bind 'go' to unknown command 'notacommand'")
+        .assert_stdout_contains("= 1");
+}
+
+/// `:pipe <command>` sends the last result to the command, shows both output
+/// streams, and reports the command's own exit — including a missing command,
+/// which is the shell's 127 rather than an empty success.
+#[cfg(unix)]
+#[test]
+fn edge_pipe_runs_a_command_and_reports_output_and_exit() {
+    let s = session(
+        "set payload to \"phase120\"\npayload\n:pipe sort\n:pipe sort >/dev/null; exit 3\n:pipe redblue-no-such-command-phase-120\n:quit\n",
+    );
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("phase120")
+        .assert_stdout_contains("exit code: 0")
+        .assert_stdout_contains("exit code: 3")
+        .assert_stdout_contains("exit code: 127");
+    assert!(
+        s.stderr.contains("not found"),
+        "a missing command's message is reported on stderr: {:?}",
+        s.stderr
+    );
+}
+
+/// A bare `:pipe` is a usage error naming the command it needs, not a process
+/// started with an empty command line.
+#[cfg(unix)]
+#[test]
+fn edge_pipe_with_no_argument_is_a_usage_error_not_an_empty_command() {
+    let s = session(":pipe\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("Usage: :pipe <command>");
+}
+
 /// `.pipe` sends `_` to a command's stdin, and `.cd`/`.pwd`/`.ls` move and show
 /// one session directory that `:load` also resolves against.
 ///
