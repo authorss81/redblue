@@ -264,6 +264,10 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
   - If a package or application requires syntax, built-ins, or compiler features not yet in Redblue, workers must NEVER hack the compiler in the package repo.
   - Workers log the requirement in `docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md` with status `[BLOCKED_BY_CORE]`, mark the package phase as deferred upstream, and immediately proceed to the next package.
   - `rbops` synthesizes and lands the compiler phase; once resolved on `main`, a dispatch unblocks and resumes the package.
+- **Automated Fault Attribution & Deep Fleet Audit**:
+  - When sweep tests fail, an automated evaluator bisects against prior compiler releases ($C_{prior}$ vs $C_{new}$) and classifies the failure.
+  - If intentional compiler safety/hardening broke unsound package code, it attributes the failure as `[PACKAGE_OBSOLESCENCE]`, dispatches an autonomous `package-fix` (or `app-fix`, `kernel-fix`) worker, and triggers a deep fleet audit scanning the entire registry for identical antipatterns to queue proactive batch migrations.
+  - If valid syntax or execution regressed unexpectedly, it attributes the failure as `[COMPILER_REGRESSION]` and logs an isolated reproduction to `docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md` for `rbops`.
 - **Pre-126 Staging vs. Post-126 Dispatch Playbook**:
   - Organizations, repository shells, CI workflow files, and organization-level secrets (`OPENCODE_KEY_1..5`) are staged and verified in advance via dry-run smoke tests.
   - Production phase workers remain locked (`pending == 0`) until Phase 126 lands on `main` to ensure code is synthesized against a frozen, verified language core.

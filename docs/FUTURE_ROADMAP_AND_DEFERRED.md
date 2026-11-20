@@ -1824,6 +1824,75 @@ To avoid manually typing 200 keys into GitHub web settings:
 - **Configuration (`.coderabbit.yaml`)**:
   CodeRabbit acts as an automated PR reviewer on every worker branch, performing AST verification, checking that no shims are introduced, ensuring test adequacy, and flagging security vulnerabilities before commits land on `main`.
 
+---
+
+## Section 32: Automated Fault Attribution Engine (Bisection, Triage & Deep Fleet Auditing)
+
+### 32.1 The Upstream vs. Downstream Blame Dilemma
+
+When the Redblue compiler evolves—particularly when introducing stricter memory safety, tightening type checks, or closing undefined-behavior loopholes—downstream packages or applications that previously passed might begin to fail.
+
+This creates a critical classification challenge:
+1. **Did the compiler break?** (An unintended compiler regression that must be fixed in `rbops`).
+2. **Or did the compiler correctly tighten safety?** (An intentional language improvement where the package relied on unsound code, which must be fixed in the package repository).
+
+Blindly filing all test failures as compiler bugs risks reverting crucial memory safety and performance improvements. Blindly assuming packages are at fault risks ignoring compiler syntax regressions.
+
+---
+
+### 32.2 The 3-Stage Automated Fault Attribution Pipeline
+
+To resolve this, the Nightly Sweep triggers an automated **Fault Attribution & Triage Engine** (`triage_evaluator.yml`) whenever test failures occur:
+
+```mermaid
+flowchart TD
+    A["Nightly Sweep Detects Test Failure"] --> B["Dual-Version Compiler Bisection (C_prior vs C_new)"]
+    B --> C{"Did it pass on C_prior?"}
+    C -- "No: Already broken" --> D["[DOWNSTREAM_BUG]: Isolated Package Defect"]
+    C -- "Yes: Regressed on C_new" --> E["Semantic Intent & Spec Classification"]
+    E --> F{"Intentional Safety Hardening / Spec Change?"}
+    F -- "YES: Package relied on loose/unsound behavior" --> G["[PACKAGE_OBSOLESCENCE]: Dispatch 'package-fix' Worker"]
+    F -- "NO: Valid grammar broke / VM panic" --> H["[COMPILER_REGRESSION]: Log to rbops Master Ledger"]
+    G --> I["Deep Fleet Audit: Scan 100k Packages for Identical Antipattern"]
+    I --> J["Batch Queue Automated Migrations"]
+```
+
+#### Stage 1: Automated Compiler Bisection ($C_{prior}$ vs. $C_{new}$)
+The evaluator automatically re-runs the failed test against:
+1. **$C_{prior}$**: The previous verified release tag (`v0.1.0` or parent commit).
+2. **$C_{new}$**: The candidate compiler commit on `main`.
+* If the package fails on *both* versions, the defect is an internal package bug unrelated to compiler changes.
+
+#### Stage 2: Semantic Intent & Error Classification
+If the package passes on $C_{prior}$ but fails on $C_{new}$, the evaluator parses the error output and compiler changelog:
+* **Class A: Intentional Language Hardening & Memory Safety**
+  * *Examples*: A new borrow/lifetime check rejected an aliased mutable reference; bounds checking caught an out-of-bounds slice; a deprecated syntax keyword was removed per spec.
+  * **Attribution**: `[PACKAGE_OBSOLESCENCE]`.
+  * **Action**: Dispatches an autonomous `package-fix` (or `app-fix`, `kernel-fix`) worker in the downstream repo to modernize the code to conform to the new standard.
+* **Class B: Unintended Compiler Regression**
+  * *Examples*: Valid specification grammar failed to parse; correct arithmetic produced invalid values; VM panicked or aborted.
+  * **Attribution**: `[COMPILER_REGRESSION]`.
+  * **Action**: Appends the issue to [`docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md`](OUT_OF_SCOPE_FINDINGS_LEDGER.md) with a minimal reproduction snippet for `rbops` core developers to fix.
+* **Class C: Transient Flake**
+  * Re-runs the test in an isolated runner to verify reproducibility before taking action.
+
+#### Stage 3: Deep Fleet Audit (Proactive Antipattern Scanning)
+When a failure is attributed to **Class A (Package Obsolescence)**:
+1. The evaluator extracts the exact AST pattern or deprecated function call that failed.
+2. A **Deep Fleet Scanner** scans the entire package catalog (100,000+ packages) using regex and AST grep to identify every other package using that same deprecated or unsound pattern.
+3. It automatically queues those packages for automated batch modernization *before* they fail future sweep cycles!
+
+---
+
+### 32.3 Cross-Ecosystem Standardization (Packages, Apps, OS, IDE)
+
+This automated triage protocol is unified across all four ecosystem tracks:
+* **Packages (`rb-pkg-ops`)**: `package-fix` worker updates package modules, locks, and manifests.
+* **Applications (`rb-apps-ops`)**: `app-fix` worker modernizes TUI, WebAssembly, or desktop code.
+* **Operating System (`rbos-ops`)**: `kernel-fix` worker updates memory bump arenas or VirtIO drivers to match the latest kernel compiler invariants.
+* **Tooling & IDE (`rb-ide-ops`)**: `lsp-fix` worker updates syntax highlighting grammars and LSP diagnostics.
+
+
 
 
 
