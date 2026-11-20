@@ -248,6 +248,17 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
 - **5-Way Parallel Concurrency**: Autonomous workflows operate 5 parallel workers simultaneously using partitioned secrets (`OPENCODE_KEY_1` through `OPENCODE_KEY_5`) with decentralized atomic Git lease locking.
 - **Perpetual Self-Dispatching Auditors**: When pending queues drain (`pending == 0`), an autonomous audit workflow scans gaps against industry benchmarks (PyPI, crates.io, POSIX, LSP 3.17) and automatically synthesizes the next batch of phases.
 - **Dynamic Write Mandate**: Agents must flush tests, scaffoldings, or implementations to disk at least once every 15–30 minutes to eliminate timeout progress loss.
+- **Delta Testing Protocol (Single-Target Gates)**:
+  - In `rb-pkg-ops`, phase and PR gates test *only* the modified package (`packages/<pkg>/tests/`) in 1–3 seconds, eliminating wasteful $O(N)$ regression runs.
+  - In `rb-apps-ops`, gates test *only* the modified application (`apps/<app>/tests/`).
+  - In `rbops` (compiler core), full test suite execution (3,243+ tests) is mandatory because core compiler changes affect the entire grammar and VM.
+  - In `rbos`, bottom-up regression tests validate the modified kernel layer and its upper dependencies.
+- **Multi-Organization Parallelism Scaling**: Standard GitHub accounts enforce a verified limit of **20 concurrent runner jobs** across the entire account. To scale beyond 20 concurrent workers without queuing, package category tracks are sharded across distinct GitHub Organizations (e.g. 5 orgs × 20 = 100 concurrent runners) backed by isolated OpenCode API key rings.
+- **Resumable 6-Hour Nightly Regression Sweeps**:
+  - A daily sweep tests all packages and applications against the latest `redblue` compiler release.
+  - To respect GitHub's 6-hour job ceiling, execution checkpoints to `state/sweep_status.json` at the 5h 30m mark.
+  - If tests remain, the workflow self-dispatches a fresh runner via `repository_dispatch` to resume from the cursor, automatically isolating compiler degradation from individual package bugs.
+
 
 ## Resources
 
