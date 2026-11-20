@@ -1709,6 +1709,14 @@ When the nightly sweep finds a failure, it automatically distinguishes between:
 - **Package Bug**: Failure reproduces on previous compiler versions.
 - **Compiler Degradation / Breaking Change**: Package passed on `v0.1.0` but fails on current `main`. The sweep automatically files a GitHub Issue on `authorss81/redblue` tagged `[COMPILER_REGRESSION]` with an exact reproduction snippet.
 
+#### 3. Scaling Milestones (100k -> 1–10M) & Adaptive Sweep Frequency
+1. **Initial Milestone: 100,000 Packages**:
+   - The 200+ OpenCode API key pool distributed across the 10 domain organizations targets an initial baseline catalog of **100,000 verified packages** (~10,000 packages per category).
+   - Elastic expansion to **1–10 million packages** is supported if ecosystem demand warrants higher domain specialization.
+2. **Adaptive Sweep Cadence**:
+   - At $\le 10,000$ packages, sweeps execute daily (every 24 hours).
+   - Once the registry exceeds 50,000+ packages, sweeping every package daily could require several cascading 6-hour runs. The workflow automatically scales its schedule to **bi-daily (every 48 hours)** or **weekly**, running in parallel shards across each organization track to prevent runner exhaustion while guaranteeing complete regression testing.
+
 ---
 
 ## Section 31: Cross-Repo Feedback Protocol, Multi-Organization Provisioning Guide & Pre-126 Staging Playbook

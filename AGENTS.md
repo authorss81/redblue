@@ -255,10 +255,11 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
   - In `rbos`, bottom-up regression tests validate the modified kernel layer and its upper dependencies.
 - **Multi-Organization Parallelism Scaling**: Standard GitHub accounts enforce a verified limit of **20 concurrent runner jobs** across the entire account. To scale beyond 20 concurrent workers without queuing, package category tracks are sharded across 10 distinct GitHub Organizations (e.g. 10 orgs × 20 = 200 concurrent runners) backed by 200+ isolated OpenCode API keys via automated org-level secret provisioning.
 - **CodeRabbit AI Review Integration**: All ecosystem repositories integrate the CodeRabbit GitHub App (`.coderabbit.yaml`) to perform automated AI-assisted code reviews on pull requests, enforcing Redblue idioms, zero-shim policy, test adequacy, and gate criteria before merging.
-- **Resumable 6-Hour Nightly Regression Sweeps**:
-  - A daily sweep tests all packages and applications against the latest `redblue` compiler release.
+- **Resumable 6-Hour Nightly Regression Sweeps & Adaptive Cadence**:
+  - A sweep tests all packages and applications against the latest `redblue` compiler release.
   - To respect GitHub's 6-hour job ceiling, execution checkpoints to `state/sweep_status.json` at the 5h 30m mark.
   - If tests remain, the workflow self-dispatches a fresh runner via `repository_dispatch` to resume from the cursor, automatically isolating compiler degradation from individual package bugs.
+  - **Adaptive Cadence & Scaling**: Scaled for an initial baseline of **100,000 packages** (with elastic expansion to 1–10M). Sweep cadence runs daily for $\le 10,000$ packages, and adaptively shifts to bi-daily (every 48h) or weekly per category once registry size exceeds 50,000+ packages to prevent CI exhaustion.
 - **Cross-Repo Out-of-Scope Feedback Protocol (`[BLOCKED_BY_CORE]`)**:
   - If a package or application requires syntax, built-ins, or compiler features not yet in Redblue, workers must NEVER hack the compiler in the package repo.
   - Workers log the requirement in `docs/OUT_OF_SCOPE_FINDINGS_LEDGER.md` with status `[BLOCKED_BY_CORE]`, mark the package phase as deferred upstream, and immediately proceed to the next package.
