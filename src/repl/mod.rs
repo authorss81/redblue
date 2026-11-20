@@ -71,6 +71,15 @@ const MAX_CHECKPOINTS: usize = 64;
 /// works because that adds no new label.
 const MAX_SESSION_LABELS: usize = 256;
 
+/// The most bytes one session label may hold.
+///
+/// Capping the number of labels is not enough on its own: a label is kept for
+/// the life of the process, so a pipe of `:session` lines can fill the list with
+/// a few very long names and grow memory without bound long before it reaches
+/// [`MAX_SESSION_LABELS`]. The byte cap bounds the whole list, and a label is a
+/// name for a person to read, so a kilobyte is far more than one needs.
+const MAX_SESSION_LABEL_BYTES: usize = 1024;
+
 /// Whether `c` is a Unicode bidirectional formatting control.
 ///
 /// These are format characters (`Cf`), not control characters, so
@@ -2550,6 +2559,13 @@ impl Repl {
             return Err(
                 "Error: :session names must contain at least one visible character.".to_string(),
             );
+        }
+        if name.len() > MAX_SESSION_LABEL_BYTES {
+            return Err(format!(
+                "Error: :session names may be at most {MAX_SESSION_LABEL_BYTES} bytes, and \
+                 this one is {}.",
+                name.len()
+            ));
         }
         if !self.session_labels.iter().any(|label| label == name) {
             if self.session_labels.len() >= MAX_SESSION_LABELS {
@@ -15176,6 +15192,35 @@ mod tests {
         }
 
         #[test]
+        fn edge_an_overlong_session_label_is_refused() {
+            let mut repl = Repl::new();
+
+            let at_limit = "x".repeat(crate::repl::MAX_SESSION_LABEL_BYTES);
+            assert!(
+                repl.label_session(&at_limit).is_ok(),
+                "a label exactly at the byte cap is accepted"
+            );
+
+            let over = "é".repeat(crate::repl::MAX_SESSION_LABEL_BYTES / 2 + 1);
+            assert!(
+                over.chars().count() < crate::repl::MAX_SESSION_LABEL_BYTES,
+                "premise: the label is short in characters and long in bytes"
+            );
+            let error = repl
+                .label_session(&over)
+                .expect_err("a label past the byte cap is refused");
+            assert!(
+                error.contains(&crate::repl::MAX_SESSION_LABEL_BYTES.to_string())
+                    && error.contains("bytes"),
+                "the error names the byte limit it hit: {error}"
+            );
+            assert!(
+                !repl.checkpoint_listing().contains(&over),
+                "the refused label never reached the listing"
+            );
+        }
+
+        #[test]
         fn edge_a_session_label_with_a_newline_is_refused() {
             let mut repl = Repl::new();
 
@@ -15395,6 +15440,86 @@ mod tests {
                     .to_string(),
                 "30",
                 "$_ is resolved at call time, not frozen when the function was defined"
+            );
+        }
+
+        #[test]
+        fn edge_a_zero_last_value_is_a_value_not_a_missing_one() {
+            let mut repl = Repl::new();
+            assert_eq!(
+                repl.execute_code("0")
+                    .expect("zero is a successful line")
+                    .to_string(),
+                "0",
+                "premise: the line produced zero"
+            );
+
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ names the zero")
+                    .to_string(),
+                "0",
+                "$_ is zero, not the empty error a missing last value raises"
+            );
+        }
+
+        #[test]
+        fn edge_last_value_survives_a_malformed_line() {
+            let mut repl = Repl::new();
+            repl.execute_code("6 * 7")
+                .expect("the value-producing line runs");
+
+            let error = repl
+                .execute_code("if yes\n    say 1")
+                .expect_err("an unclosed block is refused");
+            assert!(
+                !error.is_empty(),
+                "the malformed line produced a named error: {error}"
+            );
+
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ survives a line that never ran")
+                    .to_string(),
+                "42",
+                "$_ is the last successful value, not the line that failed to parse"
+            );
+        }
+
+        #[test]
+        fn edge_a_session_label_with_a_tab_is_refused() {
+            let mut repl = Repl::new();
+            let before = repl.checkpoint_listing();
+
+            assert!(
+                repl.handle_command(":session monday\tmorning"),
+                "a tabbed label is still a command"
+            );
+
+            assert!(
+                repl.session_labels.is_empty(),
+                "a tab would break the listing row, so the command refuses it"
+            );
+            assert_eq!(
+                repl.checkpoint_listing(),
+                before,
+                "the refused label never reached the listing"
+            );
+        }
+
+        #[test]
+        fn edge_a_blank_line_does_not_clear_the_last_value() {
+            let mut repl = Repl::new();
+            repl.execute_code("8 + 9")
+                .expect("the value-producing line runs");
+            repl.execute_code("").expect("a blank line is not an error");
+
+            assert_eq!(
+                repl.execute_code("$_")
+                    .expect("$_ still names the last success")
+                    .to_string(),
+                "17",
+                "a blank line leaves the last value alone"
             );
         }
     }
