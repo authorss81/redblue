@@ -416,7 +416,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["pipe"],
-        description: "Send the last result through a shell command for inspection (host only)",
+        description: "Send the last result through a shell command for inspection, not as a shell replacement (host only)",
         usage: Some("<command>"),
         optional_argument: false,
         verbatim_argument: false,
@@ -900,7 +900,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["alias"],
-        description: "Define a shortcut (:name takes arguments; bare name stands alone) or list",
+        description: "Define a shortcut (:name takes arguments; bare name stands alone), or list the shortcuts",
         usage: Some("<name> <command>"),
         optional_argument: true,
         verbatim_argument: false,
@@ -908,7 +908,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["bind"],
-        description: "Bind a key to an existing command, or list the bindings",
+        description: "Bind a key to an existing command, or list the shortcuts",
         usage: Some("<key> <command>"),
         optional_argument: true,
         verbatim_argument: false,

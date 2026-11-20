@@ -2044,7 +2044,7 @@ fn edge_alias_with_no_arguments_lists_the_empty_table() {
     let empty = session(".alias\n:quit\n");
     empty
         .assert_exited_ok()
-        .assert_stdout_contains("No aliases defined.");
+        .assert_stdout_contains("No shortcuts defined.");
 
     let filled = session(".alias ll :vars\n.alias\n:quit\n");
     filled
@@ -2260,7 +2260,7 @@ fn bind_runs_a_key_and_lists_bindings_in_order() {
     );
 
     s.assert_exited_ok()
-        .assert_stdout_contains("Bindings:")
+        .assert_stdout_contains("Shortcuts:")
         .assert_stdout_contains(":alpha = :functions")
         .assert_stdout_contains(":zebra = :vars")
         .assert_stdout_contains("Variables:")
@@ -2311,23 +2311,44 @@ fn edge_bind_refuses_an_unknown_command_before_the_key_is_used() {
 }
 
 /// `:pipe <command>` sends the last result to the command, shows both output
-/// streams, and reports the command's own exit — including a missing command,
-/// which is the shell's 127 rather than an empty success.
+/// streams, and reports the command's own exit.
 #[cfg(unix)]
 #[test]
 fn edge_pipe_runs_a_command_and_reports_output_and_exit() {
     let s = session(
-        "set payload to \"phase120\"\npayload\n:pipe sort\n:pipe sort >/dev/null; exit 3\n:pipe redblue-no-such-command-phase-120\n:quit\n",
+        "set payload to \"phase120\"\npayload\n:pipe sort\n:pipe sort >/dev/null; exit 3\n:quit\n",
     );
 
     s.assert_exited_ok()
         .assert_stdout_contains("phase120")
         .assert_stdout_contains("exit code: 0")
-        .assert_stdout_contains("exit code: 3")
-        .assert_stdout_contains("exit code: 127");
+        .assert_stdout_contains("exit code: 3");
+}
+
+/// A command that does not exist is the shell's own failure: a non-zero status
+/// and a message rather than an empty success. The exact status and wording
+/// belong to the host shell, so this test asserts only the shape every shell
+/// gives a missing command.
+#[cfg(unix)]
+#[test]
+fn edge_pipe_to_a_missing_command_reports_its_nonzero_status_and_message() {
+    let s = session(
+        "set payload to \"phase120\"\npayload\n:pipe redblue-no-such-command-phase-120\n:quit\n",
+    );
+
+    s.assert_exited_ok();
+    let status = s
+        .stdout
+        .lines()
+        .find_map(|line| {
+            line.split_once("exit code: ")
+                .map(|(_, value)| value.trim())
+        })
+        .expect("the pipe prints the command's exit code");
+    assert_ne!(status, "0", "a missing command is a non-zero status");
     assert!(
-        s.stderr.contains("not found"),
-        "a missing command's message is reported on stderr: {:?}",
+        !s.stderr.trim().is_empty(),
+        "the shell's message is reported on stderr: {:?}",
         s.stderr
     );
 }
