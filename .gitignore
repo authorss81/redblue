@@ -40,3 +40,5 @@ secrets.txt
 BENCH_TIMINGS.md
 # Local build redirect (my machine puts target/ on F); not project config.
 .cargo/
+keys.txt
+api_keys.txt
