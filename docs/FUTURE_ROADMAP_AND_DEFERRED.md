@@ -1644,6 +1644,72 @@ done
 2. **Decentralized Lease Locking**: Workers claim phases via git branch leases (`leases/worker-<id>`) before dispatching, preventing redundant API calls and duplicate work across workers.
 3. **Dynamic Write Mandate**: In all prompts and audit phases, workers are instructed to flush progress to disk at least once every 15–30 minutes, ensuring that even if a network timeout occurs, partial work is preserved.
 
+---
+
+## Section 30: Delta CI Testing Architecture, Multi-Org Parallelism & Resumable 6-Hour Nightly Regression Sweeps
+
+### 30.1 Verified GitHub Actions Concurrency Limits & Account Scaling
+
+The standard GitHub Actions concurrency limits are verified as follows:
+- **Free Plan**: **20 concurrent jobs** max across the entire account (with a cap of 5 macOS jobs).
+- **Pro Plan**: **40 concurrent jobs** max.
+- **Team Plan**: **60 concurrent jobs** max.
+- **Enterprise Plan**: **500 concurrent jobs** max.
+- **Maximum Execution Time**: **6 hours (360 minutes)** per individual job.
+
+#### Crucial Concurrency Constraint:
+The **20-runner limit is account-wide**, not per repository. Splitting packages into 4–5 repositories under the **same user account** does *not* bypass this 20-runner limit. 
+
+#### How to Achieve Maximum Parallelism (Multi-Org Federation):
+To unlock 80–100+ concurrent runners on the free tier:
+1. **Multi-Organization Partitioning**: Host package category tracks under distinct GitHub Organizations (e.g., `rb-pkg-sys`, `rb-pkg-web`, `rb-pkg-data`, `rb-apps-org`). Each GitHub Organization gets its own independent **20 concurrent runner allocation** (5 orgs × 20 = 100 concurrent workers).
+2. **Self-Hosted Runner Clusters**: In ops orchestrators, registering lightweight self-hosted runner daemons (or Docker container runners) on local workstations or VPS nodes completely removes the 20-runner limit with unlimited parallel execution.
+
+---
+
+### 30.2 Scope-Limited "Delta Testing" (Single-Target Gate) vs. Whole-Ecosystem Testing
+
+Testing every single package or application on every individual PR/commit is an anti-pattern that wastes CI minutes and creates massive test queues as the ecosystem grows:
+
+| Ecosystem Track | Change Scope | PR / Phase Gate Test Scope | Rationale |
+| :--- | :--- | :--- | :--- |
+| **`authorss81/rb-pkg-ops`** | Change to `packages/<pkg>/` | **Only `packages/<pkg>/tests/`** (1–3 seconds) | Packages are completely isolated and do not import peer packages directly. Testing other packages is redundant. |
+| **`authorss81/rb-apps-ops`** | Change to `apps/<app>/` | **Only `apps/<app>/tests/`** (2–5 seconds) | Standalone application logic is sandboxed. Modifying `todo_cli` cannot break `sysmon`. |
+| **`authorss81/rbos-ops`** | Change to `kernel/mem/` | **Layer Under Test + Dependent Upper Layers** | Bottom-up kernel dependency: changing physical memory allocator requires testing paging, scheduler, and userland. |
+| **`authorss81/rbops`** | Change to `src/lexer.rs`, `src/parser.rs`, VM | **Full Core Test Suite (All 3,243+ tests)** | Changes to compiler internals affect all language syntax and semantics. Full regression test is mandatory to prevent spec drift. |
+
+---
+
+### 30.3 Resumable 6-Hour Nightly Regression Sweeps & Self-Dispatching Checkpoints
+
+While PR and phase gates only run **Delta Tests**, a dedicated **Nightly Ecosystem Sweep Workflow** runs once per day to verify ecosystem health, detect compiler degradation, and catch breaking changes:
+
+#### 1. The 6-Hour Job Limit & Graceful Checkpointing
+GitHub Actions kills any job that runs longer than 6 hours. When testing tens of thousands of packages or hundreds of applications against the latest `rb` compiler release:
+1. **Cursor & State Tracking**: The sweep tracks execution in `state/sweep_status.json`:
+   ```json
+   {
+     "target_compiler_sha": "77d6973",
+     "total_packages": 12500,
+     "cursor": "packages/matrix_math",
+     "completed": 8200,
+     "failed": ["packages/legacy_crypto"],
+     "started_at": "2026-11-20T00:00:00Z"
+   }
+   ```
+2. **Graceful Cutoff at 5 Hours 30 Minutes**: The sweep script checks the elapsed runtime on every package iteration. At the 5h 30m mark, it pauses execution before GitHub's 6-hour hard termination.
+3. **Commit & Self-Dispatch**: It commits `state/sweep_status.json` and immediately issues a GitHub API `repository_dispatch` or `workflow_dispatch` trigger:
+   ```bash
+   gh workflow run nightly-sweep.yml -f resume_from="packages/matrix_math"
+   ```
+4. **Resumed Execution**: The subsequent runner picks up at package 8,201 and continues without repeating previously passed packages until all tests finish.
+
+#### 2. Root Cause Degradation Analysis
+When the nightly sweep finds a failure, it automatically distinguishes between:
+- **Package Bug**: Failure reproduces on previous compiler versions.
+- **Compiler Degradation / Breaking Change**: Package passed on `v0.1.0` but fails on current `main`. The sweep automatically files a GitHub Issue on `authorss81/redblue` tagged `[COMPILER_REGRESSION]` with an exact reproduction snippet.
+
+
 
 
 
