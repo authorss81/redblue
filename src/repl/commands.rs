@@ -247,6 +247,15 @@ pub enum ReplCommand {
     /// `.alias` is a question ("what aliases are there?") rather than a command
     /// typed incompletely.
     Alias(Option<String>),
+    /// Binds a key to a command that already exists, or — with no argument —
+    /// lists the keys this session binds.
+    ///
+    /// A key is a shortcut word, stored beside `:alias`'s shortcuts because both
+    /// are a name for a command. The difference is when the target is checked:
+    /// `:alias` may point at a name defined later, while `:bind` refuses a target
+    /// that is not a command at the moment the key is bound, so a mistyped key
+    /// is named while the user is still looking at the line that made it.
+    Bind(Option<String>),
     /// Records, stops recording, lists, or replays a macro — the session's own
     /// named sequence of lines.
     ///
@@ -407,7 +416,7 @@ static COMMAND_TABLE: &[CommandSpec] = &[
     },
     CommandSpec {
         names: &["pipe"],
-        description: "Send the last result through a shell command (host only)",
+        description: "Send the last result through a shell command for inspection (host only)",
         usage: Some("<command>"),
         optional_argument: false,
         verbatim_argument: false,
@@ -898,6 +907,14 @@ static COMMAND_TABLE: &[CommandSpec] = &[
         build: |argument| ReplCommand::Alias(argument),
     },
     CommandSpec {
+        names: &["bind"],
+        description: "Bind a key to an existing command, or list the bindings",
+        usage: Some("<key> <command>"),
+        optional_argument: true,
+        verbatim_argument: false,
+        build: |argument| ReplCommand::Bind(argument),
+    },
+    CommandSpec {
         names: &["macro"],
         description: "Record, stop, list, or replay a named sequence of lines",
         usage: Some("start <name> | stop | list | run <name>"),
@@ -1201,6 +1218,7 @@ impl ReplCommand {
             ReplCommand::Theme(value) => Some(value.as_str()),
             ReplCommand::Vm(Some(value)) => Some(value.as_str()),
             ReplCommand::Alias(Some(value)) => Some(value.as_str()),
+            ReplCommand::Bind(Some(value)) => Some(value.as_str()),
             ReplCommand::Macro(Some(value)) => Some(value.as_str()),
             ReplCommand::Format(Some(value)) => Some(value.as_str()),
             _ => None,
@@ -1321,6 +1339,12 @@ mod tests {
             (".alias", "Alias", ""),
             (":alias ll :vars", "Alias", "ll :vars"),
             (".alias ll :vars", "Alias", "ll :vars"),
+            // `:bind` is the same `<key> <command>` remainder as `:alias`, and a
+            // bare one is the listing rather than a command missing its key.
+            (":bind", "Bind", ""),
+            (".bind", "Bind", ""),
+            (":bind show :vars", "Bind", "show :vars"),
+            (".bind show :vars", "Bind", "show :vars"),
             // `.macro` with no argument is the stop command while a recording is
             // in progress, so it is the other command whose argument may be
             // left out. Its sub-commands carry their own words and names.
@@ -1371,7 +1395,9 @@ mod tests {
                 ReplCommand::Format(Some(value)) => value.as_str(),
                 // The alias and macro remainders are carried whole, so a
                 // shortcut to `:load a b.rb` keeps the path with the space in it.
-                ReplCommand::Alias(Some(value)) | ReplCommand::Macro(Some(value)) => value.as_str(),
+                ReplCommand::Alias(Some(value))
+                | ReplCommand::Bind(Some(value))
+                | ReplCommand::Macro(Some(value)) => value.as_str(),
                 _ => "",
             };
             assert_eq!(
