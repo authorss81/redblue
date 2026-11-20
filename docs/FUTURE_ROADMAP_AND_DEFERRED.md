@@ -1892,6 +1892,76 @@ This automated triage protocol is unified across all four ecosystem tracks:
 * **Operating System (`rbos-ops`)**: `kernel-fix` worker updates memory bump arenas or VirtIO drivers to match the latest kernel compiler invariants.
 * **Tooling & IDE (`rb-ide-ops`)**: `lsp-fix` worker updates syntax highlighting grammars and LSP diagnostics.
 
+---
+
+## Section 33: Redblue Version Control Architecture: Toolchains, Language Editions & Dependency Resolution
+
+### 33.1 The 3 Dimensions of Language Version Management
+
+In modern language engineering, "version control" encompasses three distinct architectural layers:
+1. **Toolchain Versioning**: How developers install, switch, and pin compiler releases without breaking their local environment.
+2. **Grammar & Syntax Evolution (Language Editions)**: How the language introduces new plain English keywords without breaking existing code that uses those words as variables.
+3. **Dependency Version Resolution**: How package dependencies are resolved deterministically without "dependency hell" or supply-chain poisoning.
+
+---
+
+### 33.2 Comparative Analysis Across Industry Languages
+
+| Dimension | Redblue (Planned Standard) | Rust | Go | Node.js (npm) | Python |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Toolchain Switching** | **Built-in `rb toolchain`** (hermetic multiplexer in `rb` binary) | `rustup` (separate multiplexer binary) | Built into `go` command (`GOTOOLCHAIN=auto`) | Fragmented external tools (`nvm`, `fnm`, `volta`, `asdf`) | Fragmented tools (`pyenv`, `asdf`, `uv`) |
+| **Syntax Evolution** | **Epoch-Based Editions** (`edition = "2026"`) | **Editions System** (`2015`, `2018`, `2021`, `2024`) | Strict Go 1 Promise (slow language evolution) | ECMAScript stages (runtime flags & Babel) | Breaking version leaps (Python 2 $\to$ 3 disaster) |
+| **Resolution Algorithm** | **Minimal Version Selection (MVS)** (deterministic) | SAT solver (PubGrub algorithm) | Minimal Version Selection (MVS) | Max-satisfying ranges (heuristic SAT) | Pip backtracking resolver |
+| **Lockfile Cryptography** | **Blake3 / SHA-256** Subresource Integrity in `rb.lock` | SHA-256 in `Cargo.lock` | Go Checksum Database (`go.sumdb`) | SHA-512 in `package-lock.json` | Hashes in `Pipfile.lock` / `poetry.lock` |
+| **Project Pinning** | `rb.version` / `package.json` | `rust-toolchain.toml` | `go.mod` (`go 1.22`) | `.nvmrc` / `.node-version` | `.python-version` / `pyproject.toml` |
+
+---
+
+### 33.3 The Optimal Redblue Architectural Recommendation
+
+#### 1. Integrated Toolchain Multiplexer (`rb toolchain`)
+Instead of forcing developers to install and manage third-party tools (like Node's `nvm` or Python's `pyenv` which suffer from Windows/WSL shell path bugs):
+* **Single Binary Dispatch**: The `rb` CLI binary acts as a transparent multiplexer.
+* **Automatic Project Detection**: When `rb` executes inside any project directory, it checks for `rb.version`:
+  ```bash
+  # Inside a legacy project requiring 0.1.0
+  cat rb.version
+  # Output: 0.1.0
+  
+  rb run main.rb
+  # -> Automatically uses/downloads hermetic 0.1.0 toolchain cache!
+  ```
+* **CLI Management**:
+  ```bash
+  rb toolchain list                  # List installed compiler toolchains
+  rb toolchain install 0.3.0         # Install a specific release
+  rb toolchain default 0.2.0         # Set default global toolchain
+  ```
+
+#### 2. Epoch-Based Language Editions (`edition = "2026"`)
+Because Redblue is designed as **plain English**, adding new keywords (e.g., `guard`, `match`, `defer`) would risk breaking existing code if a programmer previously wrote `set guard to true`:
+* **The Solution**: Every package manifest (`package.json`) declares its language edition:
+  ```json
+  {
+    "name": "matrix_math",
+    "version": "1.0.0",
+    "edition": "2026"
+  }
+  ```
+* **Per-Package Tokenization**: When compiling `matrix_math`, the lexer treats `guard` as an ordinary variable name. When compiling an Edition 2028 application, `guard` is recognized as a control-flow keyword.
+* **Zero-Overhead Interoperability**: Both editions compile into the **exact same Redblue bytecode VM**. You can import an Edition 2026 package into an Edition 2028 program seamlessly!
+
+#### 3. Minimal Version Selection (MVS) & Cryptographic Lockfiles
+To avoid the notorious "NPM dependency hell" where patch updates break production builds:
+* **MVS Principle**: If Package A asks for `math >= 1.2.0` and Package B asks for `math >= 1.2.3`, Redblue selects **`1.2.3`** (the *oldest* version that satisfies all constraints), rather than hunting for `1.9.9`.
+* **Reproducibility Guarantee**: Builds are byte-for-byte identical on every developer machine and CI runner.
+* **Subresource Integrity (`rb.lock`)**: Every package tarball is pinned by its **Blake3 cryptographic hash** and checked against the official signed index, eliminating typosquatting and supply-chain tampering.
+
+#### 4. Pure-Redblue Native Git Version Control (`app-git`)
+As planned in Section 28 (`apps/git`), Redblue includes a sovereign, pure-Redblue Git engine capable of parsing Git objects (blobs, trees, commits, packfiles).
+* The package manager (`rb pkg`) can clone, checkout, and verify Git dependencies natively across platforms without requiring an external `git` binary installed on the host system.
+
+
 
 
 
