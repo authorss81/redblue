@@ -71,8 +71,8 @@ pub const NO_SHELL: &str = "Error: this host has no shell, so shell commands are
 /// The sentence an empty `!` answers with, before any process is started.
 pub const EMPTY_COMMAND: &str = "Error: ! needs a command. Usage: !<command>";
 
-/// The sentence an empty `.pipe` answers with, before any process is started.
-pub const EMPTY_PIPE: &str = "Error: .pipe needs a command. Usage: .pipe <command>";
+/// The sentence an empty `:pipe` answers with, before any process is started.
+pub const EMPTY_PIPE: &str = "Error: :pipe needs a command. Usage: :pipe <command>";
 
 /// The bytes one output reader kept and whether it stopped at the cap.
 #[cfg(any(unix, windows))]
@@ -465,7 +465,7 @@ pub fn listing(path: &Path) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{listing, run, EMPTY_COMMAND};
+    use super::{listing, pipe, run, EMPTY_COMMAND, EMPTY_PIPE};
 
     /// A command that keeps the shell busy past any test deadline.
     #[cfg(any(unix, windows))]
@@ -500,6 +500,19 @@ mod tests {
     #[test]
     fn empty_shell_command_is_refused_without_starting_a_process() {
         assert_eq!(run(" ").unwrap_err(), EMPTY_COMMAND);
+    }
+
+    /// A bare `:pipe` is refused before a process starts, and the refusal names
+    /// the command the user typed rather than the dot spelling of it.
+    #[test]
+    fn edge_empty_pipe_command_is_refused_and_names_the_command() {
+        let refusal = pipe(" ", "").expect_err("an empty pipe command is refused");
+
+        assert_eq!(refusal, EMPTY_PIPE);
+        assert!(
+            refusal.contains(":pipe"),
+            "the refusal names the command the user typed: {refusal}"
+        );
     }
 
     #[test]

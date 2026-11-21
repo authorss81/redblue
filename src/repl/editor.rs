@@ -903,7 +903,16 @@ mod tests {
 
     #[test]
     fn the_history_directory_is_created_by_the_session_that_writes_to_it() {
-        let path = history_path("first-run").with_file_name("first-run-dir/history");
+        // The directory is unique to this process, so a leftover from an earlier
+        // run (possibly with restrictive permissions) cannot make a first run
+        // look like a directory that was already there.
+        let path = history_path("first-run")
+            .with_file_name(format!(
+                "first-run-dir-{}-{}",
+                std::process::id(),
+                scratch_name("run")
+            ))
+            .join("history");
         let mut source = editor(live_names(&[]), Some(path.clone()));
         source.record("set first_run to 1");
 

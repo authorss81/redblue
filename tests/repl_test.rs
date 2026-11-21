@@ -2038,17 +2038,19 @@ fn edge_alias_cycle_is_refused_without_looping() {
 }
 
 /// `.alias` with nothing after it asks what aliases exist. A session with none
-/// says so by name rather than printing an empty list with no explanation.
+/// says so by name rather than printing an empty list with no explanation, and
+/// the filled listing keeps the heading the command has always used.
 #[test]
 fn edge_alias_with_no_arguments_lists_the_empty_table() {
     let empty = session(".alias\n:quit\n");
     empty
         .assert_exited_ok()
-        .assert_stdout_contains("No shortcuts defined.");
+        .assert_stdout_contains("No aliases defined.");
 
     let filled = session(".alias ll :vars\n.alias\n:quit\n");
     filled
         .assert_exited_ok()
+        .assert_stdout_contains("Aliases:")
         .assert_stdout_contains(":ll")
         .assert_stdout_contains(":vars");
 }
@@ -2253,6 +2255,7 @@ fn shell_escape_shows_command_output_and_exit_code() {
 
 /// `:bind` runs a key as its command, and a bare `:bind` lists every binding in
 /// name order rather than in whatever order the table happened to hold them.
+/// Its heading is its own, so `:alias` keeps the wording it has always printed.
 #[test]
 fn bind_runs_a_key_and_lists_bindings_in_order() {
     let s = session(
@@ -2260,7 +2263,7 @@ fn bind_runs_a_key_and_lists_bindings_in_order() {
     );
 
     s.assert_exited_ok()
-        .assert_stdout_contains("Shortcuts:")
+        .assert_stdout_contains("Bindings:")
         .assert_stdout_contains(":alpha = :functions")
         .assert_stdout_contains(":zebra = :vars")
         .assert_stdout_contains("Variables:")
@@ -2308,6 +2311,48 @@ fn edge_bind_refuses_an_unknown_command_before_the_key_is_used() {
     s.assert_exited_ok()
         .assert_stdout_contains("cannot bind 'go' to unknown command 'notacommand'")
         .assert_stdout_contains("= 1");
+}
+
+/// `!` starts the host-shell escape, so it cannot be a key. The refusal names
+/// the key and leaves the shell escape untouched.
+#[test]
+fn edge_bind_refuses_a_key_that_is_the_shell_escape() {
+    let s = session(":bind !ls :vars\n!echo still-the-shell\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("'!ls' is not a usable key")
+        .assert_stdout_contains("still-the-shell");
+}
+
+/// A key with no command after it is missing the command, not the key, on the
+/// real `:bind` dispatch path.
+#[test]
+fn edge_bind_with_a_key_but_no_command_names_the_missing_command() {
+    let s = session(":bind lonely\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("needs the command the key runs")
+        .assert_stdout_lacks("needs a key and the command it runs");
+}
+
+/// A key may name a command that carries its own argument, and the whole
+/// remainder reaches the command when the key is pressed.
+#[test]
+fn edge_bind_runs_a_command_with_an_argument() {
+    let s = session("set x to 7\n:bind show :inspect x\nshow\n:quit\n");
+
+    s.assert_exited_ok()
+        .assert_stdout_contains("x: 7")
+        .assert_stdout_contains("Type: number");
+}
+
+/// A key is a shortcut like any other, so one key can reach a command through
+/// another key.
+#[test]
+fn edge_bind_follows_another_bound_key() {
+    let s = session("set x to 7\n:bind first :vars\n:bind second first\nsecond\n:quit\n");
+
+    s.assert_exited_ok().assert_stdout_contains("Variables:");
 }
 
 /// `:pipe <command>` sends the last result to the command, shows both output
@@ -2371,9 +2416,21 @@ fn edge_pipe_with_no_argument_is_a_usage_error_not_an_empty_command() {
 fn help_scopes_pipe_to_read_only_inspection() {
     let s = session(":help\n:quit\n");
 
-    s.assert_exited_ok()
-        .assert_stdout_contains("read-only")
-        .assert_stdout_contains(":pipe <command>");
+    s.assert_exited_ok();
+    let pipe_line = s
+        .stdout
+        .lines()
+        .find(|line| line.contains(":pipe <command>"))
+        .expect("the help lists the :pipe signature");
+    assert!(
+        pipe_line.contains("read-only") && pipe_line.contains("not as a shell replacement"),
+        "the :pipe description itself carries its scope: {pipe_line}"
+    );
+    assert!(
+        s.stdout.contains("!<command>") && s.stdout.contains("host shell"),
+        "the help names !<command> as the general host-shell escape:\n{}",
+        s.stdout
+    );
 }
 
 /// A command that reads its standard input gets the session's last result on

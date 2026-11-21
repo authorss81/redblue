@@ -10,8 +10,8 @@ It is **not** implemented by this phase, on purpose.
   budgets before it runs. AGENTS.md section 1, rule 2 says a phase may never
   weaken a gate, and building a runtime code-loading surface is the strongest
   possible form of that weakening.
-- It also crosses the phase's single concern (rule 7): this phase adds two
-  read-only conveniences (`:pipe`, `:bind`), not a dynamic code loader.
+- It also crosses the phase's single concern (rule 7): this phase adds `:bind`
+  and documents `:pipe`'s scope, not a dynamic code loader.
 
 A later phase must not re-propose `:plugin` without first addressing the gate
 question above. This phase adds no loader, no eval of untrusted source, and no
