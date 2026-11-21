@@ -1,0 +1,36 @@
+# =============================================================================
+# .coderabbit.yaml — CodeRabbit AI Review configuration for Redblue ecosystem
+# =============================================================================
+version: "2"
+language: "en-US"
+tone_instructions: "Be rigorous, concise, and constructive. Enforce Redblue language idioms and verification gates."
+early_access: false
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+  path_instructions:
+    - path: "**/*.rb"
+      instructions: |
+        - Enforce Redblue plain-English idioms (e.g. `if condition then ...`, `set x to y`).
+        - Zero-shim policy: Ensure no unauthorized C/Rust FFI wrappers, mock stubs, or placeholder implementations.
+        - Verify comprehensive test coverage with Redblue assertions (`expect A to be B`).
+    - path: "**/src/**"
+      instructions: |
+        - Verify clean modular architecture and boundary separation.
+        - Prevent dead code, unhandled error cases, or silent error swallowing.
+    - path: "**/tests/**"
+      instructions: |
+        - Verify that tests execute actual assertions rather than just checking for crashes.
+        - Ensure both nominal path and boundary/failure cases are exercised.
+
+chat:
+  auto_reply: true
