@@ -3147,4 +3147,44 @@ mod list_surface {
             );
         }
     }
+
+    #[test]
+    fn edge_builtin_resolver_leaves_the_higher_order_list_names_to_the_engines() {
+        let span = redblue::Span::new(1, 1);
+        for name in ["map", "list_map", "filter", "reduce"] {
+            let answer = redblue::stdlib::builtin(span, name, &[]);
+            assert!(
+                matches!(answer, Ok(None)),
+                "`{name}` is answered by the higher-order driver, so the shared resolver \
+                 must leave it to the engines rather than blame the arguments: {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_builtin_resolver_still_blames_a_real_builtin_with_bad_arguments() {
+        let span = redblue::Span::new(1, 1);
+        let error = redblue::stdlib::builtin(span, "sqrt", &[Value::Text("nine".to_string())])
+            .expect_err("sqrt of text must be refused")
+            .to_string();
+        assert!(
+            error.contains("sqrt was called with arguments it cannot use"),
+            "a real builtin given a genuinely wrong argument must keep the argument \
+             refusal, not become Unknown function: {error}"
+        );
+    }
+
+    #[test]
+    fn edge_filter_and_reduce_definition_of_done_program_agrees_on_both_engines() {
+        assert_eq!(
+            both("filter([1, 2, 3], to (x) give back x > 1)"),
+            Value::list(vec![Value::Number(2.0), Value::Number(3.0)]),
+            "filter(xs, f) must keep only the items the predicate accepts"
+        );
+        assert_eq!(
+            both("reduce([1, 2, 3], 0, to (a, b) give back a + b end)"),
+            Value::Number(6.0),
+            "reduce(xs, init, f) must fold from the initial value on both engines"
+        );
+    }
 }

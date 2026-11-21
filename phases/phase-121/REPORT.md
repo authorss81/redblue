@@ -16,7 +16,18 @@ $ ./target/debug/rb vm target/tmp_filter.rbc
 
 The phase's definition of done also requires `reduce(xs, init, f)`. That order
 did still fail, because `reduce_parts` accepted only `reduce(xs, f)` and
-`reduce(xs, f, start)`. That is the gap this phase fixes. See `FINDINGS.md`.
+`reduce(xs, f, start)`. That is the gap the previous attempt fixed. See
+`FINDINGS.md`.
+
+## Resumed work
+
+The previous attempt's change is already committed at `HEAD`, so the first
+resumed gate run reported `no changed files detected against HEAD`, `diff too
+small: +0`, and `no implementation change`. This run keeps that work and adds
+the missing resolver hardening plus the tests that hold it: a higher-order list
+name (`map`, `list_map`, `filter`, `reduce`) that `builtin_function` does not
+answer is now left to the engines (`Ok(None)`) instead of being refused with
+`was called with arguments it cannot use`.
 
 ## What changed
 
@@ -26,8 +37,11 @@ did still fail, because `reduce_parts` accepted only `reduce(xs, f)` and
 | `src/interpreter.rs` | +2 −1 | `reduce_builtin`'s doc names the two equivalent orders |
 | `src/bytecode/vm.rs` | +4 −4 | `start_reduce`'s doc names the two equivalent orders, re-wrapped to keep `call_function` at line 3792 for `NATIVE.md` |
 | `SPEC.md` | +2 −2 | § list writes that the flat `filter(xs, f)` and `reduce(xs, f[, start])` answer like their dotted spellings, and that `reduce(xs, start, f)` is the same call with the start value first |
+| `src/stdlib.rs` | +9 −0 | `stdlib::builtin` hands a higher-order list name (`map`, `list_map`, `filter`, `reduce`) back as `Ok(None)` when `builtin_function` does not answer it, so the shared resolver never blames the caller's arguments for a name the engines answer |
 | `tests/stdlib_modules_test.rs` | +123 −0 | eight tests in `mod list_surface`, covering both `reduce` orders on both engines, empty/singleton lists, a predicate true for nothing, nothing/text items, a failing predicate, a missing function, the preserved wrong-argument message, and TAB completion against `BUILTIN_NAMES` |
+| `tests/stdlib_modules_test.rs` | +43 −0 | three resumed tests: the resolver leaves `map`/`list_map`/`filter`/`reduce` to the engines, still refuses `sqrt` of text by name, and the definition-of-done program agrees on both engines |
 | `tests/unreviewed_work_ack_test.rs` | +1 −0 | pins the phase-120 resume commit by SHA now that phase-120 is no longer the phase under review |
+| `SURVEY.md` | +1 −1 | re-anchors the `regex_builtin` citation from `src/stdlib.rs:1851` to `:1860` after the resolver guard shifted the line |
 
 The `filter`/`reduce` flat spellings themselves are unchanged: phase-077 already
 gave them a driver on both engines. This phase adds the start-before-function
@@ -58,6 +72,9 @@ class" and the diff matches those two. `FINDINGS.md` records the discrepancy.
 | `edge_reduce_start_before_function_refuses_a_missing_function` | type mismatch / malformed input |
 | `edge_uppercase_still_blames_arguments_it_cannot_use` | the `src/stdlib.rs:1246` message is preserved for a real builtin given a genuinely wrong argument |
 | `edge_completion_offers_exactly_the_registered_builtins_that_answer` | TAB completion is reconciled with `BUILTIN_NAMES` and `GLOBAL_CONSTANTS`, not with a copied list |
+| `edge_builtin_resolver_leaves_the_higher_order_list_names_to_the_engines` | type/ownership boundary — `map`, `list_map`, `filter` and `reduce` are not refused by the shared resolver |
+| `edge_builtin_resolver_still_blames_a_real_builtin_with_bad_arguments` | asserts a failure is produced — `sqrt` of text keeps the argument refusal |
+| `edge_filter_and_reduce_definition_of_done_program_agrees_on_both_engines` | boundary — the phase's exact `filter`/`reduce` program on both engines |
 
 Existing coverage also runs every registered builtin through a real program:
 `edge_no_registered_builtin_is_unreachable_from_a_program` in
@@ -89,7 +106,7 @@ the same for the init-first spelling.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 3287 passed, 0 failed |
+| `cargo test --all-targets` | 3290 passed, 0 failed |
 | `../rbops/verify.sh phase-121` | pass |
 
 ## Invariants touched
