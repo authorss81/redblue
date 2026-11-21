@@ -1961,6 +1961,63 @@ To avoid the notorious "NPM dependency hell" where patch updates break productio
 As planned in Section 28 (`apps/git`), Redblue includes a sovereign, pure-Redblue Git engine capable of parsing Git objects (blobs, trees, commits, packfiles).
 * The package manager (`rb pkg`) can clone, checkout, and verify Git dependencies natively across platforms without requiring an external `git` binary installed on the host system.
 
+---
+
+## Section 34: Global Namespace Registry Index (`rb-pkg`), Canonical Name Normalization & Atomic Git CAS Lease Arbitration
+
+### 34.1 The Danger of Near-Duplicate Packages Across Decentralized Organizations
+
+In a multi-organization ecosystem (10 specialized domain organizations), allowing two organizations to create packages with identical or near-identical names (e.g., `matrix_math` in `rb-pkg-math` and `matrix-math` in `rb-pkg-ai`) creates severe real-world failure modes:
+1. **Developer Confusion**: Programmers do not know which package to import, and types cannot be passed between the two packages without conversion errors.
+2. **Typosquatting & Supply-Chain Attacks**: Malicious actors could publish slight spelling variants to trick users.
+3. **Split Community Effort**: Duplicate maintenance effort is wasted across overlapping libraries.
+
+Therefore, the Redblue package ecosystem enforces a strict **Single Canonical Name Policy**: no two packages may share the same canonical name or near-duplicate spelling. The first organization to claim the lease secures exclusive publication rights.
+
+---
+
+### 34.2 The 4 Pillars of the Implemented Resolution Engine
+
+```mermaid
+flowchart TD
+    A["Auditor in rb-pkg-math proposes 'matrix_math'"] --> B["Step 1: Canonical Normalization (lowercase, collapse _ - .) -> 'matrix_math'"]
+    B --> C["Step 2: Zero-Token HTTP HEAD check against Global Index (raw.githubusercontent.com/authorss81/rb-pkg/main/index/ma/tr/matrix_math.json)"]
+    C --> D{"File Exists?"}
+    D -- "YES (HTTP 200)" --> E["ALREADY CLAIMED: Skip without invoking LLM (0 tokens burned)"]
+    D -- "NO (HTTP 404)" --> F["Step 3: Atomic Git CAS Lease Push to authorss81/rb-pkg"]
+    F --> G{"Git Push Succeeds?"}
+    G -- "NO: Race collision detected! Another org pushed earlier" --> H["ABORT: Yield lease, pick next candidate"]
+    G -- "YES: Atomic commit landed on main" --> I["LEASE SECURED: Worker safely synthesizes package exclusively"]
+```
+
+#### 1. The Global Sparse Index (`authorss81/rb-pkg`)
+* All 10 organizations share **ONE single source of truth**: [`authorss81/rb-pkg`](https://github.com/authorss81/rb-pkg).
+* The index does not store package source code (keeping it lightweight and fast, mirroring `crates.io-index`). It stores only canonical metadata in a 2-character sparse prefix structure:
+  `index/ve/ct/vector2d.json`
+* **Zero-Token Availability Verification**: Auditors check if a package exists using a **50ms HTTP `HEAD` request** (`curl -s -I ...`).
+  * If HTTP 200 $\to$ already taken (skipped with **0 LLM tokens burned**).
+  * If HTTP 404 $\to$ available to claim.
+
+#### 2. Canonical Name Normalization (Collapsing Typos & Variants)
+* Every proposed package name is normalized using the industry standard (PEP 503 / crates.io algorithm):
+  $$\text{canonical\_name} = \text{lowercase}(name).\text{replace}([\text{"-"}, \text{"\_"}, \text{"."}], \text{"\_"})$$
+* `Matrix-Math`, `matrix_math`, and `matrix.math` all collapse into the exact same canonical key: `matrix_math`.
+* Only ONE canonical key can exist in the registry index. Near-duplicates are mathematically rejected before synthesis begins.
+
+#### 3. Atomic Git Compare-and-Swap (CAS) Lease Reservation
+To eliminate TOCTOU (Time-of-Check to Time-of-Use) race conditions where two workers check at the same second:
+* Before synthesizing code, workers commit an active lease to `leases/<canonical>.json` in `authorss81/rb-pkg`:
+  ```json
+  { "name": "matrix_math", "owner": "rb-pkg-math", "worker_id": "worker-1", "leased_at_epoch": 1793100000 }
+  ```
+* **Git's Atomic Guarantee**: If two workers push simultaneously:
+  * Only one commit becomes the tip of `main`.
+  * The second runner receives a Git non-fast-forward rejection, detects the competing lease, yields, and selects the next package.
+
+#### 4. Domain Taxonomy Whitelists (`domain_taxonomy.json`)
+* Managed via [`domain_taxonomy.json`](https://github.com/authorss81/rb-pkg/blob/main/domain_taxonomy.json), bounding each organization strictly to its domain (`rb-pkg-math` $\to$ math, `rb-pkg-web` $\to$ web, etc.), preventing auditors from attempting out-of-domain packages.
+
+
 
 
 
