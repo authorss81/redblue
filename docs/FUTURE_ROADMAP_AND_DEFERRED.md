@@ -2030,3 +2030,125 @@ To eliminate TOCTOU (Time-of-Check to Time-of-Use) race conditions where two wor
 
 
 
+
+
+---
+
+## 35. Permutation Invariance, Semantic Coexistence, Multi-Worker Concurrency & Ops Inheritance
+
+### 35.1 Permutation Invariance vs. False Collision Prevention
+
+#### The Problem:
+A naive bag-of-words or permutation-invariance filter (e.g. treating `matrix_math` and `math_matrix` as strictly identical) prevents duplicate bot generation, but if enforced as an unconditional global block, it risks falsely hindering legitimate, needed packages where word order conveys distinct semantics:
+* `mock_server` (a network server configured to mock endpoints) vs `server_mock` (a test mock representing a remote server).
+* `file_watch` (a command-line utility) vs `watch_file` (a background library watcher).
+* `ast_parser` (a parser that generates an AST) vs `parser_ast` (the AST data structure itself).
+
+#### The 3-Tier Registry Architecture:
+
+1. **Tier 1: Exact Canonical Match (Hard Gate)**
+   * `lowercase(replace(['-', '.'], '_'))`.
+   * `Matrix-Math`, `matrix_math`, and `matrix.math` resolve to `matrix_math`.
+   * **Verdict**: Strictly blocked across the global registry. Only one package may hold the canonical name.
+
+2. **Tier 2: Permutation Match (Soft Advisory & Auditor Guardrail)**
+   * **For Autonomous Auditors**: Treated as a duplicate guardrail. If an auditor in `rb-pkg-math` sees `math_matrix` exists, it will never synthesize `matrix_math` under the assumption that basic coverage is already provided.
+   * **For Human Authors & Specialized Libraries**: Allowed via explicit **Disambiguation Appeal** in `rb.toml`:
+     ```toml
+     [package]
+     name = "server_mock"
+     version = "0.1.0"
+     allow_permutation_collision = true
+     disambiguation = "In-memory client mock for Redblue HTTP services, distinct from mock_server test daemon"
+     ```
+   * **Scoped Namespaces**: Scoped packages (`@domain/package_name` or `author/package_name`) are completely exempt from permutation restrictions.
+
+3. **Tier 3: Capability Concept IDs (Semantic Anchors)**
+   * Packages declare their standard capability concept in their manifest (`concept_id = "math.linear_algebra.matrix"`).
+   * The registry tracks claimed capabilities in `authorss81/rb-pkg/capabilities/<concept_id>.json`.
+   * Auditors claim concepts rather than arbitrary strings, ensuring clean domain coverage.
+
+---
+
+### 35.2 Policy on Different-Named Packages Providing Similar Functionality
+
+**Question**: Should packages with different names that do the same work (e.g., competing HTTP clients or JSON parsers) be kept and allowed in the Redblue ecosystem?
+
+**Policy: YES, UNCONDITIONALLY.**
+
+Healthy ecosystems thrive on diversity of implementation. Redblue actively encourages competing packages that offer different design trade-offs:
+* **High Performance vs. Zero Dependencies**: `fast_json` (SIMD-accelerated, high throughput) vs. `simple_json` (zero external dependencies, minimal memory footprint).
+* **Sync vs. Async**: `blocking_http` (minimal script ergonomics) vs. `async_http` (high-concurrency fiber networking).
+* **Simplicity vs. Completeness**: `micro_test` (minimal single-file harness) vs. `suite_test` (rich reporters, mocks, and property testing).
+
+The registry tracks capability tags (`tags = ["http-client", "networking"]`) so developers can compare alternatives based on benchmark metrics in `docs/PERFORMANCE_HISTORY.md`. The registry blocks only deceptive typosquatting (`reqwest` vs `req-west`) and malicious impersonation.
+
+---
+
+### 35.3 100k+ Zero-Token Scaling Model for Autonomous Auditors
+
+```mermaid
+flowchart TD
+    A["Auditor Worker Tick"] --> B["Read Static Domain Taxonomy (taxonomy/math/linear_algebra.json)"]
+    B --> C["Query Central Registry via fast HTTP GET: raw.githubusercontent.com/.../capabilities/<concept_id>.json"]
+    C --> D{"Concept Claimed? (HTTP 200 vs 404)"}
+    D -- "HTTP 200 (Claimed)" --> E["Skip concept instantly (0 LLM tokens consumed)"]
+    D -- "HTTP 404 (Unclaimed)" --> F["Synthesize Phase Prompt only for this specific unclaimed concept"]
+    F --> G["Worker synthesizes and registers package"]
+```
+
+1. **Static Benchmark Catalogs**: Taxonomies are stored in static JSON trees derived from international standards (POSIX.1-2017, IEEE 754, RFCs, Python stdlib, Rust core/std).
+2. **Zero-Token Filtering**: The auditor never passes existing package lists to an LLM. It tests existence via fast 50ms HTTP `HEAD` / `GET` requests against `authorss81/rb-pkg/capabilities/<concept_id>.json`.
+3. **Targeted Synthesis**: The LLM prompt receives only the single candidate specification to implement, keeping prompt tokens small (< 1,500 tokens) regardless of whether the registry has 10 or 100,000 packages.
+
+---
+
+### 35.4 Multi-Worker Parallel Concurrency (Up to 20 Workers per Org)
+
+To maximize throughput without exceeding GitHub's 20-runner account ceiling or causing race collisions:
+
+```mermaid
+sequenceDiagram
+    participant W1 as Worker 1 (Key 1)
+    participant W2 as Worker 2 (Key 2)
+    participant Git as authorss81/rb-pkg (Leases)
+    
+    W1->>Git: Atomic CAS push lease: leases/phase-001.lock
+    W2->>Git: Atomic CAS push lease: leases/phase-001.lock (simultaneous)
+    Git-->>W1: 200 OK (Commit tip accepted)
+    Git-->>W2: 409 Rejected (Non-fast-forward / lock exists)
+    W2->>W2: Backoff 5s, select next available phase (phase-002)
+    W2->>Git: Atomic CAS push lease: leases/phase-002.lock
+    Git-->>W2: 200 OK (Lease secured)
+    W1->>W1: Synthesize phase-001 & Delta Test
+    W2->>W2: Synthesize phase-002 & Delta Test
+```
+
+#### Parallel Worker Specifications:
+* **Matrix Scaling**: Workflows run a matrix of workers (`worker_id: [1, 2, 3, 4, 5]`), scaling up to 20 concurrent jobs across 10 domain orgs (200 total concurrent workers).
+* **Secret Partitioning**: Each runner injects `OPENCODE_KEY_${{ matrix.worker_id }}`, completely preventing API rate limit starvation between parallel workers.
+* **Decentralized Atomic Git CAS Locking**:
+  * Workers take leases via `leases/<target>.lock` pushed directly to `authorss81/rb-pkg`.
+  * Git enforces atomic commit order: concurrent pushes fail gracefully, triggering a rebase and election of the next candidate phase.
+* **Lease Timeout & Auto-Reclaim**: Leases record timestamp and owner; any lease older than 6 hours (crashed/killed runner) is automatically purged by the next tick.
+
+---
+
+### 35.5 Ops Engine Inheritance from `rbops`
+
+Every ecosystem orchestrator repository (`rb-pkg-*/ops`, `rb-apps-org/ops`, `authorss81/rbos-ops`) inherits the production-proven core engine from `authorss81/rbops`:
+
+1. **Autonomous Worker Loop (`worker.sh`)**:
+   * Isolated sandbox checkout.
+   * Model fallback chains (`deepseek-v4.1-flash-free` -> `big-pickle` -> `glm-5.3-flash-free`).
+   * Dynamic checkpointing every 15 minutes to prevent timeout losses.
+2. **3-Round Automated Code Review (`agents/reviewer.md`)**:
+   * Evaluates memory safety, zero-shim policy, Redblue idioms, and boundary checks.
+   * Output structured findings with severity classifications.
+3. **3-Round Automated Fix Loop**:
+   * Automatically invokes OpenCode to resolve reviewer findings before verification.
+4. **Single-Target Delta Testing Gate (`verify.sh`)**:
+   * Executes `cargo run --bin rb -- run packages/<pkg>/tests/run.rb` in 1-2 seconds.
+   * Proves functionality without O(N) whole-repo regressions.
+5. **Parallel Smoke Suite (`smoke_parallel.yml`)**:
+   * Validates multi-worker matrix execution, partitioned key binding, and race-free concurrent lease acquisition.
