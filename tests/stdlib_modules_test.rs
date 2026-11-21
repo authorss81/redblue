@@ -3024,4 +3024,127 @@ mod list_surface {
             "sort and reverse must answer new lists and leave the input unchanged"
         );
     }
+
+    #[test]
+    fn reduce_accepts_the_start_value_before_the_function() {
+        let value = both("reduce([1, 2, 3], 0, to (a, b) give back a + b end)");
+        assert_eq!(
+            value,
+            Value::Number(6.0),
+            "reduce(xs, init, f) must fold from the initial value"
+        );
+
+        // The order the language already documented still answers the same way.
+        let documented = both("reduce([1, 2, 3], to (a, b) give back a + b end, 0)");
+        assert_eq!(
+            documented,
+            Value::Number(6.0),
+            "reduce(xs, f, init) must keep answering after the second order is accepted"
+        );
+
+        // A singleton with a start value folds exactly once.
+        let singleton = both("reduce([5], 10, to (a, b) give back a + b end)");
+        assert_eq!(
+            singleton,
+            Value::Number(15.0),
+            "a singleton with a start value folds that one item onto the start"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_of_an_empty_list_answers_the_start() {
+        let value = both("reduce([], 10, to (a, b) give back a + b end)");
+        assert_eq!(
+            value,
+            Value::Number(10.0),
+            "an empty list with an initial value has that value as its answer"
+        );
+    }
+
+    #[test]
+    fn edge_filter_keeps_nothing_when_the_predicate_is_true_for_no_item() {
+        let value = both("filter([1, 2, 3], to (x) give back no end)");
+        assert_eq!(
+            value,
+            Value::list(Vec::new()),
+            "a predicate false for every item keeps an empty list, not the input"
+        );
+    }
+
+    #[test]
+    fn edge_filter_predicate_sees_nothing_and_text_items() {
+        let nothing = both("filter([nothing, 1, nothing], to (x) give back x is nothing end)");
+        assert_eq!(
+            nothing,
+            Value::list(vec![Value::Nothing, Value::Nothing]),
+            "a predicate that tests for nothing must be applied to nothing items"
+        );
+
+        let text = both(r#"filter(["a", "b", "a"], to (x) give back x is "a" end)"#);
+        assert_eq!(
+            text,
+            Value::list(vec![
+                Value::Text("a".to_string()),
+                Value::Text("a".to_string())
+            ]),
+            "a predicate that tests text must be applied to text items"
+        );
+    }
+
+    #[test]
+    fn edge_filter_propagates_a_failure_from_the_predicate() {
+        let source = "filter([1, 2], to (x) give back 1 / 0 end)";
+        assert!(
+            run_source_value(source).is_err(),
+            "a failing predicate must fail the whole filter call"
+        );
+        both_refuse(source, "Division by zero");
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_refuses_a_missing_function() {
+        both_refuse("reduce([1, 2], 0, 5)", "reduce requires a function");
+    }
+
+    #[test]
+    fn edge_uppercase_still_blames_arguments_it_cannot_use() {
+        // The generic argument message is correct for a builtin that really
+        // exists. Keeping it here makes sure this phase did not remove that
+        // refusal while making the higher-order names answer.
+        let error = run_source_value("uppercase(5)")
+            .expect_err("uppercase of a number must be refused")
+            .to_string();
+        assert!(
+            error.contains("uppercase was called with arguments it cannot use"),
+            "a real builtin given a wrong argument must still be refused by name: {error}"
+        );
+    }
+
+    #[test]
+    fn edge_completion_offers_exactly_the_registered_builtins_that_answer() {
+        let completer = redblue::repl::ReplCompleter::new();
+        let offered = completer.builtin_names();
+
+        for name in redblue::stdlib::BUILTIN_NAMES {
+            assert!(
+                offered.iter().any(|candidate| candidate == name),
+                "TAB does not offer `{name}`, a registered builtin, so completion and \
+                 the registry disagree"
+            );
+        }
+        for name in redblue::stdlib::GLOBAL_CONSTANTS {
+            assert!(
+                offered.iter().any(|candidate| candidate == name),
+                "TAB does not offer the global constant `{name}`"
+            );
+        }
+        for name in offered {
+            assert!(
+                redblue::stdlib::BUILTIN_NAMES.contains(&name.as_str())
+                    || redblue::stdlib::GLOBAL_CONSTANTS.contains(&name.as_str()),
+                "TAB offers `{name}`, which is neither a registered builtin nor a global \
+                 constant, so it suggests a name the language does not have"
+            );
+        }
+    }
 }
