@@ -2152,3 +2152,29 @@ Every ecosystem orchestrator repository (`rb-pkg-*/ops`, `rb-apps-org/ops`, `aut
    * Proves functionality without O(N) whole-repo regressions.
 5. **Parallel Smoke Suite (`smoke_parallel.yml`)**:
    * Validates multi-worker matrix execution, partitioned key binding, and race-free concurrent lease acquisition.
+
+
+### 35.6 The "Anti-Misc" Policy & Universal Domain Mapping
+
+#### Why an Unconstrained "Miscellaneous" Org (`rb-pkg-misc`) is Unsafe:
+1. **Lack of Benchmark Anchor**: Autonomous auditors require formal industry benchmarks (POSIX, RFC, IEEE 754, Python stdlib) to know what to build. A vague "miscellaneous" scope gives an LLM no boundary conditions, causing it to hallucinate low-value trivialities (e.g. `is-odd`, `random-string-generator`) and burn CI tokens.
+2. **Namespace Overlap & Semantic Pollution**: Unconstrained "misc" packages inevitably collide with packages in standard domains (e.g. `misc/text_tool` vs `cli/text_parser` or `data/json_helper`).
+
+#### The Universal Domain Mapping (100% Coverage Guarantee):
+To ensure no standard capability is left out, the domain taxonomy maps all general software capabilities directly into our 10 focused organizations:
+
+| Software Capability | Designated Domain Org | Benchmark Source & Concrete Examples |
+| :--- | :--- | :--- |
+| **Data Structures & Collections** | `rb-pkg-data` | Heaps, Tries, B-Trees, LRU Cache, Ring Buffers, Priority Queues |
+| **Compression & Archives** | `rb-pkg-data` | Gzip, Zstandard, Tar, Zip, Deflate |
+| **Time, Clocks, Calendars & Intervals** | `rb-pkg-sys` | POSIX clocks, Monotonic timers, IANA timezones, ISO8601 parsing |
+| **Concurrency, Channels & Atomics** | `rb-pkg-sys` | MPSC channels, Atomic primitives, Thread pools, Fiber sync |
+| **Text, Unicode, Regex & Internationalization** | `rb-pkg-cli` | Regex, Unicode normalization, Diff algorithms, Fuzzy search, i18n |
+| **Physics, Simulation & Geometry** | `rb-pkg-math` | 2D/3D physics engines, Collision detection, Raycasting, Splines |
+| **Graphics, Image & Audio Synthesis** | `rb-pkg-media` | PNG/JPEG decoding, Canvas 2D, Waveform synthesis, Color spaces |
+| **Networking, Sockets & Protocols** | `rb-pkg-net` | TCP/UDP sockets, DNS resolution, Packet parsing, TLS streams |
+| **Web, HTTP, REST & APIs** | `rb-pkg-web` | HTTP/1.1 & HTTP/2, WebSocket server, Routing, JWT/OAuth |
+| **Cryptography & Secure Storage** | `rb-pkg-crypto` | Blake3, SHA-256, AES-GCM, Ed25519, Argon2id, X.509 certs |
+| **Practical End-User Applications** | `rb-apps-org` | System monitors, Task managers, Spreadsheets, Vector canvases |
+
+This guarantees that every standard utility package has an unambiguous, rigorously bounded home without creating an unconstrained "junk drawer."
