@@ -2178,3 +2178,64 @@ To ensure no standard capability is left out, the domain taxonomy maps all gener
 | **Practical End-User Applications** | `rb-apps-org` | System monitors, Task managers, Spreadsheets, Vector canvases |
 
 This guarantees that every standard utility package has an unambiguous, rigorously bounded home without creating an unconstrained "junk drawer."
+
+
+---
+
+## 36. Open-Source MIT Porting Strategy, Key Pool Scaling & Hybrid Typing Roadmap
+
+### 36.1 Phase 113 Analysis: Should Redblue Implement Static Typing?
+
+#### The Core Question:
+Phase 113 addressed the gap between `docs/GRAMMAR.md` §2 (which drafted a full type annotation syntax: `set x : number to 1`, `to f(a : number) gives number`) and the parser implementation (which currently raises `ParserError: Unexpected token Colon`).
+
+#### The Architectural Decision: Hybrid Gradual Typing (The Modern Gold Standard)
+For Redblue to be a world-class language, the **Hybrid Gradual Typing model** (mirroring TypeScript over JavaScript, Python PEP 484 type hints with MyPy, and Ruby Sorbet) is the optimal strategy:
+1. **Dynamic by Default**: Beginners, scripts, and quick prototypes retain zero-friction plain English (`set count to 10`, `to greet(name)`).
+2. **Optional Annotations for Scale**: Large enterprise packages, core libraries, and IDEs can supply optional type annotations (`set count : number to 10`, `to greet(name : text) gives text`) enabling compile-time boundary checks, LSP autocomplete, and type inference.
+3. **Why Phase 113 Was Deferred**:
+   - Tier 1 (Phases 001–126) focused on establishing the core parser, VM bytecode execution, and baseline stdlib.
+   - Implementing a full bidirectional type checker during Tier 1 would have halted the language stabilization sprint.
+   - **Roadmap Position**: Slotted for **Milestone 2.0 (Phases 150+)** once the runtime VM and package manifest schemas are completely frozen.
+
+---
+
+### 36.2 Snapshot Versioning & Reversibility
+
+* **Deterministic Commits as Snapshots**: Every Git commit SHA acts as an immutable cryptographic snapshot. If an experimental feature or breaking optimization degrades the compiler, the repository can revert to the prior known-good snapshot in milliseconds via `git revert <sha>` or `git reset --hard <sha>`.
+* **SemVer & Continuous Versioning**: Section 33 established that every development build is identified by `0.2.0-dev+git.<sha>`. Manual version bumps are reserved for formal tag releases; development builds track the commit SHA for zero-overhead reversibility.
+
+---
+
+### 36.3 Open-Source MIT/Apache-2.0 Porting Engine ("Accelerated Bootstrap")
+
+#### Feasibility & Industry Benchmark:
+Porting battle-tested open-source libraries (MIT, Apache-2.0, BSD-3-Clause) into pure Redblue is the fastest, safest method to bootstrap a rich, production-ready ecosystem:
+* **Pre-existing API Design**: Established libraries (e.g. `requests`, `express`, `lodash`, `numpy`, `zstd`, `pydantic`) have proven interfaces refined over decades.
+* **Pre-existing Test Suites**: Unit tests and edge cases can be transcribed directly into Redblue assertions (`expect A to be B`), ensuring 100% test adequacy from day one.
+* **No Shim / Pure Native Code**: All ported code must be synthesized in native Redblue syntax (`.rb`), guaranteeing portability across WASM, TUI, and kernel environments.
+
+#### Organization Strategy (Reusing the 10 Domain Orgs vs. Creating 10 New Orgs):
+* **Do NOT create 10 new organizations for porting**: Creating excess organizations triggers automated GitHub account suspension flags.
+* **In-Tree Domain Allocation**: Ported packages live naturally inside the existing 10 domain organizations:
+  - Numerical/Physics ports (e.g. NumPy algorithms) $	o$ `rb-pkg-math`
+  - Web/HTTP/API ports (e.g. Express/Axios algorithms) $	o$ `rb-pkg-web`
+  - Database/Collection ports (e.g. SQLite parser, Lodash structures) $	o$ `rb-pkg-data`
+  - System/Time/Process ports (e.g. Chrono, POSIX utils) $	o$ `rb-pkg-sys`
+* **200 Additional API Keys Pooling**:
+  - The 200 new API keys will be distributed across the existing 10 domain organizations (expanding each org from 20 keys to 40 keys).
+  - Enables **40 parallel workers per org** (400 concurrent workers total across the ecosystem), increasing synthesis throughput to ~5,000 packages per week.
+
+#### Licensing & Attribution Compliance:
+Every ported package must adhere to open-source governance:
+1. `LICENSE` in the package root retains the original upstream copyright notice.
+2. `rb.toml` declares provenance:
+   ```toml
+   [package]
+   name = "lodash_collections"
+   version = "0.1.0"
+   license = "MIT"
+   upstream = "https://github.com/lodash/lodash"
+   upstream_commit = "4.17.21"
+   port_attribution = "Ported natively to Redblue from original MIT-licensed source"
+   ```
