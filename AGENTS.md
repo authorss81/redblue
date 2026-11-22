@@ -249,6 +249,7 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
      - Complex production backends & flagship apps: **3 staged phases** (Slice 1: Headless Protocol & Data Model; Slice 2: Network & Concurrent I/O; Slice 3: CLI, Configuration & End-to-End Verification).
    - **Execution Models**: TUI (terminal box-drawing via Phase 132 `tui`), WebAssembly (zero-install in-browser), and standalone single-file executables via `rb bundle`.
 3. **Package Track**: `authorss81/rb-pkg` (package index & registry) + `authorss81/rb-pkg-ops` (package ingestion & crypto verification).
+   - **Bootstrap & Velocity Philosophy**: Go, Rust, and Zig bootstrapped their entire ecosystems by porting battle-tested C, Python, and JavaScript/TypeScript libraries into pure native code. Autonomous package workers must **strictly prioritize porting proven open-source packages** (MIT, Apache-2.0, BSD, ISC) over inventing algorithms from scratch. This guarantees 10× faster package generation, rock-solid production reliability, immediate API familiarity, and verified test parity.
    - **Security & Ergonomics**: Human-friendly imports (`import sqlite`), backed by automated Blake3/SHA-256 cryptographic subresource integrity in `rb.lock`, signed registry provenance, and Levenshtein typosquatting protection.
 
 ### Wave 2: Staged Tooling Spin-Up at Dogfooding Milestone (2 Repositories / 1 Paired Track)

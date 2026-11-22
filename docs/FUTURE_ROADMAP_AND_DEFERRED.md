@@ -2207,14 +2207,15 @@ For Redblue to be a world-class language, the **Hybrid Gradual Typing model** (m
 
 ---
 
-### 36.3 Open-Source MIT/Apache-2.0 Porting Engine ("Accelerated Bootstrap")
+### 36.3 Open-Source Porting Engine ("Accelerated Bootstrap via Historical Precedence")
 
 #### Feasibility & Industry Benchmark:
-Porting battle-tested open-source libraries (MIT, Apache-2.0, BSD-3-Clause) into pure Redblue is the fastest, safest method to bootstrap a rich, production-ready ecosystem:
-* **Pre-existing API Design**: Established libraries (e.g. `requests`, `express`, `lodash`, `numpy`, `zstd`, `pydantic`) have proven interfaces refined over decades.
-* **Pre-existing Test Suites**: Unit tests and edge cases can be transcribed directly into Redblue assertions (`expect A to be B`), ensuring 100% test adequacy from day one.
-* **No Shim / Pure Native Code**: All ported code must be synthesized in native Redblue syntax (`.rb`), guaranteeing portability across WASM, TUI, and kernel environments.
-
+**Go, Rust, and Zig bootstrapped their entire initial ecosystems by porting battle-tested C and Python libraries into pure native code.** Redblue follows this exact proven historical playbook to achieve unmatched package velocity and stability:
+* **Strict Porting Priority**: Autonomous package workers must **prioritize porting proven open-source packages** (MIT, Apache-2.0, BSD, ISC) over inventing custom algorithms from scratch.
+* **10x Acceleration Factor**: Porting battle-tested algorithms eliminates design paralysis, solves edge cases upfront, and allows creating packages exponentially faster.
+* **Pre-existing API Design**: Established libraries (e.g. `requests`, `express`, `lodash`, `numpy`, `date-fns`, `marked`) have battle-hardened interfaces refined over decades of real-world use.
+* **Pre-existing Test Suites**: Upstream unit tests and edge cases transcribe directly into Redblue assertions (`expect A to be B`), ensuring 100% test adequacy from day one.
+* **No Shim / Pure Native Code**: All ported code is written in 100% pure native Redblue syntax (`.rb`), guaranteeing portability across WASM, TUI, CLI, and kernel environments.
 #### Organization Strategy (Reusing the 10 Domain Orgs vs. Creating 10 New Orgs):
 * **Do NOT create 10 new organizations for porting**: Creating excess organizations triggers automated GitHub account suspension flags.
 * **In-Tree Domain Allocation**: Ported packages live naturally inside the existing 10 domain organizations:
