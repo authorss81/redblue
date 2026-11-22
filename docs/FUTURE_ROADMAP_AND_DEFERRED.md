@@ -2223,9 +2223,10 @@ For Redblue to be a world-class language, the **Hybrid Gradual Typing model** (m
   - Web/HTTP/API ports (e.g. Express/Axios algorithms) $	o$ `rb-pkg-web`
   - Database/Collection ports (e.g. SQLite parser, Lodash structures) $	o$ `rb-pkg-data`
   - System/Time/Process ports (e.g. Chrono, POSIX utils) $	o$ `rb-pkg-sys`
-* **200 Additional API Keys Pooling**:
-  - The 200 new API keys will be distributed across the existing 10 domain organizations (expanding each org from 20 keys to 40 keys).
-  - Enables **40 parallel workers per org** (400 concurrent workers total across the ecosystem), increasing synthesis throughput to ~5,000 packages per week.
+* **200 Additional API Keys Pooling & Strict 18 Worker Cap**:
+  - The 200 new API keys will be distributed across the existing 10 domain organizations (expanding each org's key ring pool).
+  - Strict runner cap: Enables up to **18 parallel AI workers per org** (180 concurrent AI workers total across the ecosystem, elastic to 360 with secondary key batches).
+  - **CI Reservation**: Exactly 2 runner slots per org (20 across the 10 domain orgs) are permanently reserved for nightly test sweeps (`nightly_sweep.yml`) and pull request test gates, guaranteeing that nightly regression testing and health checks are never queued or starved.
 
 #### Licensing & Attribution Compliance:
 Every ported package must adhere to open-source governance:
