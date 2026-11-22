@@ -230,11 +230,23 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
      5. Virtual File System (VFS), RAMFS, TarFS & SimpleFS.
      6. Userland shell (`init`, `sh`) & framebuffer desktop window manager.
    - **Verification**: Fully verified in headless CI via `qemu-system-x86_64` with automated serial console assertions.
-2. **Apps Track**: `authorss81/rb-apps` (practical apps incubator) + `authorss81/rb-apps-ops` (autonomous app release runner).
+2. **Apps & Production Backends Track (10 Domain Sectors)**: `rb-apps-org/apps` + `rb-apps-org/ops` (scalable across 10 specialized domain application sectors). Focuses on full-scale, working open-source applications and production servers ported natively into pure Redblue:
+   - **Sectors 1–4 (Backends & Infrastructure)**:
+     - `apps-web`: Production REST API frameworks & backends (Express / FastAPI ports).
+     - `apps-db`: In-memory caching & storage engines (Redis-compatible RESP server, embedded KV/SQLite ports).
+     - `apps-net`: Network infrastructure (HTTP/WebSocket reverse proxy, load balancer, API gateway).
+     - `apps-auth`: Identity & security microservices (JWT/OAuth2 auth daemon, encrypted vault).
+   - **Sectors 5–7 (Terminal & Desktop Power Tools)**:
+     - `apps-tui`: Terminal productivity tools (Terminal Git client like `lazygit`, terminal file manager like `yazi`).
+     - `apps-sys`: Real-time system & resource monitors (`htop` / `btop` ports).
+     - `apps-office`: Practical computation engines (Terminal/WASM spreadsheet with formula engine, vector canvas).
+   - **Sectors 8–10 (Developer, Media & Local AI)**:
+     - `apps-dev`: Developer tooling & generators (Static site generator like Hugo/Zola, markdown documentation IDE).
+     - `apps-media`: Creative workstations (Audio synthesizer/tracker, 2D canvas & pixel art editor).
+     - `apps-ai`: Local inference & workflow tools (Prompt studio, local vector search & RAG engine).
    - **Phase Slicing Strategy**:
-     - Standard utility apps (`sysmon`, `todo_cli`, `csv_inspector`, `pass_manager`, `api_tester`): **1 Phase per App** (delivers core logic, TUI/CLI interface, headless tests, and docs in ~90 minutes).
-     - Complex flagship apps (`spreadsheet`, `vector_canvas`, `markdown_ide`): Sliced into **2 to 3 staged phases** (Slice 1: Headless Core Engine & Data Model; Slice 2: Interface & Interaction Layer; Slice 3: I/O, File Persistence & End-to-End Verification).
-     - **Feature Granularity Rule**: Any individual complex feature within an app may be divided into its own standalone phase if needed to prevent context exhaustion or runner timeouts.
+     - Standard utility apps: **1 Phase per App** (~90 minutes).
+     - Complex production backends & flagship apps: **3 staged phases** (Slice 1: Headless Protocol & Data Model; Slice 2: Network & Concurrent I/O; Slice 3: CLI, Configuration & End-to-End Verification).
    - **Execution Models**: TUI (terminal box-drawing via Phase 132 `tui`), WebAssembly (zero-install in-browser), and standalone single-file executables via `rb bundle`.
 3. **Package Track**: `authorss81/rb-pkg` (package index & registry) + `authorss81/rb-pkg-ops` (package ingestion & crypto verification).
    - **Security & Ergonomics**: Human-friendly imports (`import sqlite`), backed by automated Blake3/SHA-256 cryptographic subresource integrity in `rb.lock`, signed registry provenance, and Levenshtein typosquatting protection.
