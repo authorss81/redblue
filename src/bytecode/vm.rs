@@ -3621,10 +3621,10 @@ impl BytecodeVm {
         self.start_list_call(frame, items, function, PendingListKind::Filter, None, 0)
     }
 
-    /// Starts `reduce(list, function)` or `reduce(list, function, start)`.
-    ///
-    /// Without a start value the first item is the accumulator and the fold
-    /// begins at the second; an empty list has no first item and is refused.
+    /// Starts `reduce(list, function)`, `reduce(list, function, start)` or
+    /// `reduce(list, start, function)`. Without a start value the first item is
+    /// the accumulator and the fold begins at the second; an empty list has no
+    /// first item and is refused.
     fn start_reduce(
         &mut self,
         frame: usize,

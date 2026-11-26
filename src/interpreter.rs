@@ -3195,7 +3195,8 @@ impl Vm {
         Ok(Value::list(kept))
     }
 
-    /// `reduce(list, function)` and `reduce(list, function, start)`.
+    /// `reduce(list, function)`, `reduce(list, function, start)` and the
+    /// equivalent `reduce(list, start, function)`.
     ///
     /// With a start value every item is folded onto it; without one the first
     /// item is the accumulator and the remaining items are folded. An empty list

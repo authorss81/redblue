@@ -417,14 +417,24 @@ pub fn list_function<'a>(operation: &str, args: &'a [Value]) -> Result<&'a Funct
 
 /// The function and optional start value a `reduce` call was given.
 ///
-/// `reduce(xs, f)` folds from the list's first item, and `reduce(xs, f, start)`
-/// folds from `start`. The two empty-list cases therefore differ: a start value
-/// answers itself, and no start value is a failure because there is no first
-/// item to fold from.
+/// `reduce(xs, f)` folds from the first item; a start value folds from that
+/// value, written `reduce(xs, f, start)` or `reduce(xs, start, f)`. Without a
+/// start value an empty list is refused because there is no first item. A
+/// function-valued start value is refused: with two functions after the list
+/// the two orders are the same shape, so there is no way to tell which one is
+/// the reducer.
 pub fn reduce_parts(args: &[Value]) -> Result<(&FunctionValue, Option<&Value>), String> {
     match args {
         [Value::Function(function)] => Ok((function, None)),
+        // Two functions after the list match both accepted orders, so the call
+        // cannot say which one folds and which one is the start value. Refuse
+        // it rather than silently treating one as the other's accumulator.
+        [Value::Function(_), Value::Function(_)] => Err(
+            "reduce cannot tell which of two functions is the reducer; a function cannot be the start value"
+                .to_string(),
+        ),
         [Value::Function(function), start] => Ok((function, Some(start))),
+        [start, Value::Function(function)] => Ok((function, Some(start))),
         [] => Err("reduce requires a function, but no argument was given".to_string()),
         [one] => Err(format!("reduce requires a function, but was given {one}")),
         many => Err(format!(
@@ -2528,7 +2538,7 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ),
     (
         "reduce",
-        "reduce(list, function) -> one value, folding from the first item\nreduce(list, function, start) -> one value, folding from start",
+        "reduce(list, function) -> one value, folding from the first item\nreduce(list, function, start) -> one value, folding from start\nreduce(list, start, function) -> the same call with the start value before the function",
     ),
     (
         "sort",
