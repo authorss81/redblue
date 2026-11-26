@@ -3024,4 +3024,228 @@ mod list_surface {
             "sort and reverse must answer new lists and leave the input unchanged"
         );
     }
+
+    #[test]
+    fn reduce_accepts_the_start_value_before_the_function() {
+        let value = both("reduce([1, 2, 3], 0, to (a, b) give back a + b end)");
+        assert_eq!(
+            value,
+            Value::Number(6.0),
+            "reduce(xs, init, f) must fold from the initial value"
+        );
+
+        // The order the language already documented still answers the same way.
+        let documented = both("reduce([1, 2, 3], to (a, b) give back a + b end, 0)");
+        assert_eq!(
+            documented,
+            Value::Number(6.0),
+            "reduce(xs, f, init) must keep answering after the second order is accepted"
+        );
+
+        // A singleton with a start value folds exactly once.
+        let singleton = both("reduce([5], 10, to (a, b) give back a + b end)");
+        assert_eq!(
+            singleton,
+            Value::Number(15.0),
+            "a singleton with a start value folds that one item onto the start"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_of_an_empty_list_answers_the_start() {
+        let value = both("reduce([], 10, to (a, b) give back a + b end)");
+        assert_eq!(
+            value,
+            Value::Number(10.0),
+            "an empty list with an initial value has that value as its answer"
+        );
+    }
+
+    #[test]
+    fn edge_filter_keeps_nothing_when_the_predicate_is_true_for_no_item() {
+        let value = both("filter([1, 2, 3], to (x) give back no end)");
+        assert_eq!(
+            value,
+            Value::list(Vec::new()),
+            "a predicate false for every item keeps an empty list, not the input"
+        );
+    }
+
+    #[test]
+    fn edge_filter_predicate_sees_nothing_and_text_items() {
+        let nothing = both("filter([nothing, 1, nothing], to (x) give back x is nothing end)");
+        assert_eq!(
+            nothing,
+            Value::list(vec![Value::Nothing, Value::Nothing]),
+            "a predicate that tests for nothing must be applied to nothing items"
+        );
+
+        let text = both(r#"filter(["a", "b", "a"], to (x) give back x is "a" end)"#);
+        assert_eq!(
+            text,
+            Value::list(vec![
+                Value::Text("a".to_string()),
+                Value::Text("a".to_string())
+            ]),
+            "a predicate that tests text must be applied to text items"
+        );
+    }
+
+    #[test]
+    fn edge_filter_propagates_a_failure_from_the_predicate() {
+        let source = "filter([1, 2], to (x) give back 1 / 0 end)";
+        assert!(
+            run_source_value(source).is_err(),
+            "a failing predicate must fail the whole filter call"
+        );
+        both_refuse(source, "Division by zero");
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_refuses_a_missing_function() {
+        both_refuse("reduce([1, 2], 0, 5)", "reduce requires a function");
+    }
+
+    #[test]
+    fn edge_uppercase_still_blames_arguments_it_cannot_use() {
+        // The generic argument message is correct for a builtin that really
+        // exists. Keeping it here makes sure this phase did not remove that
+        // refusal while making the higher-order names answer.
+        let error = run_source_value("uppercase(5)")
+            .expect_err("uppercase of a number must be refused")
+            .to_string();
+        assert!(
+            error.contains("uppercase was called with arguments it cannot use"),
+            "a real builtin given a wrong argument must still be refused by name: {error}"
+        );
+    }
+
+    #[test]
+    fn edge_completion_offers_exactly_the_registered_builtins_that_answer() {
+        let completer = redblue::repl::ReplCompleter::new();
+        let offered = completer.builtin_names();
+
+        for name in redblue::stdlib::BUILTIN_NAMES {
+            assert!(
+                offered.iter().any(|candidate| candidate == name),
+                "TAB does not offer `{name}`, a registered builtin, so completion and \
+                 the registry disagree"
+            );
+        }
+        for name in redblue::stdlib::GLOBAL_CONSTANTS {
+            assert!(
+                offered.iter().any(|candidate| candidate == name),
+                "TAB does not offer the global constant `{name}`"
+            );
+        }
+        for name in offered {
+            assert!(
+                redblue::stdlib::BUILTIN_NAMES.contains(&name.as_str())
+                    || redblue::stdlib::GLOBAL_CONSTANTS.contains(&name.as_str()),
+                "TAB offers `{name}`, which is neither a registered builtin nor a global \
+                 constant, so it suggests a name the language does not have"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_builtin_resolver_leaves_the_higher_order_list_names_to_the_engines() {
+        let span = redblue::Span::new(1, 1);
+        for name in ["map", "list_map", "filter", "reduce"] {
+            let answer = redblue::stdlib::builtin(span, name, &[]);
+            assert!(
+                matches!(answer, Ok(None)),
+                "`{name}` is answered by the higher-order driver, so the shared resolver \
+                 must leave it to the engines rather than blame the arguments: {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_builtin_resolver_still_blames_a_real_builtin_with_bad_arguments() {
+        let span = redblue::Span::new(1, 1);
+        let error = redblue::stdlib::builtin(span, "sqrt", &[Value::Text("nine".to_string())])
+            .expect_err("sqrt of text must be refused")
+            .to_string();
+        assert!(
+            error.contains("sqrt was called with arguments it cannot use"),
+            "a real builtin given a genuinely wrong argument must keep the argument \
+             refusal, not become Unknown function: {error}"
+        );
+    }
+
+    #[test]
+    fn edge_filter_and_reduce_definition_of_done_program_agrees_on_both_engines() {
+        assert_eq!(
+            both("filter([1, 2, 3], to (x) give back x > 1)"),
+            Value::list(vec![Value::Number(2.0), Value::Number(3.0)]),
+            "filter(xs, f) must keep only the items the predicate accepts"
+        );
+        assert_eq!(
+            both("reduce([1, 2, 3], 0, to (a, b) give back a + b end)"),
+            Value::Number(6.0),
+            "reduce(xs, init, f) must fold from the initial value on both engines"
+        );
+    }
+
+    #[test]
+    fn edge_higher_order_names_with_arguments_are_left_to_the_engines() {
+        let span = redblue::Span::new(1, 1);
+        let items = Value::list(vec![Value::Number(1.0)]);
+        let args = std::slice::from_ref(&items);
+        for name in ["map", "list_map", "filter", "reduce"] {
+            let answer = redblue::stdlib::builtin(span, name, args);
+            assert!(
+                matches!(answer, Ok(None)),
+                "`{name}` given a list must still be left to the engine's higher-order \
+                 driver, not refused as bad arguments: {answer:?}"
+            );
+            assert!(
+                redblue::stdlib::is_builtin(name),
+                "`{name}` must stay registered even though the shared resolver leaves it \
+                 to the engines"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_reduce_with_a_function_start_keeps_the_documented_reducer_first_order() {
+        // The original `reduce(xs, f, start)` order still accepts a function as
+        // the start value: with two functions after the list the first is the
+        // reducer and the second is the seed. Reading them the other way would
+        // call the one-argument seed as a two-argument reducer and fail.
+        let value = both("reduce([1, 2], to (a, b) give back b end, to (x) give back x end)");
+        assert_eq!(
+            value,
+            Value::Number(2.0),
+            "a function start value must be read in the documented reducer-first order, \
+             so `reduce(xs, f, start)` keeps answering"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_with_a_function_start_propagates_a_reducer_failure() {
+        // The reducer-first reading of a function seed must not swallow a
+        // failure from the reducer: the whole call still refuses by name.
+        let source = "reduce([1, 2], to (a, b) give back 1 / 0 end, to (x) give back x end)";
+        assert!(
+            run_source_value(source).is_err(),
+            "a failing reducer must fail the whole call even when the start value is a function"
+        );
+        both_refuse(source, "Division by zero");
+    }
+
+    #[test]
+    fn edge_filter_of_a_singleton_list_keeps_or_drops_the_only_item() {
+        assert_eq!(
+            both("filter([7], to (x) give back x is 7 end)"),
+            Value::list(vec![Value::Number(7.0)]),
+            "a singleton kept by the predicate must answer the one-item list"
+        );
+        assert_eq!(
+            both("filter([7], to (x) give back x is 8 end)"),
+            Value::list(vec![]),
+            "a singleton rejected by the predicate must answer an empty list"
+        );
+    }
 }

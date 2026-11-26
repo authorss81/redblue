@@ -1589,7 +1589,7 @@ set indexed to list.enumerate(["a", "b"])                              // [[0, a
 ```
 
 `map`, `filter` and `reduce` are higher-order builtins, and each is a member
-of `list`. `sort(xs)` orders a homogeneous list ascending when its items are
+of `list`; the flat `filter(xs, f)` and `reduce(xs, f[, start])` answer the same way. `sort(xs)` orders a homogeneous list ascending when its items are
 numbers, text, `yes`/`no` values, decimals, dates, or durations; a homogeneous
 list of any other kind is refused. `sort(xs, field)` orders records by one
 field; `sort` is stable and refuses a list that mixes kinds. `reverse(xs)` answers the list backwards, and
@@ -1600,7 +1600,7 @@ field; `sort` is stable and refuses a list that mixes kinds. `reverse(xs)` answe
 § text writes it for a text; `list.sort`, `list.reverse`, `list.filter`,
 `list.reduce`, `list.zip` and `list.enumerate` are the dotted spellings of those
 builtins. `reduce(xs, f, start)` folds from `start`, so an empty list answers
-`start`.
+`start`; `reduce(xs, start, f)` is the same call with the start value before the function. When the start value is itself a function the two orders have the same shape, so the reducer comes first: `reduce(xs, f, start)` with `f` the reducer and `start` the function seed.
 
 The third spelling takes its receiver **literally**. A dotted call resolves its
 receiver against modules and objects first, so a module or object named `xs`

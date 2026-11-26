@@ -40,11 +40,11 @@ components it would consume, with the reason each is or is not reusable.
 | Chunk, block, instruction and constant types | `src/bytecode/format.rs:244` (`Chunk`), `src/bytecode/format.rs:222` (`Block`), `src/bytecode/format.rs:158` (`Instruction`), `src/bytecode/format.rs:111` (`Constant`) | **Yes.** This is the in-memory IR a backend would translate. |
 | Encoder and decoder | `src/bytecode/format.rs:290` (`encode`), `src/bytecode/format.rs:308` (`decode`), version at `src/bytecode/format.rs:81` | **Yes, but should be left alone for the first backend.** The decoder is strict about the version and refuses anything it does not know. |
 | Disassembler | `src/bytecode/disasm.rs:102` (`render`), `src/bytecode/disasm.rs:35` (`render_compact`) | **Yes.** It is a pure function of a chunk and is useful for differential testing the backend's input. |
-| Bytecode VM | `src/bytecode/vm.rs:741` (`BytecodeVm`), `src/bytecode/vm.rs:1163` (`run`), `src/bytecode/vm.rs:3792` (`call_function`) | **Yes as the semantic oracle, not as the code generator.** The native backend must agree with it instruction for instruction and error for error. |
+| Bytecode VM | `src/bytecode/vm.rs:741` (`BytecodeVm`), `src/bytecode/vm.rs:1163` (`run`), `src/bytecode/vm.rs:3794` (`call_function`) | **Yes as the semantic oracle, not as the code generator.** The native backend must agree with it instruction for instruction and error for error. |
 | Tree-walking VM | `src/interpreter.rs:371` (`Vm`), `src/interpreter.rs:1799` (`run`), `src/interpreter.rs:1890` (captured locals) | **Yes as the second oracle.** It is the language's reference behaviour. |
 | Runtime operations | `src/runtime.rs:368` (`binary_op`), `src/runtime.rs:315` (`index`), `src/runtime.rs:256` (`property`), `src/runtime.rs:3420` (`builtin`) | **Partly.** Native code can call these through a runtime ABI, but calling one per operation is the slow path the backend is supposed to remove. |
 | Value model | `src/value.rs:387` (`Value`), `src/value.rs:21` (`Fields`), `src/value.rs:37` (`Captured`), `src/value.rs:48` (`FunctionBody`), `src/value.rs:85` (`FunctionValue`), `src/value.rs:470` (`Shared<T> = Arc<T>`) | **Only with a runtime contract.** Dynamic tags, `f64` numbers, shared lists/records, captured scope maps and function bodies all need a native representation or a call into Rust. |
-| Standard library | `src/stdlib.rs:520` (`builtins`) | **Yes through the same runtime boundary.** Reimplementing it in native code would duplicate behaviour and drift. |
+| Standard library | `src/stdlib.rs:527` (`builtins`) | **Yes through the same runtime boundary.** Reimplementing it in native code would duplicate behaviour and drift. |
 | Self-hosted compiler and fixed point | `docs/BOOTSTRAP.md:16` (S3), `docs/BOOTSTRAP.md:17` (S4) | **Yes as the acceptance corpus.** A native backend that runs `stage1.rbc` must still produce the same `stage2.rbc` bytes. |
 | CLI commands | `src/lib.rs:331` (`compile`), `src/lib.rs:337` (`dis`), `src/lib.rs:343` (`vm`), `src/lib.rs:608` (`compile_command`), `src/lib.rs:622` (`dis_command`), `src/lib.rs:641` (`vm_command`) | **Yes as the dispatch points** for a new backend command. They do not need to change for a prototype. |
 
@@ -76,7 +76,7 @@ A realistic first backend has this pipeline:
 5. **Define a runtime ABI.** Allocation of lists, records and text; `Arc`
    retain/release or an equivalent; function values and captured scopes;
    exceptions/failure unwinding; the step, iteration and call-depth budgets;
-   and every builtin in `src/stdlib.rs:520`.
+   and every builtin in `src/stdlib.rs:527`.
 6. **Preserve observable semantics.** Same output, same error kind, same message,
    same line number, same step-budget point, same catchability, same record order,
    same Unicode handling.
@@ -135,7 +135,7 @@ control-flow bugs will live.
 
 Arithmetic, indexing, property access and builtins live in Rust
 (`src/runtime.rs:368`, `src/runtime.rs:315`, `src/runtime.rs:256`, `src/runtime.rs:3420`), and the standard library is a
-large `HashMap` of builtins (`src/stdlib.rs:520`). A native program cannot call
+large `HashMap` of builtins (`src/stdlib.rs:527`). A native program cannot call
 those functions directly without an ABI: argument passing, ownership, error
 representation, panic boundaries, and the thread or stack on which the runtime
 runs all have to be specified.
@@ -298,7 +298,7 @@ Reasoning that bounds the range:
   programs can see no gain or a regression. The benchmark suite includes small
   workloads (`BENCH.md`), so the reported speedup must say which workload it is.
 - **I/O and builtins do not move.** `files`, `network`, JSON/CSV, time and the
-  other builtins (`src/stdlib.rs:520`) are already Rust. Their time is outside
+  other builtins (`src/stdlib.rs:527`) are already Rust. Their time is outside
   the code generator. Native compilation cannot make `network.get` faster.
 
 So: expect a clear win on `fibonacci`, `primes` and tight numeric loops after
@@ -328,7 +328,7 @@ with unboxing and shape feedback, not about the first backend.
   bindings for numeric, native and security-sensitive work. A backend does not
   create a tensor library, an HTTP stack, a regex engine or a package ecosystem.
 - **I/O, network and builtin-bound work.** Those costs are already in Rust
-  (`src/stdlib.rs:520`) and do not become faster because the caller is native.
+  (`src/stdlib.rs:527`) and do not become faster because the caller is native.
 - **Correctness, diagnostics, formatting, linting and the LSP.** A backend is an
   execution engine, not a fix for parser, analyzer, tooling or specification
   defects.
