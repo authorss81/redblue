@@ -251,9 +251,12 @@ When Phase 126 lands on `main`, the ecosystem expands beyond the core compiler i
 3. **Package Track**: `authorss81/rb-pkg` (package index & registry) + `authorss81/rb-pkg-ops` (package ingestion & crypto verification).
    - **Bootstrap & Velocity Philosophy**: Go, Rust, and Zig bootstrapped their entire ecosystems by porting battle-tested C, Python, and JavaScript/TypeScript libraries into pure native code. Autonomous package workers must **strictly prioritize porting proven open-source packages** (MIT, Apache-2.0, BSD, ISC) over inventing algorithms from scratch. This guarantees 10× faster package generation, rock-solid production reliability, immediate API familiarity, and verified test parity.
    - **Security & Ergonomics**: Human-friendly imports (`import sqlite`), backed by automated Blake3/SHA-256 cryptographic subresource integrity in `rb.lock`, signed registry provenance, and Levenshtein typosquatting protection.
+4. **Formal Math & Proof Track**: `rb-lean/rean` (Lean 4 $\leftrightarrow$ Redblue Plain-English Mathematical Bridge) + `rb-lean/reanops` (autonomous pipeline cloned from `rb-pkg-ops`).
+   - **Scope & Architecture**: Preserves 100% mathematical soundness by using Lean 4's verified kernel as the source of truth while providing a deterministic AST & InfoTree-to-Plain-English Redblue translator (`Rean`). Allows non-technical mathematicians to read theorem statements and goal-state deductions in unambiguous natural English, and audit formalization fidelity.
+   - **Spin-Up Action at Phase 126**: Push initial repository scaffolds to the `rb-lean` organization (`rb-lean/rean` + `rb-lean/reanops`) and copy the full `ops-core` engine, workflows, and 18-worker concurrency setup from `rb-pkg-ops`.
 
 ### Wave 2: Staged Tooling Spin-Up at Dogfooding Milestone (2 Repositories / 1 Paired Track)
-4. **Tooling & IDE Track**: `authorss81/rb-ide` + `authorss81/rb-ide-ops`
+5. **Tooling & IDE Track**: `authorss81/rb-ide` + `authorss81/rb-ide-ops`
    - **Scope**: Dedicated Language Server Protocol (`rb lsp` daemon & JSON-RPC transport), VS Code extension backend, Debug Adapter Protocol (DAP), code formatting protocol (`rb format`), linter integration (`rb lint`), syntax highlighting grammars (TextMate / Tree-sitter), and editor integrations (VS Code, Neovim, JetBrains).
    - **Spin-Up Timing**: Initiated at **Milestone 1.5** (midway, once `rb-pkg` establishes the package manifest schema and `rb-apps` ships its first 3 dogfooding apps, or at Core Phase 135), decoupling editor server maintenance completely from compiler core development.
 
