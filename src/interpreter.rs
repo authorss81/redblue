@@ -3201,6 +3201,9 @@ impl Vm {
     /// With a start value every item is folded onto it; without one the first
     /// item is the accumulator and the remaining items are folded. An empty list
     /// without a start value has nothing to fold from and is refused by name.
+    /// When the start value is itself a function the two orders have the same
+    /// shape, so the documented reducer-first order wins: the first function is
+    /// the reducer and the second is the start value.
     fn reduce_builtin(&mut self, args: &[Value]) -> Result<Value> {
         let [Value::List(items), rest @ ..] = args else {
             return Err(Error::Runtime(

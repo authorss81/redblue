@@ -419,20 +419,17 @@ pub fn list_function<'a>(operation: &str, args: &'a [Value]) -> Result<&'a Funct
 ///
 /// `reduce(xs, f)` folds from the first item; a start value folds from that
 /// value, written `reduce(xs, f, start)` or `reduce(xs, start, f)`. Without a
-/// start value an empty list is refused because there is no first item. A
-/// function-valued start value is refused: with two functions after the list
-/// the two orders are the same shape, so there is no way to tell which one is
-/// the reducer.
+/// start value an empty list is refused because there is no first item. When
+/// the start value is itself a function the two orders have the same shape, so
+/// the documented reducer-first order wins: the first function is the reducer
+/// and the second is the start value. That keeps `reduce(xs, f, start)`
+/// answering for every kind of start value, including a function seed.
 pub fn reduce_parts(args: &[Value]) -> Result<(&FunctionValue, Option<&Value>), String> {
     match args {
         [Value::Function(function)] => Ok((function, None)),
-        // Two functions after the list match both accepted orders, so the call
-        // cannot say which one folds and which one is the start value. Refuse
-        // it rather than silently treating one as the other's accumulator.
-        [Value::Function(_), Value::Function(_)] => Err(
-            "reduce cannot tell which of two functions is the reducer; a function cannot be the start value"
-                .to_string(),
-        ),
+        // This arm also matches two functions. The documented `reduce(xs, f,
+        // start)` order takes precedence there, so a function-valued start is
+        // read as the accumulator rather than refused.
         [Value::Function(function), start] => Ok((function, Some(start))),
         [start, Value::Function(function)] => Ok((function, Some(start))),
         [] => Err("reduce requires a function, but no argument was given".to_string()),
@@ -1213,7 +1210,10 @@ pub fn builtin_function(name: &str, args: Vec<Value>) -> Option<Value> {
 /// carry on to user functions and finally to `Unknown function`. A builtin that
 /// *ran* and refused is `Err`, and it is never downgraded to "no such name":
 /// `files.read` given a number it cannot read has to say so rather than claim
-/// the function does not exist.
+/// the function does not exist. The higher-order list names (`map`, `filter`,
+/// `reduce`) are also `Ok(None)`: both engines answer them before reaching this
+/// resolver, so refusing them here would blame the caller's arguments for a
+/// call that works.
 pub fn builtin(
     span: crate::error::Span,
     name: &str,
@@ -1247,6 +1247,12 @@ pub fn builtin(
             span,
         )),
         Some(value) => Ok(Some(value)),
+        // The higher-order list calls are registered builtins whose driver lives
+        // in the engines, not in `builtin_function`. Handing them back as "no
+        // builtin of that name" lets the engine answer them; the argument
+        // refusal below is for a builtin that exists and really cannot use what
+        // it was given.
+        None if list_operation(name).is_some() => Ok(None),
         // A builtin that recognised itself and could not use the arguments is
         // also an error by name. `Unknown function` is the message for a name
         // nothing implements, and applying it to a name the language documents

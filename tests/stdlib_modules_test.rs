@@ -3187,4 +3187,65 @@ mod list_surface {
             "reduce(xs, init, f) must fold from the initial value on both engines"
         );
     }
+
+    #[test]
+    fn edge_higher_order_names_with_arguments_are_left_to_the_engines() {
+        let span = redblue::Span::new(1, 1);
+        let items = Value::list(vec![Value::Number(1.0)]);
+        let args = std::slice::from_ref(&items);
+        for name in ["map", "list_map", "filter", "reduce"] {
+            let answer = redblue::stdlib::builtin(span, name, args);
+            assert!(
+                matches!(answer, Ok(None)),
+                "`{name}` given a list must still be left to the engine's higher-order \
+                 driver, not refused as bad arguments: {answer:?}"
+            );
+            assert!(
+                redblue::stdlib::is_builtin(name),
+                "`{name}` must stay registered even though the shared resolver leaves it \
+                 to the engines"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_reduce_with_a_function_start_keeps_the_documented_reducer_first_order() {
+        // The original `reduce(xs, f, start)` order still accepts a function as
+        // the start value: with two functions after the list the first is the
+        // reducer and the second is the seed. Reading them the other way would
+        // call the one-argument seed as a two-argument reducer and fail.
+        let value = both("reduce([1, 2], to (a, b) give back b end, to (x) give back x end)");
+        assert_eq!(
+            value,
+            Value::Number(2.0),
+            "a function start value must be read in the documented reducer-first order, \
+             so `reduce(xs, f, start)` keeps answering"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_with_a_function_start_propagates_a_reducer_failure() {
+        // The reducer-first reading of a function seed must not swallow a
+        // failure from the reducer: the whole call still refuses by name.
+        let source = "reduce([1, 2], to (a, b) give back 1 / 0 end, to (x) give back x end)";
+        assert!(
+            run_source_value(source).is_err(),
+            "a failing reducer must fail the whole call even when the start value is a function"
+        );
+        both_refuse(source, "Division by zero");
+    }
+
+    #[test]
+    fn edge_filter_of_a_singleton_list_keeps_or_drops_the_only_item() {
+        assert_eq!(
+            both("filter([7], to (x) give back x is 7 end)"),
+            Value::list(vec![Value::Number(7.0)]),
+            "a singleton kept by the predicate must answer the one-item list"
+        );
+        assert_eq!(
+            both("filter([7], to (x) give back x is 8 end)"),
+            Value::list(vec![]),
+            "a singleton rejected by the predicate must answer an empty list"
+        );
+    }
 }

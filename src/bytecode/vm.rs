@@ -3624,7 +3624,9 @@ impl BytecodeVm {
     /// Starts `reduce(list, function)`, `reduce(list, function, start)` or
     /// `reduce(list, start, function)`. Without a start value the first item is
     /// the accumulator and the fold begins at the second; an empty list has no
-    /// first item and is refused.
+    /// first item and is refused. When the start value is itself a function the
+    /// two orders have the same shape, so the documented reducer-first order
+    /// wins: the first function is the reducer and the second is the start.
     fn start_reduce(
         &mut self,
         frame: usize,

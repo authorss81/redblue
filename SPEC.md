@@ -1600,7 +1600,7 @@ field; `sort` is stable and refuses a list that mixes kinds. `reverse(xs)` answe
 § text writes it for a text; `list.sort`, `list.reverse`, `list.filter`,
 `list.reduce`, `list.zip` and `list.enumerate` are the dotted spellings of those
 builtins. `reduce(xs, f, start)` folds from `start`, so an empty list answers
-`start`; `reduce(xs, start, f)` is the same call with the start value before the function.
+`start`; `reduce(xs, start, f)` is the same call with the start value before the function. When the start value is itself a function the two orders have the same shape, so the reducer comes first: `reduce(xs, f, start)` with `f` the reducer and `start` the function seed.
 
 The third spelling takes its receiver **literally**. A dotted call resolves its
 receiver against modules and objects first, so a module or object named `xs`
