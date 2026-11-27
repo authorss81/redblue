@@ -43,7 +43,7 @@ Redblue is a programming language designed to be as readable as plain English.
 say "Hello, World!"
 
 set name to "World"
-if name is "World"
+if name is "World" then
     say "Hello, {name}!"
 end
 
@@ -140,7 +140,7 @@ set rounded to math.round(3.7)
 ```redblue
 set content to files.read("data.txt")
 files.write("output.txt", "Hello!")
-if files.exists("config.txt")
+if files.exists("config.txt") then
     say "Config found"
 end
 ```

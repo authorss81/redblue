@@ -314,25 +314,25 @@ an ordinary `0` in every other respect, so it is an ordinary zero divisor:
 
 ```redblue
 // Text comparison
-if name is "Alice"
-if x is greater than 10
-if x is less than or equal to 100
+if name is "Alice" then
+if x is greater than 10 then
+if x is less than or equal to 100 then
 
 // Alternative operators
-if x > 10          // is greater than
-if x >= 10         // is greater than or equal to
-if x < 10          // is less than
-if x <= 10         // is less than or equal to
-if x == 10         // is equal to
-if x != 10         // is not
+if x > 10 then     // is greater than
+if x >= 10 then    // is greater than or equal to
+if x < 10 then     // is less than
+if x <= 10 then    // is less than or equal to
+if x == 10 then    // is equal to
+if x != 10 then    // is not
 ```
 
 ### Logical
 
 ```redblue
-if x is greater than 0 and x is less than 100
-if status is "active" or status is "pending"
-if not is_empty
+if x is greater than 0 and x is less than 100 then
+if status is "active" or status is "pending" then
+if not is_empty then
 ```
 
 ### String Interpolation
@@ -372,7 +372,7 @@ set count to length of items
 set same to length(items)
 
 // Contains
-if "hello" is in words
+if "hello" is in words then
 ```
 
 `items at N` and `items[N]` are one indexing operation written two ways, and
@@ -440,7 +440,16 @@ the chain, and the whole chain shares one `end`. Written on the following line,
 the `if` is an ordinary nested `if` in the `else` body, so it needs its own
 `end` before the outer one.
 
+`then` is required on both the `if` and the `unless` header. It is the word the
+parser reads to know where the condition ends and the body begins; leaving it
+out is a `ParserError: Expected 'then'`, not an accepted shorthand.
+
 ### When (Pattern Matching)
+
+Not implemented. `when` is an ordinary identifier, not a keyword, so the form
+below is not part of the language and does not parse. It is recorded here only
+so the intended shape is written down; docs/GRAMMAR.md § 4.3 carries the same
+note.
 
 ```redblue
 when value
@@ -453,7 +462,7 @@ end
 ### Unless
 
 ```redblue
-unless is_valid
+unless is_valid then
     say "Invalid!"
 end
 ```
@@ -524,14 +533,14 @@ until x > 10
 
 ```redblue
 for each item in items
-    if item is nothing
+    if item is nothing then
         skip
     end
     process item
 end
 
 for each i from 1 to 100
-    if i is 50
+    if i is 50 then
         break
     end
     say i
@@ -618,7 +627,7 @@ to add(a, b)
 end
 
 to max(a, b)
-    if a > b
+    if a > b then
         give back a
     else
         give back b
@@ -1013,7 +1022,7 @@ end
 
 ```redblue
 set result to might fail network.get("https://example.com")
-if result is nothing
+if result is nothing then
     say "the network call failed"
 end
 ```
@@ -1025,7 +1034,7 @@ try
     set file to might fail files.open("data.rb")
     process file
 finally
-    if file is not nothing
+    if file is not nothing then
         might fail files.close(file)
     end
 end
@@ -1096,7 +1105,7 @@ the program carries on where it would otherwise have stopped:
 
 ```redblue
 set config to might fail files.read("config.rb")
-if config is nothing
+if config is nothing then
     say "using defaults"
 end
 ```
@@ -1522,7 +1531,7 @@ set lines to files.lines("data.rb")  // one entry per line
 files.copy("data.rb", "copy.rb")
 files.rename("copy.rb", "moved.rb")
 files.delete("moved.rb")
-if files.exists("config.rb")
+if files.exists("config.rb") then
     // ...
 end
 ```
