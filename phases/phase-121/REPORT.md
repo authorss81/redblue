@@ -24,20 +24,26 @@ did still fail, because `reduce_parts` accepted only `reduce(xs, f)` and
 | File | Lines | What |
 |---|---|---|
 | `src/stdlib.rs` | +5 −5 | `reduce_parts` accepts `[start, Function]` as the same call as `[Function, start]`; two functions after the list keep the documented reducer-first order (`[Function, start]`), so a function seed still works; the doc comment names both orders |
-| `src/stdlib.rs` | +6 −0 | `stdlib::builtin` now returns `Ok(None)` for a higher-order list name (`map`, `list_map`, `filter`, `reduce`) that `builtin_function` does not answer, so the shared resolver never blames the caller's arguments for a name the engines answer. The doc comment says why |
-| `src/interpreter.rs` | +2 −1 | `reduce_builtin`'s doc names the two equivalent orders and the reducer-first reading of a function seed |
-| `src/bytecode/vm.rs` | +4 −4 | `start_reduce`'s doc names the two equivalent orders and the reducer-first reading of a function seed |
-| `src/bytecode/format.rs` | +2 −2 | the pinned `NATIVE.md` citations for `builtins` and `call_function` move to the lines they now occupy |
-| `NATIVE.md` | +5 −5 | re-anchors every `src/stdlib.rs:520` `builtins` citation to `:527` and the `src/bytecode/vm.rs` `call_function` citation to the line it now occupies |
+| `src/stdlib.rs` | +6 −0 | `stdlib::builtin` returns `Ok(None)` for a higher-order list name (`map`, `list_map`, `filter`, `reduce`) that `builtin_function` does not answer, so the shared resolver never blames the caller's arguments for a name the engines answer. The guard is on the production path: both engines call this resolver first and dispatch the higher-order driver only after it returns `Ok(None)`. The doc comment says why |
+| `src/interpreter.rs` | +10 −8 | the higher-order driver runs after `stdlib::builtin` returns `Ok(None)`, so the resolver is the single dispatch point; `reduce_builtin`'s doc names the two equivalent orders and the reducer-first reading of a function seed |
+| `src/bytecode/vm.rs` | +14 −12 | same ordering: the VM asks `stdlib::builtin` first and starts the higher-order driver after it returns `Ok(None)`; `start_reduce`'s doc names the two equivalent orders and the reducer-first reading of a function seed |
+| `src/bytecode/format.rs` | +2 −2 | the pinned `NATIVE.md` citations for `builtins` and `call_function` move to the lines they now occupy (`call_function` is now `vm.rs:3796`) |
+| `NATIVE.md` | +5 −5 | re-anchors every `src/stdlib.rs:520` `builtins` citation to `:527` and the `src/bytecode/vm.rs` `call_function` citation to `:3796` |
 | `SURVEY.md` | +1 −1 | re-anchors the `regex_builtin` citation from `:1870` to `:1867` after the `reduce_parts` and resolver guard edits shifted the line |
 | `SPEC.md` | +2 −2 | § list says the flat `filter(xs, f)` and `reduce(xs, f[, start])` answer like their dotted spellings, that `reduce(xs, start, f)` is the same call with the start value first, and that a function start keeps the reducer-first order |
+| `src/stdlib.rs` | +117 −0 | a `#[cfg(test)]` module pins the source rule directly: both `reduce_parts` orders, the reducer-first reading of two functions, the named refusal of a call with no function, both spellings in `list_operation`, and the resolver guard |
 | `tests/stdlib_modules_test.rs` | +163 −0 | the previous attempt's eight `mod list_surface` tests, kept |
 | `tests/stdlib_modules_test.rs` | +61 −0 | four new tests this run: the resolver guard with real arguments, the function-seed reducer-first regression, the function-seed reducer-failure propagation, and the singleton `filter` boundary |
+| `tests/stdlib_modules_test.rs` | +52 −0 | four more integration tests this run: a text start, a record start, a singleton that calls the reducer exactly once, and a non-list receiver refusal |
+| `tests/stdlib_modules_test.rs` | +38 −0 | a review-round engine test that runs `map`, `filter`, `reduce`, `list_map`, `list.filter` and `list.reduce` through both engines, so removing the resolver guard fails at the engine boundary, not only in the resolver's unit test |
 
 `filter` and `reduce` themselves are unchanged: phase-077 already gave them a
 driver on both engines. This phase adds the start-before-function form of
 `reduce`, the resolver guard that stops a registered higher-order name being
-refused as bad arguments, and the tests that hold the whole surface.
+refused as bad arguments, and the tests that hold the whole surface. The
+resolver is the single dispatch point: both engines ask it first, it answers
+`Ok(None)` for the higher-order names, and the driver runs after, so the guard
+is on the reachable path rather than beside it.
 
 ### Resumed work and the merge conflict
 
@@ -48,6 +54,37 @@ kept is the accurate one for that commit (`+788/-27`, 6 files, `+545/-27` under
 `src/`), so the acknowledgement list and `main`'s history agree. There is no
 net change to that file against `HEAD`, which is why it is absent from the
 table above. The four gates were then re-run from scratch on the resolved tree.
+
+### Second continuation
+
+The phase's substantive change had already been committed as `5ba9fdb`, so
+`verify.sh` (which reads the diff against `HEAD`) saw no working-tree changes
+and failed the diff, `must_touch` and test-policy checks even though the code
+was correct. This run added working-tree coverage on top of that commit: the
+six `#[cfg(test)]` unit tests in `src/stdlib.rs` pin the source rule directly,
+and the four integration tests in `tests/stdlib_modules_test.rs` cover a text
+start, a record start, the singleton call count and a non-list receiver. No
+production behaviour was changed by this continuation; the implementation it
+exercises is the one in `5ba9fdb`.
+
+### Review round 1
+
+Two findings were fixed without weakening a gate or deleting a test.
+
+- The resolver guard is now reachable. Both engines previously intercepted
+  `list_operation` before calling `stdlib::builtin`, so the `Ok(None)` guard
+  could never run in production. The interception now happens after the
+  resolver returns `Ok(None)`, making `stdlib::builtin` the single dispatch
+  point. A new engine-level test
+  (`edge_higher_order_names_answer_on_both_engines_without_an_argument_refusal`)
+  runs every higher-order spelling through both engines; removing the guard
+  turns those calls into `arguments it cannot use` failures.
+- The two weak `is_err()` assertions now pin the named refusals:
+  `edge_reduce_parts_refuses_a_call_with_no_function` asserts the exact
+  `reduce requires a function and an optional start value, but was given 2
+  arguments` text, and
+  `edge_builtin_resolver_still_refuses_a_real_builtin_with_bad_arguments`
+  asserts `uppercase was called with arguments it cannot use`.
 
 ## Names written or removed
 
@@ -81,6 +118,17 @@ class" and the diff matches those two. `FINDINGS.md` records the discrepancy.
 | `edge_builtin_resolver_leaves_the_higher_order_list_names_to_the_engines` | type/ownership boundary — `map`, `list_map`, `filter`, `reduce` are not refused by the shared resolver |
 | `edge_builtin_resolver_still_blames_a_real_builtin_with_bad_arguments` | asserts a failure is produced — `sqrt` of text keeps the argument refusal |
 | `edge_filter_and_reduce_definition_of_done_program_agrees_on_both_engines` | boundary — the phase's exact `filter`/`reduce` program on both engines |
+| `edge_reduce_start_before_function_accepts_a_text_start` | type boundary — a text start value folds on both engines |
+| `edge_reduce_start_before_function_accepts_a_record_start` | nesting/record — a record start value folds into its field on both engines |
+| `edge_reduce_start_before_function_with_a_singleton_calls_the_reducer_once` | singleton — a one-item list with a start calls the reducer exactly once |
+| `edge_reduce_start_before_function_refuses_a_non_list_receiver` | asserts a failure is produced — a non-list receiver is refused by name |
+| `edge_reduce_parts_accepts_the_start_value_before_the_function` | boundary — `reduce_parts` returns the function as reducer and the value before it as start |
+| `edge_reduce_parts_keeps_the_documented_order_when_both_are_functions` | function seed / regression — two functions keep the reducer-first order |
+| `edge_reduce_parts_refuses_a_call_with_no_function` | asserts the exact named refusal — `reduce requires a function and an optional start value, but was given 2 arguments` |
+| `edge_list_operation_names_both_spellings` | boundary — flat and module spellings reach the same driver; a plain builtin does not |
+| `edge_builtin_resolver_leaves_higher_order_names_to_the_engines` | type/ownership boundary — all six higher-order spellings return `Ok(None)` |
+| `edge_builtin_resolver_still_refuses_a_real_builtin_with_bad_arguments` | asserts the exact named refusal — `uppercase(5)` answers `uppercase was called with arguments it cannot use` |
+| `edge_higher_order_names_answer_on_both_engines_without_an_argument_refusal` | engine boundary — all six higher-order spellings answer on both engines; fails if the resolver guard is removed |
 
 Existing coverage also runs every registered builtin through a real program:
 `edge_no_registered_builtin_is_unreachable_from_a_program` in
@@ -101,7 +149,7 @@ asserted byte-for-byte agreement between the two engines.
 | numeric_boundary | N/A — no arithmetic, comparison, or float formatting changed |
 | unicode | N/A — text is passed through untouched; no encoding or splitting changed |
 | nesting_recursion | covered by pre-existing `edge_nested_higher_order_calls_answer_identically_on_both_engines` |
-| duplicate_missing_keys | N/A — no records or maps involved |
+| duplicate_missing_keys | covered — a record start value is now folded in `edge_reduce_start_before_function_accepts_a_record_start`; the change itself adds no key lookup |
 | malformed_input | covered — a `reduce` with no function after the start value is refused |
 | resource_limit | N/A — no new allocation, recursion, or unbounded loop |
 
@@ -111,9 +159,9 @@ asserted byte-for-byte agreement between the two engines.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test` | 3294 passed, 0 failed |
-| `cargo test --all-targets` | 3294 passed, 0 failed |
-| `../rbops/verify.sh phase-121` | pass |
+| `cargo test` | 3307 passed, 0 failed |
+| `cargo test --all-targets` | 3305 passed, 0 failed |
+| `../rbops/verify.sh phase-121` | pass (`VERIFY PASS — phase-121`) |
 
 ## Invariants touched
 

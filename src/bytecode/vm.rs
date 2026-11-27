@@ -3397,11 +3397,20 @@ impl BytecodeVm {
             return Ok(());
         }
         // The higher-order list calls have to *call* a Redblue function, which
-        // the shared resolver cannot do, so they are answered here and started
-        // on the frame — asked for before the resolver, which would otherwise
-        // claim the name and refuse it as one it cannot use. The tree-walking
-        // VM asks the same `stdlib::list_operation` before its own call into
-        // `stdlib::builtin`; see [`crate::interpreter::Vm::call`].
+        // the shared resolver cannot do. The resolver answers `Ok(None)` for
+        // them (see `stdlib::builtin`), so they are answered after it returns,
+        // which keeps a registered name from being refused as one it cannot
+        // use on the way to its driver. The tree-walking VM asks the same
+        // `stdlib::list_operation` after its own call into `stdlib::builtin`;
+        // see [`crate::interpreter::Vm::call`].
+        //
+        // The same single resolver the tree-walker uses, so the two engines
+        // cannot disagree about which names exist. See `stdlib::builtin`.
+        if let Some(value) = crate::stdlib::builtin(self.span(), name, args)? {
+            self.push(value);
+            self.advance(frame);
+            return Ok(());
+        }
         if let Some(operation) = crate::stdlib::list_operation(name) {
             let [Value::List(items), rest @ ..] = args else {
                 return Err(Error::Runtime(
@@ -3434,13 +3443,6 @@ impl BytecodeVm {
                     ))
                 }
             }
-            self.advance(frame);
-            return Ok(());
-        }
-        // The same single resolver the tree-walker uses, so the two engines
-        // cannot disagree about which names exist. See `stdlib::builtin`.
-        if let Some(value) = crate::stdlib::builtin(self.span(), name, args)? {
-            self.push(value);
             self.advance(frame);
             return Ok(());
         }

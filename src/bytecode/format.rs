@@ -724,7 +724,7 @@ The concrete trigger for reversing the deferral is in
             ("src/bytecode/vm.rs", 741, "BytecodeVm"),
             ("src/bytecode/vm.rs", 1163, "run"),
             ("src/bytecode/vm.rs", 1373, "charge_step"),
-            ("src/bytecode/vm.rs", 3794, "call_function"),
+            ("src/bytecode/vm.rs", 3796, "call_function"),
             ("src/interpreter.rs", 371, "Vm"),
             ("src/interpreter.rs", 1799, "run"),
             ("src/interpreter.rs", 1890, "captured"),

@@ -3209,6 +3209,44 @@ mod list_surface {
     }
 
     #[test]
+    fn edge_higher_order_names_answer_on_both_engines_without_an_argument_refusal() {
+        // Without the resolver's `Ok(None)` guard, `stdlib::builtin` would
+        // refuse every one of these registered names as "arguments it cannot
+        // use" before the engine's higher-order driver could run. They must
+        // answer, on both engines, in both spellings.
+        assert_eq!(
+            both("map([1, 2], to (x) give back x + 1 end)"),
+            Value::list(vec![Value::Number(2.0), Value::Number(3.0)]),
+            "map(xs, f) must reach the higher-order driver, not an argument refusal"
+        );
+        assert_eq!(
+            both("filter([1, 2, 3], to (x) give back x > 1)"),
+            Value::list(vec![Value::Number(2.0), Value::Number(3.0)]),
+            "filter(xs, f) must reach the higher-order driver, not an argument refusal"
+        );
+        assert_eq!(
+            both("reduce([1, 2, 3], 0, to (a, b) give back a + b end)"),
+            Value::Number(6.0),
+            "reduce(xs, start, f) must reach the higher-order driver, not an argument refusal"
+        );
+        assert_eq!(
+            both("list_map([1, 2], to (x) give back x + 1 end)"),
+            Value::list(vec![Value::Number(2.0), Value::Number(3.0)]),
+            "list_map(xs, f) must reach the higher-order driver, not an argument refusal"
+        );
+        assert_eq!(
+            both(r#"list.filter([1, 2, 3], to (x) give back x > 1 end)"#),
+            Value::list(vec![Value::Number(2.0), Value::Number(3.0)]),
+            "list.filter(xs, f) must reach the higher-order driver, not an argument refusal"
+        );
+        assert_eq!(
+            both(r#"list.reduce([1, 2, 3], 0, to (a, b) give back a + b end)"#),
+            Value::Number(6.0),
+            "list.reduce(xs, start, f) must reach the higher-order driver, not an argument refusal"
+        );
+    }
+
+    #[test]
     fn edge_reduce_with_a_function_start_keeps_the_documented_reducer_first_order() {
         // The original `reduce(xs, f, start)` order still accepts a function as
         // the start value: with two functions after the list the first is the
@@ -3246,6 +3284,58 @@ mod list_surface {
             both("filter([7], to (x) give back x is 8 end)"),
             Value::list(vec![]),
             "a singleton rejected by the predicate must answer an empty list"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_accepts_a_text_start() {
+        assert_eq!(
+            both(r#"reduce(["a", "b"], ">", to (acc, item) give back acc + item end)"#),
+            Value::Text(">ab".to_string()),
+            "reduce(xs, start, f) must accept a text start value on both engines"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_accepts_a_record_start() {
+        let value = both(
+            r#"
+    set total to reduce([1, 2], {n: 10}, to (acc, item) give back {n: acc.n + item} end)
+    total.n
+    "#,
+        );
+        assert_eq!(
+            value,
+            Value::Number(13.0),
+            "reduce(xs, start, f) must accept a record start value and fold into it"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_with_a_singleton_calls_the_reducer_once() {
+        let value = both(
+            r#"
+    set calls to 0
+    to add(acc, item)
+        set calls to calls + 1
+        give back acc + item
+    end
+    set total to reduce([5], 10, add)
+    [total, calls]
+    "#,
+        );
+        assert_eq!(
+            value.to_string(),
+            "[15, 1]",
+            "a singleton with a start value must call the reducer exactly once"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_start_before_function_refuses_a_non_list_receiver() {
+        both_refuse(
+            "reduce(5, 0, to (a, b) give back a + b end)",
+            "reduce requires a list and a function",
         );
     }
 }

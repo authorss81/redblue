@@ -1211,9 +1211,9 @@ pub fn builtin_function(name: &str, args: Vec<Value>) -> Option<Value> {
 /// *ran* and refused is `Err`, and it is never downgraded to "no such name":
 /// `files.read` given a number it cannot read has to say so rather than claim
 /// the function does not exist. The higher-order list names (`map`, `filter`,
-/// `reduce`) are also `Ok(None)`: both engines answer them before reaching this
-/// resolver, so refusing them here would blame the caller's arguments for a
-/// call that works.
+/// `reduce`) are also `Ok(None)`: both engines ask this resolver first and
+/// answer them after it returns, so refusing them here would blame the caller's
+/// arguments for a call that works.
 pub fn builtin(
     span: crate::error::Span,
     name: &str,
@@ -3246,5 +3246,119 @@ impl Value {
             }
             _ => Value::Nothing,
         }
+    }
+}
+
+#[cfg(test)]
+mod higher_order_list_names {
+    use super::*;
+    use crate::value::FunctionBody;
+    use std::sync::Arc;
+
+    fn function(name: &str) -> Value {
+        Value::Function(FunctionValue::new(
+            name.to_string(),
+            Vec::new(),
+            FunctionBody::Statements(Arc::new(Vec::new())),
+            Arc::new(Vec::new()),
+        ))
+    }
+
+    #[test]
+    fn edge_reduce_parts_accepts_the_start_value_before_the_function() {
+        let reducer = function("add");
+        let start = Value::Number(10.0);
+        let args = [start.clone(), reducer];
+        let (found, initial) = reduce_parts(&args).expect("the start-first order must be accepted");
+        assert_eq!(
+            found.name, "add",
+            "the function is the reducer, not the start"
+        );
+        assert_eq!(
+            initial,
+            Some(&start),
+            "the value before the function is the start value"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_parts_keeps_the_documented_order_when_both_are_functions() {
+        let reducer = function("reducer");
+        let seed = function("seed");
+        let args = [reducer, seed];
+        let (found, initial) = reduce_parts(&args).expect("two functions must keep answering");
+        assert_eq!(
+            found.name, "reducer",
+            "with two functions the documented reducer-first order wins"
+        );
+        assert!(
+            matches!(initial, Some(Value::Function(seed)) if seed.name == "seed"),
+            "the second function is the start value, not the reducer"
+        );
+    }
+
+    #[test]
+    fn edge_reduce_parts_refuses_a_call_with_no_function() {
+        let args = [Value::Number(0.0), Value::Number(5.0)];
+        let error = reduce_parts(&args).expect_err("a call with no function must be refused");
+        assert_eq!(
+            error,
+            "reduce requires a function and an optional start value, but was given 2 arguments",
+            "a call with no function must keep the named `reduce requires a function` refusal"
+        );
+    }
+
+    #[test]
+    fn edge_list_operation_names_both_spellings() {
+        for (name, operation) in [
+            ("map", "map"),
+            ("list_map", "map"),
+            ("filter", "filter"),
+            ("list_filter", "filter"),
+            ("reduce", "reduce"),
+            ("list_reduce", "reduce"),
+        ] {
+            assert_eq!(
+                list_operation(name),
+                Some(operation),
+                "`{name}` must reach the `{operation}` driver"
+            );
+        }
+        assert_eq!(
+            list_operation("uppercase"),
+            None,
+            "a plain builtin is not a higher-order list operation"
+        );
+    }
+
+    #[test]
+    fn edge_builtin_resolver_leaves_higher_order_names_to_the_engines() {
+        let span = crate::error::Span::new(1, 1);
+        for name in [
+            "map",
+            "list_map",
+            "filter",
+            "list_filter",
+            "reduce",
+            "list_reduce",
+        ] {
+            assert!(
+                matches!(builtin(span, name, &[]), Ok(None)),
+                "`{name}` is answered by the engine's higher-order driver, so the \
+                 shared resolver must not blame the caller's arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_builtin_resolver_still_refuses_a_real_builtin_with_bad_arguments() {
+        let span = crate::error::Span::new(1, 1);
+        let error = builtin(span, "uppercase", &[Value::Number(5.0)])
+            .expect_err("a real builtin given a genuinely wrong argument must keep the refusal");
+        assert_eq!(
+            error.message(),
+            "uppercase was called with arguments it cannot use",
+            "a real builtin given a genuinely wrong argument must keep the named refusal"
+        );
     }
 }
