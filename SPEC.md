@@ -440,9 +440,9 @@ the chain, and the whole chain shares one `end`. Written on the following line,
 the `if` is an ordinary nested `if` in the `else` body, so it needs its own
 `end` before the outer one.
 
-`then` is required on both the `if` and the `unless` header. It is the word the
-parser reads to know where the condition ends and the body begins; leaving it
-out is a `ParserError: Expected 'then'`, not an accepted shorthand.
+`then` is required on both the `if` and the `unless` header, and on an `else if`
+header as well. It is the word the parser reads to know where the condition ends and
+the body begins; leaving it out is a `ParserError: Expected 'then'`, not an accepted shorthand.
 
 ### When (Pattern Matching)
 

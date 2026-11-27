@@ -40,4 +40,5 @@ PHILOSOPHY.md:132	Error: ParserError: Expected variable name, found reserved wor
 
 # --- HANDOUT.md -------------------------------------------------------------
 HANDOUT.md:133	Error: RuntimeError: Module 'math' has no function 'random'
+HANDOUT.md:140	Error: IoError: Failed to read 'data.txt': No such file or directory (os error 2)
 HANDOUT.md:162	Error: AnalyzerError: Unknown variable 'ask'; did you mean 'as'?

@@ -628,7 +628,7 @@ set items to [1, 2, 3]
 
 ### If Statement
 ```redblue
-if age is greater than 18
+if age is greater than 18 then
     say "You can vote"
 else
     say "Too young to vote"
