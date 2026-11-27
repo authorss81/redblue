@@ -1,8 +1,8 @@
 //! Every ```redblue block in the five documents that define Redblue is
 //! extracted, classified and — where it is a program — executed.
 //!
-//! The finding this pins: the five documents carried **97** code blocks
-//! (`SPEC.md` 64, `docs/GRAMMAR.md` 9, `PHILOSOPHY.md` 9, `HANDOUT.md` 8,
+//! The finding this pins: the five documents carried **117** code blocks
+//! (`SPEC.md` 84, `docs/GRAMMAR.md` 9, `PHILOSOPHY.md` 9, `HANDOUT.md` 8,
 //! `README.md` 7) and **no test ran any of them**. Every existing reference to
 //! documentation was a hand-quoted single example:
 //! `tests/for_range_test.rs:2` cites `SPEC.md:380-391` and
@@ -74,7 +74,7 @@ const DOCS: &[&str] = &[
 /// fails the suite. Without it, the cheapest way to make this test green would
 /// be to delete the blocks it cannot run, which is the rot this file exists to
 /// prevent.
-const MINIMUM_BLOCKS: usize = 97;
+const MINIMUM_BLOCKS: usize = 117;
 
 /// One fenced `redblue` block, with the position a reader would jump to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -450,6 +450,56 @@ fn list(keys: &[String]) -> String {
         .join("\n")
 }
 
+/// Whether a FRAGMENT reason names an actual non-program property.
+///
+/// The reason beside a fragment is not decoration: it is the claim that the
+/// block is not a program. This recognises the properties the bucket defines —
+/// an unbound name, a placeholder body, an elided `end`, illustrative
+/// pseudo-code, a catalogue of spellings — so a whole program cannot be parked
+/// here under arbitrary prose. `network` is handled by the caller: those blocks
+/// are programs, deliberately not executed.
+fn fragment_reason_names_non_program(reason: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "unbound",
+        "bound nowhere",
+        "not bound",
+        "not in this one",
+        "placeholder",
+        "elided",
+        "no `end`",
+        "not a program",
+        "not redblue",
+        "illustrative",
+        "pseudo",
+        "catalogue",
+        "not a form",
+        "not forms",
+        "not redblue spellings",
+        "not redblue forms",
+        "not redblue syntax",
+        "only valid inside a loop",
+        "not implemented",
+        "not in scope",
+        "declared elsewhere",
+        "never creates",
+    ];
+    let reason = reason.to_ascii_lowercase();
+    MARKERS.iter().any(|marker| reason.contains(marker))
+}
+
+/// The KNOWN-FAIL rows whose recorded first stderr line is the missing-`then`
+/// parser error.
+///
+/// A free function over a row slice so the teeth test can hand it a mixed list
+/// containing a known offender and a known innocent, and assert it returns the
+/// offender and only the offender.
+fn missing_then_offenders(rows: &[Row]) -> Vec<String> {
+    rows.iter()
+        .filter(|row| row.value.contains("Expected 'then'"))
+        .map(|row| format!("{}:{} {}", row.file, row.line, row.key))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 
 /// The measured count is at least the audited floor, every block is in exactly
@@ -548,6 +598,70 @@ fn every_documentation_block_is_classified_exactly_once() {
             row.key
         );
     }
+}
+
+/// A FRAGMENT is not a program, and this checks that claim rather than trusting
+/// the prose beside it.
+///
+/// The reason has to name a real non-program property, and — the root cause of a
+/// whole program being parked here — `rb compile` has to refuse the block. A
+/// program that compiles is a program, even when it then fails at runtime on a
+/// file it never creates, so it belongs in RUNS or KNOWN-FAIL. The only exception
+/// is a placeholder body (`// ...`), which compiles because it is a comment but
+/// is not the program the surrounding prose promises.
+#[test]
+fn edge_a_fragment_is_not_a_self_contained_program() {
+    let audit = Audit::load();
+    let mut compiled = 0usize;
+
+    for row in &audit.fragments {
+        // `network` is the other kind of fragment: a program deliberately not
+        // run because AGENTS.md forbids a test that depends on the network.
+        if row.value.starts_with("network") {
+            continue;
+        }
+        assert!(
+            fragment_reason_names_non_program(&row.value),
+            "{}:{} gives {} a reason that names no non-program property:\n  {}\n\
+             A fragment must say why it is not a program — an unbound name, a \
+             placeholder body, an elided `end`, or illustrative pseudo-code. \
+             Without that, a whole program can be parked here under arbitrary \
+             prose.",
+            row.file,
+            row.line,
+            row.key,
+            row.value
+        );
+
+        let block = audit
+            .blocks
+            .get(&row.key)
+            .unwrap_or_else(|| panic!("{} lists {}, which is not a block", row.file, row.key));
+        let outcome = compile_block("fragment", &row.key, block);
+        if outcome.compiled {
+            compiled += 1;
+            assert!(
+                row.value.to_ascii_lowercase().contains("placeholder"),
+                "{}:{} ({}) is classified FRAGMENT, but `rb compile` accepts it \
+                 as a whole program.\n\
+                 reason: {}\n\
+                 body:\n{}\n\
+                 A block that compiles is a program: move it to RUNS if it runs, \
+                 or to KNOWN-FAIL with the first line of stderr it prints. Do not \
+                 call a whole program a fragment.",
+                row.file,
+                row.line,
+                row.key,
+                row.value,
+                block.body
+            );
+        }
+    }
+
+    assert!(
+        compiled > 0,
+        "no non-network fragment was compiled, so this test asserts nothing"
+    );
 }
 
 /// The bucket a block is in: run it, and assert it did what the bucket says.
@@ -857,4 +971,281 @@ fn edge_a_document_that_does_not_exist_is_an_error_rather_than_a_panic() {
         text.contains("```redblue"),
         "SPEC.md carries redblue blocks"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 122: `then` on `if`/`unless`, and the `when` marker.
+// ---------------------------------------------------------------------------
+
+/// No documentation block may be recorded as a known failure whose first line
+/// is `Expected 'then'`. That error is the one this phase removed from every
+/// example; if a block goes back to omitting `then`, it belongs in neither the
+/// RUNS nor the KNOWN-FAIL bucket until the example is fixed, and this test
+/// names the offender instead of letting the docs quietly drift from the
+/// parser again.
+#[test]
+fn edge_no_documentation_block_is_recorded_as_failing_on_missing_then() {
+    let audit = Audit::load();
+    let offenders = missing_then_offenders(&audit.known_fail);
+
+    assert!(
+        offenders.is_empty(),
+        "these documentation blocks are still recorded as failing on a missing \
+         `then`:\n{}\n\
+         Every `if` and `unless` header in a document must carry `then`, or the \
+         block must be a fragment whose reason names a different construct.",
+        list(&offenders)
+    );
+
+    // The check has teeth: a mixed list holding one offending row and one
+    // innocent row must return exactly the offender. Chaining the synthetic row
+    // onto the real list would be a tautology — it would "find" the value the
+    // synthetic row was constructed with — so the helper is handed a list of
+    // rows and its answer is compared.
+    let synthetic = Row {
+        file: "synthetic.txt",
+        line: 1,
+        key: "SPEC.md:1".to_string(),
+        value: "Error: ParserError: Expected 'then' but got 'say'".to_string(),
+    };
+    let innocent = Row {
+        file: "synthetic.txt",
+        line: 2,
+        key: "SPEC.md:2".to_string(),
+        value: "Error: ParserError: Expected field name".to_string(),
+    };
+    let mixed = [innocent, synthetic];
+    let found = missing_then_offenders(&mixed);
+    assert_eq!(
+        found,
+        vec!["synthetic.txt:1 SPEC.md:1".to_string()],
+        "the matcher must return the offending key and only it, got: {found:?}"
+    );
+}
+
+/// A source with no `then` must still be rejected, with the parser error the
+/// documents now describe. This is the failure channel for the phase: if the
+/// parser ever accepts a bare `if` condition, the sentence added to SPEC.md
+/// would be false and this test would say so.
+#[test]
+fn edge_missing_then_is_a_parser_error_not_silently_accepted() {
+    let result = redblue::run_source("if 1 > 0\n    say \"positive\"\nend\n");
+    assert!(
+        result.is_err(),
+        "a bare `if 1 > 0` must not run; the parser requires `then`"
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Expected 'then'"),
+        "the failure must be the missing-`then` parser error, got: {error}"
+    );
+
+    // `then` is required on `unless` too, and SPEC.md says so. The parser
+    // already enforces it; this is the parallel failure channel that keeps the
+    // sentence from becoming false if `unless` ever drifts from `if`.
+    let result = redblue::run_source("unless 1 is nothing\n    say \"one\"\nend\n");
+    assert!(
+        result.is_err(),
+        "a bare `unless 1 is nothing` must not run; the parser requires `then`"
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Expected 'then'"),
+        "the `unless` failure must be the missing-`then` parser error, got: {error}"
+    );
+}
+
+/// SPEC.md must say in prose that `then` is required, so a reader who meets the
+/// examples knows the word is not optional decoration.
+#[test]
+fn spec_states_that_then_is_required_after_if_and_unless() {
+    let spec = read_doc(&root(), "SPEC.md").expect("SPEC.md is in the checkout");
+    assert!(
+        spec.contains("`then` is required on both the `if` and the `unless` header"),
+        "SPEC.md must state that `then` is required after `if` and after `unless`"
+    );
+    let spec_words = spec.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        spec_words.contains("`else if` header as well"),
+        "SPEC.md must say that `then` is required after `else if` too, not only \
+         after `if` and `unless`"
+    );
+}
+
+/// The `when` section is not a language feature: SPEC.md has to say so in the
+/// same `Not implemented` voice it uses for `async`, before showing the block.
+#[test]
+fn edge_spec_when_section_is_marked_not_implemented() {
+    let spec = read_doc(&root(), "SPEC.md").expect("SPEC.md is in the checkout");
+    let start = spec
+        .find("### When (Pattern Matching)")
+        .expect("SPEC.md still has a When section");
+    let rest = &spec[start..];
+    let fence = rest
+        .find("```redblue")
+        .expect("the When section still shows its form");
+    let intro = &rest[..fence];
+
+    assert!(
+        intro.contains("Not implemented"),
+        "the When section must carry a `Not implemented` marker before its \
+         block, the same way the async section does"
+    );
+    assert!(
+        intro.contains("`when` is an ordinary identifier"),
+        "the marker must say why: `when` is an ordinary identifier, not a keyword"
+    );
+}
+
+/// Every `if`, `else if`, and `unless` header in the normative documents
+/// carries `then`.
+///
+/// The phase removed the four missing-`then` entries from the KNOWN-FAIL list by
+/// editing the examples. This test scans the documents themselves, so a new
+/// example that omits `then` is caught even if it happens to sit in a block
+/// that is not currently executed. It covers `SPEC.md`, `HANDOUT.md` and
+/// `docs/GRAMMAR.md`, the three documents whose examples teach the conditional
+/// syntax; `PHILOSOPHY.md` is deliberately excluded because its blocks are
+/// pseudo-code, not Redblue. It counts the headers it checked, so an extraction
+/// bug that finds none cannot make it pass vacuously.
+#[test]
+fn edge_every_conditional_header_in_documents_carries_then() {
+    const DOCS_WITH_EXAMPLES: &[&str] = &["SPEC.md", "HANDOUT.md", "docs/GRAMMAR.md"];
+    let audit = Audit::load();
+    let mut headers = 0usize;
+    let mut offenders = Vec::new();
+
+    for (key, block) in &audit.blocks {
+        if !DOCS_WITH_EXAMPLES.contains(&block.doc.as_str()) {
+            continue;
+        }
+        for line in block.body.lines() {
+            let trimmed = line.trim();
+            let is_conditional_header = trimmed.starts_with("if ")
+                || trimmed.starts_with("else if ")
+                || trimmed.starts_with("unless ");
+            if !is_conditional_header {
+                continue;
+            }
+            headers += 1;
+            if !trimmed.split_whitespace().any(|word| word == "then") {
+                offenders.push(format!("{key}: {trimmed}"));
+            }
+        }
+    }
+
+    assert!(
+        headers > 0,
+        "no `if`, `else if`, or `unless` header was found in the normative \
+         documents, so this test asserts nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these headers omit `then`:\n{}\n\
+         `then` is required after `if`, `else if`, and `unless`; the examples \
+         must show it.",
+        list(&offenders)
+    );
+}
+
+/// The HANDOUT file example reads an input the document never provides, so it
+/// is a whole program that fails and belongs in KNOWN-FAIL — not RUNS, and not
+/// the fragment bucket, which is for blocks that are not programs at all.
+///
+/// This is the failure channel for the block that used to be excused on the
+/// missing `then`: it must fail with the file error, not the parser error.
+#[test]
+fn edge_handout_files_example_is_a_known_failure_on_the_missing_input() {
+    let audit = Audit::load();
+    let (key, block) = audit
+        .blocks
+        .iter()
+        .find(|(_, block)| {
+            block.doc == "HANDOUT.md" && block.body.contains(r#"files.read("data.txt")"#)
+        })
+        .expect("the HANDOUT file example is still in the document");
+
+    let (bucket, row) = audit
+        .bucket_of(key)
+        .unwrap_or_else(|| panic!("{key} is in no bucket; classify it"));
+    assert_eq!(
+        bucket, "KNOWN-FAIL",
+        "{key} reads a file the document never creates, so it is a program \
+         that fails; it belongs in KNOWN-FAIL"
+    );
+
+    let outcome = run_block("edge-handout-files", key, block);
+    assert!(
+        !outcome.exit_ok,
+        "{key} is recorded as failing and it ran to completion"
+    );
+    assert!(
+        outcome.first_error_line.contains("IoError"),
+        "{key} must fail on the missing input file, got: {}",
+        outcome.first_error_line
+    );
+    assert_eq!(
+        row.expect("a KNOWN-FAIL row").value,
+        outcome.first_error_line,
+        "{key} records a different first line of stderr than it prints"
+    );
+}
+
+/// The `zip`/`tar` example is a self-contained program: it writes the archives
+/// it reads, so it must be classified RUNS and must both run and compile.
+#[test]
+fn edge_spec_zip_and_tar_block_is_runs() {
+    let audit = Audit::load();
+    let (key, block) = audit
+        .blocks
+        .iter()
+        .find(|(_, block)| {
+            block.doc == "SPEC.md" && block.body.contains(r#"zip.write("records.zip""#)
+        })
+        .expect("the zip and tar example is still in SPEC.md");
+
+    let (bucket, _) = audit
+        .bucket_of(key)
+        .unwrap_or_else(|| panic!("{key} is in no bucket; classify it"));
+    assert_eq!(
+        bucket, "RUNS",
+        "{key} creates every file it reads, so it is a runnable program"
+    );
+
+    let outcome = run_block("edge-zip-tar", key, block);
+    assert!(
+        outcome.exit_ok,
+        "{key} is classified RUNS and did not run: {}",
+        outcome.first_error_line
+    );
+    let compiled = compile_block("edge-zip-tar", key, block);
+    assert!(
+        compiled.compiled,
+        "{key} is classified RUNS and `rb compile` refused it: {}",
+        compiled.first_error_line
+    );
+}
+
+/// `then` is required on an `else if` header too, not only on the opening `if`.
+///
+/// The phase's prose says `then` is required on every conditional header, so an
+/// `else if` that omits it must be the same clean parser error rather than an
+/// accepted program. The matching form that carries `then` must still run, so
+/// the test is about the missing word and not about `else if` being rejected.
+#[test]
+fn edge_then_is_required_after_else_if() {
+    let missing =
+        redblue::run_source("if 1 > 2 then\n    say \"a\"\nelse if 1 > 0\n    say \"b\"\nend\n");
+    assert!(
+        missing.is_err(),
+        "an `else if` header without `then` must not run"
+    );
+    let error = missing.unwrap_err().to_string();
+    assert!(
+        error.contains("Expected 'then'"),
+        "the `else if` failure must be the missing-`then` parser error, got: {error}"
+    );
+
+    redblue::run_source("if 1 > 2 then\n    say \"a\"\nelse if 1 > 0 then\n    say \"b\"\nend\n")
+        .expect("the same form with `then` must run");
 }
