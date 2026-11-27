@@ -10576,6 +10576,15 @@ mod tests {
                 !greeting.contains("v0.1.0"),
                 "and the stale version it used to say is gone, got:\n{greeting}"
             );
+            // The CLI's `--version`, `version` and `help` all print this same
+            // heading. Checking it here means the one guard that used to cover
+            // only the greeting now covers every surface that names the crate
+            // version, not just the REPL.
+            assert_eq!(
+                crate::version_heading(),
+                format!("Redblue v{}", env!("CARGO_PKG_VERSION")),
+                "every CLI version surface reads the crate version"
+            );
             assert!(
                 greeting.contains(banner::ENGINE),
                 "the greeting names the engine in use, got:\n{greeting}"

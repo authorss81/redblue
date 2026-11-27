@@ -652,8 +652,19 @@ fn vm_command(path: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// The version heading every CLI surface prints, read from the crate.
+///
+/// `--version`, `version` and the first line of `help` all go through this one
+/// string, so a bump in `Cargo.toml` cannot leave one of them behind.
+pub(crate) fn version_heading() -> String {
+    format!("Redblue v{}", crate::repl::banner::VERSION)
+}
+
 fn print_help() {
-    println!("Redblue v0.1.0 - A programming language as readable as plain English");
+    println!(
+        "{} - A programming language as readable as plain English",
+        version_heading()
+    );
     println!();
     println!("Usage:");
     println!("  rb              Start interactive REPL");
@@ -687,5 +698,5 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("Redblue v0.1.0");
+    println!("{}", version_heading());
 }
