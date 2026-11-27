@@ -3085,10 +3085,16 @@ impl Vm {
         // alone answers only the names that need a `Result`; the rest are
         // `stdlib::builtin_function`'s, and until this call existed they were
         // registered in the global table and answered by nothing.
-        // The higher-order list calls (`map`, `filter`, `reduce`) are excluded
-        // here and answered below: each is registered as a builtin name but has
-        // to *call* a Redblue function, which the shared resolver cannot do.
-        // Asking the resolver first would turn a working call into a refusal.
+        //
+        // The higher-order list calls (`map`, `filter`, `reduce`) are
+        // registered builtin names whose driver has to *call* a Redblue
+        // function, which the shared resolver cannot do. The resolver answers
+        // `Ok(None)` for them (see `stdlib::builtin`), and they are answered
+        // after it returns, so a registered name is never refused as bad
+        // arguments on the way to its driver.
+        if let Some(value) = stdlib::builtin(self.span(), stdlib::resolve(name), args)? {
+            return Ok(value);
+        }
         if let Some(operation) = stdlib::list_operation(name) {
             return match operation {
                 "map" => self.map_builtin(args),
@@ -3099,10 +3105,6 @@ impl Vm {
                     self.span(),
                 )),
             };
-        }
-
-        if let Some(value) = stdlib::builtin(self.span(), stdlib::resolve(name), args)? {
-            return Ok(value);
         }
         match self.get_var(name) {
             Some(Value::Function(function)) => self.call_user_function(name, &function, args),
