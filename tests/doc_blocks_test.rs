@@ -1097,6 +1097,110 @@ fn edge_spec_when_section_is_marked_not_implemented() {
     );
 }
 
+/// `when` is an ordinary identifier, not a keyword, and the pattern-matching
+/// form § When shows is not implemented.
+///
+/// The section's prose makes both claims. This pins the behaviour behind them,
+/// so the marker cannot become a sentence the interpreter contradicts: `when`
+/// still binds and reads like any other name, while the form below is a clean
+/// parser error rather than something silently accepted.
+#[test]
+fn edge_when_is_an_ordinary_identifier_and_its_form_does_not_parse() {
+    redblue::run_source("set when to 41\nsay when + 1\n")
+        .expect("`when` must remain usable as an ordinary identifier");
+
+    let form = redblue::run_source(
+        "when value\n    case 1 then say \"one\"\n    case 2 then say \"two\"\n    else say \"other\"\nend\n",
+    );
+    assert!(
+        form.is_err(),
+        "the unimplemented `when` form must be rejected, not silently accepted"
+    );
+}
+
+/// The `when` block SPEC.md shows is a fragment, and its reason names the
+/// unimplemented construct.
+///
+/// The marker above the block and the bucket below it have to agree: a block
+/// that is not part of the language is a FRAGMENT, and the reason must say the
+/// form is not implemented and name `when` as the construct, not just repeat
+/// generic prose.
+#[test]
+fn edge_spec_when_block_is_a_fragment_because_the_form_is_unimplemented() {
+    let audit = Audit::load();
+    let (key, _) = audit
+        .blocks
+        .iter()
+        .find(|(_, block)| {
+            block.doc == "SPEC.md" && block.body.trim_start().starts_with("when value")
+        })
+        .expect("SPEC.md still shows the unimplemented `when` form");
+
+    let (bucket, row) = audit
+        .bucket_of(key)
+        .unwrap_or_else(|| panic!("{key} is in no bucket; classify it"));
+    assert_eq!(
+        bucket, "FRAGMENT",
+        "{key} is not a program, so it must be a FRAGMENT with a reason, not {bucket}"
+    );
+
+    let reason = row.expect("a FRAGMENT row").value.to_ascii_lowercase();
+    assert!(
+        reason.contains("not implemented"),
+        "{key} must say the form is not implemented, got: {reason}"
+    );
+    assert!(
+        reason.contains("when"),
+        "{key} must name `when` as the construct that does not parse, got: {reason}"
+    );
+}
+
+/// The grammar document is the source of truth for `then`, and it still marks
+/// `when` unimplemented.
+///
+/// The finding cites `docs/GRAMMAR.md` for both rules. Checking the productions
+/// rather than only the examples keeps the defining document from drifting away
+/// from the parser the examples are edited to match.
+#[test]
+fn edge_grammar_productions_require_then_and_mark_when_not_implemented() {
+    let grammar = read_doc(&root(), "docs/GRAMMAR.md").expect("docs/GRAMMAR.md is in the checkout");
+
+    let if_start = grammar
+        .find("if_statement     = 'if'")
+        .expect("GRAMMAR still defines if_statement");
+    let if_tail = &grammar[if_start..];
+    let if_end = if_tail
+        .find("// `else if`")
+        .expect("the if production is still followed by its else-if note");
+    assert!(
+        if_tail[..if_end].contains("'then'"),
+        "the if_statement production must require 'then'"
+    );
+
+    let unless_start = grammar
+        .find("unless_statement = 'unless'")
+        .expect("GRAMMAR still defines unless_statement");
+    let unless_tail = &grammar[unless_start..];
+    let unless_end = unless_tail
+        .find("\n\n")
+        .expect("the unless production ends a paragraph");
+    assert!(
+        unless_tail[..unless_end].contains("'then'"),
+        "the unless_statement production must require 'then'"
+    );
+
+    let when_start = grammar
+        .find("when_statement    = 'when'")
+        .expect("GRAMMAR still defines when_statement");
+    let marker = grammar
+        .find("NOT IMPLEMENTED")
+        .expect("the when production is marked NOT IMPLEMENTED");
+    assert!(
+        marker < when_start && when_start - marker < 400,
+        "the NOT IMPLEMENTED note must sit immediately above the when_statement production"
+    );
+}
+
 /// Every `if`, `else if`, and `unless` header in the normative documents
 /// carries `then`.
 ///
