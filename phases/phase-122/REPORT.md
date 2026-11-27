@@ -27,7 +27,7 @@ prose. `§ When` is kept and marked `Not implemented`, matching `async`.
 | SPEC.md | +30 −21 | adds `then` to every `if`/`unless` example that lacked it; states in prose that `then` is required on `if`, `else if` and `unless` headers; marks `§ When (Pattern Matching)` **Not implemented** |
 | HANDOUT.md | +2 −2 | adds `then` to the `if name is "World"` and `if files.exists("config.txt")` examples |
 | docs/GRAMMAR.md | +1 −1 | adds `then` to the `If Statement` example, so the defining grammar document no longer teaches the invalid spelling |
-| tests/doc_blocks_test.rs | +394 −3 | the phase tests below, plus a repaired format string whose missing `{}` made the file fail to compile |
+| tests/doc_blocks_test.rs | +498 −3 | the phase tests below, plus a repaired format string whose missing `{}` made the file fail to compile; the resumed run added three `when`-behaviour tests (+104) so § When's prose and bucket are backed by the parser and the grammar document |
 | tests/doc_blocks_runs.txt | +44 −41 | `SPEC.md:624`, `SPEC.md:1106`, `HANDOUT.md:42` moved from KNOWN-FAIL to RUNS; `SPEC.md:1693` (zip/tar) classified RUNS; all keys renumbered after the document edits |
 | tests/doc_blocks_fragments.txt | +24 −21 | entries renumbered after the edits; no entry excuses a block on a missing `then` |
 | tests/doc_blocks_known_fail.txt | +7 −10 | the four `Expected 'then'` entries are gone; `HANDOUT.md:140` is recorded honestly as a whole program that fails on its missing input file, not as a fragment |
@@ -54,12 +54,15 @@ Every moved entry, with its new location:
 | `edge_handout_files_example_is_a_known_failure_on_the_missing_input` | resource limit / failure channel: the file example must run and fail with `IoError`, not the parser error, and be in KNOWN-FAIL |
 | `edge_spec_zip_and_tar_block_is_runs` | boundary / success: the zip/tar block must be RUNS and must both run and compile |
 | `edge_then_is_required_after_else_if` | malformed input / failure channel: an `else if` without `then` must return `Err` containing `Expected 'then'`, while the same form with `then` runs |
+| `edge_when_is_an_ordinary_identifier_and_its_form_does_not_parse` | malformed input / failure channel (resumed run): `when` binds as an ordinary identifier, while the unimplemented pattern-matching form is a parser error |
+| `edge_spec_when_block_is_a_fragment_because_the_form_is_unimplemented` | malformed input / classification (resumed run): the `when` block must be a FRAGMENT whose reason says `not implemented` and names `when` |
+| `edge_grammar_productions_require_then_and_mark_when_not_implemented` | malformed input / grammar drift (resumed run): `if_statement` and `unless_statement` must require `'then'`, and the `when_statement` production must stay marked `NOT IMPLEMENTED` |
 
 Edge-case matrix: empty, singleton, out-of-bounds, type mismatch, numeric
 boundary, unicode, nesting, duplicate keys are **N/A** — this phase changes
 documentation classification and adds no runtime code path. The applicable rows
-are malformed input (missing `then`), missing documentation text, and the
-missing-input resource case, all covered above.
+are malformed input (missing `then`, unimplemented `when` form), missing
+documentation text, and the missing-input resource case, all covered above.
 
 ## Gates
 
@@ -67,7 +70,7 @@ missing-input resource case, all covered above.
 |---|---|
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --all-targets -- -D warnings` | pass |
-| `cargo test --all-targets` | 3303 passed, 0 failed |
+| `cargo test --all-targets` | 3306 passed, 0 failed |
 | `../rbops/verify.sh phase-122` | pass |
 
 ## Invariants touched
