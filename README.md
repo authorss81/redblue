@@ -483,7 +483,7 @@ redblue/
 │   ├── lexer.rs         # Tokenizer
 │   ├── parser.rs        # AST builder
 │   ├── analyzer.rs      # Semantic analysis
-│   ├── vm.rs            # Tree-walking interpreter
+│   ├── interpreter.rs   # Tree-walking interpreter
 │   ├── bytecode/        # Bytecode format, compiler, disassembler, VM
 │   ├── stdlib.rs        # Standard library
 │   ├── formatter.rs     # Code formatter

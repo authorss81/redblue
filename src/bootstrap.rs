@@ -28,7 +28,7 @@
 //!
 //! Nothing here reaches around the ladder. There is no Rust fast path a
 //! self-hosted run falls back to, because [`build`] performs step 2 by running
-//! the stage 1 chunk in [`bytecode::vm::BytecodeVm`] — the same VM `rb vm` uses
+//! the stage 1 chunk in [`crate::bytecode::vm::BytecodeVm`] — the same VM `rb vm` uses
 //! — and never consults [`compile_source`] again until the next build.
 //!
 //! ## Why the shipped artifact is a `.rbc`
@@ -87,7 +87,7 @@ pub const STAGE2_NAME: &str = "stage2.rbc";
 /// Where stage 2 comes from, so a test can hand the build a stage 2 that is not
 /// the fixed point and watch it refuse.
 ///
-/// **Crate-private, and it stays that way.** [`Stage2::Bytes`] is a way to hand
+/// **Crate-private, and it stays that way.** `Stage2::Bytes` is a way to hand
 /// the build a stage 2 that no run produced, so publishing it would let any
 /// library caller ship bytes as "the verified fixed point" with no self-hosted
 /// run behind them — which is the one claim S4 exists to make. A comment saying
@@ -122,7 +122,7 @@ pub fn build(compiler_path: &Path, out_dir: &Path) -> Result<Build, Error> {
 
 /// [`build`], with stage 2 supplied rather than computed.
 ///
-/// Private, because the only caller that passes [`Stage2::Bytes`] is a test in
+/// Private, because the only caller that passes `Stage2::Bytes` is a test in
 /// this module that has to make the fixed point fail on purpose, and a public
 /// signature here would be a public way to claim a fixed point no run reached.
 fn build_with(compiler_path: &Path, out_dir: &Path, stage2: Stage2) -> Result<Build, Error> {
@@ -324,7 +324,7 @@ static STAGE2: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// A run that fails, or that succeeds having written no file, is an error.
 ///
 /// One stage-2 run happens at a time, because `sys.argv()` is process-global;
-/// see [`STAGE2`].
+/// see `STAGE2`.
 pub fn run_compiler_on(chunk: &Chunk, input_path: &Path, output_path: &Path) -> Result<(), Error> {
     let _guard = STAGE2
         .lock()

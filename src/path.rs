@@ -390,7 +390,7 @@ pub fn list(text: &str) -> std::io::Result<Vec<String>> {
 
 /// Answers one `path.*` call.
 ///
-/// Both VMs reach this through [`crate::runtime::builtin`], so a path cannot
+/// Both VMs reach this through `crate::runtime::builtin`, so a path cannot
 /// answer in one engine and be refused by the other.
 pub fn builtin(span: Span, name: &str, args: &[Value]) -> Result<Value> {
     match name {

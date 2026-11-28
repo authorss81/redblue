@@ -342,7 +342,7 @@ pub fn expect_range_number(value: &Value, argument: &str, span: Span) -> Result<
 ///   on turns is [`crate::interpreter::MAX_ITERATIONS`] and not the width of this counter:
 ///   such a loop is stopped by the iteration cap, which names the limit that
 ///   stopped it, or left by a `break` on its first turn.
-/// - A count that is not finite is refused by [`finite_number`], the refusal
+/// - A count that is not finite is refused by `finite_number`, the refusal
 ///   every computed number gets. A Redblue program cannot write one — the number
 ///   door refuses it before a loop ever sees it — so this is the second door, and
 ///   it is here so that the first one is not the only thing between a `NaN` and

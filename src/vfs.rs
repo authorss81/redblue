@@ -98,8 +98,8 @@ pub use native::{append, exists, is_file, read_bytes, read_dir, write_bytes};
 /// be asked about become the same thing.
 ///
 /// The two shapes of "no root" are spelled the way they come. An empty root is
-/// what [`Path::parent`] gives for a bare `prog.rb`, and a root of `.` is what
-/// [`Path::new`] gives for the working directory; both answer `relative` itself,
+/// what [`std::path::Path::parent`] gives for a bare `prog.rb`, and a root of `.` is what
+/// [`std::path::Path::new`] gives for the working directory; both answer `relative` itself,
 /// without a `./` in front of it. That is not tidiness. On
 /// `wasm32-unknown-unknown` the filesystem is a map from path *text* to bytes,
 /// so the text `files.write("modules/Foo.rb", …)` wrote is the text a module
@@ -216,7 +216,7 @@ pub mod memory {
     /// named *empty* directory on disk exists and this one does not, because
     /// nothing in the language creates one and nothing in the map could
     /// remember it. The working directory and the root are the exceptions: `.`,
-    /// `./` and `/` always name a directory that exists. See [`normalize`].
+    /// `./` and `/` always name a directory that exists. See `normalize`.
     pub fn exists(path: &str) -> bool {
         let files = lock();
         let Ok(Some(key)) = normalize(path, &files) else {
@@ -285,7 +285,7 @@ pub mod memory {
     /// same `NotFound` the native `read_dir` gives for a path that is not
     /// there. That is also the one case a flat map cannot reproduce — a named
     /// empty directory that exists on a disk has no key here, so it is reported
-    /// as missing rather than as an empty list; see [`exists`](self::exists).
+    /// as missing rather than as an empty list; see [`exists`].
     /// The working directory and the root are the exceptions: `.`, `./` and `/`
     /// always exist, so an empty one is the empty list a native `read_dir(".")`
     /// or `read_dir("/")` gives, not an error.
@@ -406,7 +406,7 @@ pub mod memory {
     /// stored file the answer is `NotADirectory`, and when nothing is stored
     /// under it there is no directory to climb out of, so the answer is
     /// `NotFound`. The working directory and root always exist and need no
-    /// entry of their own; see [`normalize`](self::normalize).
+    /// entry of their own; see [`normalize`].
     fn ensure_directory(key: &str, files: &Store) -> io::Result<()> {
         if key.is_empty() || key == "/" {
             return Ok(());
@@ -483,7 +483,7 @@ pub mod memory {
     /// holding it — `"notes/"` for `"notes"`, `"notes/"` for `"notes/"`.
     ///
     /// The trailing separator is the whole of it, and it is why
-    /// [`exists`](self::exists) does not confuse the directory `notes` with a
+    /// [`exists`] does not confuse the directory `notes` with a
     /// file called `notes.txt`. The key is already normalized, so `./data`,
     /// `data/.` and `data` all answer the prefix `"data/"` rather than a
     /// literal `"./data/"` no key carries.

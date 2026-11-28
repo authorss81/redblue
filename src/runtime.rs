@@ -1,6 +1,6 @@
 //! What a Redblue *operation* means, in the one place both VMs read it.
 //!
-//! Two VMs now exist: the tree-walker in [`crate::vm`], which is what `rb run`
+//! Two VMs now exist: the tree-walker in [`crate::Vm`], which is what `rb run`
 //! uses and what the language is specified against, and the bytecode VM in
 //! [`crate::bytecode::vm`], which runs a `.rbc`. They must agree on what
 //! `1 + 2` is, what `xs[9]` says when `xs` holds one element, and what
@@ -967,7 +967,7 @@ fn now() -> Result<SystemTime> {
 ///
 /// The two read one clock on purpose: a record and a `time.now()` taken in the
 /// same program should agree, and the playground supplies only one clock
-/// through [`set_host_clock`]. Calling `SystemTime::now()` directly would panic
+/// through `set_host_clock`. Calling `SystemTime::now()` directly would panic
 /// on `wasm32-unknown-unknown`, where the logging module used to take its
 /// timestamp from `chrono::Utc::now()` and abort the whole module instead of
 /// writing a record.
@@ -1749,7 +1749,7 @@ fn add_fixed(
 // `Cell<u64>` rather than an `AtomicU64` or a mutex: the state is thread-local,
 // so `cargo test` running several tests in parallel cannot interleave two
 // tests' draws and make a pinned sequence unreproducible, and no draw pays for
-// a lock. A Redblue program is single-threaded — `crate::vm` runs one — so
+// a lock. A Redblue program is single-threaded — `crate::interpreter` runs one — so
 // thread-local *is* process-local here.
 thread_local! {
     static RANDOM_STATE: Cell<u64> = const { Cell::new(DEFAULT_SEED) };

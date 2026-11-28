@@ -1,11 +1,11 @@
 //! The bytecode virtual machine: what `rb vm file.rbc` executes.
 //!
-//! This is bootstrap stage **S1b**. The tree-walking VM in [`crate::vm`] is what
+//! This is bootstrap stage **S1b**. The tree-walking VM in [`crate::Vm`] is what
 //! `rb run` uses and is the specification of what a Redblue program *does*;
 //! this runs the compiled form and has to answer the same way, down to the
 //! wording of a failure. Where the two have to agree on an operation — the
 //! arithmetic operators, indexing, the builtin library — neither writes it: both
-//! read [`crate::runtime`], so there is one implementation and it cannot drift.
+//! read `crate::runtime`, so there is one implementation and it cannot drift.
 //!
 //! # How it runs
 //!
@@ -15,7 +15,7 @@
 //! call pushes a *frame* — the same stacks, with their bases remembered — rather
 //! than calling back into Rust.
 //!
-//! That is what makes deep recursion safe here: [`BytecodeVm::call_depth`]
+//! That is what makes deep recursion safe here: `BytecodeVm::call_depth`
 //! counts frames in a `Vec`, so a call chain as deep as
 //! [`DEFAULT_MAX_CALL_DEPTH`](crate::interpreter::MAX_CALL_DEPTH) costs heap rather than
 //! machine stack. There is no path from a `.rbc` to a native stack overflow.
@@ -32,7 +32,7 @@
 //! Loops are the one place where a block's *shape* matters. A loop is a backward
 //! `JUMP`, and the instruction it jumps to is the loop's `top`: the `STORE` that
 //! binds the loop variable for `for each` and `repeat`, and the first
-//! instruction of the condition for a `while`. [`loop_sites`] finds those once
+//! instruction of the condition for a `while`. `loop_sites` finds those once
 //! per block; everything else about a loop follows from them.
 
 use std::collections::{HashMap, HashSet};

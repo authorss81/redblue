@@ -22,7 +22,7 @@ const ELLIPSIS: char = '\u{2026}';
 /// A source position: a 1-based line and a 1-based **character** column.
 ///
 /// Columns count characters, not bytes, so a line that starts with an emoji
-/// reports the column the caret is drawn at — and [`display_width`] is what
+/// reports the column the caret is drawn at — and `display_width` is what
 /// turns that character column into the cell the caret is *drawn* at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {

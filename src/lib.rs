@@ -762,3 +762,185 @@ mod version_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod doc_link_tests {
+    //! Guards the rustdoc contract for this crate.
+    //!
+    //! `cargo doc --no-deps` must be warning-free, which means every intra-doc
+    //! link written in a `///` or `//!` comment under `src/` has to name an item
+    //! that is actually `pub` and reachable. The four build gates (fmt, clippy,
+    //! test, verify.sh) cannot see a rustdoc warning, so this module is the only
+    //! thing that does.
+    //!
+    //! The `edge_*` tests are the checked-in negative cases: they prove that the
+    //! same rustdoc invocation this module trusts really does refuse a link to a
+    //! private item and a link to a name that does not exist. One fixture also
+    //! proves that a broken link inside a private item is only visible when
+    //! `--document-private-items` is passed, so the gate cannot silently drop
+    //! that flag. Without them a broken fixture path could make the positive
+    //! test pass for the wrong reason.
+
+    use std::path::PathBuf;
+    use std::process::{Command, Output};
+
+    /// Extra rustdoc flags the crate gate runs with. The fixture tests below
+    /// read this same constant, so removing `--document-private-items` makes
+    /// `edge_private_item_link_requires_document_private_items` fail instead of
+    /// silently narrowing coverage.
+    const DOC_GATE_EXTRA_ARGS: &[&str] = &["--document-private-items"];
+
+    fn root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn cargo() -> String {
+        std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
+    }
+
+    fn rustdoc() -> String {
+        std::env::var("RUSTDOC").unwrap_or_else(|_| "rustdoc".to_string())
+    }
+
+    fn text(output: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    /// The real check: the crate documents cleanly with warnings promoted to
+    /// errors.
+    ///
+    /// A single `--document-private-items` pass covers both failure modes: it
+    /// still reports a public doc comment that links to a private item, and it
+    /// additionally reports a link anywhere in `src/` (including private items)
+    /// that resolves to nothing at all. Reusing the outer target directory keeps
+    /// dependency artifacts warm, so the gate does not rebuild the tree twice.
+    #[test]
+    fn doc_links_resolve_to_public_items() {
+        let flags = format!("{} -D warnings", DOC_GATE_EXTRA_ARGS.join(" "));
+        let output = Command::new(cargo())
+            .args(["doc", "--no-deps", "--quiet"])
+            .current_dir(root())
+            .env("RUSTDOCFLAGS", &flags)
+            .output()
+            .expect("cargo doc should run");
+        let report = text(&output);
+        assert!(
+            output.status.success(),
+            "cargo doc --no-deps {flags} must produce no warnings:\n{report}"
+        );
+        assert!(
+            !report.contains("warning:"),
+            "cargo doc must not emit any warning:\n{report}"
+        );
+        assert!(
+            !report.contains("links to private item"),
+            "a doc comment links to a private item:\n{report}"
+        );
+        assert!(
+            !report.contains("unresolved link"),
+            "a doc comment links to a name that does not resolve:\n{report}"
+        );
+    }
+
+    fn rustdoc_outcome_with(fixture: &str, extra_args: &[&str]) -> Result<String, String> {
+        let source = root().join("tests/fixtures").join(fixture);
+        let out = root().join("target/tmp/doc-links-fixtures").join(fixture);
+        let output = Command::new(rustdoc())
+            .arg(&source)
+            .arg("--edition")
+            .arg("2021")
+            .arg("-D")
+            .arg("warnings")
+            .args(extra_args)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .expect("rustdoc should run on the fixture");
+        let report = text(&output);
+        if output.status.success() {
+            Ok(report)
+        } else {
+            Err(report)
+        }
+    }
+
+    fn rustdoc_outcome(fixture: &str) -> Result<String, String> {
+        rustdoc_outcome_with(fixture, &[])
+    }
+
+    #[test]
+    fn edge_private_intra_doc_link_is_rejected() {
+        let outcome = rustdoc_outcome("private_doc_link.rs");
+        assert!(
+            outcome.is_err(),
+            "rustdoc should refuse a link to a private item, but it passed"
+        );
+        let report = outcome.unwrap_err();
+        assert!(
+            report.contains("links to private item"),
+            "expected a private-link warning, got:\n{report}"
+        );
+    }
+
+    #[test]
+    fn edge_unresolved_intra_doc_link_is_rejected() {
+        let outcome = rustdoc_outcome("unresolved_doc_link.rs");
+        assert!(
+            outcome.is_err(),
+            "rustdoc should refuse a link to a name that does not exist, but it passed"
+        );
+        let report = outcome.unwrap_err();
+        assert!(
+            report.contains("unresolved link"),
+            "expected an unresolved-link warning, got:\n{report}"
+        );
+    }
+
+    #[test]
+    fn edge_private_item_link_requires_document_private_items() {
+        // A link inside a private item is not documented by default, so its
+        // broken target is invisible until `--document-private-items` is set.
+        // This is the fixture that makes the gate's flag load-bearing.
+        let without = rustdoc_outcome("private_item_unresolved_doc_link.rs");
+        assert!(
+            without.is_ok(),
+            "rustdoc without private items should skip the private item, but it failed:\n{}",
+            without.unwrap_err()
+        );
+
+        let with = rustdoc_outcome_with("private_item_unresolved_doc_link.rs", DOC_GATE_EXTRA_ARGS);
+        assert!(
+            with.is_err(),
+            "rustdoc with private items should refuse a broken link in a private item, but it passed"
+        );
+        let report = with.unwrap_err();
+        assert!(
+            report.contains("unresolved link"),
+            "expected an unresolved-link warning, got:\n{report}"
+        );
+    }
+
+    #[test]
+    fn edge_single_public_intra_doc_link_is_accepted() {
+        let outcome = rustdoc_outcome("public_doc_link.rs");
+        assert!(
+            outcome.is_ok(),
+            "rustdoc should accept a link to a public item, but it failed:\n{}",
+            outcome.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn edge_document_with_no_links_is_accepted() {
+        let outcome = rustdoc_outcome("empty_doc.rs");
+        assert!(
+            outcome.is_ok(),
+            "rustdoc should accept a document with no links, but it failed:\n{}",
+            outcome.unwrap_err()
+        );
+    }
+}

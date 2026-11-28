@@ -89,7 +89,7 @@ pub enum ReplCommand {
     /// argument — on nothing at all, which is the empty session the sub-REPL
     /// commands are then asked against.
     ///
-    /// `String` rather than a unit variant for the same reason [`Run`] is: the
+    /// `String` rather than a unit variant for the same reason [`ReplCommand::Run`] is: the
     /// argument is the program that runs on entry, and `.debug 1 + 1` that
     /// ignored its argument printed breakpoint status instead of running it.
     /// Same shape as [`ReplCommand::Run`], which does not ignore it either.
@@ -960,7 +960,7 @@ impl ReplCommand {
     /// they typed against this and puts their sigil back.
     ///
     /// Not deduplicated: a word the table holds twice is a word two commands
-    /// answer to, and [`bare_names`] reporting it twice is what lets a test say
+    /// answer to, and `bare_names` reporting it twice is what lets a test say
     /// so. The completer's own `dedup` hides it from a user either way.
     pub fn bare_names() -> Vec<String> {
         let mut names: Vec<String> = COMMAND_TABLE
@@ -994,7 +994,7 @@ impl ReplCommand {
 
     /// One line per command, aliases included, for `:help`.
     ///
-    /// Built from [`COMMAND_TABLE`], aliases and all, so every word the parser
+    /// Built from `COMMAND_TABLE`, aliases and all, so every word the parser
     /// accepts is one the user can read about, and a command added to the table
     /// cannot be missing from the help. Padded to a common column so the
     /// descriptions line up however long the command and its argument are.

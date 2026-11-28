@@ -96,13 +96,13 @@ fn resolve_limit_from(raw: Option<usize>, default: usize) -> usize {
     }
 }
 
-/// [`resolve_limit_from`] applied to [`MAX_ITERATIONS_ENV`]. `None` means the
+/// `resolve_limit_from` applied to [`MAX_ITERATIONS_ENV`]. `None` means the
 /// variable was unset or not a number.
 pub fn resolve_max_iterations_from(raw: Option<usize>) -> usize {
     resolve_limit_from(raw, MAX_ITERATIONS)
 }
 
-/// [`resolve_limit_from`] applied to [`MAX_STEPS_ENV`]. `None` means the
+/// `resolve_limit_from` applied to [`MAX_STEPS_ENV`]. `None` means the
 /// variable was unset or not a number.
 pub fn resolve_max_steps_from(raw: Option<usize>) -> usize {
     resolve_limit_from(raw, MAX_STEPS)
@@ -177,7 +177,7 @@ pub fn run_isolated_with_depth(program: &Program, depth: usize) -> (Vm, Result<V
 ///
 /// Split out for the same reason [`run_isolated_with_depth`] is: a test has to
 /// be able to ask for a stack this process cannot reserve — the case
-/// [`run_without_a_sized_thread`] decides — and the only way to reach it without
+/// `run_without_a_sized_thread` decides — and the only way to reach it without
 /// mutating the process environment is to hand the number in. It reads a depth,
 /// not bytes: the size asked for is `depth * STACK_BYTES_PER_CALL`, so a depth
 /// past what any thread can carry asks for the impossible and the refusal is the
@@ -968,7 +968,7 @@ impl Vm {
     /// Off everywhere by default. A caller answering a question — the REPL's
     /// `.type`, on a [`Vm::fork`] — says so for the VM it evaluates that question
     /// on and nothing else does, because for a program these builtins and this
-    /// output are the point. See [`Vm::asking_a_question`] for what changes.
+    /// output are the point. See `Vm::asking_a_question` for what changes.
     pub fn ask_questions(&mut self, asking: bool) {
         self.asking_a_question = asking;
     }
@@ -976,14 +976,14 @@ impl Vm {
     /// The body of the function `name` names, when `name` holds one.
     ///
     /// Every way a call can reach a Redblue function this VM declared, in the
-    /// order [`Vm::call`] and [`Vm::call_method`] reach it, so a caller asking
+    /// order `Vm::call` and `Vm::call_method` reach it, so a caller asking
     /// "what does calling this do?" reads the same declaration the run would:
     ///
     /// - a bare name — `evil()` is `call("evil", …)`, which ends at
-    ///   [`Vm::get_var`] — read out of the globals and the live scopes, because a
+    ///   `Vm::get_var` — read out of the globals and the live scopes, because a
     ///   function declared inside a function closes over them;
     /// - a module member — `MathUtils.circle_area(5)` is `call("MathUtils_circle_area", …)`
-    ///   after [`Vm::call_method`] resolved the module and its alias;
+    ///   after `Vm::call_method` resolved the module and its alias;
     /// - an object's method — `counter.bump()` is not a name at all, it is
     ///   `objects[counter].methods[bump]`, and the receiver is a name the caller
     ///   has in hand.
@@ -1018,7 +1018,7 @@ impl Vm {
     /// touches — what `.type` refuses, what `.which` names — has to resolve the
     /// alias first or it is looking at a name the language never registered.
     /// Every module declares itself in this table under its own name
-    /// ([`Vm::declare_module`]), so the unaliased case is a hit rather than a
+    /// (`Vm::declare_module`), so the unaliased case is a hit rather than a
     /// miss.
     pub fn module_behind<'a>(&'a self, name: &'a str) -> &'a str {
         self.context
@@ -1293,8 +1293,8 @@ impl Vm {
     /// since both live in `globals`.
     ///
     /// The local scopes are read as well as `globals`, because a name is not
-    /// always a global: `to` binds a function with [`Vm::declare`] and
-    /// [`Vm::set_var`], which lands in the innermost live scope. Scanning
+    /// always a global: `to` binds a function with `Vm::declare` and
+    /// `Vm::set_var`, which lands in the innermost live scope. Scanning
     /// `globals` alone therefore never offered a function the program had just
     /// defined, which is the name a REPL user is most likely to be reaching for
     /// next.
@@ -1303,8 +1303,8 @@ impl Vm {
     /// their iteration order is not a result.
     ///
     /// The `module_member` names a module's members are published under are left
-    /// out — see [`CallContext::qualified_members`]. They are in `globals` because that is
-    /// where [`Vm::call_method`] looks for them, and a name the program never
+    /// out — see `CallContext::qualified_members`. They are in `globals` because that is
+    /// where `Vm::call_method` looks for them, and a name the program never
     /// wrote is not one of its names: after `import MathUtils` this used to offer
     /// `MathUtils_circle_area` to completion and list it in `:vars`, which is a
     /// name no line of Redblue can call.
@@ -1348,7 +1348,7 @@ impl Vm {
     ///
     /// Not the same as "the name is bound": every builtin is bound in `globals`,
     /// so `files_read` answers here and is not a member any program published.
-    /// What a program's module publishes goes through [`Vm::publish_member`], and
+    /// What a program's module publishes goes through `Vm::publish_member`, and
     /// that is what is being asked about — a REPL's `.which` has to tell
     /// `files.read` (a stdlib member) from `MathUtils.circle_area` (a member of a
     /// module this session imported), and only the record of publication tells
@@ -1649,7 +1649,7 @@ impl Vm {
     /// Public because a REPL asks it about a name rather than about a call: a
     /// `module Foo … export all end` binds `Foo_greet` and no `Foo`, so the only
     /// evidence that the declaration ran is this. See
-    /// [`crate::repl::Repl::record_definitions`].
+    /// `crate::repl::Repl::record_definitions`.
     pub fn declares_module(&self, name: &str) -> bool {
         self.context.modules.contains_key(name) || self.context.declared_modules.contains_key(name)
     }
