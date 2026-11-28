@@ -810,23 +810,40 @@ mod doc_link_tests {
         )
     }
 
+    /// True when rustdoc reported `lint`. The human-readable sentence changes
+    /// between rustdoc releases, but the lint name does not. rustdoc prints the
+    /// name with hyphens in its note (`rustdoc::private-intra-doc-links`) and
+    /// with underscores in the `allow` hint, so normalise both spellings.
+    fn reports_lint(report: &str, lint: &str) -> bool {
+        report
+            .replace('-', "_")
+            .contains(&format!("rustdoc::{lint}"))
+    }
+
     /// The real check: the crate documents cleanly with warnings promoted to
     /// errors.
     ///
     /// A single `--document-private-items` pass covers both failure modes: it
     /// still reports a public doc comment that links to a private item, and it
     /// additionally reports a link anywhere in `src/` (including private items)
-    /// that resolves to nothing at all. Reusing the outer target directory keeps
-    /// dependency artifacts warm, so the gate does not rebuild the tree twice.
+    /// that resolves to nothing at all. The child gets its own `CARGO_TARGET_DIR`
+    /// under `target/tmp`, so a nested cargo invocation can never contend with
+    /// the outer build's directory lock and the gate stays independent of how
+    /// `cargo test` was launched.
     #[test]
     fn doc_links_resolve_to_public_items() {
         let flags = format!("{} -D warnings", DOC_GATE_EXTRA_ARGS.join(" "));
+        let target_dir = root().join("target/tmp/doc-links-crate");
         let output = Command::new(cargo())
             .args(["doc", "--no-deps", "--quiet"])
             .current_dir(root())
+            .env("CARGO_TARGET_DIR", &target_dir)
             .env("RUSTDOCFLAGS", &flags)
-            .output()
-            .expect("cargo doc should run");
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => panic!("could not run `{} doc`: {error}", cargo()),
+        };
         let report = text(&output);
         assert!(
             output.status.success(),
@@ -837,11 +854,11 @@ mod doc_link_tests {
             "cargo doc must not emit any warning:\n{report}"
         );
         assert!(
-            !report.contains("links to private item"),
+            !reports_lint(&report, "private_intra_doc_links"),
             "a doc comment links to a private item:\n{report}"
         );
         assert!(
-            !report.contains("unresolved link"),
+            !reports_lint(&report, "broken_intra_doc_links"),
             "a doc comment links to a name that does not resolve:\n{report}"
         );
     }
@@ -881,8 +898,12 @@ mod doc_link_tests {
         );
         let report = outcome.unwrap_err();
         assert!(
-            report.contains("links to private item"),
-            "expected a private-link warning, got:\n{report}"
+            reports_lint(&report, "private_intra_doc_links"),
+            "expected the private-intra-doc-links lint, got:\n{report}"
+        );
+        assert!(
+            report.contains("Hidden"),
+            "the warning must name the private target, got:\n{report}"
         );
     }
 
@@ -895,8 +916,12 @@ mod doc_link_tests {
         );
         let report = outcome.unwrap_err();
         assert!(
-            report.contains("unresolved link"),
-            "expected an unresolved-link warning, got:\n{report}"
+            reports_lint(&report, "broken_intra_doc_links"),
+            "expected the broken-intra-doc-links lint, got:\n{report}"
+        );
+        assert!(
+            report.contains("NotDefinedAnywhere"),
+            "the warning must name the unresolved target, got:\n{report}"
         );
     }
 
@@ -919,8 +944,12 @@ mod doc_link_tests {
         );
         let report = with.unwrap_err();
         assert!(
-            report.contains("unresolved link"),
-            "expected an unresolved-link warning, got:\n{report}"
+            reports_lint(&report, "broken_intra_doc_links"),
+            "expected the broken-intra-doc-links lint, got:\n{report}"
+        );
+        assert!(
+            report.contains("NotDefinedAnywhere"),
+            "the warning must name the unresolved target, got:\n{report}"
         );
     }
 
