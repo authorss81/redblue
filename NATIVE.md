@@ -283,8 +283,8 @@ Reasoning that bounds the range:
   monomorphic/JIT stack, not for a baseline code generator.
 - **The project's own comparison table bounds the ambition.** It describes
   Redblue as about 15x to 30x slower than native Rust on pure compute loops
-  (`docs/FUTURE_ROADMAP_AND_DEFERRED.md:112`), and it places LuaJIT at about
-  1.5x to 3x of native Rust (`docs/FUTURE_ROADMAP_AND_DEFERRED.md:115`). A
+  (`docs/FUTURE_ROADMAP_AND_DEFERRED.md:119`), and it places LuaJIT at about
+  1.5x to 3x of native Rust (`docs/FUTURE_ROADMAP_AND_DEFERRED.md:122`). A
   competent baseline JIT closing the interpreter gap is therefore a single-digit
   multiple, not a 15x to 30x multiplier, until the unboxing and inline-cache
   work lands.

@@ -16,14 +16,19 @@ The work was already present in the adopted resume commit `dd5337a`; this run
 verified it and wrote the missing report. The round-1 review fixes then isolated
 the nested `cargo doc` target directory, restored the `Style::forced(false)`
 prose, and replaced assertions on rustdoc's wording with assertions on its stable
-lint names. No production behaviour changed.
+lint names. A later round split the positive gate into two passes (with and
+without `--document-private-items`) so the private-link lint cannot be silently
+suppressed, and made a spawn failure report its missing precondition instead of
+panicking in an `.expect`. No production behaviour changed.
 
 | File | Lines | What |
 |---|---|---|
 | README.md | +1 −1 | Project Structure names `interpreter.rs`, the file that exists, instead of `vm.rs` |
+| NATIVE.md | +2 −2 | citation line pins follow the roadmap's shifted comparison table (`112/115` → `119/122`) |
 | src/analyzer.rs | +1 −1 | private `Analyzer::declare_in_program_scope` link rewritten as prose code span |
 | src/bootstrap.rs | +4 −4 | `bytecode::vm::BytecodeVm` retargeted to `crate::bytecode::vm::BytecodeVm`; `STAGE2` / `Stage2::Bytes` links rewritten as code spans |
 | src/bytecode/format.rs | +1 −1 | private link rewritten as code span |
+| src/bytecode/format.rs | +2 −2 | `native_study` citation line pins follow the shifted roadmap (`112/115` → `119/122`) |
 | src/bytecode/opcode.rs | +1 −1 | private `call_method` link rewritten as code span |
 | src/bytecode/vm.rs | +4 −4 | `crate::vm` → `crate::Vm`; `crate::runtime`, `BytecodeVm::call_depth`, `loop_sites` links rewritten as code spans |
 | src/debugger.rs | +2 −2 | unresolved `Rc` and private `Frame::capture` links rewritten as code spans |
@@ -51,6 +56,20 @@ Every private-item link was handled by **rewriting the prose without a link**
 (keeping the wording, turning `[`X`]` into `` `X` ``); no item was made public
 just to silence rustdoc. The two `crate::vm` links were retargeted to the public
 `crate::Vm`, because the prose names the tree-walker that does exist.
+
+### Resume fix — a docs regression the phase window inherited
+
+The phase base is `f55ccc9`. Between that base and this resumed commit, two
+docs commits (`4d1a4f2`, `2403b16`) reorganized
+`docs/FUTURE_ROADMAP_AND_DEFERRED.md`, moving the "Rust / C / C++" comparison
+row from line 112 to 119 and the LuaJIT row from 115 to 122. `NATIVE.md` still
+cited the old lines, and `native_study_records_a_recommendation_and_the_components_it_cites`
+(`src/bytecode/format.rs`) pinned the same numbers, so `cargo test` was red on
+the adopted tree before any phase-124 edit. The fix updates both the prose
+citation and the test's line pins to the rows that actually hold those symbols;
+the assertions (the line must contain `Rust` / `LuaJIT`) are unchanged, so this
+is a re-pin, not a weakened test. This is the only non-rustdoc change, and it is
+what made the full suite green.
 
 ## The 59 reproduced warnings, each resolved
 
@@ -126,19 +145,24 @@ the 59 warnings.
 ## Tests added
 
 All in `src/lib.rs::doc_link_tests` (the test-only module counts as `src/`).
-The positive test runs `cargo doc --no-deps` with `RUSTDOCFLAGS` promoting every
-warning to an error, so any future private/unresolved link fails CI. It gives the
-child its own `CARGO_TARGET_DIR` under `target/tmp`, so the nested cargo call
-cannot contend with the outer build's lock. The `edge_*` tests run the same
-`rustdoc` binary over checked-in fixtures, so a broken fixture path cannot let
-the positive test pass for the wrong reason. The edge assertions match the stable
-rustdoc lint names (`private_intra_doc_links`, `broken_intra_doc_links`) and the
-fixture's target, not rustdoc's human-readable wording, so a toolchain wording
-change cannot turn them red.
+The positive test runs `cargo doc --no-deps` **twice** with `RUSTDOCFLAGS`
+promoting every warning to an error, because no single pass sees every failure:
+once without `--document-private-items` (the only pass that reports a public doc
+comment linking to a private item) and once with it (the only pass that reports
+an unresolved link inside a private item). Together they mean any future private
+or unresolved link fails CI. Each child gets its own `CARGO_TARGET_DIR` under
+`target/tmp`, so the nested cargo calls cannot contend with the outer build's
+lock or reuse each other's stale rustdoc output. A spawn failure is reported with
+the missing precondition instead of an `.expect` panic. The `edge_*` tests run
+the same `rustdoc` binary over checked-in fixtures, so a broken fixture path
+cannot let the positive test pass for the wrong reason. The edge assertions
+match the stable rustdoc lint names (`private_intra_doc_links`,
+`broken_intra_doc_links`) and the fixture's target, not rustdoc's
+human-readable wording, so a toolchain wording change cannot turn them red.
 
 | Test | Edge class covered |
 |---|---|
-| `doc_links_resolve_to_public_items` | positive crate-wide gate: zero warnings, no private or unresolved links |
+| `doc_links_resolve_to_public_items` | positive crate-wide gate, two passes: zero warnings and no private links without the flag, no unresolved links with it |
 | `edge_private_intra_doc_link_is_rejected` | failure: link to a private item is refused |
 | `edge_unresolved_intra_doc_link_is_rejected` | failure: link to a missing name is refused |
 | `edge_private_item_link_requires_document_private_items` | boundary: proves `--document-private-items` is load-bearing |
@@ -167,7 +191,7 @@ Fixtures: `tests/fixtures/public_doc_link.rs`,
 
 ## Gates
 
-Run on `dd5337a` after adding this report (doc-only, no code change).
+Run on the resumed tree after the citation re-pin (base `f55ccc9`).
 
 | Gate | Result |
 |---|---|
@@ -188,7 +212,8 @@ the gate runs from the pipeline checkout.
 
 ## Invariants touched
 
-- None. Only doc comments, README's file list, and a `#[cfg(test)]` module changed.
+- None. Only doc comments, README's file list, `NATIVE.md`'s citation line pins,
+  a test's citation line pins, and a `#[cfg(test)]` module changed.
 
 ## Known gaps / follow-ups
 
@@ -196,7 +221,10 @@ the gate runs from the pipeline checkout.
   `f55ccc9` emits 59 (58 lib + 1 `rb-bench`). The count is now pinned by the
   positive test, which fails on any new warning rather than on a fixed number.
 - The gate lives in `src/lib.rs`, so it runs with the library tests. It shells
-  out to `cargo doc` with an isolated `CARGO_TARGET_DIR`, so it never shares the
-  outer build's directory lock; if a future CI environment forbids spawning
-  cargo from a test, the fixtures still cover the rustdoc semantics but the
-  crate-wide check would need a dedicated CI step.
+  out to `cargo doc` twice with isolated `CARGO_TARGET_DIR`s, so it never shares
+  the outer build's directory lock and each pass rebuilds its own rustdoc output.
+  `cargo test` already requires a working cargo and a writable target directory,
+  so the same preconditions hold here; a spawn failure is reported with the
+  missing precondition rather than an `.expect` panic. If a future CI environment
+  forbids spawning cargo from a test, the fixtures still cover the rustdoc
+  semantics but the crate-wide check would need a dedicated CI step.

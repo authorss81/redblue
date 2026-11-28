@@ -773,6 +773,12 @@ mod doc_link_tests {
     //! test, verify.sh) cannot see a rustdoc warning, so this module is the only
     //! thing that does.
     //!
+    //! The positive gate runs two passes, because rustdoc hides one class of
+    //! problem when the other is enabled: without `--document-private-items` it
+    //! reports a public doc comment that links to a private item, but it never
+    //! documents private items; with the flag it documents private items but
+    //! suppresses the private-link lint. Only the pair covers the crate.
+    //!
     //! The `edge_*` tests are the checked-in negative cases: they prove that the
     //! same rustdoc invocation this module trusts really does refuse a link to a
     //! private item and a link to a name that does not exist. One fixture also
@@ -781,11 +787,12 @@ mod doc_link_tests {
     //! that flag. Without them a broken fixture path could make the positive
     //! test pass for the wrong reason.
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
-    /// Extra rustdoc flags the crate gate runs with. The fixture tests below
-    /// read this same constant, so removing `--document-private-items` makes
+    /// Extra rustdoc flags the private-items pass of the crate gate runs with.
+    /// The fixture tests below read this same constant, so removing
+    /// `--document-private-items` makes
     /// `edge_private_item_link_requires_document_private_items` fail instead of
     /// silently narrowing coverage.
     const DOC_GATE_EXTRA_ARGS: &[&str] = &["--document-private-items"];
@@ -820,38 +827,55 @@ mod doc_link_tests {
             .contains(&format!("rustdoc::{lint}"))
     }
 
-    /// The real check: the crate documents cleanly with warnings promoted to
-    /// errors.
+    /// Run one `cargo doc --no-deps` pass over this crate with warnings promoted
+    /// to errors, plus any extra rustdoc flags.
     ///
-    /// A single `--document-private-items` pass covers both failure modes: it
-    /// still reports a public doc comment that links to a private item, and it
-    /// additionally reports a link anywhere in `src/` (including private items)
-    /// that resolves to nothing at all. The child gets its own `CARGO_TARGET_DIR`
-    /// under `target/tmp`, so a nested cargo invocation can never contend with
-    /// the outer build's directory lock and the gate stays independent of how
-    /// `cargo test` was launched.
-    #[test]
-    fn doc_links_resolve_to_public_items() {
-        let flags = format!("{} -D warnings", DOC_GATE_EXTRA_ARGS.join(" "));
-        let target_dir = root().join("target/tmp/doc-links-crate");
+    /// A spawn failure is returned as an error string rather than panicking
+    /// inside an `.expect`, so the caller can report the missing environment
+    /// precondition (a working cargo/rustdoc and a writable target directory)
+    /// instead of aborting with a bare OS error.
+    fn crate_doc_outcome(extra_args: &[&str], target_dir: &Path) -> Result<String, String> {
+        let mut flags = extra_args.join(" ");
+        if !flags.is_empty() {
+            flags.push(' ');
+        }
+        flags.push_str("-D warnings");
         let output = Command::new(cargo())
             .args(["doc", "--no-deps", "--quiet"])
             .current_dir(root())
-            .env("CARGO_TARGET_DIR", &target_dir)
+            .env("CARGO_TARGET_DIR", target_dir)
             .env("RUSTDOCFLAGS", &flags)
             .output();
         let output = match output {
             Ok(output) => output,
-            Err(error) => panic!("could not run `{} doc`: {error}", cargo()),
+            Err(error) => {
+                return Err(format!(
+                    "could not run `{} doc` with RUSTDOCFLAGS={flags:?}: {error}\n\
+                     The doc gate needs a working cargo/rustdoc and a writable target \
+                     directory at {}.",
+                    cargo(),
+                    target_dir.display()
+                ));
+            }
         };
         let report = text(&output);
-        assert!(
-            output.status.success(),
-            "cargo doc --no-deps {flags} must produce no warnings:\n{report}"
-        );
+        if output.status.success() {
+            Ok(report)
+        } else {
+            Err(report)
+        }
+    }
+
+    /// Assert that one crate-wide `cargo doc` pass was warning-free and named no
+    /// doc-link lint.
+    fn assert_crate_docs_clean(outcome: Result<String, String>, pass: &str) {
+        let report = match outcome {
+            Ok(report) => report,
+            Err(report) => panic!("cargo doc {pass} must produce no warnings:\n{report}"),
+        };
         assert!(
             !report.contains("warning:"),
-            "cargo doc must not emit any warning:\n{report}"
+            "cargo doc {pass} must not emit any warning:\n{report}"
         );
         assert!(
             !reports_lint(&report, "private_intra_doc_links"),
@@ -861,6 +885,36 @@ mod doc_link_tests {
             !reports_lint(&report, "broken_intra_doc_links"),
             "a doc comment links to a name that does not resolve:\n{report}"
         );
+    }
+
+    /// The real check: the crate documents cleanly with warnings promoted to
+    /// errors, in both passes the two failure modes require.
+    ///
+    /// rustdoc suppresses `private_intra_doc_links` when
+    /// `--document-private-items` is set, so no single pass can see everything:
+    ///
+    /// 1. Without the flag, a public doc comment that links to a private item is
+    ///    reported (`private_intra_doc_links`), as is an unresolved link in a
+    ///    public item (`broken_intra_doc_links`). Private items are not
+    ///    documented, so their links are invisible here.
+    /// 2. With the flag, a link anywhere in `src/` (including private items)
+    ///    that resolves to nothing is reported, but the private-link lint is
+    ///    suppressed.
+    ///
+    /// Each child gets its own `CARGO_TARGET_DIR` under `target/tmp`, so a
+    /// nested cargo invocation can never contend with the outer build's
+    /// directory lock and the two passes cannot reuse each other's stale
+    /// rustdoc output.
+    #[test]
+    fn doc_links_resolve_to_public_items() {
+        let public = crate_doc_outcome(&[], &root().join("target/tmp/doc-links-public"));
+        assert_crate_docs_clean(public, "without --document-private-items");
+
+        let private = crate_doc_outcome(
+            DOC_GATE_EXTRA_ARGS,
+            &root().join("target/tmp/doc-links-private"),
+        );
+        assert_crate_docs_clean(private, "with --document-private-items");
     }
 
     fn rustdoc_outcome_with(fixture: &str, extra_args: &[&str]) -> Result<String, String> {
