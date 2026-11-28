@@ -229,7 +229,7 @@ pub struct Block {
     pub arity: u32,
     /// The parameter names, in order, for a function or method block.
     ///
-    /// Names and not slots, for the reason [`Opcode::Load`](crate::bytecode::Opcode::Load)
+    /// Names and not slots, for the reason [`Opcode::Load`]
     /// keeps names: a body reads its own arguments by name, so the file has to
     /// say which name each argument is bound to. Empty for every other kind.
     pub params: Vec<String>,

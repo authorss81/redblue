@@ -2073,8 +2073,8 @@ impl Parser {
         Ok(Some(Statement::Test { name, body }))
     }
 
-    /// expect <actual> to be <expected>
-    /// expect <actual> to <expected>
+    /// expect `<actual>` to be `<expected>`
+    /// expect `<actual>` to `<expected>`
     fn parse_expect(&mut self) -> Result<Option<Statement>> {
         self.advance(); // consume 'expect'
 

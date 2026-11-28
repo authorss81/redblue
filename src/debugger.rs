@@ -57,7 +57,7 @@ pub enum DebugAction {
 ///
 /// `Send` because the [`Vm`](crate::Vm) carrying it is sent to the sized thread
 /// `rb run` executes a program on. A `DebugSession` the hook closes over is
-/// therefore an [`Arc`] rather than an [`Rc`]; the REPL runs its program on its
+/// therefore an [`Arc`] rather than an [`std::rc::Rc`]; the REPL runs its program on its
 /// own thread, and only the type has to satisfy the stricter rule.
 pub type DebugHook = Box<dyn FnMut(DebugEvent<'_>) -> DebugAction + Send>;
 
@@ -137,7 +137,7 @@ impl DebugEvent<'_> {
     /// globals *that frame wrote* are its own — its caller's globals are not
     /// bindings of it, even though its body can read them.
     ///
-    /// This is what the debug sub-REPL's `.locals` prints. [`Frame::capture`] is
+    /// This is what the debug sub-REPL's `.locals` prints. `Frame::capture` is
     /// the same question asked wider — *everything* visible at a stop, for
     /// `:frame` — and the two answer differently on purpose.
     pub fn frame_locals(&self) -> Vec<(String, Value)> {

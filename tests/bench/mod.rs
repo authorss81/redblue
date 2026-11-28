@@ -41,7 +41,7 @@ const WORKER_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// A larger size is refused before the reference answer or the workload's source
 /// string is built, so the harness fails cleanly instead of allocating without
 /// bound or burning the shared budget. The boundary test compares against these
-/// maxima with [`check_size_supported`], which does not run the workload, so the
+/// maxima with `check_size_supported`, which does not run the workload, so the
 /// correctness gate never pays for a maximum-size measurement on an arbitrary
 /// machine. The maxima are demonstrated by the measured baseline, not by a timed
 /// assertion inside the gate.

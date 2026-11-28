@@ -239,7 +239,7 @@ pub const LIGHT: Theme = Theme {
 };
 
 /// No colour at all. Every paint returns its text untouched, which is the same
-/// byte-for-byte result as [`Style::forced(false)`].
+/// byte-for-byte result as `Style::forced(false)`.
 pub const NONE: Theme = Theme {
     name: "none",
     description: "no colour; identical to colour off",

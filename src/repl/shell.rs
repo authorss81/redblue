@@ -348,7 +348,7 @@ fn run_with(command: &str, _timeout: Duration, _max_output: usize) -> Result<She
 /// Sends `input` to `command`'s standard input and returns what it wrote.
 ///
 /// The writing happens on its own thread while this one drains both output
-/// streams through [`wait_for`]. A command like `cat` writes back everything it
+/// streams through `wait_for`. A command like `cat` writes back everything it
 /// reads, so writing the whole payload first would fill the output pipe and
 /// deadlock the pair: the child waiting for more input, the parent waiting for
 /// the child to read it.
@@ -428,7 +428,7 @@ fn pipe_with(
 }
 
 /// The visible entries of `path`, sorted the way completion sorts them and with
-/// a trailing [`DIRECTORY_SEPARATOR`] on every directory.
+/// a trailing `DIRECTORY_SEPARATOR` on every directory.
 ///
 /// The separator is completion's own constant rather than a second copy, so
 /// `.ls` and TAB cannot drift apart on what a directory looks like. Names that
