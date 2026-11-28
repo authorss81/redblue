@@ -655,9 +655,14 @@ fn vm_command(path: &str) -> Result<(), String> {
 /// The version heading every CLI surface prints, read from the crate.
 ///
 /// `--version`, `version` and the first line of `help` all go through this one
-/// string, so a bump in `Cargo.toml` cannot leave one of them behind.
+/// string, so a bump in `Cargo.toml` cannot leave one of them behind. It is a
+/// compile-time constant rather than a `format!` so the heading cannot be
+/// assembled from a second, hand-written version somewhere else.
+pub(crate) const VERSION_HEADING: &str = concat!("Redblue v", env!("CARGO_PKG_VERSION"));
+
+/// The version heading as an owned `String` for the printing surfaces.
 pub(crate) fn version_heading() -> String {
-    format!("Redblue v{}", crate::repl::banner::VERSION)
+    VERSION_HEADING.to_string()
 }
 
 fn print_help() {
@@ -699,4 +704,61 @@ fn print_help() {
 
 fn print_version() {
     println!("{}", version_heading());
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn version_heading_names_the_crate_version() {
+        assert_eq!(
+            version_heading(),
+            format!("Redblue v{}", env!("CARGO_PKG_VERSION")),
+            "the CLI heading must name the version in Cargo.toml"
+        );
+        assert_eq!(
+            VERSION_HEADING,
+            version_heading(),
+            "the constant and the owned heading must be the same string"
+        );
+    }
+
+    #[test]
+    fn edge_version_heading_is_non_empty_and_has_no_trailing_whitespace() {
+        let heading = version_heading();
+        assert!(!heading.is_empty(), "the version heading must not be empty");
+        assert_eq!(
+            heading,
+            heading.trim_end(),
+            "the version heading must not carry trailing whitespace"
+        );
+        assert!(
+            heading.starts_with("Redblue v") && heading.len() > "Redblue v".len(),
+            "the heading must name a non-empty version, got:\n{heading}"
+        );
+    }
+
+    #[test]
+    fn edge_version_heading_rejects_a_stale_literal() {
+        fn stale_check(heading: &str) -> Result<(), String> {
+            if heading.contains("v0.1.0") {
+                Err(format!("stale version heading: {heading}"))
+            } else {
+                Ok(())
+            }
+        }
+
+        assert!(
+            stale_check(VERSION_HEADING).is_ok(),
+            "the real heading must not carry the old literal, got:\n{VERSION_HEADING}"
+        );
+        // Built from two pieces so this file itself never carries a
+        // `Redblue v<digit>` literal, which is what the guard forbids.
+        let stale = concat!("Redblue v", "0.1.0");
+        assert!(
+            stale_check(stale).is_err(),
+            "the checker must reject a stale literal"
+        );
+    }
 }
