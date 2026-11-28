@@ -57,7 +57,7 @@ thread_local! {
 /// The most output one run may produce, in bytes.
 ///
 /// The playground hands its output to a host as an *address*, not a copy, so the
-/// bytes behind that address have to stay put — see [`HostBuffer`]. That buffer
+/// bytes behind that address have to stay put — see `HostBuffer`. That buffer
 /// is allocated once and reused, which is what makes the address stable, and a
 /// reused buffer has to have a size. This is it. A program past it is refused
 /// with a message, on the same `Error::Limit` channel [`crate::interpreter::MAX_CALL_DEPTH`]
@@ -168,7 +168,7 @@ fn run_lock() -> MutexGuard<'static, ()> {
 
 /// Starts a capture. The buffer is emptied first, so a capture never inherits
 /// the previous one's bytes. Callers go through [`run_program`] or [`rb_run`],
-/// which hold [`RUN_LOCK`]; reaching for these directly is only for a caller
+/// which hold `RUN_LOCK`; reaching for these directly is only for a caller
 /// that has serialised its own runs.
 pub fn begin_capture() {
     output_buffer().clear();
@@ -691,7 +691,7 @@ pub unsafe extern "C" fn rb_run(ptr: *const u8, len: i32) -> i32 {
 /// the module; only the bytes behind it change, and the next `rb_run` changes
 /// them.
 ///
-/// Serialised against every other entry point by the [`run_lock`], so a read
+/// Serialised against every other entry point by the `run_lock`, so a read
 /// never *overlaps* a write — but the address a host holds across its own
 /// `rb_output_len` call, and the bytes it reads through them, can still be
 /// another run's by the time it gets there. [`rb_read_output`] copies instead
@@ -774,7 +774,7 @@ pub unsafe extern "C" fn rb_read_error(dest: *mut u8, cap: i32) -> i32 {
 /// Runs the program *and* copies both channels out, all under one lock.
 ///
 /// The run-and-read form in one call, and the reason it exists is a schedule:
-/// [`rb_run`] then [`rb_read_output`] is two acquisitions of [`run_lock`], and
+/// [`rb_run`] then [`rb_read_output`] is two acquisitions of `run_lock`, and
 /// another host's run landing between them means the host reads bytes that are
 /// not its own. Two native threads doing exactly that was not a theoretical
 /// worry — it is what

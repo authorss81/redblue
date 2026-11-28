@@ -1,6 +1,6 @@
 //! The typed value a `catch error of <Type>` matches against.
 //!
-//! [`Error`](crate::error::Error) is the host's own error type: `Runtime`,
+//! [`Error`] is the host's own error type: `Runtime`,
 //! `Io`, `Limit` and the three compile-time kinds, in Rust, for the host and
 //! its tooling. None of that reaches a Redblue program — a `catch` used to bind
 //! the untyped text `error`, so there was nothing a handler could ask about the

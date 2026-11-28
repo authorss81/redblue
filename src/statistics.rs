@@ -1,6 +1,6 @@
 //! Descriptive statistics over a list of numbers.
 //!
-//! These live on the shared builtin path, [`crate::runtime::builtin`], so the
+//! These live on the shared builtin path, `crate::runtime::builtin`, so the
 //! tree-walker and the bytecode VM answer from one implementation. The exact
 //! definitions are in SPEC.md § math: variance and standard deviation are the
 //! population forms, an even median is the mean of the two middle values, a

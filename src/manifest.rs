@@ -45,7 +45,7 @@
 //! resolve found, and a program whose manifest pins `*` would be handed a new
 //! version the moment one is published, in silence, with nothing to notice. So a
 //! lockfile that disagrees with the resolution is refused, by
-//! [`check_lockfile`], naming the module that moved.
+//! `check_lockfile`, naming the module that moved.
 //!
 //! # Failing
 //!
@@ -119,7 +119,7 @@ impl Version {
     ///
     /// Exactly three components, each of them at least one digit. `1.0` and
     /// `1.0.0-beta` are refused rather than read as `1.0.0`: a version nobody
-    /// can round-trip through [`Display`] is a version two manifests will
+    /// can round-trip through [`std::fmt::Display`] is a version two manifests will
     /// disagree about. A leading zero is refused for the same reason: `01.0.0`
     /// would be read and displayed as `1.0.0`.
     pub fn parse(text: &str) -> Result<Version> {
@@ -686,7 +686,7 @@ pub struct LockedModule {
 /// last resolve found, and the world moves under it: publish a new version of a
 /// module a manifest pins with `*`, and the next resolve quietly hands the
 /// program different code from the one the file records, with nothing to notice.
-/// Reading it back is what makes it a lock — see [`check_lockfile`], which
+/// Reading it back is what makes it a lock — see `check_lockfile`, which
 /// refuses exactly that disagreement.
 ///
 /// The errors are [`Error::Runtime`] naming the line, like [`Manifest::parse`]
@@ -1622,10 +1622,10 @@ impl Pins {
     /// able to answer after the manifest is repaired.
     ///
     /// This asks the strict question: a full-parse failure is reported here.
-    /// A running program with an `import` uses [`Pins::check_program_language_for`]
+    /// A running program with an `import` uses `Pins::check_program_language_for`
     /// instead, so the parse error stays at the import that can surface it.
-    /// Pins that do not own the program's range — [`Pins::for_analysis`] and
-    /// [`Pins::for_session`] — answer `Ok`.
+    /// Pins that do not own the program's range — `Pins::for_analysis` and
+    /// `Pins::for_session` — answer `Ok`.
     pub fn check_program_language(&mut self) -> Result<()> {
         self.check_program_language_with(true)
     }

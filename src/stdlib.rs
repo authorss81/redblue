@@ -321,8 +321,8 @@ pub fn module_members(module: &str) -> Option<&'static [&'static str]> {
 /// it names.
 ///
 /// This is the whole rule, in one place, because both engines ask it before they
-/// resolve anything — [`crate::interpreter::Vm::call_method`] and
-/// [`crate::bytecode::vm::BytecodeVm::call_method`] — and a rule written twice is
+/// resolve anything — `crate::interpreter::Vm::call_method` and
+/// `crate::bytecode::vm::BytecodeVm::call_method` — and a rule written twice is
 /// a rule the next change will apply to one of them.
 ///
 /// Three questions, in the order a call asks them, and the first that says no is
@@ -373,8 +373,8 @@ pub fn dotted_call_reaches(
 /// counted: `xs.map(5)` says what it got, and a call with no argument at all
 /// says that too. [`list_function`] and [`reduce_parts`] carry the same naming
 /// for `filter` and `reduce`, and both engines ask this — see
-/// [`crate::interpreter::Vm::call_method`] and
-/// [`crate::bytecode::vm::BytecodeVm::call_method`] — because the two engines
+/// `crate::interpreter::Vm::call_method` and
+/// `crate::bytecode::vm::BytecodeVm::call_method` — because the two engines
 /// refusing with different words is a divergence `tests/differential_test.rs`
 /// reports for a program that is behaving the same way.
 ///
@@ -1000,7 +1000,7 @@ pub fn module_of_builtin(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Calls the builtin `name`, for the builtins [`runtime::builtin`] does not
+/// Calls the builtin `name`, for the builtins `runtime::builtin` does not
 /// answer.
 ///
 /// This function used to be **dead code**: both VMs asked `runtime::builtin`,
@@ -2405,12 +2405,12 @@ pub const BUILTIN_NAMES: &[&str] = &[
 /// The shape of every builtin: the parameters it reads and what it answers.
 ///
 /// This is what `:sighelp` reads. A builtin's arity and argument types are written
-/// in the arms of [`builtin_function`] and [`crate::runtime::builtin`], which a
+/// in the arms of [`builtin_function`] and `crate::runtime::builtin`, which a
 /// reader has to hold in their head to answer "how do I call `split`?" — and a
 /// REPL that cannot answer it sends the user to the source instead.
 ///
 /// Kept here, beside [`BUILTIN_NAMES`], so it is written down where the registry
-/// is: [`signatures_cover_the_registry`] fails the moment a builtin is registered
+/// is: `signatures_cover_the_registry` fails the moment a builtin is registered
 /// without a shape, which is the drift a table in a REPL module would have had.
 ///
 /// The shapes are written in the language's own terms — `text`, `number`,
@@ -3101,7 +3101,7 @@ pub fn builtins_without_signatures() -> Vec<&'static str> {
 ///   with no timeout to save them.
 /// - They *advance something shared*: `random`, `random_number`,
 ///   `random_choice` and `random_shuffle` all draw from the one
-///   `RANDOM_STATE` ([`crate::runtime`]), so asking `:type random()` twice
+///   `RANDOM_STATE` (`crate::runtime`), so asking `:type random()` twice
 ///   answers two different numbers and the *next* `random()` a program draws
 ///   is not the one it would have got. `random_seed` writes that state outright.
 ///   `time_now` is the same defect without a stream to advance: it is the wall

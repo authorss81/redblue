@@ -129,7 +129,7 @@ impl Analyzer {
     /// `Unknown variable 'x'`, and no line could read anything an earlier line
     /// had bound — a variable, a `to`, an `import`ed module.
     ///
-    /// The names go in the program scope ([`Analyzer::declare_in_program_scope`])
+    /// The names go in the program scope (`Analyzer::declare_in_program_scope`)
     /// because that is where a `set` a session made lands, so a later line's read
     /// and write of the name resolve the same way they would inside one program.
     pub fn with_bound_names(names: &[String]) -> Self {

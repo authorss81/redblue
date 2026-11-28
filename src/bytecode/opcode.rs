@@ -149,7 +149,7 @@ pub enum Opcode {
     /// held. A bare name therefore says the receiver was not a name at all,
     /// which is what the one answerable expression receiver,
     /// `[1, 2, 3].map(f)`, is written as; see
-    /// [`crate::bytecode::vm::BytecodeVm::call_method`].
+    /// `crate::bytecode::vm::BytecodeVm::call_method`.
     CallMethod,
     /// Returns the top of the stack, or `nothing` when the return had no value.
     Return,
