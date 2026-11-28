@@ -2259,22 +2259,22 @@ Every ported package must adhere to open-source governance:
 #### The Mandate:
 Prior to Phase 126, the language core underwent rapid pre-1.0 grammar stabilization. Immediately upon the completion of Phase 126, formal language versioning is officially inaugurated starting in **Phase 127**:
 
-1. **The `v0.2.0` Baseline & Phase 127 Auto-Increment**:
+1. **The `v0.2.0` Baseline & Phase 127 Automated SemVer Differentiation**:
    - The base stabilization (`phase-123`) synchronized `Cargo.toml`, `rb version`, and `SPEC.md` at `0.2.0`.
-2. **Automated Version Increment on Every Compiler Fix (Active at Phase 127+)**:
-   - Starting at **`phase-127`**, `rbops` automatically bumps Redblue's SemVer patch version (`Cargo.toml` + `Cargo.lock` + git tag) on every landed compiler phase:
-     - `Phase 127` → `v0.2.1` (First version bump)
-     - `Phase 128` → `v0.2.2`
-     - `Phase 129` → `v0.2.3`
-     - `Phase 130` → `v0.2.4`
-     - `Phase 131` → `v0.2.5` (Ecosystem Wave 1 Release)
-   - Every version is permanently bound to its Git commit SHA:
+   - Starting at **`phase-127`**, `rbops.yml` differentiates **MAJOR**, **MINOR**, and **PATCH** bumps automatically from git diff/metadata (`auto`, `version_bump` field in `phases.json`, or `workflow_dispatch` input):
+     - **PATCH (`0.2.X` → `0.2.(X+1)`)**: Bug fixes, small repairs, warning cleanups, doc fixes (`Phase 127` nested return fix → `0.2.1`, `Phase 128` loop closure fix → `0.2.2`, `Phase 129` parser loop → `0.2.3`, `Phase 130` `BYTECODE.md` → `0.2.4`).
+     - **MINOR (`0.Y.Z` → `0.(Y+1).0`)**: New backward-compatible features, new stdlib modules, keywords, VM opcodes, or Milestone gates (`Phase 131` Ecosystem Launch, `Phase 137` `tui` module, `Phase 144` NaN-Boxing, `Phase 155+` Gradual Typing → `0.3.0`, `0.4.0`...). Pre-`1.0.0` breaking changes also bump `MINOR` per SemVer `0.y.z` rules.
+     - **MAJOR (`1.0.0` Production Maturity & Beyond)**:
+       - **`v1.0.0` Milestone**: Explicitly unlocked via `version_bump=major` when Redblue achieves full production maturity — core compiler stabilized (`127–130` + Section 14 ledger clean) **AND ecosystem proof achieved** (**10,000+ native packages** in `authorss81/rb-pkg` + flagship real-world production backends/apps verified green via `nightly_sweep.yml`).
+       - **`v2.0.0+`**: Reserved strictly for post-`1.0.0` breaking language/ABI changes.
+2. **Every Version Pinned by Immutable Tag & Commit SHA**:
+   - Every bump commits `chore(release): bump <kind> vX.Y.Z (<phase>)` and pushes git tag `vX.Y.Z`:
      ```bash
      $ rb version
-     Redblue v0.2.1 (commit 78bda85, 2026-11-22, x86_64-pc-windows-msvc)
+     Redblue v0.2.1 (commit 78bda85, 2026-11-28, x86_64-pc-windows-msvc)
      ```
 3. **Deterministic Snapshot Restoration**:
-   - Because each fix increments the SemVer version and produces an immutable Git commit snapshot, any regression can be rolled back to the exact pre-breaking version (`git revert <sha>` or `git checkout v0.2.0`).
+   - Because each fix or feature produces a SemVer tag and immutable Git commit snapshot, any regression can be rolled back to the exact pre-breaking state (`git revert <sha>` or `git checkout v0.2.1`).
 
 ---
 
