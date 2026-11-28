@@ -12,7 +12,14 @@ These phases are **deliberately held back from `rbops/phases.json`** to allow th
 
 A comparison against [`authorss81/Ipp`](https://github.com/authorss81/Ipp) and [`authorss81/inscript`](https://github.com/authorss81/inscript) reveals that Redblue's current REPL is functional but visually plain (unbordered plaintext, single hardcoded palette, manual-only timing). The following visual enhancements are planned:
 
-### Phase 127: Rich Box-Drawing Cards & Frame Layouts
+### Phases 127–130: Auditor Core Stabilization & SemVer Inauguration (`rbops` Active Queue)
+- **Phases 127–130** (`phase-127` through `phase-130`) are the 4 core stabilization phases queued automatically by `rbops audit` (nested `give back` unwinding, VM closure loop capture, self-hosted parser 1,000+ statements, and `docs/BYTECODE.md` version guard).
+- **Version Marking Active from Phase 127**: Starting at `phase-127`, `rbops` automatically bumps Redblue's SemVer patch version (`0.2.0` → `0.2.1`, `0.2.2`...) in `Cargo.toml` and tags every landed phase on `main`.
+
+### Phase 131: Core Freeze Gate & Ecosystem Wave 1 Launch
+- **Goal**: Final verification checkpoint after `Phases 127–130` (and `113`/`115`/`122`) land cleanly on `main`. Unlocks Wave 1 ecosystem orchestrators (`rbos-ops`, `rb-apps-org/ops`, `rb-pkg-*/ops`) and deploys `rb-lean/rean` + `rb-lean/rean-ops`.
+
+### Phase 132: Rich Box-Drawing Cards & Frame Layouts
 - **Goal**: Frame `.help` menus, `.vars`/`.inspect` listings, command tables, and error diagnostics inside clean Unicode box-drawing cards (`╔════╗`, `║`, `╚════╝`, `────`), with clear column alignment and ASCII fallbacks.
 - **Why it matters**: Replaces wall-of-text dumps with readable visual panels matching `InScript`'s terminal aesthetics.
 - **Acceptance Criteria**:
@@ -21,48 +28,48 @@ A comparison against [`authorss81/Ipp`](https://github.com/authorss81/Ipp) and [
   - Degrades gracefully to plain ASCII (`+---`, `|`) on non-Unicode terminals.
   - Output remains byte-identical when `NO_COLOR=1` or when piped to non-TTY.
 
-### Phase 128: Automatic Inline Execution Timing (`[1.2ms]`)
+### Phase 133: Automatic Inline Execution Timing (`[1.2ms]`)
 - **Goal**: Automatically calculate and display execution time for every evaluated expression directly beside or below the result (e.g. `[1.4ms]`).
 - **Features**:
   - Sub-millisecond precision for fast expressions (`0.4ms`), second precision for long runs (`1.24s`).
   - `.timing on` and `.timing off` commands to toggle automatic timing.
   - Color-coded: dim grey for fast runs, subtle yellow for runs $> 500\text{ms}$.
 
-### Phase 129: Multi-line Line Numbers & Dynamic Prompts
+### Phase 134: Multi-line Line Numbers & Dynamic Prompts
 - **Goal**: Upgrade the continuation prompt from static `... ` to line-numbered prompts (`... 2 `, `... 3 `) and add contextual prompt status glyphs (borrowed from `InScript`).
 - **Features**:
   - Explicit line numbering during block entry (`if`, `repeat`, `function`).
   - Visual distinction between primary prompt (`rb> `) and continuation prompt.
 
-### Phase 130: Extended Theme Engine & Live Palette Swatches
+### Phase 135: Extended Theme Engine & Live Palette Swatches
 - **Goal**: Expand Phase 117's theme system with a full suite of vibrant terminal themes:
   - **Themes**: Monokai, Dracula, Nord, Solarized Dark, Gruvbox, and Cyberpunk/Sunset.
   - **Palette Viewer**: `.themes` renders a visual swatch card showing actual background/foreground color samples for keywords, strings, builtins, results, and errors.
 
-### Phase 131: History Ghost Suggestions & Bracket Highlights
+### Phase 136: History Ghost Suggestions & Bracket Highlights
 - **Goal**: Faint inline auto-suggestions from command history as the user types (similar to `prompt_toolkit` in `Ipp`), with real-time matching bracket/parenthesis highlights.
 
-### Phase 132: Terminal UI Component Toolkit (`tui` Module)
+### Phase 137: Terminal UI Component Toolkit (`tui` Module)
 - **Goal**: Add a lightweight, zero-dependency terminal UI module (`tui`) for building interactive terminal dashboards, forms, and progress monitors directly in Redblue.
 - **Features**: Split frames (vertical/horizontal), progress gauges, selectable lists, and keypress event polling.
 
-### Phase 133: Interactive Debugger & Breakpoint Stepper (`rb debug`)
+### Phase 138: Interactive Debugger & Breakpoint Stepper (`rb debug`)
 - **Goal**: Provide an interactive CLI debugger supporting line breakpoints, single-stepping (`next`, `step in`), stack frame inspection, and expression evaluation at pause points.
 - **Decoupling Protocol**: Core `redblue` ships only the terminal stepper (`rb debug`); the graphical Debug Adapter Protocol (DAP) server for VS Code and Neovim is built in the dedicated **`authorss81/rb-ide`** repository at Milestone 1.5.
 
-### Phase 134: Structured Doc-Comment Extractor & Markdown API Generator (`rb doc`)
+### Phase 139: Structured Doc-Comment Extractor & Markdown API Generator (`rb doc`)
 - **Goal**: Extract `///` docstrings from Redblue source files and generate clean GitHub-flavored Markdown API reference documentation for libraries and modules.
 
-### Phase 135: Hermetic Test Coverage & Branch Profiler (`rb test --coverage`)
+### Phase 140: Hermetic Test Coverage & Branch Profiler (`rb test --coverage`)
 - **Goal**: Instrument AST evaluation to measure statement and branch test coverage, reporting uncovered lines in `rb test` summaries.
 
-### Phase 136: Compiler Diagnostic Enhancements & Suggestion Underlines
+### Phase 141: Compiler Diagnostic Enhancements & Suggestion Underlines
 - **Goal**: Upgrade parser and semantic analyzer diagnostics to display rustc-style source code context, colored underline carets (`^^^^`), and automated "Did you mean ...?" correction hints.
 
-### Phase 137: Bytecode Disassembler & Opcode Inspector (`rb disasm`)
+### Phase 142: Bytecode Disassembler & Opcode Inspector (`rb disasm`)
 - **Goal**: Provide an official CLI tool to inspect bytecode chunks, constant pools, and jump targets for any compiled `.rb` or `.rbc` file.
 
-### Phase 138: Zero-Dependency Single-File Bundle Tool (`rb bundle`)
+### Phase 143: Zero-Dependency Single-File Bundle Tool (`rb bundle`)
 - **Goal**: Package a multi-file Redblue project and its assets into a single self-contained, executable script or pre-compiled bytecode bundle.
 
 ---
@@ -118,30 +125,30 @@ They run in the dedicated `rb-apps` pipeline powered by autonomous OpenCode agen
 
 The following VM and memory optimizations are queued to close the performance gap:
 
-### Phase 139: NaN-Boxing Value Representation
+### Phase 144: NaN-Boxing Value Representation
 - **Goal**: Compress Redblue's runtime `Value` enum from 24 bytes down to an 8-byte IEEE-754 floating-point `u64`.
 - **How it works**: Uses unallocated quiet NaN bit patterns to pack integers, booleans, nil, symbols, and heap pointers into a single CPU register.
 - **Impact**: Doubles CPU cache density, eliminates pointer dereferences for primitives, and speeds up stack operations by $25\%\text{--}40\%$.
 
-### Phase 140: Bytecode Peephole Optimizer & Constant Folding
+### Phase 145: Bytecode Peephole Optimizer & Constant Folding
 - **Goal**: Add a multi-pass optimization pipeline to the bytecode compiler.
 - **Techniques**:
   - Constant folding (`set x to 2 + 3` emits `LOAD_CONST 5`, not runtime addition).
   - Dead code elimination (skips unreachable `else` branches).
   - Super-instructions (e.g., merging `LOAD_VAR` and `BINARY_ADD` into `ADD_VAR`).
 
-### Phase 141: Inline Caching (IC) for Member & Record Lookups
+### Phase 146: Inline Caching (IC) for Member & Record Lookups
 - **Goal**: Convert dynamic property access (`user.name` or `record.field`) from expensive dictionary hash lookups into single array index lookups by caching the field offset at the bytecode call-site.
 - **Impact**: Accelerates record and module member lookups to near-native $O(1)$ speeds.
 
-### Phase 142: Small-Value Inlining (`SmallVec`)
+### Phase 147: Small-Value Inlining (`SmallVec`)
 - **Goal**: Inline small strings ($\le 24$ bytes) and small lists ($\le 4$ elements) directly into the value stack rather than allocating on the system heap.
 - **Impact**: Eliminates heap allocator locks in tight loops ($20\%\text{--}35\%$ speedup).
 
-### Phase 143: Structural Cycle-Break Collector
+### Phase 148: Structural Cycle-Break Collector
 - **Goal**: Implement a trial-deletion cycle collector for reference-counted cyclic structures (records referencing records), guaranteeing deterministic memory release without stop-the-world GC pauses.
 
-### Phase 144: High-Precision Euclidean Time Math & POSIX Compliance
+### Phase 149: High-Precision Euclidean Time Math & POSIX Compliance
 - **Goal**: Upgrade all numeric timestamp conversions (`time.from_unix`, `time.format`, and temporal arithmetic) to use mathematical `floor` / Euclidean division ($[s, s+1)$ intervals), matching POSIX `timespec`, Python (`datetime.fromtimestamp`), Go (`time.Unix`), and Rust (`chrono::DateTime::from_timestamp`).
 - **Context & Motivation**:
   - In Phase 096, `time.from_unix` and `time.format` initially implemented numeric instant conversions using Rust's direct `as i64` cast, which truncates toward zero. This created a double-bucket anomaly around epoch where both $+0.5\text{s}$ and $-0.5\text{s}$ collapsed into `1970-01-01 00:00:00`, erasing the second `1969-12-31 23:59:59` for fractional pre-epoch timestamps.
@@ -159,14 +166,14 @@ The following VM and memory optimizations are queued to close the performance ga
 The project includes a 140 KB compiler written in pure Redblue (`bootstrap/compiler.rb`). The self-hosting milestones follow the ladder defined in `docs/BOOTSTRAP.md`:
 $$\text{Rust Compiler (S1)} \to \text{Self-Compiled Bytecode (S2)} \to \text{Fixed-Point Identity (S3: } \text{stage1.rbc} == \text{stage2.rbc}) \to \text{Shipped Release (S4)}$$
 
-#### Current Status vs S4 Target Milestone (Phase 191)
+#### Current Status vs S4 Target Milestone (Phase 196)
 - **S0 through S3 are already achieved and verified**: `tests/bootstrap_selfhost_test.rs` already asserts that `stage1.rbc` and `stage2.rbc` are byte-identical across hundreds of test programs.
-- **S4 (The Shipped Compiler is cut by Redblue itself)** is scheduled to formally take over at **Phase 191** (following the completion of the precision audits, core grammar extensions, JIT velocity passes, and world-class capabilities through Phase 190).
-- **Why S4 Must Take Place at Phase 191 (Rather than Earlier)**:
-  1. **Precision & Semantic Integrity (Phases 162–170)**: Bootstrapping before completing the precision audit would bake shallow implementation flaws (such as combining Unicode emoji corruption, float rounding anomalies, or non-deterministic map ordering) directly into the self-hosting compiler's binary output.
-  2. **Core Language Grammar (Phases 171–175)**: Cutting S4 after Phase 175 allows `bootstrap/compiler.rb` to be written using modern, idiomatic Redblue (`using` deterministic cleanup, `when matches` pattern matching, and `needs/guarantees` contracts).
-  3. **Near-Native Execution Speed (Phases 176–183)**: With Hidden Classes, Escape Analysis, Monomorphic Unboxing, and Cranelift JIT compilation, `bootstrap/compiler.rb` compiles at **near-native C/Rust speed (< 150 ms)**. Without these passes, running self-hosting across 84 test suites would cause 10-minute CI build times and pipeline timeouts.
-  4. **World-Class Compiler Features (Phases 184–190)**: Completing module encapsulation (`public`/`private`), generics, zero-config cross-compilation (`--target`), and the 10,000-case conformance suite before S4 ensures `bootstrap/compiler.rb` is clean, type-safe, cross-compiles to all platforms out of the box, and is mathematically proven against the Rust reference compiler before Rust is retired.
+- **S4 (The Shipped Compiler is cut by Redblue itself)** is scheduled to formally take over at **Phase 196** (following the completion of the precision audits, core grammar extensions, JIT velocity passes, and world-class capabilities through Phase 195).
+- **Why S4 Must Take Place at Phase 196 (Rather than Earlier)**:
+  1. **Precision & Semantic Integrity (Phases 167–175)**: Bootstrapping before completing the precision audit would bake shallow implementation flaws (such as combining Unicode emoji corruption, float rounding anomalies, or non-deterministic map ordering) directly into the self-hosting compiler's binary output.
+  2. **Core Language Grammar (Phases 176–180)**: Cutting S4 after Phase 180 allows `bootstrap/compiler.rb` to be written using modern, idiomatic Redblue (`using` deterministic cleanup, `when matches` pattern matching, and `needs/guarantees` contracts).
+  3. **Near-Native Execution Speed (Phases 181–188)**: With Hidden Classes, Escape Analysis, Monomorphic Unboxing, and Cranelift JIT compilation, `bootstrap/compiler.rb` compiles at **near-native C/Rust speed (< 150 ms)**. Without these passes, running self-hosting across 84 test suites would cause 10-minute CI build times and pipeline timeouts.
+  4. **World-Class Compiler Features (Phases 189–195)**: Completing module encapsulation (`public`/`private`), generics, zero-config cross-compilation (`--target`), and the 10,000-case conformance suite before S4 ensures `bootstrap/compiler.rb` is clean, type-safe, cross-compiles to all platforms out of the box, and is mathematically proven against the Rust reference compiler before Rust is retired.
 
 #### Will Bootstrapping Make GitHub Actions Workflows Take Much Longer?
 **Without optimization: YES (Catastrophic slowdown). With the phased strategy: NO.**
@@ -177,8 +184,8 @@ $$\text{Rust Compiler (S1)} \to \text{Self-Compiled Bytecode (S2)} \to \text{Fix
    - With an unoptimized tree-walking interpreter and linear table scans, a single self-compilation pass took ~6–10 seconds. Running multiple stages across 84 test binaries would add minutes to every PR, risking CI timeouts.
 2. **How CI Workflow Velocity is Preserved**:
    - **Phase 074 Hash Interning**: Replaces the linear symbol table scan with $\mathcal{O}(1)$ hashing, slashing compiler codegen time by >25%–50%.
-   - **Phases 139–143 (NaN-Boxing & Inline Caching)**: Accelerates the bytecode VM by $3\times\text{--}5\times$, dropping full self-compilation of `bootstrap/compiler.rb` from 6 seconds down to **under 500 ms**.
-   - **Phases 176–183 (Monomorphic Unboxing & Cranelift JIT)**: Compiles the self-hosted compiler into raw native machine code, dropping execution time to **under 150 ms** (matching native Rust).
+   - **Phases 144–148 (NaN-Boxing & Inline Caching)**: Accelerates the bytecode VM by $3\times\text{--}5\times$, dropping full self-compilation of `bootstrap/compiler.rb` from 6 seconds down to **under 500 ms**.
+   - **Phases 181–188 (Monomorphic Unboxing & Cranelift JIT)**: Compiles the self-hosted compiler into raw native machine code, dropping execution time to **under 150 ms** (matching native Rust).
    - **Artifact Caching in CI**: `stage1_of_the_compiler()` caches the compiled artifact in `target/` so it is compiled only **once per test run**, not re-compiled on every individual test function.
    - **Selective CI Execution**: Full 3-stage fixed-point verification (`cmp stage1 stage2`) is triggered only when files in `bootstrap/` or `src/bytecode/` are modified, while everyday stdlib/docs changes run ordinary fast unit tests.
 
@@ -194,7 +201,7 @@ Currently, Redblue maintains two distinct execution engines: the **AST Tree-Walk
 * **Optimization Asymmetry**: Key performance optimizations (NaN-boxing, register allocation, inline caches, and JIT compilation) can only be built into the Bytecode VM. The AST tree-walker cannot benefit from them.
 * **Roadmap**:
   1. Maintain both engines throughout the 126 base phases and initial bootstrap testing.
-  2. Once the Bytecode VM optimizations (Phases 139–143) land and pass all test suites, consolidate on the **Bytecode VM as the primary and default engine**.
+  2. Once the Bytecode VM optimizations (Phases 144–148) land and pass all test suites, consolidate on the **Bytecode VM as the primary and default engine**.
   3. Demote the AST interpreter to an optional reference specification or retire it to reduce technical debt.
 
 ---
@@ -238,7 +245,7 @@ Rather than building the Operating System inside the `authorss81/redblue` langua
 
 ---
 
-## 7. Future Memory Safety Architecture: Perceus In-Place Value Semantics (Phases 145–149)
+## 7. Future Memory Safety Architecture: Perceus In-Place Value Semantics (Phases 150–154)
 
 ### Design Rationale: Why Not Tracing GC or Rust Lifetimes?
 - **Tracing GC** (Mark-Sweep / Generational) introduces non-deterministic stop-the-world pauses, 2–3× memory overhead, and delayed finalizers. This is unacceptable for an operating system kernel (`rbos`) and low-latency network servers.
@@ -248,7 +255,7 @@ Rather than building the Operating System inside the `authorss81/redblue` langua
   - The engine tracks reference uniqueness: when `ref_count == 1`, updates mutate buffers in-place with native C speed and zero allocation. When `ref_count > 1`, it copies on write (COW).
   - Reclamation is immediate and deterministic upon leaving scope.
 
-### Phase 145: Native Intrusive Reference Headers
+### Phase 150: Native Intrusive Reference Headers
 - **Goal**: Replace Rust `Arc` wrappers with an engine-native 8-byte intrusive header embedded directly before all heap allocations (`List`, `Record`, `Text`, `Matrix`).
 - **Header Layout**:
   ```rust
@@ -262,19 +269,19 @@ Rather than building the Operating System inside the `authorss81/redblue` langua
   ```
 - **Impact**: Eliminates double-indirection pointer hops and unifies heap representation across the tree interpreter, bytecode VM, and future native/WASM backends.
 
-### Phase 146: RAII Deterministic Drop Insertion
+### Phase 151: RAII Deterministic Drop Insertion
 - **Goal**: Compiler pass inserting deterministic drop opcodes (`OP_DECREF`, `OP_DROP`) at lexical scope exits, block boundaries, loop turns, and early returns.
 - **Guarantee**: Files, sockets, matrix memory, and heavy buffers are reclaimed instantly the moment execution leaves the block, without waiting for an external collection pass.
 
-### Phase 147: Perceus In-Place Reuse Analysis (FBIP)
+### Phase 152: Perceus In-Place Reuse Analysis (FBIP)
 - **Goal**: Compile-time liveness analysis in the bytecode VM detecting whether a collection binding is reused or dead immediately following an update.
 - **Impact**: Transforms immutable functional list/record updates (`set items to items.append(x)`) into zero-cost in-place writes whenever uniqueness count is 1.
 
-### Phase 148: Bacon-Rajan Cycle-Break Collector
+### Phase 153: Bacon-Rajan Cycle-Break Collector
 - **Goal**: A concurrent trial-deletion cycle collector specifically for cyclic object structures and recursive closures.
 - **Optimization**: Because 98% of values in Redblue are acyclic data trees, only mutable objects and closures with cycles are tracked in an isolated candidate buffer. The collector scans only this tiny buffer, preventing full-heap pauses.
 
-### Phase 149: Per-Fiber Regional Bump Arenas (for `rbos`)
+### Phase 154: Per-Fiber Regional Bump Arenas (for `rbos`)
 - **Goal**: Regional bump-pointer allocation arenas dedicated to individual async fibers.
 - **Behavior**: Short-lived task allocations increment a pointer without heap locking. When the fiber finishes, the entire arena resets in $\mathcal{O}(1)$ time.
 
@@ -318,14 +325,14 @@ However, adopting traditional package managers introduces catastrophic industry 
 - **`npm` / JavaScript Hell**: 1,000 transitive dependencies for a basic project, 500 MB `node_modules`, Left-Pad breaking the internet, and supply chain malware.
 - **`pip` / Python Hell**: Virtual environment corruption (`venv`), broken C-extension wheel builds, ABI incompatibility across Python minor versions, and diamond dependency version locking.
 
-### 9.2 Redblue's Modern Dependency Architecture (Phases 150–152)
+### 9.2 Redblue's Modern Dependency Architecture (Phases 155–157)
 
-### Phase 150: Tiered Standard Library Model
+### Phase 155: Tiered Standard Library Model
 - **Tier 0 (Core Builtin Binary, ~15 MB)**: Primitive types, arithmetic, strings, files, time, JSON, CSV, TOML, basic HTTP, and matrix/decimal math. Ships inside the binary.
 - **Tier 1 (Official Pre-Compiled Modules)**: First-party maintained packages (e.g., `sqlite`, `crypto`, `image`, `httpd`). Distributed as single pre-compiled dynamic/static modules with zero transitive dependencies.
 - **Tier 2 (Ecosystem Community Packages)**: User-contributed libraries.
 
-### Phase 151: Content-Addressed Hermetic Package Cache (Zero `venv` Hell)
+### Phase 156: Content-Addressed Hermetic Package Cache (Zero `venv` Hell)
 - Import packages directly by URL with mandatory cryptographic SHA-256 integrity pinning:
   ```redblue
   import "https://pkg.redblue.org/postgres@v2.1#sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" as pg
@@ -333,7 +340,7 @@ However, adopting traditional package managers introduces catastrophic industry 
 - **Global Immutable Cache**: Packages are stored once in `~/.rb/cache/<hash>` as immutable artifacts. Multiple projects on the same machine share the exact same package files without disk duplication or environment activation.
 - **Hermetic Lockfile (`rb.lock`)**: Guarantees bit-for-bit identical dependency trees across developers, CI/CD, and production servers.
 
-### Phase 152: Capability-Based Security for Third-Party Packages (Solving "Permission Fatigue")
+### Phase 157: Capability-Based Security for Third-Party Packages (Solving "Permission Fatigue")
 - **The Problem**: In Python or npm, packages have unrestricted ambient authority: a Markdown parser can silently read `~/.ssh/id_rsa` or send environment variables over HTTP. Conversely, naive capability systems (like early Deno) require developers to type tedious CLI flags or manual permission clauses on every import, creating **"permission fatigue"** that drives developers to bypass security.
 - **The Redblue Solution**:
   1. **Zero Ambient Authority**: Packages cannot access the network, filesystem, or processes without granted capabilities.
@@ -371,16 +378,16 @@ However, adopting traditional package managers introduces catastrophic industry 
 
 ---
 
-## 11. When Should `rbos` Be Built? (The Phase 126 vs Phase 152 Architectural Decision)
+## 11. When Should `rbos` Be Built? (The Phase 126 vs Phase 157 Architectural Decision)
 
 ### 11.1 The Technical Dilemma
 The original roadmap scheduled the spinning up of `authorss81/rbos` at **Phase 126**. However, analyzing the engine requirements reveals a critical divide:
 - **At Phase 126**: Redblue has a rich standard library (Matrix, Decimals, Crypto, Formats, VFS), but its memory model still relies on host-level Rust `Arc` allocations and the bytecode VM lacks low-level hardware optimizations.
-- **At Phase 152**: Redblue will possess:
-  - NaN-boxed 8-byte value registers (Phases 139).
-  - In-place mutation with zero GC pauses via Perceus (Phases 145–147).
-  - Per-fiber $\mathcal{O}(1)$ bump arenas for task memory (Phase 149).
-  - Capability-based sandboxing and hermetic packaging (Phases 150–152).
+- **At Phase 157**: Redblue will possess:
+  - NaN-boxed 8-byte value registers (Phases 144).
+  - In-place mutation with zero GC pauses via Perceus (Phases 150–152).
+  - Per-fiber $\mathcal{O}(1)$ bump arenas for task memory (Phase 154).
+  - Capability-based sandboxing and hermetic packaging (Phases 155–157).
 
 ### 11.2 The Two-Stage Resolution
 Attempting to boot an operating system kernel on an engine without deterministic memory management or bump arenas leads to memory exhaustion and kernel panics. Therefore, `rbos` follows a **staged release**:
@@ -389,34 +396,34 @@ Attempting to boot an operating system kernel on an engine without deterministic
    - Create `authorss81/rbos` as a separate repository.
    - Implement the **Userspace OS Simulator & Microkernel Shell** (Tier 1): A virtual machine emulator, process table, filesystem driver, and shell running *inside* Redblue.
    - This validates the developer-facing OS design without risking kernel memory leaks.
-2. **Stage 2 (Following Phases 145–152)**:
+2. **Stage 2 (Following Phases 150–157)**:
    - Upgrade `rbos` to **Bare-Metal Kernel Execution** (Tier 2): Deploying the low-level memory bump allocator, interrupt service routines, and fiber task scheduler directly to hardware (x86_64 / RISC-V).
 
 ---
 
-## 12. Honest Limitations of Redblue, New Pain Points Created, and Remediation (Phases 153–161)
+## 12. Honest Limitations of Redblue, New Pain Points Created, and Remediation (Phases 158–166)
 
 While Redblue solves major developer frustrations, **it also introduces real friction and limitations of its own**. Total engineering honesty requires acknowledging these weaknesses and planning their phased solutions.
 
-### Phase 153: Terse Syntax Aliases & Dual-Style Formatter
+### Phase 158: Terse Syntax Aliases & Dual-Style Formatter
 - **Pain Point Addressed (Limitation 1 - The Verbosity Tax)**: Seasoned engineers who touch-type at 120 WPM find typing `give back`, `set ... to`, `repeat 10 times`, and `is greater than` physically fatiguing compared to `return`, `=`, and `>`.
 - **Implementation**:
   - Add compact keyword aliases: `ret` for `give back`, `let` / `=` for `set ... to`.
   - The compiler treats them as exact synonyms.
   - The official formatter (`rb format`) provides `--style=english` (canonical) and `--style=compact` so teams can view code in their preferred visual density.
 
-### Phase 154: Native C & Rust Shared Library FFI (`ffi` Module)
+### Phase 159: Native C & Rust Shared Library FFI (`ffi` Module)
 - **Pain Point Addressed (Limitation 2a - Native Interoperability)**: Direct access to operating system APIs, C libraries, and native Rust shared objects without waiting for ecosystem rewrites.
 - **Implementation**:
   - Implement a zero-boilerplate Foreign Function Interface (`ffi.open`, `ffi.symbol`, `ffi.call`) for calling native shared libraries (`.so`, `.dll`, `.dylib`).
   - Strict type marshaling for C primitives (`int`, `float`, `char*`, raw pointers) with memory safety wrappers.
 
-### Phase 155: Hermetic WebAssembly Component Model (`WASI 0.2` Host Runtime)
+### Phase 160: Hermetic WebAssembly Component Model (`WASI 0.2` Host Runtime)
 - **Pain Point Addressed (Limitation 2b - Sandboxed Polyglot Components)**: Safely executing third-party code from Python, C, and Rust without security vulnerabilities or complex C-toolchain compilation.
 - **Implementation**:
   - Embed a sandboxed WebAssembly component runtime (`wasmtime` integration) allowing Redblue programs to import pre-compiled WebAssembly components hermetically inside the Redblue runtime.
 
-### Phase 156: Gradual Type Contracts & Refinement Types
+### Phase 161: Gradual Type Contracts & Refinement Types
 - **Pain Point Addressed (Limitation 3 - Refactoring Fear at Scale)**: At 500 lines, dynamic typing is delightful. At 50,000 lines, changing a function parameter or record field without static type checks is terrifying.
 - **Implementation**:
   - Introduce optional type annotations in natural English syntax:
@@ -427,42 +434,42 @@ While Redblue solves major developer frustrations, **it also introduces real fri
     ```
   - The static analyzer checks these contracts before execution, catching refactoring bugs ahead of runtime.
 
-### Phase 157: Safe Raw Byte Buffers & Struct Packing
+### Phase 162: Safe Raw Byte Buffers & Struct Packing
 - **Pain Point Addressed (Limitation 5 - Systems Programming Control)**: Operating system drivers, network packet dissection, and binary file formats require raw byte manipulation, endianness conversion, and ring buffers. Currently, Redblue abstracts numbers as `f64` and arrays as high-level collections.
 - **Implementation**:
   - Add native fixed-size byte buffers (`buffer.create(size)`), structured packing (`struct.pack("<HHI", ...)`), and explicit endianness reading (`buffer.read_u32_be(offset)`).
 
-### Phase 158: Fiber Stack Allocation, Task Control Blocks & Context Switching
+### Phase 163: Fiber Stack Allocation, Task Control Blocks & Context Switching
 - **Pain Point Addressed (Limitation 6a - Cooperative Concurrency Primitives)**: Foundation for lightweight fibers without the overhead of heavy OS threads.
 - **Implementation**:
   - Implement low-level fiber stack allocation (regional bump arena), Fiber Control Blocks (FCB), and cooperative context switching (`yield`, `resume`) on a single thread.
 
-### Phase 159: M:N Multi-Threaded Chase-Lev Work-Stealing Run Queue
+### Phase 164: M:N Multi-Threaded Chase-Lev Work-Stealing Run Queue
 - **Pain Point Addressed (Limitation 6b - Multi-Core CPU Utilization)**: Distributing fiber tasks across multiple operating system threads.
 - **Implementation**:
   - Implement an $M:N$ thread pool with per-thread local run-queues and Chase-Lev work-stealing deques, scaling compute across all physical CPU cores without lock contention.
 
-### Phase 160: Asynchronous Non-Blocking I/O Integration (`epoll`/`kqueue`/`IOCP`)
+### Phase 165: Asynchronous Non-Blocking I/O Integration (`epoll`/`kqueue`/`IOCP`)
 - **Pain Point Addressed (Limitation 6c - Blocking I/O Concurrency)**: Preventing slow network requests or file reads from stalling execution threads.
 - **Implementation**:
   - Connect the fiber scheduler to the host OS I/O event multiplexer (`epoll` on Linux, `kqueue` on macOS, `IOCP` on Windows) so blocking `network.get` or `files.read` parks only the fiber, not the OS thread.
 
-### Phase 161: Structured Concurrency Blocks & Safe Channels (`parallel`, `channel`)
+### Phase 166: Structured Concurrency Blocks & Safe Channels (`parallel`, `channel`)
 - **Pain Point Addressed (Limitation 6d - Safe Concurrency Syntax & Actor Messaging)**: Eradicating data races while providing natural English syntax for parallel workflows.
 - **Implementation**:
   - Add grammar and runtime for `parallel ... until done` execution blocks and thread-safe fiber message channels (`channel.send`, `channel.receive`) with zero data race risk.
 
 ### Limitation 7: The "Permission Fatigue" Friction (Manual Capability Grants)
 - **The Pain Point**: Explicit capability security models (such as early Deno) force developers to grant permissions manually via endless CLI flags or per-file imports. This friction causes developers to bypass security entirely with `--allow-all`.
-- **The Remediation (Integrated into Phase 152)**: Capabilities are declared once in the project lockfile (`rb.lock`) or registry manifest, supported by interactive one-click terminal grants during local development. Developers never type capability clauses repeatedly in source code.
+- **The Remediation (Integrated into Phase 157)**: Capabilities are declared once in the project lockfile (`rb.lock`) or registry manifest, supported by interactive one-click terminal grants during local development. Developers never type capability clauses repeatedly in source code.
 
 ### Limitation 8: Fallible Chained Operation Boilerplate
 - **The Pain Point**: In chained I/O operations (reading a file, parsing JSON, fetching an authentication token), nested `try ... catch` blocks create pyramids of error handling.
-- **The Remediation (Phases 171–172)**: Modern `might fail ... otherwise <fallback>` expressions and declarative pattern matching (`when matches`) allow clean, one-line error unwrapping without losing error context.
+- **The Remediation (Phases 176–177)**: Modern `might fail ... otherwise <fallback>` expressions and declarative pattern matching (`when matches`) allow clean, one-line error unwrapping without losing error context.
 
 ### Limitation 9: Deeply Nested Record Mutation Friction
 - **The Pain Point**: In pure functional immutable languages, updating a nested field (`user.company.address.city`) requires tedious manual copying at each nesting level.
-- **The Remediation (Phase 147 & Phase 163)**: Perceus Functional-But-In-Place (FBIP) analysis allows direct path mutation syntax (`set user.company.address.city to "Tokyo"`). When the reference count is 1, the engine mutates the nested memory in-place with zero allocation and native C speed.
+- **The Remediation (Phase 152 & Phase 168)**: Perceus Functional-But-In-Place (FBIP) analysis allows direct path mutation syntax (`set user.company.address.city to "Tokyo"`). When the reference count is 1, the engine mutates the nested memory in-place with zero allocation and native C speed.
 
 ### 12.2 Post-126 Architectural Partitioning & Decoupling Ledger
 
@@ -470,11 +477,11 @@ To permanently prevent monolithic pipeline stalls (such as Phase 075's 75-hour f
 
 | Capability Track | Original Monolithic Risk | Shifted Sequential Integer Phase Mapping | Target Repository |
 |---|---|---|---|
-| **Debugger** | DAP IDE server protocol coupled with CLI stepper | **Phase 133**: Terminal line stepper in core.<br>*(Graphical DAP server decoupled to `rb-ide`).* | `authorss81/redblue` + `rb-ide` |
-| **Polyglot FFI & WASM** | Native C shared library loader bundled with WASI 0.2 runtime | **Phase 154**: Native C/Rust Shared Library FFI (`ffi`)<br>**Phase 155**: Hermetic WASM Component Model (`wasmtime`) | `authorss81/redblue` |
+| **Debugger** | DAP IDE server protocol coupled with CLI stepper | **Phase 138**: Terminal line stepper in core.<br>*(Graphical DAP server decoupled to `rb-ide`).* | `authorss81/redblue` + `rb-ide` |
+| **Polyglot FFI & WASM** | Native C shared library loader bundled with WASI 0.2 runtime | **Phase 159**: Native C/Rust Shared Library FFI (`ffi`)<br>**Phase 160**: Hermetic WASM Component Model (`wasmtime`) | `authorss81/redblue` |
 | **Language Server Protocol** | IDE language server daemon in compiler CI queue | **Decoupled to Wave 2 Tooling Track**:<br>• `ide-001`: Standalone `rb-lsp` daemon<br>• `ide-002`: Tree-Sitter / TextMate grammars<br>• `ide-003`: VS Code extension backend & DAP | `authorss81/rb-ide`<br>+ `rb-ide-ops` |
-| **Fiber Concurrency** | Multi-threaded M:N scheduler, I/O multiplexer, and syntax bundled | **Phase 158**: Fiber Stack Allocation & Context Switching<br>**Phase 159**: M:N Multi-Threaded Chase-Lev Work-Stealing<br>**Phase 160**: Asynchronous Epoll/Kqueue/IOCP Event Loop<br>**Phase 161**: Structured Concurrency Blocks & Channels | `authorss81/redblue` |
-| **Tiered Cranelift JIT** | Cranelift SSA optimizer bundled with baseline JIT and trampolines | **Phase 181**: Bytecode-to-Cranelift SSA IR Translation<br>**Phase 182**: Machine Code Emission & Memory Trampolines<br>**Phase 183**: On-Stack Replacement (OSR) & Deopt Bailouts | `authorss81/redblue` |
+| **Fiber Concurrency** | Multi-threaded M:N scheduler, I/O multiplexer, and syntax bundled | **Phase 163**: Fiber Stack Allocation & Context Switching<br>**Phase 164**: M:N Multi-Threaded Chase-Lev Work-Stealing<br>**Phase 165**: Asynchronous Epoll/Kqueue/IOCP Event Loop<br>**Phase 166**: Structured Concurrency Blocks & Channels | `authorss81/redblue` |
+| **Tiered Cranelift JIT** | Cranelift SSA optimizer bundled with baseline JIT and trampolines | **Phase 186**: Bytecode-to-Cranelift SSA IR Translation<br>**Phase 187**: Machine Code Emission & Memory Trampolines<br>**Phase 188**: On-Stack Replacement (OSR) & Deopt Bailouts | `authorss81/redblue` |
 
 ---
 
@@ -495,7 +502,7 @@ Embedding end-user applications (`rb-httpd`, `rb-todo`, `rb-kv`, `rb-markdown`, 
    - When an application tool reaches production maturity and passes all test suites, the autonomous pipeline promotes it to its own dedicated repository (e.g., `authorss81/rb-httpd`, `authorss81/rb-lsp`, `authorss81/rb-kv`), publishing releases to package registries.
 3. **Timing**:
    - **Stage 1 (At Phase 126 Milestone)**: Spin up `authorss81/rb-apps` alongside `authorss81/rbos`. Build early CLI dogfooding tools (`rb-todo`, `rb-markdown`, `rb-ssg`, `rb-lsp`).
-   - **Stage 2 (Following Phase 152)**: Build high-performance, network-intensive tools (`rb-httpd` web server, `rb-kv` ACID key-value store, `rb-git`) utilizing Perceus zero-pause memory and bump arenas.
+   - **Stage 2 (Following Phase 157)**: Build high-performance, network-intensive tools (`rb-httpd` web server, `rb-kv` ACID key-value store, `rb-git`) utilizing Perceus zero-pause memory and bump arenas.
 
 ### 13.3 The 8-Repository Architectural Blueprint (The 4 Paired Code + Ops Tracks)
 
@@ -526,10 +533,10 @@ Following this exact paradigm, **the downstream ecosystem expands into 8 paired 
   1. The package directory layout and manifest format (`rb.toml` / capabilities) defined by `rb-pkg`.
   2. Concrete end-user codebases in `rb-apps` (`app-todo`, `app-markdown`) to serve as real-world dogfooding fixtures for autocompletion, goto-definition, and refactoring tests.
   3. The core language baseline: Phase 075 already proved the core in-memory navigation algorithms (+9,500 lines) within `authorss81/redblue`.
-- **Why NOT delayed until Phase 152?**
-  Waiting until Phase 152 is far too late. By Phase 152, dozens of packages and applications will have been written; forcing developers and autonomous agents to write large codebases without a working VS Code extension, inline errors, and real-time completions severely impairs productivity.
+- **Why NOT delayed until Phase 157?**
+  Waiting until Phase 157 is far too late. By Phase 157, dozens of packages and applications will have been written; forcing developers and autonomous agents to write large codebases without a working VS Code extension, inline errors, and real-time completions severely impairs productivity.
 - **The Golden Window (Milestone 1.5 / Midway)**:
-  - **Trigger**: As soon as `rb-pkg` establishes its package manifest schema (approx. App/Pkg Phase 005) and `rb-apps` delivers its first 3 foundational applications, OR when `redblue` reaches Core Phase 135 (Visual Polish & Ergonomics).
+  - **Trigger**: As soon as `rb-pkg` establishes its package manifest schema (approx. App/Pkg Phase 005) and `rb-apps` delivers its first 3 foundational applications, OR when `redblue` reaches Core Phase 140 (Visual Polish & Ergonomics).
   - **Action**: Extract `src/lsp.rs` and editor utilities out of `redblue` into `authorss81/rb-ide`. This completely unburdens the core compiler CI while giving `rb-ide` its own dedicated 24/7 autonomous test harness (`rb-ide-ops`).
 
 #### The 4 Non-Negotiable Invariants of the Paired Model:
@@ -544,13 +551,13 @@ Following this exact paradigm, **the downstream ecosystem expands into 8 paired 
 >    - `authorss81/rbos` & `authorss81/rbos-ops`
 >    - `authorss81/rb-apps` & `authorss81/rb-apps-ops`
 >    - `authorss81/rb-pkg` & `authorss81/rb-pkg-ops`
-> 2. **At Milestone 1.5 (Dogfooding / Pkg-005 / Core Phase 135)**: The agent MUST alert the user to spin up the **Wave 2 Tooling Track (2 Repositories / 1 Paired Track)**:
+> 2. **At Milestone 1.5 (Dogfooding / Pkg-005 / Core Phase 140)**: The agent MUST alert the user to spin up the **Wave 2 Tooling Track (2 Repositories / 1 Paired Track)**:
 >    - `authorss81/rb-ide` & `authorss81/rb-ide-ops`
 > and repeat this directive in responses until confirmed.
 
 ---
 
-## 14. Rigor & Precision Audit Track: Eliminating "Shallow Implementations" (Phases 162–170)
+## 14. Rigor & Precision Audit Track: Eliminating "Shallow Implementations" (Phases 167–175)
 
 Every major programming language in history has suffered from "shallow feature" shortcuts taken during early prototyping that became multi-decade design flaws:
 - **JavaScript**: `typeof null === "object"` (a shallow C-pointer check hack from 1995 that can never be fixed); lack of 64-bit integers.
@@ -558,7 +565,7 @@ Every major programming language in history has suffered from "shallow feature" 
 - **Go**: Loop variable capture bugs in goroutines (only fixed after 12 years in Go 1.22); nil interface pointer traps (`var p *int = nil; var i any = p; i != nil`).
 - **PHP**: Inconsistent parameter ordering across stdlib functions (`needle, haystack` vs `haystack, needle`).
 
-To ensure Redblue achieves world-class mathematical and architectural rigor, **Phases 162–170 establish a systematic audit and remediation track across all existing modules**:
+To ensure Redblue achieves world-class mathematical and architectural rigor, **Phases 167–175 establish a systematic audit and remediation track across all existing modules**:
 
 ### 14.1 Guarding Survey Phases Against 3-Hour Timeouts and Infinite Loops
 A major historical failure mode in autonomous coding pipelines is the **"Open-Ended Survey Trap"**:
@@ -577,42 +584,42 @@ A major historical failure mode in autonomous coding pipelines is the **"Open-En
    - Every finding must be documented with an executable reproduction snippet:
      `| Module | Function / Path | Shallow Implementation | Reproduction Snippet | Target Remediation Phase |`
 
-### Phase 162: Numeric, Arithmetic & Temporal Precision Audit
+### Phase 167: Numeric, Arithmetic & Temporal Precision Audit
 - **Modules**: `number`, `math`, `decimal`, `matrix`, `statistics`, `time`.
 - **Target Flaws**: Negative timestamp floor division (pre-epoch dates), float overflow on extreme finite means, `NaN` / `Infinity` leaks, and subnormal float rounding.
 
-### Phase 163: Text, Unicode & Collection Semantics Audit
+### Phase 168: Text, Unicode & Collection Semantics Audit
 - **Modules**: `text`, `list`, `record`, `collections`, `formats`, `json`, `csv`, `toml`.
 - **Target Flaws**: Multi-byte emoji slicing, combining accent corruption, shallow list copies, and non-deterministic map iteration orders.
 
-### Phase 164: Systems, Network, VFS & Concurrency Audit
+### Phase 169: Systems, Network, VFS & Concurrency Audit
 - **Modules**: `files`, `path`, `vfs`, `network`, `logging`, `crypto`, `cli`.
 - **Target Flaws**: Unbuffered large file reads, socket timeout leaks, unmasked secrets in error messages, and cross-platform path separator inconsistencies.
 
-### Phase 165: Unicode Grapheme Cluster & Scalar Slicing Rigor
+### Phase 170: Unicode Grapheme Cluster & Scalar Slicing Rigor
 - **Goal**: Upgrade string operations (`split`, `slice`, `length`, `at`) from naive UTF-8 byte or code unit indexing to **Unicode Extended Grapheme Clusters**.
 - **Why**: Prevents corrupting multi-byte emoji sequences (👨‍👩‍👧‍👦), accented characters (é formed by `e` + combining acute), and non-Latin scripts.
 
-### Phase 166: Control Flow Unwinding Integrity, Early Return & Parser Depth Remediation
+### Phase 171: Control Flow Unwinding Integrity, Early Return & Parser Depth Remediation
 - **Goal**: Implement complete call-frame unwinding for `give back` / `return` across `if`, `while`, `for`, `repeat`, and `try/finally` blocks in the tree-walking interpreter ([`src/interpreter.rs`](file:///c:/Users/USER/3D%20Objects/wsl/redblue/src/interpreter.rs)), enforce per-iteration loop variable lexical binding isolation, and make `bootstrap/compiler.rb`'s `parse_statements` iterative.
 - **Why (Verified Findings)**:
   - **Phase 006 Findings §5 & Phase 073 Findings §1**: `give back` inside an `if` block or loop yields a statement value but does not leave the enclosing block; execution falls through to whatever follows. The tree-walker must propagate an unwinding signal (`return_value: Option<Value>`) across statement blocks, halting iterations immediately while preserving `finally` execution.
   - **Eliminating Go/Python Late-Binding**: Loop variables in `for each` and `repeat` are re-bound per iteration so closures do not mistakenly capture a single mutating pointer.
   - **Phase 074 Findings §1 (1,000+ Stmt Scale)**: Compiling a flat program with $\ge 1,000$ sequential statements fails with `RuntimeError: Maximum call depth of 1000 reached while calling 'token_kind'`. Iterative parsing ensures large generated sources compile cleanly without requiring an arbitrary increase in the runtime recursion limit.
 
-### Phase 167: Streaming Large-File I/O & Zero-Copy Iterators
+### Phase 172: Streaming Large-File I/O & Zero-Copy Iterators
 - **Goal**: Introduce memory-mapped and streaming line iterators (`files.stream_lines`, `files.stream_bytes`) alongside the existing `files.read`.
 - **Why**: Prevents out-of-memory crashes when processing multi-gigabyte server logs or CSV datasets.
 
-### Phase 168: Structural Deep Equality & Cycle-Safe Hashing
+### Phase 173: Structural Deep Equality & Cycle-Safe Hashing
 - **Goal**: Guarantee that equality (`==`) and hashing over recursive records, nested lists, and objects terminate cleanly with cycle detection.
 - **Why**: Prevents runtime stack overflow panics when comparing self-referential or cyclic data structures.
 
-### Phase 169: Explicit Numeric Boundary Safety & BigInt Promotion
+### Phase 174: Explicit Numeric Boundary Safety & BigInt Promotion
 - **Goal**: Formalize the numeric threshold where numbers transition past $2^{53}$ (`MAX_EXACT_INT`).
 - **Behavior**: Refuse silent float roundoff of integers past $2^{53}$ unless explicitly converted, or seamlessly promote large whole numbers to an exact arbitrary-precision integer (`BigInt`) representation.
 
-### Phase 170: Documentation Drift, Parameter Order & Standard Library Consistency Normalization
+### Phase 175: Documentation Drift, Parameter Order & Standard Library Consistency Normalization
 - **Goal**: Strict audit of all 24+ standard library modules to guarantee standard parameter order (`target, pattern` or `collection, predicate`) across all methods, and correct normative documentation drift recorded in the master ledger (starting with the stale `docs/BYTECODE.md` format version).
 - **Why**: Completely avoids the PHP/C "argument order lottery" where developers must constantly look up whether `needle` or `haystack` comes first, and prevents readers of normative documents from following an obsolete specification.
 
@@ -620,30 +627,30 @@ A major historical failure mode in autonomous coding pipelines is the **"Open-En
 
 ### 14.2 The Dependency Invariant: Why Remediations Must Precede Optimization and Bootstrapping
 
-A critical architectural question is: **If the shallow implementation audits (Phases 162–164) discover new bugs, can remediation phases be scheduled after the speedup (Phases 176–183) or bootstrapping (Phase 191) passes?**
+A critical architectural question is: **If the shallow implementation audits (Phases 167–169) discover new bugs, can remediation phases be scheduled after the speedup (Phases 181–188) or bootstrapping (Phase 196) passes?**
 
 **The Answer is Strictly NO. All remediations must precede optimization and bootstrapping.**
 
 ```
-[Audits: Phases 162–164] ──> [Remediations: Phases 165–170 + new fixes]
+[Audits: Phases 167–169] ──> [Remediations: Phases 170–175 + new fixes]
                                               │
                                               ▼ (depends_on gate)
-                             [JIT Velocity Passes: Phases 176–183]
+                             [JIT Velocity Passes: Phases 181–188]
                                               │
                                               ▼ (depends_on gate)
-                             [Full S4 Bootstrapping: Phase 191]
+                             [Full S4 Bootstrapping: Phase 196]
 ```
 
 #### Why Deferring Bug Fixes Until After Speedup or Bootstrapping Fails:
 1. **Never Optimize Broken Code**:
-   - The Cranelift JIT compiler and monomorphic unboxing passes (Phases 176–183) rely on deterministic semantic assumptions (e.g. integer ranges, IEEE float behavior, grapheme boundaries).
+   - The Cranelift JIT compiler and monomorphic unboxing passes (Phases 181–188) rely on deterministic semantic assumptions (e.g. integer ranges, IEEE float behavior, grapheme boundaries).
    - Optimizing a shallow or flawed implementation bakes bugs directly into compiled machine code, causing hard crashes, deoptimization thrashing, or corrupted registers that are nearly impossible to debug.
 2. **Preventing Compiler Self-Infection (The Chicken-and-Egg Bug)**:
-   - If S4 bootstrapping (Phase 191) occurs *before* all shallow bugs are resolved, `bootstrap/compiler.rb` will be compiled into a binary carrying those exact runtime defects.
+   - If S4 bootstrapping (Phase 196) occurs *before* all shallow bugs are resolved, `bootstrap/compiler.rb` will be compiled into a binary carrying those exact runtime defects.
    - Fixing a compiler bug *after* it has become self-hosting requires modifying a broken compiler that miscompiles itself.
 3. **The `depends_on` Policy for Newly Discovered Audit Defects**:
-   - When Phases 162–164 identify defects beyond the planned remediations (Phases 165–170), the new remediation phases are **inserted immediately before Phase 171** with explicit `depends_on` markers.
-   - Speedup passes (Phases 176–183) and S4 Bootstrapping (Phase 191) declare hard dependencies on all audit remediations, guaranteeing the pipeline never enters optimization or self-hosting until the language runtime is mathematically clean.
+   - When Phases 167–169 identify defects beyond the planned remediations (Phases 170–175), the new remediation phases are **inserted immediately before Phase 176** with explicit `depends_on` markers.
+   - Speedup passes (Phases 181–188) and S4 Bootstrapping (Phase 196) declare hard dependencies on all audit remediations, guaranteeing the pipeline never enters optimization or self-hosting until the language runtime is mathematically clean.
 
 ---
 
@@ -671,11 +678,11 @@ A survey of global developer pain points across popular language ecosystems reve
 
 ---
 
-## 16. Core Grammar & Keyword Evolution Plan (Phases 171–175)
+## 16. Core Grammar & Keyword Evolution Plan (Phases 176–180)
 
-To address these industry pain points without exceeding Redblue's target of minimal cognitive overhead, **Phases 171–175 introduce targeted, high-leverage grammar extensions**:
+To address these industry pain points without exceeding Redblue's target of minimal cognitive overhead, **Phases 176–180 introduce targeted, high-leverage grammar extensions**:
 
-### Phase 171: Block-Scoped Deterministic Cleanup (`using ... as ... then ... end`)
+### Phase 176: Block-Scoped Deterministic Cleanup (`using ... as ... then ... end`)
 - **Problem Solved**: Eliminates Go's loop-defer file descriptor leaks and Python's verbose context manager boilerplate.
 - **Grammar Syntax**:
   ```redblue
@@ -686,7 +693,7 @@ To address these industry pain points without exceeding Redblue's target of mini
 - **Keywords Added**: `using` (formalized as a first-class statement).
 - **Semantics**: Executes deterministic cleanup at block exit (unlike Go's `defer` which only runs at function exit).
 
-### Phase 172: Natural English Pattern Matching (`when ... matches ... otherwise`)
+### Phase 177: Natural English Pattern Matching (`when ... matches ... otherwise`)
 - **Problem Solved**: Replaces complex nested `if-then-else` trees with declarative destructuring over records, lists, and types.
 - **Grammar Syntax**:
   ```redblue
@@ -701,7 +708,7 @@ To address these industry pain points without exceeding Redblue's target of mini
   ```
 - **Keywords Added**: `matches`, `otherwise` (reconciling SPEC.md § When).
 
-### Phase 173: Fiber Channels & Safe Actor Messaging (`channel`, `send`, `receive`)
+### Phase 178: Fiber Channels & Safe Actor Messaging (`channel`, `send`, `receive`)
 - **Problem Solved**: Solves multi-threaded concurrency bugs and eliminates shared mutable state races.
 - **Grammar Syntax**:
   ```redblue
@@ -715,7 +722,7 @@ To address these industry pain points without exceeding Redblue's target of mini
   ```
 - **Keywords Added**: `channel`, `send`, `receive`, `spawn`.
 
-### Phase 174: Function Preconditions & Postconditions (`needs`, `guarantees`)
+### Phase 179: Function Preconditions & Postconditions (`needs`, `guarantees`)
 - **Problem Solved**: Replaces defensive boilerplate (ten lines of `if arg < 0 then error end`) with declarative function contracts that can be verified statically and dynamically.
 - **Grammar Syntax**:
   ```redblue
@@ -728,7 +735,7 @@ To address these industry pain points without exceeding Redblue's target of mini
   ```
 - **Keywords Added**: `needs`, `guarantees`.
 
-### Phase 175: Ergonomic Terse Grammar Aliases (`let`, `ret`, `fn`)
+### Phase 180: Ergonomic Terse Grammar Aliases (`let`, `ret`, `fn`)
 - **Problem Solved**: Eliminates the "verbosity tax" for experienced touch-typists while preserving plain English as the canonical AST representation.
 - **Grammar Aliases**:
   - `let x = 10` $\iff$ `set x to 10`
@@ -738,11 +745,11 @@ To address these industry pain points without exceeding Redblue's target of mini
 
 ---
 
-## 17. Extreme Execution Velocity & Hardware-Near Acceleration (Phases 176–183)
+## 17. Extreme Execution Velocity & Hardware-Near Acceleration (Phases 181–188)
 
-While early VM phases (Phases 139–142) provide baseline efficiency (NaN-boxing, basic inline caching, bytecode peephole optimization) to match interpreted Lua 5.4, reaching **parity with compiled C and Rust ($1.0\times\text{--}1.5\times$ speedup)** on numerical, memory-bound, and concurrent workloads requires hardware-near microarchitectural optimizations:
+While early VM phases (Phases 144–147) provide baseline efficiency (NaN-boxing, basic inline caching, bytecode peephole optimization) to match interpreted Lua 5.4, reaching **parity with compiled C and Rust ($1.0\times\text{--}1.5\times$ speedup)** on numerical, memory-bound, and concurrent workloads requires hardware-near microarchitectural optimizations:
 
-### Phase 176: V8-Style Hidden Classes (Shapes) & Transition Trees for Records
+### Phase 181: V8-Style Hidden Classes (Shapes) & Transition Trees for Records
 - **Goal**: Eliminate dynamic hash lookups for record property access entirely by structuring records around deterministic `Shape` transition trees (identical to Google V8).
 - **Mechanism**:
   - Every record begins with the `EmptyShape`.
@@ -751,14 +758,14 @@ While early VM phases (Phases 139–142) provide baseline efficiency (NaN-boxing
   - Call-sites maintain **Monomorphic Inline Caches (MIC)**: a single assembly instruction compares the Shape ID and loads directly from memory offset `[base + 8]`, bypassing all dictionary searches.
 - **Speedup**: Up to $12\times$ faster property reads and writes, identical to native C struct member access.
 
-### Phase 177: Escape Analysis & Scalar Replacement of Aggregates (SRA)
+### Phase 182: Escape Analysis & Scalar Replacement of Aggregates (SRA)
 - **Goal**: Eliminate heap allocations and garbage collection overhead for short-lived records, lists, and closures.
 - **Mechanism**:
   - The compiler runs escape analysis on function bodies to identify objects that never outlive the current stack frame (e.g. temporary coordinate records `{ x: 10, y: 20 }` passed into a distance calculation).
   - **Scalar Replacement of Aggregates (SRA)**: The compiler explodes the record into discrete CPU registers (`rax`, `rdx`) or local stack slots, entirely bypassing memory allocation.
 - **Speedup**: Zero GC pressure, zero reference counting overhead, and $30\%\text{--}60\%$ faster execution in object-heavy inner loops.
 
-### Phase 178: Whole-Program Type Specialization & Monomorphic Unboxing
+### Phase 183: Whole-Program Type Specialization & Monomorphic Unboxing
 - **Goal**: Eliminate runtime dynamic type dispatch and boxing for numerical and collection loops.
 - **Mechanism**:
   - When the compiler or JIT observes loops over numbers (`for each i from 1 to 1000`) or functions guarded by type contracts (e.g. `needs n is number`), it emits a **specialized monomorphic machine code kernel**.
@@ -766,32 +773,32 @@ While early VM phases (Phases 139–142) provide baseline efficiency (NaN-boxing
   - The loop compiles down to 4 machine instructions (`mov`, `add`, `dec`, `jnz`), matching `rustc -O3` and `gcc -O3` byte-for-byte.
 - **Speedup**: Closes the $1,800\times$ gap on numeric workloads (such as `primes` and `fibonacci`) down to $\approx 1.0\times\text{--}1.2\times$ of native C/Rust.
 
-### Phase 179: SIMD Loop Auto-Vectorization & Explicit Data Kernels
+### Phase 184: SIMD Loop Auto-Vectorization & Explicit Data Kernels
 - **Goal**: Leverage hardware vector units (128-bit SSE/NEON, 256-bit AVX2, and 512-bit AVX-512) for batch numeric transformations.
 - **Mechanism**:
   - Auto-vectorizes homogeneous list operations (`map`, `filter`, `sum`, arithmetic scalar broadcasting).
   - Emits packed vector instructions (`vaddpd`, `vmulpd`, `vpaddq`), processing 4 to 8 floating-point or integer operations per CPU clock cycle.
 - **Speedup**: $4\times\text{--}8\times$ speedup on large data vectors, matching NumPy and BLAS speeds without external C extensions.
 
-### Phase 180: Automatic Work-Stealing Loop Parallelization (Rayon-Style Data Parallelism)
+### Phase 185: Automatic Work-Stealing Loop Parallelization (Rayon-Style Data Parallelism)
 - **Goal**: Automatically scale pure collection processing across all available CPU cores.
 - **Mechanism**:
   - Redblue's Perceus immutable value semantics guarantee data race freedom. Pure loops (`for each x in items ...`) above a minimum size threshold ($\ge 10,000$ elements) are automatically partitioned across a pool of worker OS threads using work-stealing deques.
 - **Speedup**: Near-linear $N\times$ scaling on $N$-core processors. An 8-core CPU executes Redblue data-processing loops faster than single-threaded native C.
 
-### Phase 181: Bytecode-to-Cranelift SSA IR Translation & Profiling Counters
+### Phase 186: Bytecode-to-Cranelift SSA IR Translation & Profiling Counters
 - **Goal**: Implement the intermediate lowering pass translating Redblue bytecode instructions into Cranelift SSA (Static Single Assignment) form.
 - **Features**:
   - Direct translation of stack opcodes into Cranelift SSA value graphs.
   - Hotspot detection: execution profiling counters ($> 1,000$ iterations) identifying hot loop headers and functions for compilation.
 
-### Phase 182: Native Machine Code Emission & Memory Page Trampolines
+### Phase 187: Native Machine Code Emission & Memory Page Trampolines
 - **Goal**: Compile Cranelift IR into executable native machine code (x86_64 and ARM64).
 - **Features**:
   - Direct machine code emission and executable memory page allocation (`mmap` with `PROT_EXEC`).
   - ABI call trampolines transitioning seamlessly between the interpreter stack and compiled machine code frames.
 
-### Phase 183: On-Stack Replacement (OSR) & Dynamic Deoptimization Bailouts
+### Phase 188: On-Stack Replacement (OSR) & Dynamic Deoptimization Bailouts
 - **Goal**: Two-tier runtime transition engine supporting instant compilation switches and safe bailouts.
 - **Features**:
   - **On-Stack Replacement (OSR)**: Long-running loops transition from the bytecode interpreter to compiled machine code mid-execution without waiting for function return.
@@ -799,11 +806,11 @@ While early VM phases (Phases 139–142) provide baseline efficiency (NaN-boxing
 
 ---
 
-## 18. World-Class Language Capabilities (Phases 184–190)
+## 18. World-Class Language Capabilities (Phases 189–195)
 
 To stand shoulder-to-shoulder with mature industry titans (Rust, Go, TypeScript, Swift) before taking the self-hosting leap, Redblue establishes seven dedicated compiler and tooling phases:
 
-### Phase 184: Formal Module Encapsulation & Information Hiding (`public` vs `private`)
+### Phase 189: Formal Module Encapsulation & Information Hiding (`public` vs `private`)
 - **Goal**: Introduce strict lexical visibility controls in natural English, ensuring internal implementation details cannot be accessed from outside.
 - **Syntax**:
   ```redblue
@@ -816,7 +823,7 @@ To stand shoulder-to-shoulder with mature industry titans (Rust, Go, TypeScript,
   ```
 - **Why Before Bootstrapping**: `bootstrap/compiler.rb` is an extensive program consisting of thousands of lines across lexer, parser, analyzer, and codegen. Building encapsulation before bootstrapping allows the self-hosted compiler to be written with clean, modular boundaries.
 
-### Phase 185: Parametric Polymorphism & Lightweight Generics (`type Stack of item`)
+### Phase 190: Parametric Polymorphism & Lightweight Generics (`type Stack of item`)
 - **Goal**: Reusable generic data structures (`Stack of item`, `Result of value or error`, `Tree of node`) that compile to specialized, unboxed machine code variants with zero runtime overhead.
 - **Syntax**:
   ```redblue
@@ -829,17 +836,17 @@ To stand shoulder-to-shoulder with mature industry titans (Rust, Go, TypeScript,
   ```
 - **Why Before Bootstrapping**: Compilers are fundamentally generic AST and symbol-table transformers. Having generics in place before S4 allows `bootstrap/compiler.rb` to be written type-safely without manual dynamic type-casts.
 
-### Phase 186: Built-In Production Observability, Profiling & Flamegraphs (`rb profile`)
+### Phase 191: Built-In Production Observability, Profiling & Flamegraphs (`rb profile`)
 - **Goal**: Built-in statistical sampling CPU and memory allocation profiling. Emits standard `pprof` protocol buffers and interactive SVG flamegraphs directly from the CLI without external agents.
 - **Usage**: `rb profile script.rb` or `rb test --profile`.
 - **Why Before Bootstrapping**: Provides the exact profiling tool needed to profile `bootstrap/compiler.rb` during the S4 self-compilation benchmark runs to eliminate any remaining CPU bottlenecks.
 
-### Phase 187: Zero-Configuration Cross-Compilation & Target Triples (`rb build --target <arch>`)
+### Phase 192: Zero-Configuration Cross-Compilation & Target Triples (`rb build --target <arch>`)
 - **Goal**: Compile standalone, statically linked binaries for Linux, macOS, Windows, and ARM from any host platform with a single flag.
 - **Implementation**: Embed Cranelift multi-architecture backends and a minimal musl/libc stub inside the `rb` binary (`rb build --target=linux-arm64`, `rb build --target=windows-x64`).
 - **Why Before Bootstrapping**: When S4 cuts the first independent, sovereign release of the Redblue compiler, it must be capable of cross-compiling for every developer platform on Earth without requiring host C toolchains.
 
-### Phase 188: Multilingual Natural Syntax Dialects & Lossless Translation (`rb format --to=...`)
+### Phase 193: Multilingual Natural Syntax Dialects & Lossless Translation (`rb format --to=...`)
 - **Goal**: Canonical Dialect Keyword Mappings. The AST is language-agnostic; code written in Spanish, French, Chinese, Japanese, or Hindi compiles to identical bytecode.
 - **Dialects**:
   - **English**: `if count is greater than 10 then say "Hello"`
@@ -847,26 +854,26 @@ To stand shoulder-to-shoulder with mature industry titans (Rust, Go, TypeScript,
   - **Chinese**: `如果 计数 大于 10 那么 打印 "你好"`
 - **Tooling**: `rb format --to=english` provides lossless translation for global open-source pull request reviews.
 
-### Phase 189: Self-Hosted Interactive Doc Server & WebAssembly Playground (`rb doc --serve`)
+### Phase 194: Self-Hosted Interactive Doc Server & WebAssembly Playground (`rb doc --serve`)
 - **Goal**: A zero-dependency local web server with full-text search, module docstring rendering, and an embedded Redblue WebAssembly runtime that executes code examples live in the browser.
 - **Why Before Bootstrapping**: Delivers the complete developer experience for the sovereign v1.0 release toolchain.
 
-### Phase 190: Formal Language Specification & 10,000-Case ISO Conformance Suite
+### Phase 195: Formal Language Specification & 10,000-Case ISO Conformance Suite
 - **Goal**: A formal operational semantics specification paired with a 10,000-case conformance test suite verifying every grammar rule, AST node, arithmetic edge, and error condition.
 - **Why Before Bootstrapping**: This is the ultimate verification gate. The reference Rust compiler (`rb`) and the self-hosted Redblue compiler (`bootstrap/compiler.rb`) must both achieve 100% byte-for-byte pass rates across all 10,000 tests before the Rust compiler is formally retired.
 
 ---
 
-## 19. Full Self-Hosting Bootstrapping S4 (Phase 191)
+## 19. Full Self-Hosting Bootstrapping S4 (Phase 196)
 
 The culmination of the Redblue compiler roadmap is the transition from a Rust-hosted bootstrap compiler to an autonomous, self-hosting language ecosystem where **Redblue compiles Redblue for all future releases**:
 
-### Phase 191: Full Self-Hosting Bootstrap S4 (The Shipped Compiler Cut by Redblue)
+### Phase 196: Full Self-Hosting Bootstrap S4 (The Shipped Compiler Cut by Redblue)
 - **Goal**: Formally cut the official release binary (`rb`) using the self-hosted compiler `bootstrap/compiler.rb` running on the fully optimized JIT/unboxed Redblue engine.
 - **Why it is placed here**:
-  - The self-hosted compiler benefits from all standard library precision fixes (Phases 162–170), modern expressive grammar (Phases 171–175), and near-native Cranelift JIT velocity (Phases 176–183, <150 ms build times).
-  - The compiler source code is structured with formal module encapsulation (Phase 184) and type-safe generics (Phase 185).
-  - The resulting binary can cross-compile to all platforms (Phase 187) and has passed the 10,000-case ISO conformance suite (Phase 190).
+  - The self-hosted compiler benefits from all standard library precision fixes (Phases 167–175), modern expressive grammar (Phases 176–180), and near-native Cranelift JIT velocity (Phases 181–188, <150 ms build times).
+  - The compiler source code is structured with formal module encapsulation (Phase 189) and type-safe generics (Phase 190).
+  - The resulting binary can cross-compile to all platforms (Phase 192) and has passed the 10,000-case ISO conformance suite (Phase 195).
 - **Deliverables**:
   1. **Fixed-Point Identity Verification**: Three-stage bootstrap cycle:
      $$\text{Rust } rb \xrightarrow{\text{compiles}} \text{Stage 1 } rb \xrightarrow{\text{compiles}} \text{Stage 2 } rb \xrightarrow{\text{compiles}} \text{Stage 3 } rb$$
@@ -937,7 +944,7 @@ window with title "Task Board" and size 900 by 600 then
 end
 ```
 - **Three Unified UI Targets**:
-  1. **TUI (Terminal UI)**: Runs in CLI environments via Phase 132's `tui` module.
+  1. **TUI (Terminal UI)**: Runs in CLI environments via Phase 137's `tui` module.
   2. **Native Lightweight Desktop GUI**: Powered by a lightweight native Webview/Skia renderer with zero bloated Chromium dependencies (< 5 MB binary footprint).
   3. **Web / WebAssembly GUI**: The identical code compiles to WebAssembly and runs client-side in the browser.
 
@@ -973,7 +980,7 @@ Both `authorss81/rb-apps` and `authorss81/rbos` will maintain standing, schedule
 ### 22.1 The Competitive Reality (Why Redblue Does Not Compete with Python or Rust)
 Total engineering honesty requires recognizing that Redblue **cannot and should not** attempt to displace Python, Rust, Go, or TypeScript as a general-purpose programming language:
 - **The Python Moat**: Python possesses 500,000+ packages on PyPI, 30 years of optimized C extensions, and near-total dominance in machine learning (PyTorch, NumPy, TensorRT). Developers will not abandon Python's scientific ecosystem to write verbose English scripts.
-- **The Rust / Go Moat**: Rust offers zero-cost abstractions, fearless concurrency, and compile-time memory safety; Go offers lightweight goroutines and microsecond network scaling. Redblue's dynamic value model (`enum Value` with `Arc<T>` and hash lookups) cannot compete on raw compute or systems-level throughput without the deep JIT/Cranelift passes planned in Phases 176–183.
+- **The Rust / Go Moat**: Rust offers zero-cost abstractions, fearless concurrency, and compile-time memory safety; Go offers lightweight goroutines and microsecond network scaling. Redblue's dynamic value model (`enum Value` with `Arc<T>` and hash lookups) cannot compete on raw compute or systems-level throughput without the deep JIT/Cranelift passes planned in Phases 181–188.
 - **The "English-Like" Trap**: Historically, languages that promised "code like plain English" (COBOL, AppleScript, HyperTalk) struggled when applied to general software engineering because natural English is inherently ambiguous and phonetic, whereas compiler grammars are strictly deterministic. Experienced software engineers read code via visual pattern recognition of compact symbols (`{}`, `()`, `->`, `=>`, `|`), not by phonetically reading long prose.
 
 Attempting to "out-Python Python" or "out-Rust Rust" is a guaranteed path to irrelevance. Redblue's design is only viable if it targets a domain where its specific trade-offs become decisive advantages.
@@ -1000,12 +1007,12 @@ A common developer critique is the repetition of the `end` keyword compared to P
 - **Why Explicit `end` Delimiters Win**:
   - Like Ruby, Lua, Elixir, and Julia, Redblue uses explicit `end` markers to provide unambiguous, stream-safe, and indentation-independent AST framing.
 - **Alleviating Developer Fatigue (The Dual-Style Protocol)**:
-  - To prevent developer fatigue for human software engineers who write Redblue by hand, **Phase 153** implements the Dual-Style Formatter (`rb format --style=compact` vs `--style=english`) and **Phase 175** introduces terse keyword aliases (`let`, `ret`, `fn`, and standard operator symbols).
+  - To prevent developer fatigue for human software engineers who write Redblue by hand, **Phase 158** implements the Dual-Style Formatter (`rb format --style=compact` vs `--style=english`) and **Phase 180** introduces terse keyword aliases (`let`, `ret`, `fn`, and standard operator symbols).
   - This guarantees that developers can write compact, rapid code when typing by hand, while the official formatter can render the exact same AST in canonical plain English for human auditors.
 
 ### 22.4 Capability-Based Security & Sandboxing Architecture
 Early-stage dynamic languages are vulnerable to malicious scripts or unconstrained FFI calls. To ensure Redblue is production-safe for executing untrusted, third-party, or AI-generated scripts:
-- **Phase 152 (Permission Capabilities)** and **Phase 155 (WASI Component Model)** establish a strict capability-based sandbox:
+- **Phase 157 (Permission Capabilities)** and **Phase 160 (WASI Component Model)** establish a strict capability-based sandbox:
   - An imported package or agent script has **zero ambient authority**: it cannot access the file system, network, or environment unless explicitly granted capabilities in the project manifest:
     ```manifest
     capabilities: [
@@ -1159,10 +1166,10 @@ How to guarantee that two runners never pick up the same package, with zero risk
    - Each of the 5 concurrent runners binds to an independent environment secret (`OPENCODE_KEY_1` through `OPENCODE_KEY_5`), ensuring zero token quota contention across parallel streams.
 
 ### 24.4 Dependency Sequencing: Why Packages & Apps Must NOT Wait for Perceus
-A common question is whether package authoring and applications should be delayed until the Perceus memory safety model (Phases 145–149) is implemented:
+A common question is whether package authoring and applications should be delayed until the Perceus memory safety model (Phases 150–154) is implemented:
 - **Redblue is ALREADY Memory-Safe**: Redblue has no raw pointers, manual allocations, or buffer overruns. The runtime engine (`src/runtime.rs`, `src/value.rs`) manages all allocations through Rust's safe reference counting (`Arc<T>`) and copy-on-write semantics.
 - **Perceus is an Internal Performance Optimization**: Perceus eliminates reference-count overhead and performs in-place mutation behind the scenes. It does **not** change Redblue syntax, library APIs, or program behavior.
-- **Zero Rework**: A Redblue package written today against `Arc<T>` will run unchanged under Perceus when Phases 145–149 land, automatically gaining a 3x–5x speedup with zero code modifications.
+- **Zero Rework**: A Redblue package written today against `Arc<T>` will run unchanged under Perceus when Phases 150–154 land, automatically gaining a 3x–5x speedup with zero code modifications.
 - **Conclusion**: **Package and application development starts immediately at Phase 126.** Holding them back for Perceus would unnecessarily delay the ecosystem by months.
 
 ### 24.5 Tooling & GUI Sequencing: Why `rb-ide` Precedes Native GUI Toolkits
@@ -1173,7 +1180,7 @@ Another frequent planning dilemma is whether `rb-apps` and `authorss81/rb-ide` m
    - Therefore, `rb-ide` spins up at **Milestone 1.5** independently of any GUI work.
 2. **CLI Apps and Daemons Precede Desktop GUIs in `rb-apps`**:
    - Foundational applications (HTTP daemons, SQL query runners, benchmark harnesses, backup managers) are headless terminal services.
-   - GUI applications (e.g. `rb-notes-gui`, `rb-paint`) spin up later once Phase 132 (`tui`) and Phase 155 (`WASI` webview) land.
+   - GUI applications (e.g. `rb-notes-gui`, `rb-paint`) spin up later once Phase 137 (`tui`) and Phase 160 (`WASI` webview) land.
 
 ### 24.6 The Atomic Dual-Handover Guarantee (Zero Collision Between Concurrent Workflows)
 A critical distributed systems scenario arises when multiple concurrent workflows complete or time out simultaneously:
@@ -1218,7 +1225,7 @@ Packages generated by `rb-pkg-ops` follow Redblue's pragmatic standard library p
 1. **Pure Redblue Packages (From Scratch)**:
    - High-level business logic, data structures, algorithms, text parsers, serialization formats (JSON, CSV, TOML, YAML, Markdown), template engines, CLI utilities, and mathematical algorithms are written **100% in pure Redblue (`.rb`)**.
 2. **Native Layered Wrappers (FFI & WASI)**:
-   - Heavy low-level primitives requiring direct OS syscalls or complex C/Rust optimizations (e.g., SQLite databases, OpenSSL cryptography, libuv networking, SIMD linear algebra) are wrapped via Phase 154's FFI or native Rust bindings.
+   - Heavy low-level primitives requiring direct OS syscalls or complex C/Rust optimizations (e.g., SQLite databases, OpenSSL cryptography, libuv networking, SIMD linear algebra) are wrapped via Phase 159's FFI or native Rust bindings.
    - The package exposes a beautiful, fluent Redblue API to the user, while delegating raw performance-critical operations to the underlying native engine.
 
 ### 24.9 Intelligent Capability UX: Solving "Permission Fatigue" Without Destroying Security
@@ -1536,7 +1543,7 @@ authorss81/rb-apps/
 - **Development Mode**: `rb app run sysmon` or `rb run apps/sysmon/main.rb`.
 - **Standalone Production Binary**: `rb bundle apps/sysmon -o sysmon` (produces a single hermetic, zero-dependency executable packing the bytecode VM, bytecode, and assets).
 - **Runtime Execution Modes**:
-  - **TUI (Terminal UI)**: Built using Phase 132's `tui` module with ANSI box-drawing, color themes, and terminal keyboard events.
+  - **TUI (Terminal UI)**: Built using Phase 137's `tui` module with ANSI box-drawing, color themes, and terminal keyboard events.
   - **Web / Playground**: Compiled to WebAssembly for instant, zero-install execution in modern web browsers.
   - **Desktop GUI**: Native window hosting a local Redblue backend process.
 
@@ -2196,7 +2203,7 @@ For Redblue to be a world-class language, the **Hybrid Gradual Typing model** (m
 3. **Why Phase 113 Was Deferred**:
    - Tier 1 (Phases 001–126) focused on establishing the core parser, VM bytecode execution, and baseline stdlib.
    - Implementing a full bidirectional type checker during Tier 1 would have halted the language stabilization sprint.
-   - **Roadmap Position**: Slotted for **Milestone 2.0 (Phases 150+)** once the runtime VM and package manifest schemas are completely frozen.
+   - **Roadmap Position**: Slotted for **Milestone 2.0 (Phases 155+)** once the runtime VM and package manifest schemas are completely frozen.
 
 ---
 
@@ -2252,15 +2259,15 @@ Every ported package must adhere to open-source governance:
 #### The Mandate:
 Prior to Phase 126, the language core underwent rapid pre-1.0 grammar stabilization. Immediately upon the completion of Phase 126, formal language versioning is officially inaugurated starting in **Phase 127**:
 
-1. **The Phase 127 Baseline (`v0.2.0`)**:
-   - Phase 127 establishes `v0.2.0` as the frozen post-stabilization language baseline.
-   - `Cargo.toml`, `rb version`, and `SPEC.md` are synchronized to `0.2.0`.
-2. **Automated Version Increment on Every Compiler Fix**:
-   - Starting from Phase 127 onwards, every single phase, compiler patch, and bug fix increments the release version:
-     - `Phase 127` $	o$ `0.2.0` (Inauguration)
-     - `Phase 128` $	o$ `0.2.1`
-     - `Phase 129` $	o$ `0.2.2`
-     - `Phase 130` $	o$ `0.2.3`
+1. **The `v0.2.0` Baseline & Phase 127 Auto-Increment**:
+   - The base stabilization (`phase-123`) synchronized `Cargo.toml`, `rb version`, and `SPEC.md` at `0.2.0`.
+2. **Automated Version Increment on Every Compiler Fix (Active at Phase 127+)**:
+   - Starting at **`phase-127`**, `rbops` automatically bumps Redblue's SemVer patch version (`Cargo.toml` + `Cargo.lock` + git tag) on every landed compiler phase:
+     - `Phase 127` → `v0.2.1` (First version bump)
+     - `Phase 128` → `v0.2.2`
+     - `Phase 129` → `v0.2.3`
+     - `Phase 130` → `v0.2.4`
+     - `Phase 131` → `v0.2.5` (Ecosystem Wave 1 Release)
    - Every version is permanently bound to its Git commit SHA:
      ```bash
      $ rb version

@@ -13,20 +13,20 @@ Historically, this produced over **416 individual findings scattered across 67 s
 3. Remediation phases lack an authoritative checklist to audit against.
 
 ### The Remediation Invariant
-**Every defect cataloged in this ledger marked as `[OPEN]` must be resolved by an assigned remediation phase (Phases 162–170) before the engine enters Extreme Execution Velocity (Cranelift JIT Phases 176–183) or S4 Self-Hosting Bootstrapping (Phase 191).**
+**Every defect cataloged in this ledger marked as `[OPEN]` must be resolved by an assigned remediation phase (Phases 167–175) before the engine enters Extreme Execution Velocity (Cranelift JIT Phases 181–188) or S4 Self-Hosting Bootstrapping (Phase 196).**
 
 ---
 
 ## 2. Master Status Summary
 
-| Category | Total Findings Cataloged | Resolved in Base Phases (001–126) | Open / Deferred to Remediation (162–170) |
+| Category | Total Findings Cataloged | Resolved in Base Phases (001–126) | Open / Deferred to Remediation (167–175) |
 | :--- | :---: | :---: | :---: |
-| **Control Flow & Functions** | 42 | 34 | **8 (Assigned to Phase 163)** |
-| **Self-Hosted Compiler (`bootstrap/`)** | 28 | 21 | **7 (Assigned to Phase 163 / 164)** |
-| **Numeric & Temporal Precision** | 35 | 22 | **13 (Assigned to Phase 162)** |
-| **Unicode, Text & Collections** | 56 | 39 | **17 (Assigned to Phase 160 / 162)** |
-| **System, Files & I/O** | 48 | 36 | **12 (Assigned to Phase 161 / 165)** |
-| **Memory & Object Cycles** | 24 | 16 | **8 (Assigned to Phase 143 / 166)** |
+| **Control Flow & Functions** | 42 | 34 | **8 (Assigned to Phase 168)** |
+| **Self-Hosted Compiler (`bootstrap/`)** | 28 | 21 | **7 (Assigned to Phase 168 / 169)** |
+| **Numeric & Temporal Precision** | 35 | 22 | **13 (Assigned to Phase 167)** |
+| **Unicode, Text & Collections** | 56 | 39 | **17 (Assigned to Phase 165 / 167)** |
+| **System, Files & I/O** | 48 | 36 | **12 (Assigned to Phase 166 / 170)** |
+| **Memory & Object Cycles** | 24 | 16 | **8 (Assigned to Phase 148 / 171)** |
 | **Total Across 67 `FINDINGS.md`** | **416** | **341 (82.0%)** | **75 Active Remediation Targets** |
 
 > Gate-repair entries `F-073-02` and `F-088-01` (Section 3.F) were found while
@@ -39,47 +39,47 @@ Historically, this produced over **416 individual findings scattered across 67 s
 
 ## 3. High-Priority Open Findings & Assigned Remediation Phases
 
-### A. Control Flow, Call Frames & Functions (Assigned to Phase 163)
+### A. Control Flow, Call Frames & Functions (Assigned to Phase 168)
 
 | Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-006-05** | `phase-006/FINDINGS.md` §5 | `src/interpreter.rs:2253` | `give back` inside `if` does not return from function; falls through to end of function. | **Phase 163** | `[OPEN]` |
-| **F-011-01** | `phase-011/FINDINGS.md` §1 | `src/interpreter.rs` | `give back` inside `for` or `try` body yields discarded value; does not unwind loops. | **Phase 163** | `[OPEN]` |
-| **F-073-01** | `phase-073/FINDINGS.md` §1 | `src/interpreter.rs:2253` | Early return yields statement arm instead of exiting call frame; ignores return value in `Statement::If`. | **Phase 163** | `[OPEN]` |
-| **F-018-04** | `phase-018/FINDINGS.md` §4 | `src/interpreter.rs:1106` | Pending `loop_control` (`break`/`skip`) can leak across function call boundaries if raised inside finally blocks. | **Phase 163** | `[OPEN]` |
-| **F-034-03** | `phase-034/FINDINGS.md` §3 | `src/interpreter.rs` | Closures created inside loops share a single mutating lexical frame (Go/Python late-binding bug). | **Phase 163** | `[OPEN]` |
+| **F-006-05** | `phase-006/FINDINGS.md` §5 | `src/interpreter.rs:2253` | `give back` inside `if` does not return from function; falls through to end of function. | **Phase 168** | `[OPEN]` |
+| **F-011-01** | `phase-011/FINDINGS.md` §1 | `src/interpreter.rs` | `give back` inside `for` or `try` body yields discarded value; does not unwind loops. | **Phase 168** | `[OPEN]` |
+| **F-073-01** | `phase-073/FINDINGS.md` §1 | `src/interpreter.rs:2253` | Early return yields statement arm instead of exiting call frame; ignores return value in `Statement::If`. | **Phase 168** | `[OPEN]` |
+| **F-018-04** | `phase-018/FINDINGS.md` §4 | `src/interpreter.rs:1106` | Pending `loop_control` (`break`/`skip`) can leak across function call boundaries if raised inside finally blocks. | **Phase 168** | `[OPEN]` |
+| **F-034-03** | `phase-034/FINDINGS.md` §3 | `src/interpreter.rs` | Closures created inside loops share a single mutating lexical frame (Go/Python late-binding bug). | **Phase 168** | `[OPEN]` |
 
-### B. Self-Hosted Compiler (`bootstrap/compiler.rb`) (Assigned to Phase 163 & 164)
+### B. Self-Hosted Compiler (`bootstrap/compiler.rb`) (Assigned to Phase 168 & 164)
 
 | Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-074-01** | `phase-074/FINDINGS.md` §1 | `bootstrap/compiler.rb:795` | `parse_statements` is recursive; flat sources with $\ge 1,000$ sequential statements hit call-depth limit of 1000. | **Phase 163** | `[OPEN]` |
+| **F-074-01** | `phase-074/FINDINGS.md` §1 | `bootstrap/compiler.rb:795` | `parse_statements` is recursive; flat sources with $\ge 1,000$ sequential statements hit call-depth limit of 1000. | **Phase 168** | `[OPEN]` |
 | **F-022-04** | `phase-022/FINDINGS.md` §4 | `bootstrap/compiler.rb:2644` | Linear symbol interning was $O(N^2)$; resolved by Phase 074 hash interning (+52.4% speedup). | **Phase 074** | `[RESOLVED]` |
-| **F-037-02** | `phase-037/FINDINGS.md` §2 | `bootstrap/compiler.rb` | Stage 2 compiler emits unoptimized duplicate jump targets on nested `else if` ladders. | **Phase 164** | `[OPEN]` |
+| **F-037-02** | `phase-037/FINDINGS.md` §2 | `bootstrap/compiler.rb` | Stage 2 compiler emits unoptimized duplicate jump targets on nested `else if` ladders. | **Phase 169** | `[OPEN]` |
 
-### C. Numeric & Temporal Precision (Assigned to Phase 162)
-
-| Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-096-01** | `phase-096/FINDINGS.md` §1 | `src/stdlib.rs` (`time`) | `time.from_unix` uses `as i64` truncation toward zero, collapsing $[-0.5, +0.5]$ into a double-bucket epoch anomaly. | **Phase 162** | `[OPEN]` |
-| **F-048-03** | `phase-048/FINDINGS.md` §3 | `src/statistics.rs` | Extreme floating point arrays ($> 10^{300}$) overflow to `Infinity` on naive mean calculation; needs Welford algorithm. | **Phase 162** | `[OPEN]` |
-| **F-054-02** | `phase-054/FINDINGS.md` §2 | `src/decimal.rs` | Decimal string conversions with trailing zeroes produce non-canonical representation keys in records. | **Phase 162** | `[OPEN]` |
-
-### D. Unicode, Text & Collection Semantics (Assigned to Phase 160 & 162)
+### C. Numeric & Temporal Precision (Assigned to Phase 167)
 
 | Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-003-08** | `phase-003/FINDINGS.md` §8 | `src/stdlib.rs` (`text`) | `length("👨‍👩‍👧‍👦")` returns byte length instead of Unicode Extended Grapheme Clusters count. | **Phase 162** | `[OPEN]` |
-| **F-020-03** | `phase-020/FINDINGS.md` §3 | `src/stdlib.rs` (`text`) | Substring slicing on multi-byte UTF-8 boundaries panics on slice index boundary splits. | **Phase 162** | `[OPEN]` |
-| **F-043-05** | `phase-043/FINDINGS.md` §5 | `src/value.rs` | Recursive record equality `rec_a == rec_b` enters infinite recursion on circular references. | **Phase 165** | `[OPEN]` |
+| **F-096-01** | `phase-096/FINDINGS.md` §1 | `src/stdlib.rs` (`time`) | `time.from_unix` uses `as i64` truncation toward zero, collapsing $[-0.5, +0.5]$ into a double-bucket epoch anomaly. | **Phase 167** | `[OPEN]` |
+| **F-048-03** | `phase-048/FINDINGS.md` §3 | `src/statistics.rs` | Extreme floating point arrays ($> 10^{300}$) overflow to `Infinity` on naive mean calculation; needs Welford algorithm. | **Phase 167** | `[OPEN]` |
+| **F-054-02** | `phase-054/FINDINGS.md` §2 | `src/decimal.rs` | Decimal string conversions with trailing zeroes produce non-canonical representation keys in records. | **Phase 167** | `[OPEN]` |
 
-### E. Systems, Files, VFS & Sockets (Assigned to Phase 161 & 165)
+### D. Unicode, Text & Collection Semantics (Assigned to Phase 165 & 162)
 
 | Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-063-02** | `phase-063/FINDINGS.md` §2 | `src/vfs.rs` | Windows backslash `\` vs POSIX slash `/` path normalization mismatch in VFS mount points. | **Phase 161** | `[OPEN]` |
-| **F-064-04** | `phase-064/FINDINGS.md` §4 | `src/stdlib.rs` (`files`) | `files.read` loads entire multi-gigabyte files into memory without streaming chunk iterators. | **Phase 165** | `[OPEN]` |
-| **F-068-01** | `phase-068/FINDINGS.md` §1 | `src/stdlib.rs` (`network`) | Socket connection timeouts leak file descriptors under heavy concurrent load. | **Phase 161** | `[OPEN]` |
+| **F-003-08** | `phase-003/FINDINGS.md` §8 | `src/stdlib.rs` (`text`) | `length("👨‍👩‍👧‍👦")` returns byte length instead of Unicode Extended Grapheme Clusters count. | **Phase 167** | `[OPEN]` |
+| **F-020-03** | `phase-020/FINDINGS.md` §3 | `src/stdlib.rs` (`text`) | Substring slicing on multi-byte UTF-8 boundaries panics on slice index boundary splits. | **Phase 167** | `[OPEN]` |
+| **F-043-05** | `phase-043/FINDINGS.md` §5 | `src/value.rs` | Recursive record equality `rec_a == rec_b` enters infinite recursion on circular references. | **Phase 170** | `[OPEN]` |
+
+### E. Systems, Files, VFS & Sockets (Assigned to Phase 166 & 165)
+
+| Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **F-063-02** | `phase-063/FINDINGS.md` §2 | `src/vfs.rs` | Windows backslash `\` vs POSIX slash `/` path normalization mismatch in VFS mount points. | **Phase 166** | `[OPEN]` |
+| **F-064-04** | `phase-064/FINDINGS.md` §4 | `src/stdlib.rs` (`files`) | `files.read` loads entire multi-gigabyte files into memory without streaming chunk iterators. | **Phase 170** | `[OPEN]` |
+| **F-068-01** | `phase-068/FINDINGS.md` §1 | `src/stdlib.rs` (`network`) | Socket connection timeouts leak file descriptors under heavy concurrent load. | **Phase 166** | `[OPEN]` |
 
 ### F. Build, Test Harness & Lint Gates (Repaired for Phase 075; verify in owner phase)
 
@@ -88,15 +88,15 @@ Historically, this produced over **416 individual findings scattered across 67 s
 | **F-073-02** | `phase-075/FINDINGS.md` §1 (owner: phase-073) | `tests/bench/mod.rs:408-452` | The `rb-bench` binary's own unit tests live under `target/<profile>/build/…`, where the old sibling lookup could not find the runner, so `edge_child_measurement_accepts_an_explicit_environment` failed with `Load("cannot locate the rb-bench worker binary …")`. Phase 075 resolves only `target/<profile>/rb-bench` (and `target/<triple>/<profile>/rb-bench` for a cross-target build) for the current Cargo profile, so a stale binary elsewhere on the ancestor path is never measured. | **Phase 073** | `[RESOLVED — verify in owner phase]` |
 | **F-088-01** | `phase-075/FINDINGS.md` §2 (owner: phase-088) | `phases/phase-088/scan.rs:524` | `is_reachability_check` returned a bool literal after an `if`, which clippy rejects as `needless_bool` under `-D warnings`. Phase 075 returns `!negates_an_is_ok_call(argument)`; behaviour is unchanged. | **Phase 088** | `[RESOLVED — verify in owner phase]` |
 
-### G. Documentation & Specification Drift (Assigned to Phase 170 — Documentation Consistency)
+### G. Documentation & Specification Drift (Assigned to Phase 175 — Documentation Consistency)
 
 | Finding ID | Originating Phase | Defect Location | Description & Symptoms | Target Phase | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **F-109-01** | `phase-109/FINDINGS.md` §1 | `docs/BYTECODE.md:3` | The normative bytecode document's opening line says "Format version: 4", while `docs/BYTECODE.md:56` and `src/bytecode/format.rs:81` say version 6 and the decoder refuses any other version. A reader can believe version 4 is current while the encoder writes 6. Phase 109 records the drift rather than changing the format or its normative documentation. | **Phase 170** | `[OPEN]` |
+| **F-109-01** | `phase-109/FINDINGS.md` §1 | `docs/BYTECODE.md:3` | The normative bytecode document's opening line says "Format version: 4", while `docs/BYTECODE.md:56` and `src/bytecode/format.rs:81` say version 6 and the decoder refuses any other version. A reader can believe version 4 is current while the encoder writes 6. Phase 109 records the drift rather than changing the format or its normative documentation. | **Phase 175** | `[OPEN]` |
 
 ---
 
-## 4. Complete Remediation Workflow (Phases 162–170)
+## 4. Complete Remediation Workflow (Phases 167–175)
 
 ```mermaid
 flowchart TD
@@ -108,26 +108,26 @@ flowchart TD
         F5["F-063-02: VFS path parity"]
     end
 
-    subgraph AuditTracks["Audit Track (Phases 162-164)"]
-        P162["Phase 162: Numeric & Time Audit"]
-        P163["Phase 163: Unicode & Records Audit"]
-        P164["Phase 164: Systems & VFS Audit"]
+    subgraph AuditTracks["Audit Track (Phases 167-169)"]
+        P162["Phase 167: Numeric & Time Audit"]
+        P163["Phase 168: Unicode & Records Audit"]
+        P164["Phase 169: Systems & VFS Audit"]
     end
 
-    subgraph RemediationPasses["Remediation Execution (Phases 165-170)"]
-        P165["Phase 165: Unicode Grapheme Clusters"]
-        P166["Phase 166: Control Flow Unwinding & Parser Loop"]
-        P167["Phase 167: Streaming I/O & Iterators"]
-        P168["Phase 168: Structural Deep Equality & Cycles"]
-        P169["Phase 169: BigInt Promotion & Arithmetic Safety"]
-        P170["Phase 170: Documentation Consistency & Stdlib Param Order"]
+    subgraph RemediationPasses["Remediation Execution (Phases 170-175)"]
+        P165["Phase 170: Unicode Grapheme Clusters"]
+        P166["Phase 171: Control Flow Unwinding & Parser Loop"]
+        P167["Phase 172: Streaming I/O & Iterators"]
+        P168["Phase 173: Structural Deep Equality & Cycles"]
+        P169["Phase 174: BigInt Promotion & Arithmetic Safety"]
+        P170["Phase 175: Documentation Consistency & Stdlib Param Order"]
     end
 
     MasterLedger --> AuditTracks
     AuditTracks --> RemediationPasses
     RemediationPasses --> Gates["All [OPEN] Marked [RESOLVED]"]
-    Gates --> JIT["Phases 176-183 (Cranelift JIT)"]
-    JIT --> S4["Phase 191 (S4 Self-Hosting)"]
+    Gates --> JIT["Phases 181-188 (Cranelift JIT)"]
+    JIT --> S4["Phase 196 (S4 Self-Hosting)"]
 ```
 
 ---
@@ -136,4 +136,4 @@ flowchart TD
 
 1. **Whenever a phase finishes**: If its `FINDINGS.md` reports any defect not resolved in that phase, it must be appended to this ledger with an `F-XXX-NN` identifier.
 2. **Whenever a remediation phase lands**: The corresponding rows in this ledger must be updated from `[OPEN]` to `[RESOLVED by phase-NNN]`, citing the landing commit hash.
-3. **Bootstrapping Gate Requirement**: Phase 191 (S4 Bootstrapping) verification will parse this ledger and fail the build if any row remains `[OPEN]`.
+3. **Bootstrapping Gate Requirement**: Phase 196 (S4 Bootstrapping) verification will parse this ledger and fail the build if any row remains `[OPEN]`.
