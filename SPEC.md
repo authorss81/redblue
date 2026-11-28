@@ -1608,6 +1608,64 @@ wins; when `xs` names no module or object but holds a list, `xs.map(f)` is the
 same call as `map(xs, f)`. The other higher-order members keep their `list`
 spelling; a variable receiver names a list method only for `map`.
 
+`pop(xs)` and `shift(xs)` read one end of a list without changing it: `pop`
+answers the last item and `shift` the first. Neither removes the item, because
+Redblue's lists are copy-on-write, so the list bound to `xs` is the same list
+after the call. An empty list has no item at either end, so `pop([])` and
+`shift([])` are catchable `RuntimeError`s naming the function rather than a
+fabricated value. A singleton answers its only item from both, and anything
+that is not a list is refused by name.
+
+```redblue
+set xs to [1, 2, 3]
+set last to pop(xs)     // 3; xs is still [1, 2, 3]
+set first to shift(xs)  // 1; xs is still [1, 2, 3]
+```
+
+#### type checks and conversion
+
+`is_number`, `is_text`, `is_list` and `is_record` answer `yes` or `no` for the
+kind of value they are given. Every value has an answer, including `nothing`:
+
+```redblue
+say is_number(1)                      // yes
+say is_number("1")                    // no
+say is_text("hi")                     // yes
+say is_text(1)                        // no
+say is_list([1])                      // yes
+say is_list("hi")                     // no
+say is_record({a: 1})                 // yes
+say is_record(collections.deque())    // no: an object is not a record
+```
+
+A record and an object are different values. `{a: 1}` is a record; a value the
+standard library makes, such as `collections.deque()` or
+`path.join("a", "b")`, is an object. `is_record` answers `yes` for the first and
+`no` for the second, and `type_of` names the difference (`"record"` against
+`"object"`). A declared `object … end` binds a record, so `is_record(Person)` is
+`yes`.
+
+`to_text(value)` writes any value in its usual text form — a number as its
+number, a text without quotes, `nothing` as `nothing` — so `to_text("")` is the
+empty text and `to_text([1, 2])` is `[1, 2]`. It requires an argument and refuses
+a call with none.
+
+`to_number(text)` reads a number from text. Surrounding whitespace is ignored, so
+`to_number(" 3 ")` is `3`, and a fraction stays a fraction:
+`to_number("3.5")` is `3.5`. It requires a text; a number or a list is refused
+with `to_number requires a text argument`. Text that is not a number is refused
+by a `RuntimeError` that names the text it could not read, so `to_number("x")`
+says `Cannot read 'x' as a number`, and the empty text says
+`Cannot read '' as a number`. A text whose value leaves the finite `number`
+range, such as `to_number("1e999")`, is refused rather than answered as
+infinity.
+
+`to_list(value)` turns text into its words: a text is split on whitespace, so
+`to_list("a b")` is `["a", "b"]` and `to_list("")` is the empty list. A single
+word with no whitespace, such as `to_list("ab")`, is a one-element list
+`["ab"]`. A list is answered unchanged, and any other kind of value is refused
+by name.
+
 ### network
 
 ```redblue

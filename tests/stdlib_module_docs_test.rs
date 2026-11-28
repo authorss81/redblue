@@ -2821,3 +2821,323 @@ fn edge_zip_refuses_a_non_list_among_its_arguments() {
         );
     }
 }
+
+// ============================================================ documented surface
+
+/// Whether `needle` occurs in `haystack` as a whole identifier.
+fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    haystack.match_indices(needle).any(|(index, _)| {
+        let before = haystack[..index].chars().next_back();
+        let after = haystack[index + needle.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
+
+/// Whether `haystack` calls `name`: `name` as a whole identifier followed by `(`.
+///
+/// The dot before `decimal.to_number(` is not a call to the flat `to_number`, so
+/// a dotted mention does not count. That distinction is the difference between
+/// "the word appears in a sentence about something else" and "the builtin has a
+/// documented call".
+fn contains_call(haystack: &str, name: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(name) {
+        let index = from + offset;
+        let before = haystack[..index].chars().next_back();
+        let after = haystack[index + name.len()..].chars().next();
+        let after_call = haystack[index + name.len()..].trim_start().starts_with('(');
+        if before != Some('.')
+            && !before.is_some_and(is_word)
+            && !after.is_some_and(is_word)
+            && after_call
+        {
+            return true;
+        }
+        from = index + name.len();
+    }
+    false
+}
+
+/// The spellings a program may write for a registered builtin name.
+///
+/// A qualified name such as `files_read` is written `files.read`; a flat name is
+/// written as itself. Both are added so the check asks about the spelling a
+/// reader copies from a document rather than the internal registry key.
+fn documented_spellings(name: &str) -> Vec<String> {
+    let mut spellings = vec![name.to_string()];
+    for module in redblue::stdlib::MODULES {
+        let prefix = format!("{module}_");
+        if let Some(member) = name.strip_prefix(&prefix) {
+            spellings.push(format!("{module}.{member}"));
+        }
+    }
+    spellings
+}
+
+/// Every name `BUILTIN_NAMES` registers has a home in a document.
+///
+/// This is the check that found `is_number`, `is_text`, `is_list`, `is_record`
+/// and `to_list` living only in `src/stdlib.rs`, and it is what keeps the next
+/// registered name from doing the same: a builtin a program can call but no
+/// document names is surface nobody agreed to. A qualified name is looked for
+/// under its dotted spelling (`files_read` is `files.read`), which is how the
+/// documents write it.
+#[test]
+fn edge_every_registered_builtin_name_is_documented() {
+    let documents = format!(
+        "{}\n{}",
+        include_str!("../SPEC.md"),
+        include_str!("../README.md")
+    );
+
+    let mut missing = Vec::new();
+    for name in redblue::stdlib::BUILTIN_NAMES {
+        let documented = documented_spellings(name)
+            .iter()
+            .any(|spelling| contains_whole_word(&documents, spelling));
+        if !documented {
+            missing.push(*name);
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "these builtins are registered in stdlib::BUILTIN_NAMES and no program \
+         document names them: {missing:?}. Give each one a documented call in \
+         SPEC.md or README.md, or remove it from the registry if it does not answer."
+    );
+}
+
+/// The nine builtins this phase found were documented as words but not as calls.
+///
+/// `pop`, `shift`, `is_number`, `is_text`, `is_list`, `is_record`, `to_text`,
+/// `to_number` and `to_list` all answer, and before this phase several appeared
+/// only inside sentences about something else (`A pop answers …`) or under a
+/// different module (`decimal.to_number`). A call spelling is what a reader can
+/// copy, so each of the nine must appear as a call in a document.
+#[test]
+fn edge_the_nine_builtins_are_documented_as_calls() {
+    let documents = format!(
+        "{}\n{}",
+        include_str!("../SPEC.md"),
+        include_str!("../README.md")
+    );
+
+    for name in [
+        "pop",
+        "shift",
+        "is_number",
+        "is_text",
+        "is_list",
+        "is_record",
+        "to_text",
+        "to_number",
+        "to_list",
+    ] {
+        assert!(
+            contains_call(&documents, name),
+            "`{name}` answers but no document writes `{name}(…)`. Document the call, \
+             its answer and what it refuses in SPEC.md or README.md."
+        );
+    }
+}
+
+// ============================================================ pop and shift
+
+/// `pop` reads the last item and `shift` the first, and neither changes the
+/// list it was given. The list is the observable half: a mutating `pop` would
+/// leave `[1, 2]`, and the test pins `[1, 2, 3]` instead.
+#[test]
+fn edge_pop_and_shift_read_an_end_without_changing_the_list() {
+    yields("pop([1, 2, 3])", "3");
+    yields("shift([1, 2, 3])", "1");
+    yields("pop([7])", "7");
+    yields("shift([7])", "7");
+    yields(
+        "set xs to [1, 2, 3]\nset last to pop(xs)\n[xs, last]",
+        "[[1, 2, 3], 3]",
+    );
+    yields(
+        "set xs to [1, 2, 3]\nset first to shift(xs)\n[xs, first]",
+        "[[1, 2, 3], 1]",
+    );
+    yields(r#"pop(["é", "日"])"#, "日");
+    yields(r#"shift(["é", "日"])"#, "é");
+}
+
+/// An empty list has no item at either end, and a value that is not a list has
+/// no end at all. Each refusal names the function on both engines rather than
+/// answering a fabricated `nothing` or panicking.
+#[test]
+fn edge_pop_and_shift_refuse_an_empty_list_and_a_non_list() {
+    for (source, name) in [
+        ("pop([])", "pop"),
+        ("shift([])", "shift"),
+        (r#"pop("x")"#, "pop"),
+        ("shift({a: 1})", "shift"),
+    ] {
+        let walked = message(&fails(source));
+        assert!(
+            walked.contains(name),
+            "the tree-walker should refuse `{source}` by name, it said: {walked}"
+        );
+
+        let chunk = compile_source(source).expect("the failing program should compile");
+        let mut vm = BytecodeVm::new();
+        let compiled = vm
+            .run(&chunk)
+            .expect_err("the bytecode VM should refuse the same call");
+        assert!(
+            compiled.message().contains(name),
+            "the bytecode VM should refuse `{source}` by name, it said: {}",
+            compiled.message()
+        );
+    }
+}
+
+// ============================================================ type predicates
+
+/// Each predicate is asked about every kind, including the kind it is for and
+/// `nothing`. A predicate that answered `yes` for everything would pass a
+/// happy-path test and fail this one.
+#[test]
+fn edge_type_predicates_answer_each_kind_and_distinguish_record_from_object() {
+    yields("is_number(1)", "yes");
+    yields(r#"is_number("1")"#, "no");
+    yields(r#"is_text("hi")"#, "yes");
+    yields("is_text(1)", "no");
+    yields("is_list([1])", "yes");
+    yields(r#"is_list("hi")"#, "no");
+    yields("is_record({a: 1})", "yes");
+    yields("is_record([1])", "no");
+    yields("is_number(nothing)", "no");
+    yields("is_text(nothing)", "no");
+    yields("is_list(nothing)", "no");
+    yields("is_record(nothing)", "no");
+}
+
+/// A record and an object are different values, and `is_record` says so. The
+/// object here is one the standard library makes, because a declared
+/// `object … end` binds a record rather than an object.
+#[test]
+fn edge_is_record_is_no_for_an_object_and_yes_for_a_record() {
+    yields("is_record({a: 1})", "yes");
+    yields("is_record(collections.deque())", "no");
+    yields(r#"is_record(path.join("a", "b"))"#, "no");
+    yields("type_of(collections.deque())", "object");
+    yields(r#"type_of(path.join("a", "b"))"#, "path");
+    yields("object P\n    has n default 1\nend\nis_record(P)", "yes");
+}
+
+// ============================================================ to_text
+
+/// `to_text` writes every kind in its usual form, including the empty text and
+/// `nothing`, and a call with no argument is refused by name.
+#[test]
+fn edge_to_text_writes_every_kind_and_requires_an_argument() {
+    yields("to_text(1)", "1");
+    yields(r#"to_text("a")"#, "a");
+    yields(r#"to_text("")"#, "");
+    yields("to_text(nothing)", "nothing");
+    yields("to_text([1, 2])", "[1, 2]");
+    yields("to_text(yes)", "yes");
+
+    let walked = message(&fails("to_text()"));
+    assert!(
+        walked.contains("to_text requires an argument"),
+        "an argumentless to_text should be refused by name, it said: {walked}"
+    );
+
+    let chunk = compile_source("to_text()").expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    let compiled = vm
+        .run(&chunk)
+        .expect_err("the bytecode VM should refuse an argumentless to_text");
+    assert!(
+        compiled.message().contains("to_text requires an argument"),
+        "the bytecode VM should refuse an argumentless to_text by name, it said: {}",
+        compiled.message()
+    );
+}
+
+// ============================================================ to_number
+
+/// `to_number` reads text, keeps a fraction, ignores surrounding whitespace, and
+/// names the text it cannot read. The empty text and a text past the finite
+/// range are boundaries, not exceptions to the rule.
+#[test]
+fn edge_to_number_reads_text_and_refuses_what_it_cannot() {
+    yields(r#"to_number("3")"#, "3");
+    yields(r#"to_number(" 3 ")"#, "3");
+    yields(r#"to_number("3.5")"#, "3.5");
+    yields(r#"to_number("-2")"#, "-2");
+
+    let not_a_number = message(&fails(r#"to_number("x")"#));
+    assert!(
+        not_a_number.contains("Cannot read") && not_a_number.contains("'x'"),
+        "to_number should name the text it could not read, it said: {not_a_number}"
+    );
+
+    let empty = message(&fails(r#"to_number("")"#));
+    assert!(
+        empty.contains("Cannot read ''"),
+        "to_number of the empty text should name the empty text, it said: {empty}"
+    );
+
+    let non_text = message(&fails("to_number(3)"));
+    assert!(
+        non_text.contains("requires a text argument"),
+        "to_number should require a text, it said: {non_text}"
+    );
+
+    let infinite = message(&fails(r#"to_number("1e999")"#));
+    assert!(
+        infinite.contains("finite"),
+        "to_number should refuse a value past the finite range, it said: {infinite}"
+    );
+
+    let chunk = compile_source(r#"to_number("x")"#).expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    let compiled = vm
+        .run(&chunk)
+        .expect_err("the bytecode VM should refuse text that is not a number");
+    assert!(
+        compiled.message().contains("Cannot read") && compiled.message().contains("'x'"),
+        "the bytecode VM should name the text it could not read, it said: {}",
+        compiled.message()
+    );
+}
+
+// ============================================================ to_list
+
+/// `to_list` splits text on whitespace: the empty text is the empty list, a
+/// single word is a one-element list, and a list is answered unchanged. Another
+/// kind is refused by name.
+#[test]
+fn edge_to_list_splits_text_and_refuses_other_kinds() {
+    yields(r#"to_list("ab")"#, "[ab]");
+    yields(r#"to_list("a b")"#, "[a, b]");
+    yields(r#"to_list("")"#, "[]");
+    yields(r#"to_list("   ")"#, "[]");
+    yields("to_list([1, 2])", "[1, 2]");
+    yields(r#"to_list(["é"])"#, "[é]");
+
+    let walked = message(&fails("to_list({a: 1})"));
+    assert!(
+        walked.contains("to_list"),
+        "to_list should refuse a record by name, it said: {walked}"
+    );
+
+    let chunk = compile_source("to_list({a: 1})").expect("the failing program should compile");
+    let mut vm = BytecodeVm::new();
+    let compiled = vm
+        .run(&chunk)
+        .expect_err("the bytecode VM should refuse a record");
+    assert!(
+        compiled.message().contains("to_list"),
+        "the bytecode VM should refuse a record by name, it said: {}",
+        compiled.message()
+    );
+}

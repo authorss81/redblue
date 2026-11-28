@@ -428,7 +428,27 @@ list.reverse([1, 2, 3])                // [3, 2, 1]
 list.zip([1, 2], ["a", "b"])           // [[1, a], [2, b]]
 list.enumerate(["a", "b"])             // [[0, a], [1, b]]
 length(xs), push(xs, x)                // flat list builtins
+pop(xs), shift(xs)                     // last / first item; the list is unchanged
 ```
+
+`pop` answers the last item and `shift` the first, and neither removes it: the
+list is copy-on-write, so `xs` is the same list after the call. An empty list
+has no item to read and is refused by name, as is a value that is not a list.
+
+#### Type checks and conversion
+```
+is_number(x), is_text(x), is_list(x), is_record(x)  // yes or no for any value
+to_text(x)             // any value in its usual text form; "" stays empty
+to_number("3.5")       // 3.5; " 3 " is 3; "x" is refused by name
+to_list("a b")         // ["a", "b"]; to_list("ab") is ["ab"]; [] stays a list
+```
+
+`is_record` answers `yes` for a record (`{a: 1}`) and `no` for an object such as
+`collections.deque()` or `path.join("a", "b")`; `type_of` names the difference.
+`to_number` requires a text and names the text it cannot read, including the
+empty text and a text past the finite `number` range. `to_list` splits text on
+whitespace, so a single word is a one-element list and an empty text is the
+empty list; a list is answered unchanged and any other kind is refused.
 
 ### Regex
 ```
