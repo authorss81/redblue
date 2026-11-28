@@ -138,10 +138,20 @@ fn edge_all_four_version_surfaces_agree() {
     ];
 
     for (surface, line) in surfaces {
+        let named = version_after(line);
         assert_eq!(
-            version_after(line),
+            named,
             crate_version(),
             "{surface} disagrees with the crate version on:\n{line}"
+        );
+        assert!(
+            !named.is_empty(),
+            "{surface} must not carry an empty version"
+        );
+        assert_eq!(
+            line,
+            line.trim_end(),
+            "{surface} must not carry trailing whitespace:\n{line:?}"
         );
     }
 }
